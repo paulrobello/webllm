@@ -1,10 +1,21 @@
+import type { Character, CharacterConfig } from "../characters/character.js";
+import { CharacterManager } from "../characters/character-manager.js";
 import type { GenerationConfig } from "../inference/generation.js";
+import {
+	LightweightModel,
+	type LightweightModelConfig,
+} from "../inference/lightweight.js";
+import type { Tokenizer } from "../inference/tokenizer.js";
+import { KVCache } from "../models/kv-cache.js";
 import { MemoryPool } from "./memory-pool.js";
+import { ModelManager } from "./model-manager.js";
 import { PipelineCache } from "./pipeline-cache.js";
 import { Scheduler } from "./scheduler.js";
 import type {
 	EventHandler,
+	ModelEntry,
 	ModelHandle,
+	ModelHyperparams,
 	ModelLoadOptions,
 	WebLLMConfig,
 } from "./types.js";
@@ -14,12 +25,15 @@ export class WebLLM {
 	private memoryPool: MemoryPool;
 	private scheduler: Scheduler;
 	private _pipelineCache: PipelineCache;
-	private models = new Map<string, ModelHandle>();
+	private modelManager: ModelManager;
+	private characterManager: CharacterManager;
 	private eventHandlers = new Map<string, Set<EventHandler>>();
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
 		this.memoryPool = new MemoryPool(config.memoryBudget);
+		this.characterManager = new CharacterManager();
+		this.modelManager = new ModelManager(this.memoryPool);
 		this.scheduler = new Scheduler({
 			frameBudgetMs: config.frameBudgetMs ?? 8,
 		});
@@ -35,18 +49,42 @@ export class WebLLM {
 		options: ModelLoadOptions,
 	): Promise<ModelHandle> {
 		const id = `model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-		const handle: ModelHandle = {
+		const entry: ModelEntry = {
 			id,
 			name,
 			priority: options.priority,
 			lightweight: options.lightweight ?? false,
+			hyperparams: {} as ModelHyperparams,
+			kvCache: new KVCache({
+				nLayers: 0,
+				nEmbdHeadK: 0,
+				nEmbdHeadV: 0,
+				nKvHead: 0,
+				maxContextLength: options.contextLength ?? 2048,
+				dataType: "f32",
+			}),
+			tokenizer: null as unknown as Tokenizer,
+			memoryAllocations: [],
+			loaded: false,
+			activeSessions: 0,
 		};
-		this.models.set(id, handle);
-		return handle;
+		this.modelManager.register(entry);
+		return entry;
 	}
 
 	async unloadModel(id: string): Promise<void> {
-		this.models.delete(id);
+		await this.modelManager.unregister(id);
+	}
+
+	async loadLightweightModel(
+		config: Omit<LightweightModelConfig, "device">,
+	): Promise<LightweightModel> {
+		const model = new LightweightModel({
+			device: this._config.device,
+			...config,
+		});
+		await model.init();
+		return model;
 	}
 
 	/**
@@ -86,6 +124,25 @@ export class WebLLM {
 	getScheduler(): Scheduler {
 		return this.scheduler;
 	}
+	getModelManager(): ModelManager {
+		return this.modelManager;
+	}
+
+	createCharacter(config: CharacterConfig): Character {
+		return this.characterManager.create(config);
+	}
+
+	getCharacter(id: string): Character | undefined {
+		return this.characterManager.get(id);
+	}
+
+	async removeCharacter(id: string): Promise<void> {
+		await this.characterManager.remove(id);
+	}
+
+	getCharacterManager(): CharacterManager {
+		return this.characterManager;
+	}
 
 	on(event: string, handler: EventHandler): void {
 		if (!this.eventHandlers.has(event))
@@ -98,8 +155,7 @@ export class WebLLM {
 	}
 
 	async shutdown(): Promise<void> {
-		this.models.clear();
-		this.memoryPool.reset();
+		this.modelManager.clear();
 		this.scheduler.clear();
 		this.eventHandlers.clear();
 	}
