@@ -1,3 +1,4 @@
+/** Configuration for initializing a WebLLM engine instance. */
 export interface WebLLMConfig {
 	device: GPUDevice;
 	cacheDir?: string;
@@ -5,6 +6,7 @@ export interface WebLLMConfig {
 	frameBudgetMs?: number;
 }
 
+/** Options passed when loading a model into the engine. */
 export interface ModelLoadOptions {
 	priority: number;
 	contextLength?: number;
@@ -12,6 +14,7 @@ export interface ModelLoadOptions {
 	lightweight?: boolean;
 }
 
+/** Read-only handle returned after successfully loading a model. */
 export interface ModelHandle {
 	readonly id: string;
 	readonly name: string;
@@ -19,6 +22,7 @@ export interface ModelHandle {
 	readonly lightweight: boolean;
 }
 
+/** Supported GGML tensor data types for quantized and full-precision weights. */
 export type GgmlType =
 	| "f32"
 	| "f16"
@@ -42,6 +46,7 @@ export type GgmlType =
 	| "iq4_nl"
 	| "iq4_xs";
 
+/** Supported model architectures for inference dispatch. */
 export type ModelArchitecture =
 	| "llama"
 	| "mistral"
@@ -51,6 +56,7 @@ export type ModelArchitecture =
 	| "mixtral"
 	| "deepseek";
 
+/** Metadata for a single tensor within a GGUF model file. */
 export interface TensorInfo {
 	name: string;
 	nDimensions: number;
@@ -60,6 +66,7 @@ export interface TensorInfo {
 	size: number;
 }
 
+/** High-level model metadata parsed from the GGUF header. */
 export interface ModelMetadata {
 	architecture: ModelArchitecture;
 	contextLength: number;
@@ -71,14 +78,17 @@ export interface ModelMetadata {
 	ropeScale: number;
 }
 
+/** Generic event handler callback. */
 export type EventHandler<T = void> = (event: T) => void;
 
+/** Emitted when GPU memory usage crosses the pressure threshold. */
 export interface MemoryPressureEvent {
 	used: number;
 	total: number;
 	modelId: string;
 }
 
+/** Full hyperparameters for a loaded model used during inference. */
 export interface ModelHyperparams {
 	architecture: ModelArchitecture;
 	contextLength: number;
@@ -96,9 +106,24 @@ export interface ModelHyperparams {
 	expertUsedCount: number;
 }
 
+/** GPU buffer mappings and tensor metadata for a loaded model's weights. */
 export interface ModelWeights {
 	/** Tensor name -> GPU buffer ID. */
 	tensorBuffers: Map<string, number>;
 	/** Tensor name -> tensor metadata. */
 	tensorInfos: Map<string, TensorInfo>;
+}
+
+/** Internal tracked state for a loaded model within the ModelManager. */
+export interface ModelEntry {
+	readonly id: string;
+	readonly name: string;
+	readonly priority: number;
+	readonly lightweight: boolean;
+	hyperparams: ModelHyperparams;
+	kvCache: import("../models/kv-cache.js").KVCache;
+	tokenizer: import("../inference/tokenizer.js").Tokenizer;
+	memoryAllocations: number[];
+	loaded: boolean;
+	activeSessions: number;
 }
