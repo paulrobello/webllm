@@ -8,11 +8,18 @@ export type {
 	MemoryPressureEvent,
 	ModelArchitecture,
 	ModelHandle,
+	ModelHyperparams,
 	ModelLoadOptions,
 	ModelMetadata,
+	ModelWeights,
 	TensorInfo,
 	WebLLMConfig,
 } from "./core/types.js";
+export type {
+	GenerationConfig,
+	GenerationResult,
+} from "./inference/generation.js";
+export { Generator } from "./inference/generation.js";
 export { GgmlWasm } from "./inference/ggml-wasm.js";
 export type { SamplerConfig } from "./inference/sampler.js";
 export { Sampler } from "./inference/sampler.js";
@@ -32,3 +39,7 @@ export type {
 } from "./models/gguf-types.js";
 export type { InferenceSessionConfig } from "./models/inference-session.js";
 export { InferenceSession } from "./models/inference-session.js";
+export type { KVCacheConfig, KVCell } from "./models/kv-cache.js";
+export { KVCache } from "./models/kv-cache.js";
+export type { ParsedModel } from "./models/model-loader.js";
+export { ModelLoader } from "./models/model-loader.js";
