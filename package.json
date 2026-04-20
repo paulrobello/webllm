@@ -1,0 +1,37 @@
+{
+  "name": "@paulrobello/webllm",
+  "version": "0.1.0",
+  "description": "High-performance LLM inference in the browser via WebGPU, backed by llama.cpp",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target browser --minify",
+    "dev": "bun build src/index.ts --outdir dist --target browser --watch",
+    "test": "bun test",
+    "lint": "biome check src tests",
+    "lint:fix": "biome check --fix src tests",
+    "fmt": "biome format --write src tests",
+    "typecheck": "tsc --noEmit",
+    "checkall": "bun run fmt && bun run lint && bun run typecheck && bun run test"
+  },
+  "keywords": ["llm", "webgpu", "inference", "browser", "llama-cpp", "gguf"],
+  "license": "MIT",
+  "author": "Paul Robello <probello@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paulrobello/webllm"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "typescript": "^5.8.0",
+    "@types/bun": "^1.2.0"
+  }
+}

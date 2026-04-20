@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.local
+*.local.*
+*-mcp.json
+.gemini-clipboard
+.cc2cc-session-id
+claude_scratch/
+.idea
+settings.local.json
+CLAUDE.local.md
+.DS_Store
+*.wasm
+src/wasm/build/
