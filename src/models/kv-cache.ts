@@ -19,8 +19,8 @@ export interface KVCacheConfig {
 export interface KVCell {
 	/** Token position in the sequence, or -1 if empty. */
 	position: number;
-	/** Owning sequence ID, or -1 if unoccupied. */
-	sequenceId: number;
+	/** Set of sequence IDs currently sharing this cell. Empty when unoccupied. */
+	sequenceIds: Set<number>;
 }
 
 /**
@@ -35,6 +35,7 @@ export class KVCache {
 	private bufferSize: number;
 	private head: number;
 	private usedCells: number;
+	private bytesPerCell: number;
 	private kBufferIds: (number | null)[];
 	private vBufferIds: (number | null)[];
 
@@ -42,10 +43,12 @@ export class KVCache {
 		this.bufferSize = config.maxContextLength;
 		this.cells = Array.from({ length: this.bufferSize }, () => ({
 			position: -1,
-			sequenceId: -1,
+			sequenceIds: new Set<number>(),
 		}));
 		this.head = 0;
 		this.usedCells = 0;
+		this.bytesPerCell =
+			config.nLayers * (config.nEmbdHeadK + config.nEmbdHeadV) * 4;
 		this.kBufferIds = new Array(config.nLayers).fill(null);
 		this.vBufferIds = new Array(config.nLayers).fill(null);
 	}
@@ -61,7 +64,7 @@ export class KVCache {
 		for (let attempt = 0; attempt < this.bufferSize; attempt++) {
 			const idx = (start + attempt) % this.bufferSize;
 			const cell = this.cells[idx];
-			if (cell.position === -1) {
+			if (cell.position === -1 && cell.sequenceIds.size === 0) {
 				slots.push(idx);
 				if (slots.length === nTokens) return slots;
 			} else {
@@ -72,7 +75,10 @@ export class KVCache {
 		// If no contiguous block from head, wrap from beginning
 		slots.length = 0;
 		for (let i = 0; i < this.bufferSize; i++) {
-			if (this.cells[i].position === -1) {
+			if (
+				this.cells[i].position === -1 &&
+				this.cells[i].sequenceIds.size === 0
+			) {
 				slots.push(i);
 				if (slots.length === nTokens) return slots;
 			} else {
@@ -91,7 +97,7 @@ export class KVCache {
 	): void {
 		for (let i = 0; i < slotIndices.length; i++) {
 			this.cells[slotIndices[i]].position = positions[i];
-			this.cells[slotIndices[i]].sequenceId = sequenceId;
+			this.cells[slotIndices[i]].sequenceIds.add(sequenceId);
 		}
 		this.usedCells += slotIndices.length;
 		const lastSlot = slotIndices[slotIndices.length - 1];
@@ -102,13 +108,75 @@ export class KVCache {
 	evictSequence(sequenceId: number): void {
 		let freed = 0;
 		for (const cell of this.cells) {
-			if (cell.sequenceId === sequenceId) {
-				cell.position = -1;
-				cell.sequenceId = -1;
+			if (cell.sequenceIds.has(sequenceId)) {
+				cell.sequenceIds.delete(sequenceId);
 				freed++;
+				if (cell.sequenceIds.size === 0) {
+					cell.position = -1;
+				}
 			}
 		}
 		this.usedCells -= freed;
+	}
+
+	/**
+	 * Share prompt KV cells from one sequence to another.
+	 *
+	 * After a system prompt is processed for one sequence, this method copies
+	 * the sequence association so a second session can reuse the same KV cache
+	 * entries for the shared prefix, avoiding redundant computation.
+	 *
+	 * @returns Number of cells shared.
+	 */
+	sharePromptCells(
+		sourceSequenceId: number,
+		targetSequenceId: number,
+		promptLength: number,
+	): number {
+		let shared = 0;
+		for (const cell of this.cells) {
+			if (
+				cell.sequenceIds.has(sourceSequenceId) &&
+				cell.position >= 0 &&
+				cell.position < promptLength
+			) {
+				cell.sequenceIds.add(targetSequenceId);
+				shared++;
+			}
+		}
+		// Shared cells are now used by one more sequence
+		this.usedCells += shared;
+		return shared;
+	}
+
+	/** Get all cells belonging to a given sequence. */
+	getSequenceCells(sequenceId: number): KVCell[] {
+		return this.cells.filter((c) => c.sequenceIds.has(sequenceId));
+	}
+
+	/**
+	 * Check whether a sequence has a complete prompt cache of the given length.
+	 *
+	 * Returns true only when every position [0, promptLength) is represented
+	 * in the cells owned by the sequence.
+	 */
+	hasPromptCache(sequenceId: number, promptLength: number): boolean {
+		let count = 0;
+		for (const cell of this.cells) {
+			if (
+				cell.sequenceIds.has(sequenceId) &&
+				cell.position >= 0 &&
+				cell.position < promptLength
+			) {
+				count++;
+			}
+		}
+		return count >= promptLength;
+	}
+
+	/** Estimated memory usage in bytes for all occupied cells. */
+	getMemoryUsage(): number {
+		return this.usedCells * this.bytesPerCell;
 	}
 
 	/** Get the GPU buffer ID for the key tensor at a given layer. */
@@ -135,7 +203,7 @@ export class KVCache {
 	reset(): void {
 		for (const cell of this.cells) {
 			cell.position = -1;
-			cell.sequenceId = -1;
+			cell.sequenceIds.clear();
 		}
 		this.head = 0;
 		this.usedCells = 0;

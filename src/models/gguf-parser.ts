@@ -9,8 +9,21 @@ import {
 	GgufValueType,
 } from "./gguf-types.js";
 
+/**
+ * Static parser for GGUF binary model format extracting header, metadata, and tensor descriptors.
+ *
+ * Reads the binary layout: header (magic, version, counts), metadata KV pairs, tensor info
+ * entries, and computes aligned data offsets for weight loading.
+ */
 // biome-ignore lint/complexity/noStaticOnlyClass: instance methods planned for Phase 2
 export class GgufParser {
+	/**
+	 * Parse a GGUF binary buffer into a structured context.
+	 *
+	 * @param buffer - Raw ArrayBuffer of the GGUF file.
+	 * @returns Parsed GgufContext with header, metadata, tensor info, and alignment.
+	 * @throws Error if magic number or version is invalid.
+	 */
 	static parse(buffer: ArrayBuffer): GgufContext {
 		const view = new DataView(buffer);
 		let offset = 0;
@@ -50,12 +63,26 @@ export class GgufParser {
 		return { header, metadata, tensors, alignment, dataOffset, totalDataSize };
 	}
 
+	/**
+	 * Retrieve a string-valued metadata entry.
+	 *
+	 * @param ctx - Parsed GGUF context.
+	 * @param key - Metadata key.
+	 * @returns String value, or undefined if missing or not a string type.
+	 */
 	static getMetadataString(ctx: GgufContext, key: string): string | undefined {
 		const kv = ctx.metadata.get(key);
 		if (!kv || kv.type !== GgufValueType.STRING) return undefined;
 		return kv.value as string;
 	}
 
+	/**
+	 * Retrieve a numeric metadata entry.
+	 *
+	 * @param ctx - Parsed GGUF context.
+	 * @param key - Metadata key.
+	 * @returns Number value, or undefined if missing or not numeric.
+	 */
 	static getMetadataNumber(ctx: GgufContext, key: string): number | undefined {
 		const kv = ctx.metadata.get(key);
 		if (!kv) return undefined;
