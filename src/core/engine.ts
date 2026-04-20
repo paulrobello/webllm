@@ -1,3 +1,4 @@
+import type { GenerationConfig } from "../inference/generation.js";
 import { MemoryPool } from "./memory-pool.js";
 import { PipelineCache } from "./pipeline-cache.js";
 import { Scheduler } from "./scheduler.js";
@@ -46,6 +47,32 @@ export class WebLLM {
 
 	async unloadModel(id: string): Promise<void> {
 		this.models.delete(id);
+	}
+
+	/**
+	 * Run a chat completion.
+	 *
+	 * Stub — requires WASM forward pass integration (post-Phase 2).
+	 */
+	async chat(
+		_modelId: string,
+		_prompt: string,
+		_config?: Partial<GenerationConfig>,
+	): Promise<string> {
+		throw new Error("chat() requires WASM forward pass integration");
+	}
+
+	/**
+	 * Load a model from a raw GGUF buffer.
+	 *
+	 * Stub — requires GPU buffer integration (post-Phase 2).
+	 */
+	static async loadModelFromBuffer(
+		_data: ArrayBuffer,
+		_options: ModelLoadOptions,
+		_config: WebLLMConfig,
+	): Promise<ModelHandle> {
+		throw new Error("loadModelFromBuffer() requires GPU buffer integration");
 	}
 	get config(): WebLLMConfig {
 		return this._config;
