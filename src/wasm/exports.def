@@ -1,0 +1,18 @@
+_exports: [
+  "webgpu_init",
+  "webgpu_shutdown",
+  "webgpu_create_buffer",
+  "webgpu_write_buffer",
+  "webgpu_read_buffer",
+  "webgpu_destroy_buffer",
+  "webgpu_mul_mat",
+  "webgpu_flash_attn",
+  "webgpu_rope",
+  "webgpu_rms_norm",
+  "webgpu_soft_max",
+  "webgpu_cpy",
+  "webgpu_get_rows",
+  "webgpu_set_rows",
+  "webgpu_get_pipeline_cache",
+  "webgpu_load_pipeline_cache",
+]
