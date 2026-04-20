@@ -1,4 +1,5 @@
-.PHONY: build test lint fmt typecheck checkall clean install deps wasm-build bench bench-eval
+.PHONY: build test lint fmt typecheck checkall clean install deps wasm-build \
+        bench bench-perf bench-eval bench-eval-interactive bench-all
 
 install:
 	bun install
@@ -26,11 +27,21 @@ typecheck:
 checkall:
 	bun run checkall
 
-bench:
+bench: bench-perf
+
+bench-perf:
 	bun run bench
 
 bench-eval:
 	bun run bench:eval
+
+bench-eval-interactive:
+	bun run bench:eval -i
+
+bench-eval-list:
+	bun run bench:eval --list
+
+bench-all: bench-perf bench-eval
 
 wasm-build:
 	cd src/wasm && mkdir -p build && cd build && \
