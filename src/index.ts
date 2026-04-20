@@ -43,6 +43,7 @@ export type {
 } from "./inference/generation.js";
 export { Generator } from "./inference/generation.js";
 export { GgmlWasm } from "./inference/ggml-wasm.js";
+export { ModelInference } from "./inference/model-inference.js";
 export type {
 	LightweightModelConfig,
 	LightweightWeights,
