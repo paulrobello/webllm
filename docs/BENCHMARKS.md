@@ -376,6 +376,83 @@ export const myTasks: EvalTask[] = [
 
 **Important:** Register the task array in `eval/cli.ts` by importing and spreading it into the `allTasks` array.
 
+## Model Catalog
+
+The benchmark suite includes 15 models across 4 performance tiers, covering all supported architectures (llama, qwen, phi, gemma).
+
+### Listing Models
+
+```bash
+# List all benchmark models with VRAM and capabilities
+make bench-eval-models
+
+# Or directly
+bun run bench:eval --models
+```
+
+### Browser VRAM Limits
+
+| Device Tier | VRAM | Max Params (Q4) | Examples |
+|-------------|------|-----------------|----------|
+| Low-end | 2 GB | ~1B | Mobile, old integrated GPUs |
+| Mid-range | 4 GB | ~3B | M1 base, RTX 3060, mid-range laptops |
+| High-end | 8 GB | ~7B | M3/M4 Pro, RTX 4070+ |
+| Enthusiast | 16 GB | ~14B | M4 Max, RTX 4090, desktop workstations |
+
+Context window adds ~30-50% overhead to base VRAM. Models at Q4_K_M quantization retain ~95-97% of full-precision quality.
+
+### Performance Tiers
+
+#### Ultrafast (100+ tok/s, <1 GB VRAM)
+
+| Model | Params | VRAM | Tool Use | License |
+|-------|--------|------|----------|---------|
+| SmolLM2 360M Instruct | 360M | 376 MB | No | Apache 2.0 |
+| Snowflake Arctic Embed S | 33M | 239 MB | Embedding | Apache 2.0 |
+| Snowflake Arctic Embed M | 109M | 539 MB | Embedding | Apache 2.0 |
+
+#### Fast (60+ tok/s, 1-2 GB VRAM)
+
+| Model | Params | VRAM | Tool Use | License |
+|-------|--------|------|----------|---------|
+| Llama 3.2 1B Instruct | 1.23B | 879 MB | No | Llama 3.2 |
+| Qwen3 0.6B | 0.6B | 1403 MB | Native | Apache 2.0 |
+| Gemma 2 2B IT | 2.61B | 1584 MB | No | Gemma |
+| Qwen2.5 1.5B Instruct | 1.54B | 1630 MB | No | Apache 2.0 |
+| Qwen2.5 Coder 1.5B | 1.54B | 1630 MB | Structured | Apache 2.0 |
+| SmolLM2 1.7B Instruct | 1.71B | 1774 MB | No | Apache 2.0 |
+
+#### Balanced (30+ tok/s, 2-3 GB VRAM)
+
+| Model | Params | VRAM | Tool Use | License |
+|-------|--------|------|----------|---------|
+| Qwen3 1.7B | 1.7B | 2037 MB | Native | Apache 2.0 |
+| Hermes 3 Llama 3.2 3B | 3.21B | 2264 MB | ChatML | Llama 3.2 |
+| Llama 3.2 3B Instruct | 3.21B | 2264 MB | No | Llama 3.2 |
+| Qwen2.5 3B Instruct | 3.09B | 2505 MB | No | Apache 2.0 |
+| Phi-3.5 Mini Instruct | 3.82B | 2520 MB | No | MIT |
+
+#### Quality (20-30 tok/s, 3-4 GB VRAM)
+
+| Model | Params | VRAM | Tool Use | License |
+|-------|--------|------|----------|---------|
+| Qwen3 4B | 4.0B | 3432 MB | Native | Apache 2.0 |
+
+### Recommended Models by Use Case
+
+| Use Case | Model | Why |
+|----------|-------|-----|
+| Tool calling / agents | Hermes 3 Llama 3.2 3B | Explicit function calling training, structured JSON output |
+| Best quality/speed balance | Qwen3 1.7B | Matches Qwen2.5 3B quality at half size, Apache 2.0 |
+| Smallest with tool calling | Qwen3 0.6B | Native function calling in under 1.5 GB |
+| Reasoning / math | Phi-3.5 Mini | MMLU 66.9, GSM8K 81.2, MIT license |
+| Code generation | Qwen2.5 Coder 1.5B | Strong code benchmarks, Apache 2.0 |
+| Embeddings | Snowflake Arctic Embed S | 239 MB, SOTA for size, Apache 2.0 |
+
+### Model Definitions
+
+All model metadata lives in `eval/models.ts` and includes architecture, VRAM requirements, quantization options, capabilities, license, and download URLs. Use `getModelById()` to look up a model, or `getModelsByTier()` / `getToolCallingModels()` / `getEmbeddingModels()` for filtered views.
+
 ## Related Documentation
 
 - [README.md](../README.md) — Project overview and quick start

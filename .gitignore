@@ -38,3 +38,5 @@ claude_scratch/
 
 # Debug / Coverage
 coverage/
+docs/superpowers
+.superpowers

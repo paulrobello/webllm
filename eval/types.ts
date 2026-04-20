@@ -1,7 +1,8 @@
 export type EvalDimension =
 	| "tool-calling"
 	| "reasoning"
-	| "instruction-following";
+	| "instruction-following"
+	| "embedding";
 
 export type ScoringMethod =
 	| { type: "exact" }
