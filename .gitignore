@@ -1,14 +1,40 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# WASM build artifacts
+*.wasm
+src/wasm/build/
+
+# Evaluation reports (generated at runtime)
+eval/reports/*.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment / Secrets
+.env
+.env.*
 *.local
 *.local.*
 *-mcp.json
+settings.local.json
+CLAUDE.local.md
+
+# Claude / Gemini session files
 .gemini-clipboard
 .cc2cc-session-id
 claude_scratch/
-.idea
-settings.local.json
-CLAUDE.local.md
-.DS_Store
-*.wasm
-src/wasm/build/
+
+# Debug / Coverage
+coverage/
