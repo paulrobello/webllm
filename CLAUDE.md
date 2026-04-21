@@ -61,7 +61,26 @@ These issues already caused real regressions here and should be preserved as pro
 
 ### Local dependency note
 
-This repo currently depends on a local browser-specific fix in:
-- `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`
+This repo depends on a local patched llama.cpp at `~/Repos/llama.cpp/`. The
+patches live on branch **`webllm-browser-patches`**, which must be checked out
+for builds to work:
 
-If browser regressions reappear, inspect that local dependency before assuming the bug is entirely in this repo.
+```bash
+cd ~/Repos/llama.cpp && git checkout webllm-browser-patches
+```
+
+The branch contains two commits on top of upstream `master`:
+
+1. `ggml: iterative ggml_visit_parents_graph for WASM stack safety` —
+   the recursive graph visitor overflows the JS/WASM stack on deep
+   transformer graphs. Rewritten as an explicit heap-allocated stack.
+2. `ggml-webgpu: browser + ASYNCIFY support bundle` — ASYNCIFY-safe
+   wait/map paths, non-aborting device error handler, per-dispatch
+   compute-pass fallback with overlap-only conflict detection,
+   `GGML_OP_DIAG_MASK_INF` shader.
+
+If browser regressions reappear, inspect that local branch before assuming
+the bug is entirely in this repo. To rebase onto a newer llama.cpp master:
+fetch, `git rebase master`, resolve any upstream changes to `ggml.c`
+(visitor) or `ggml-webgpu.cpp` (backend), rebuild via `make wasm-build`,
+re-run `make bench-inference` to confirm no perf regression.
