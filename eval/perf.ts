@@ -12,6 +12,7 @@
  *   bun run eval/perf.ts --model <id>          # choose a registered model (default tinyllama-1.1b-chat-q4_0)
  *   bun run eval/perf.ts --runs 5              # number of runs (default 3)
  *   bun run eval/perf.ts --port <cdp-port>     # agentchrome port (default: auto-detect)
+ *   bun run eval/perf.ts --profile             # also dump per-phase decode timings
  *
  * Requires:
  *   - smoke-test server on http://localhost:8031 (run `make smoke-serve`)
@@ -42,6 +43,19 @@ interface PerfReport {
 	notes?: string;
 }
 
+interface DecodeTrace {
+	nTokens: number;
+	pastLen: number;
+	ctxCreateMs: number;
+	buildGraphMs: number;
+	backendAllocMs: number;
+	uploadLeavesMs: number;
+	graphComputeMs: number;
+	downloadLogitsMs: number;
+	teardownMs: number;
+	totalMs: number;
+}
+
 const DEFAULT_MODEL_ID = "tinyllama-1.1b-chat-q4_0";
 const DEFAULT_RUNS = 3;
 const SMOKE_TEST_URL = "http://localhost:8031/real-model.html";
@@ -56,6 +70,7 @@ function main(): void {
 			port: { type: "string" },
 			tab: { type: "string" },
 			baseline: { type: "string" },
+			profile: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -80,6 +95,7 @@ function main(): void {
 		tab: values.tab,
 		save: values.save ?? false,
 		baseline: values.baseline ?? BASELINE_PATH,
+		profile: values.profile ?? false,
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -89,18 +105,31 @@ function main(): void {
 async function run(
 	model: BenchmarkModel,
 	nRuns: number,
-	opts: { port?: string; tab?: string; save: boolean; baseline: string },
+	opts: {
+		port?: string;
+		tab?: string;
+		save: boolean;
+		baseline: string;
+		profile: boolean;
+	},
 ): Promise<void> {
 	const { port, tab } = await resolveAgentchromeSession(opts.port, opts.tab);
 
 	// Trigger N page reloads with cache busting and collect tok/s from each.
 	const perfRuns: PerfRun[] = [];
+	const allTraces: DecodeTrace[] = [];
 	for (let i = 0; i < nRuns; i++) {
 		process.stdout.write(`Run ${i + 1}/${nRuns}...`);
-		const url = `${SMOKE_TEST_URL}?perf=${Date.now()}-${i}`;
+		const base = `${SMOKE_TEST_URL}?perf=${Date.now()}-${i}`;
+		const url = opts.profile ? `${base}&profile=1` : base;
 		agentchrome(port, tab, ["navigate", url]);
 		const result = await waitForSmokeTestResult(port, tab);
 		perfRuns.push(result);
+		if (opts.profile) {
+			const traces = fetchDecodeTraces(port, tab);
+			const decodeOnly = traces.filter((t) => t.nTokens === 1);
+			allTraces.push(...decodeOnly);
+		}
 		process.stdout.write(` ${result.tokensPerSecond.toFixed(1)} tok/s\n`);
 	}
 
@@ -118,6 +147,9 @@ async function run(
 
 	printTable(report);
 	compareToBaseline(report, opts.baseline);
+	if (opts.profile) {
+		printProfileTable(allTraces);
+	}
 
 	if (opts.save) {
 		mkdirSync(dirname(opts.baseline), { recursive: true });
@@ -249,6 +281,52 @@ async function waitForSmokeTestResult(port: string, tab: string): Promise<PerfRu
 	throw new Error("Timed out waiting for smoke-test result line on the page");
 }
 
+function fetchDecodeTraces(port: string, tab: string): DecodeTrace[] {
+	const out = agentchrome(port, tab, [
+		"js",
+		"exec",
+		`(() => JSON.stringify(window.__decodeTraces ?? []))()`,
+	]);
+	const resp = JSON.parse(out) as { result?: string };
+	if (!resp.result) return [];
+	try {
+		return JSON.parse(resp.result) as DecodeTrace[];
+	} catch {
+		return [];
+	}
+}
+
+function printProfileTable(traces: DecodeTrace[]): void {
+	if (traces.length === 0) {
+		console.log("\nNo decode traces captured (profile mode).");
+		return;
+	}
+	const keys: Array<keyof DecodeTrace> = [
+		"ctxCreateMs",
+		"buildGraphMs",
+		"backendAllocMs",
+		"uploadLeavesMs",
+		"graphComputeMs",
+		"downloadLogitsMs",
+		"teardownMs",
+		"totalMs",
+	];
+	console.log(`\nPer-phase decode timing (${traces.length} single-token steps)`);
+	console.log("Phase              mean(ms)  median(ms)  p90(ms)  %total");
+	console.log("-----------------  --------  ----------  -------  ------");
+	const totalMean = traces.reduce((acc, t) => acc + t.totalMs, 0) / traces.length;
+	for (const k of keys) {
+		const vals = traces.map((t) => t[k] as number).sort((a, b) => a - b);
+		const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+		const median = vals[Math.floor(vals.length / 2)];
+		const p90 = vals[Math.floor(vals.length * 0.9)];
+		const pct = k === "totalMs" ? 100 : (mean / totalMean) * 100;
+		console.log(
+			`${k.padEnd(17)}  ${mean.toFixed(2).padStart(8)}  ${median.toFixed(2).padStart(10)}  ${p90.toFixed(2).padStart(7)}  ${pct.toFixed(1).padStart(5)}%`,
+		);
+	}
+}
+
 async function extractSmokeTestPrompt(port: string, tab: string): Promise<string> {
 	try {
 		const out = agentchrome(port, tab, [
@@ -281,6 +359,7 @@ Options:
       --port <cdp-port> Use this agentchrome CDP port instead of auto-detecting
       --tab <tab-id>    Use this specific Chrome tab ID
       --baseline <path> Baseline file path (default: ${BASELINE_PATH})
+      --profile         Also print per-phase decode timing from browser traces
   -h, --help            Show this help
 
 Prereqs:

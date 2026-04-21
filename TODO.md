@@ -36,9 +36,22 @@ the code lives today, the expected win, and the risk/tradeoff.
   - Refactoring KV cache layout so writes always go to a fixed slot and the
     "real" position is a permutation applied separately, or
   - Pre-building graphs for every possible past-length (memory hungry)
+- **Profile measurement (2026-04-21):**
+  - mean total per decode step: 16.75 ms
+  - ctxCreate: 0.00 ms (0.0%)
+  - buildGraph: 0.21 ms (1.3%)
+  - backendAlloc: 0.05 ms (0.3%)
+  - uploadLeaves: 0.02 ms (0.1%)
+  - graphCompute: 6.92 ms (41.3%)
+  - downloadLogits: 9.53 ms (56.9%)
+  - teardown: 0.02 ms (0.1%)
+  - Non-GPU overhead (ctxCreate + buildGraph + backendAlloc + teardown) = 1.7%.
 - **Status**: deferred. Big structural change relative to its current
   expected win at 17.5 ms/step. Revisit if we can measure that graph
   building (not GPU compute) is actually the bottleneck.
+- **Phase A skipped:** GPU compute + logits download dominate; moving graph
+  build to C can at best claw back ~1.7% and isn't worth the C-side
+  maintenance burden.
 
 ### 2. Re-enable batched compute passes in the WebGPU backend ✅ DONE
 - **Where**: `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`

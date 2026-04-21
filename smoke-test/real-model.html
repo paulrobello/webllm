@@ -87,6 +87,7 @@ let parsedModel = null;
 
 async function loadAndTest() {
     const t0 = performance.now();
+    const profileMode = new URLSearchParams(window.location.search).has('profile');
 
     // Step 1: Fetch model
     log('running', '[1/7] Fetching model...');
@@ -149,6 +150,10 @@ async function loadAndTest() {
     setProgress(35);
     try {
         inference = new ModelInference(wasm, parsed.hyperparams);
+        if (profileMode) {
+            inference.traceEnabled = true;
+            window.__decodeTraces = [];
+        }
         const t1 = performance.now();
         inference.loadWeights(ggufCtx, modelBuffer);
         const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
@@ -356,6 +361,9 @@ async function loadAndTest() {
                 new Int32Array([sampledId]),
                 new Int32Array([pos]),
             );
+            if (profileMode && inference.lastTrace) {
+                window.__decodeTraces.push(inference.lastTrace);
+            }
             sampler.applyRepetitionPenalty(stepLogits, recent.slice(-64));
             sampledId = sampler.sample(stepLogits);
             if (sampledId === eosId) break;

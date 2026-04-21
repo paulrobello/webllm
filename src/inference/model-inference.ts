@@ -33,6 +33,24 @@ interface LayerKVCache {
 }
 
 /**
+ * Per-phase wall-clock timing for one `forward()` call, in milliseconds.
+ * Captured only when `traceEnabled` is true — the default is off so the
+ * hot path pays nothing. Used by the profile harness in `eval/perf.ts`.
+ */
+export interface ForwardTrace {
+	nTokens: number;
+	pastLen: number;
+	ctxCreateMs: number;
+	buildGraphMs: number;
+	backendAllocMs: number;
+	uploadLeavesMs: number;
+	graphComputeMs: number;
+	downloadLogitsMs: number;
+	teardownMs: number;
+	totalMs: number;
+}
+
+/**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
@@ -53,6 +71,10 @@ export class ModelInference {
 	private kvLayers: LayerKVCache[] | null = null;
 	private kvBuf: BufferPtr = 0;
 	private nCached = 0;
+	/** When true, `forward()` populates `lastTrace` on every call. */
+	traceEnabled = false;
+	/** Timing of the most recent `forward()` call, or null if never traced. */
+	lastTrace: ForwardTrace | null = null;
 
 	constructor(wasm: GgmlWasm, hyperparams: ModelHyperparams) {
 		this.wasm = wasm;
@@ -166,8 +188,13 @@ export class ModelInference {
 		const pastLen = this.nCached;
 		const totalLen = pastLen + nTokens;
 
+		const trace = this.traceEnabled;
+		const t0 = trace ? performance.now() : 0;
+
 		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
 		wasm.ctxCreate(graphMem);
+
+		const t1 = trace ? performance.now() : 0;
 
 		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
@@ -362,7 +389,13 @@ export class ModelInference {
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
 
+		wasm.graphBuildForwardExpand(graph, logits);
+
+		const t2 = trace ? performance.now() : 0;
+
 		const graphBuf = wasm.backendAllocCtxTensors();
+
+		const t3 = trace ? performance.now() : 0;
 
 		// Upload leaf input data AFTER backend buffers are assigned.
 		// All three buffers (pos / tokenIds / mask) are written in a single
@@ -426,12 +459,11 @@ export class ModelInference {
 			}
 		}
 
-		// KV cache writes are already expanded into the graph per layer (above),
-		// so they precede attention reads. Finally add logits + its dependency
-		// chain — nodes already in the graph are deduped by build_forward_expand.
-		wasm.graphBuildForwardExpand(graph, logits);
+		const t4 = trace ? performance.now() : 0;
 
 		await wasm.graphCompute(graph);
+
+		const t5 = trace ? performance.now() : 0;
 
 		const logitsBytes = hp.vocabularySize * 4;
 		const offset = nTokens > 1 ? (nTokens - 1) * logitsBytes : 0;
@@ -445,9 +477,29 @@ export class ModelInference {
 			resultBuf.byteOffset,
 			hp.vocabularySize,
 		).slice();
+
+		const t6 = trace ? performance.now() : 0;
+
 		wasm.backendBufferFree(graphBuf);
 		wasm.ctxFree();
 		this.nCached = totalLen;
+
+		const t7 = trace ? performance.now() : 0;
+
+		if (trace) {
+			this.lastTrace = {
+				nTokens,
+				pastLen,
+				ctxCreateMs: t1 - t0,
+				buildGraphMs: t2 - t1,
+				backendAllocMs: t3 - t2,
+				uploadLeavesMs: t4 - t3,
+				graphComputeMs: t5 - t4,
+				downloadLogitsMs: t6 - t5,
+				teardownMs: t7 - t6,
+				totalMs: t7 - t0,
+			};
+		}
 
 		return result;
 	}
