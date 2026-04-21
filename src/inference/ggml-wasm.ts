@@ -366,6 +366,11 @@ export class GgmlWasm {
 		return this.m._op_soft_max(x);
 	}
 
+	/** Fused SwiGLU for LLaMA FFN: silu(a) * b in one op. */
+	opSwigluSplit(a: TensorPtr, b: TensorPtr): TensorPtr {
+		return this.m._op_swiglu_split(a, b);
+	}
+
 	/**
 	 * Fused scale + mask + softmax.
 	 * @param mask - F32 tensor [ne0, ne1] broadcast over higher dims. 0 = visible,

@@ -328,7 +328,8 @@ export class ModelInference {
 			);
 			const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
 			const up = wasm.opMulMat(lw.upProj, ffnNormed);
-			const ffnHidden = wasm.opMul(wasm.opSilu(gate), up);
+			// Fused silu(gate) * up — single GPU op instead of silu+mul.
+			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
 			cur = wasm.opAdd(ffnOut, attnResidual);
@@ -702,7 +703,7 @@ export class ModelInference {
 					returnTensor = up;
 					break;
 				}
-				const ffnHidden = wasm.opMul(wasm.opSilu(gate), up);
+				const ffnHidden = wasm.opSwigluSplit(gate, up);
 				if (il === layerIdx && checkpoint === "ffn_hidden") {
 					returnTensor = ffnHidden;
 					break;

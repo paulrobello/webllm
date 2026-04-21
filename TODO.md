@@ -72,15 +72,13 @@ the code lives today, the expected win, and the risk/tradeoff.
 - **Risk**: gated on browser support. Need to probe capabilities and
   not crash when absent.
 
-### 5. Fused SwiGLU op
-- **Where**: `src/inference/model-inference.ts` FFN section, replace
-  `opMul(opSilu(gate), up)` with `opGlu(... SWIGLU ...)`.
-- **Today**: three ops per layer (silu, mul, cast to GLU semantics).
-- **Change**: bind `ggml_glu` in the WASM bridge, call with
-  `GGML_GLU_OP_SWIGLU`, pass the combined gate/up tensor.
-- **Expected**: ~3% speedup (FFN dominates compute, but mul+silu
-  together are cheap relative to the mul_mats).
-- **Risk**: low. The webgpu backend already supports GLU ops.
+### 5. Fused SwiGLU op ✅ DONE
+- **Where**: `src/inference/model-inference.ts` FFN section.
+- **Change**: replaced `opMul(opSilu(gate), up)` with `opSwigluSplit(gate, up)`
+  which calls `ggml_glu_split(..., GGML_GLU_OP_SWIGLU)`. Added WASM binding
+  and exported `_op_swiglu_split`.
+- **Actual gain**: +1–2% (58 → ~58.5 tok/s). Modest — FFN compute is
+  dominated by the three mul_mats, not by silu/mul. Kept for cleanliness.
 
 ### 6. F16 KV cache
 - **Where**: `src/inference/model-inference.ts::initKVCache`.

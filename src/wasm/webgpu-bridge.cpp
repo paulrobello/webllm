@@ -190,6 +190,12 @@ void* op_soft_max_ext(void* x, void* mask, float scale, float max_bias) {
                              (struct ggml_tensor*)mask, scale, max_bias);
 }
 
+// Fused silu(a) * b (LLaMA SwiGLU FFN), avoids three separate dispatches.
+void* op_swiglu_split(void* a, void* b) {
+    return ggml_glu_split(current_ctx(), (struct ggml_tensor*)a,
+                          (struct ggml_tensor*)b, GGML_GLU_OP_SWIGLU);
+}
+
 void* op_scale(void* x, float s) {
     return ggml_scale(current_ctx(), (struct ggml_tensor*)x, s);
 }
