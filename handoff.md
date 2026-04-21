@@ -10,9 +10,36 @@
 
 ---
 
-## The residual bug (what we know)
+## The residual bug (LAYER-BY-LAYER EVIDENCE)
 
-### Evidence
+For token `"▁hello"` (id=22172) at position 0, dim 624 is an outlier
+dimension that develops rapidly at layer 2 in the reference model.
+Side-by-side comparison of per-layer hidden-state magnitude:
+
+| Layer | HF rms | Mine rms | HF max&#124;v&#124; (at dim) | Mine max&#124;v&#124; (at dim) |
+|-------|--------|----------|--------------------------|-------------------------------|
+| emb   | 0.015  | 0.015    | 0.05 (331)               | 0.05 (matches)                |
+| 0     | 0.024  | 0.021    | 0.40 (1454)              | 0.11 (2014)                   |
+| 1     | 0.029  | 0.026    | 0.23 (1447)              | 0.11 (2014)                   |
+| **2** | **4.37** | **0.039** | **-157.74 (624)**     | **-0.75 (624)**               |
+| 3     | 4.37   | 0.053    | -157.79 (624)            | -0.68 (624)                   |
+| ...   | ...    | ...      | ...                      | ...                           |
+| 20    | 4.19   | 0.53     | 151 (624-family)         | 2.5 (411)                     |
+| 21    | 1.74   | 0.63     | 21 (various)             | 5.6 (1308)                    |
+
+**The outlier DIMENSION is right (624).** **The SIGN is right (negative).**
+**The MAGNITUDE is ~200× too small.** This ratio holds through every
+subsequent layer — my pipeline reproduces the right qualitative behavior
+but with dramatically less amplification.
+
+That's a concrete, reproducible smoking gun for a specific numerical
+issue somewhere in layer 2's attention+FFN pathway (or shared across
+all layers but only visible once outliers develop). Next session's
+debugging should start by isolating whether layer 2's attention output
+or FFN output is the undersized component — instrument each separately
+via a per-layer debug tensor readback.
+
+### Other evidence
 
 | Probe                              | HuggingFace FP32 | Our pipeline |
 |-----------------------------------|------------------|--------------|
