@@ -37,8 +37,7 @@ import {
     GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer
 } from "./webllm-bundle.js";
 
-document.getElementById('start-btn').addEventListener('click', runSmokeTest);
-const GGUF_MAGIC = 0x46475547;
+const GGUF_MAGIC = 0x46554747;
 const GGUF_VERSION = 3;
 
 // ── GGUF helpers ──────────────────────────────────────────────────
@@ -50,7 +49,7 @@ function writeStr(dv, off, s) {
 function writeU32(dv, off, v) { dv.setUint32(off, v, true); return off + 4; }
 function writeKvStr(dv, off, k, v) { off = writeStr(dv, off, k); off = writeU32(dv, off, 8); return writeStr(dv, off, v); }
 function writeKvU32(dv, off, k, v) { off = writeStr(dv, off, k); off = writeU32(dv, off, 4); return writeU32(dv, off, v); }
-function writeKvF32(dv, off, k, v) { off = writeStr(dv, off, k); off = writeU32(dv, off, 10); dv.setFloat32(off, v, true); return off + 4; }
+function writeKvF32(dv, off, k, v) { off = writeStr(dv, off, k); off = writeU32(dv, off, 6); dv.setFloat32(off, v, true); return off + 4; }
 function writeKvStrArr(dv, off, k, vals) {
     off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 8);
     dv.setBigUint64(off, BigInt(vals.length), true); off += 8;
@@ -58,13 +57,13 @@ function writeKvStrArr(dv, off, k, vals) {
     return off;
 }
 function writeKvF32Arr(dv, off, k, vals) {
-    off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 10);
+    off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 6);
     dv.setBigUint64(off, BigInt(vals.length), true); off += 8;
     for (const v of vals) { dv.setFloat32(off, v, true); off += 4; }
     return off;
 }
 function writeKvI32Arr(dv, off, k, vals) {
-    off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 4);
+    off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 5);
     dv.setBigUint64(off, BigInt(vals.length), true); off += 8;
     for (const v of vals) { dv.setInt32(off, v, true); off += 4; }
     return off;
@@ -84,7 +83,7 @@ function buildTinyGGUF() {
     const scores = new Array(t.vocabSize).fill(-1);
     const tokenTypes = new Array(t.vocabSize).fill(1); // NORMAL
 
-    // Metadata keys
+    // Metadata keys: [key, typeTag, value]
     const kvs = [
         ["general.architecture", "str", t.arch],
         [`${t.arch}.context_length`, "u32", t.ctxLen],
@@ -105,7 +104,7 @@ function buildTinyGGUF() {
         ["tokenizer.ggml.bos_token_id", "u32", 1],
     ];
 
-    // Weight tensors: name, [dims], nelements
+    // Weight tensors: [name, [dims]]
     const weightTensors = [
         ["token_embd.weight", [t.embDim, t.vocabSize]],
         ["output_norm.weight", [t.embDim]],
@@ -126,22 +125,45 @@ function buildTinyGGUF() {
         );
     }
 
-    // Calculate sizes
-    let kvSize = 0;
-    for (const [, type, val] of kvs) {
-        kvSize += 8 + kvs[0][0].length + 4; // key string overhead varies
-        // We'll recalc properly in the write loop
-    }
-    // Rough over-estimate: 100 bytes per KV entry
-    const headerSize = 24;
-    kvSize = 4096; // generous over-estimate
-    const tensorInfoSize = weightTensors.length * (8 + 32 + 4 + 8*2 + 4 + 8);
-    const totalTensorData = weightTensors.reduce((s, [, dims]) =>
-        s + dims.reduce((a, d) => a * d, 1) * 4, 0);
-    const alignment = 32;
-    const alignedData = Math.ceil(totalTensorData / alignment) * alignment;
+    // ── Pass 1: calculate exact byte sizes ──────────────────────────
+    const HEADER = 24;
+    const AL = 32; // GGUF alignment
 
-    const totalSize = headerSize + kvSize + tensorInfoSize + alignedData + 4096;
+    function kvEntrySize(key, typeTag, val) {
+        let s = 8 + key.length + 4; // key string (len+chars) + type u32
+        if (typeTag === "str") s += 8 + val.length;
+        else if (typeTag === "u32" || typeTag === "f32") s += 4;
+        else if (typeTag === "strarr") { s += 4 + 8; for (const x of val) s += 8 + x.length; }
+        else if (typeTag === "f32arr") { s += 4 + 8 + val.length * 4; }
+        else if (typeTag === "i32arr") { s += 4 + 8 + val.length * 4; }
+        return s;
+    }
+
+    function tensorInfoSize(name, dims) {
+        return 8 + name.length + 4 + dims.length * 8 + 4 + 8;
+    }
+
+    let kvTotal = 0;
+    for (const [k, tag, v] of kvs) kvTotal += kvEntrySize(k, tag, v);
+
+    let tiTotal = 0;
+    for (const [name, dims] of weightTensors) tiTotal += tensorInfoSize(name, dims);
+
+    const dataOffset = Math.ceil((HEADER + kvTotal + tiTotal) / AL) * AL;
+
+    // Compute per-tensor data offsets (within the data section)
+    const tensorDataOff = [];
+    let curDataOff = 0;
+    for (const [, dims] of weightTensors) {
+        const nEl = dims.reduce((a, d) => a * d, 1);
+        const aligned = Math.ceil(curDataOff / AL) * AL;
+        tensorDataOff.push(aligned);
+        curDataOff = aligned + nEl * 4; // F32
+    }
+
+    const totalSize = dataOffset + curDataOff;
+
+    // ── Pass 2: write to buffer ─────────────────────────────────────
     const buf = new ArrayBuffer(totalSize);
     const dv = new DataView(buf);
     let off = 0;
@@ -152,7 +174,7 @@ function buildTinyGGUF() {
     dv.setBigUint64(off, BigInt(weightTensors.length), true); off += 8;
     dv.setBigUint64(off, BigInt(kvs.length), true); off += 8;
 
-    // Write KV entries
+    // KV entries
     for (const [key, type, val] of kvs) {
         if (type === "str") off = writeKvStr(dv, off, key, val);
         else if (type === "u32") off = writeKvU32(dv, off, key, val);
@@ -162,87 +184,26 @@ function buildTinyGGUF() {
         else if (type === "i32arr") off = writeKvI32Arr(dv, off, key, val);
     }
 
-    // Write tensor infos
-    for (const [name, dims] of weightTensors) {
+    // Tensor infos with pre-computed data offsets
+    for (let i = 0; i < weightTensors.length; i++) {
+        const [name, dims] = weightTensors[i];
         off = writeStr(dv, off, name);
         off = writeU32(dv, off, dims.length);
         for (const d of dims) { dv.setBigUint64(off, BigInt(d), true); off += 8; }
         off = writeU32(dv, off, 0); // type = F32
-        dv.setBigUint64(off, BigInt(0), true); off += 8; // offset (filled later)
+        dv.setBigUint64(off, BigInt(tensorDataOff[i]), true); off += 8;
     }
 
-    // Align data section
-    const alignment2 = 32;
-    const dataStart = Math.ceil(off / alignment2) * alignment2;
-    let dataOff = 0;
-
-    // Fill tensor data with deterministic pseudo-random values
-    const tensorDataOffsets = [];
-    for (const [name, dims] of weightTensors) {
-        const nElements = dims.reduce((a, d) => a * d, 1);
-        const bytes = nElements * 4;
-        const alignedOff = Math.ceil(dataOff / alignment2) * alignment2;
-        tensorDataOffsets.push(alignedOff);
-
-        // Simple deterministic fill: sin-based pattern
-        for (let i = 0; i < nElements; i++) {
-            const val = Math.sin(i * 0.1 + dims[0]) * 0.1;
-            dv.setFloat32(dataStart + alignedOff + i * 4, val, true);
+    // Data section: fill with deterministic values
+    for (let i = 0; i < weightTensors.length; i++) {
+        const [, dims] = weightTensors[i];
+        const nEl = dims.reduce((a, d) => a * d, 1);
+        for (let j = 0; j < nEl; j++) {
+            dv.setFloat32(dataOffset + tensorDataOff[i] + j * 4, Math.sin(j * 0.1 + dims[0]) * 0.1, true);
         }
-        dataOff = alignedOff + bytes;
     }
 
-    // Go back and fill in tensor offsets
-    // Re-scan tensor infos to find offset fields
-    // Easier: rewrite the whole thing with known offsets
-    // Let's just rebuild from scratch with proper offsets
-    off = 0;
-    dv.setUint32(off, GGUF_MAGIC, true); off += 4;
-    dv.setUint32(off, GGUF_VERSION, true); off += 4;
-    dv.setBigUint64(off, BigInt(weightTensors.length), true); off += 8;
-    dv.setBigUint64(off, BigInt(kvs.length), true); off += 8;
-
-    for (const [key, type, val] of kvs) {
-        if (type === "str") off = writeKvStr(dv, off, key, val);
-        else if (type === "u32") off = writeKvU32(dv, off, key, val);
-        else if (type === "f32") off = writeKvF32(dv, off, key, val);
-        else if (type === "strarr") off = writeKvStrArr(dv, off, key, val);
-        else if (type === "f32arr") off = writeKvF32Arr(dv, off, key, val);
-        else if (type === "i32arr") off = writeKvI32Arr(dv, off, key, val);
-    }
-
-    const dataSectionStart = Math.ceil(off + weightTensors.reduce((s, [name, dims]) =>
-        s + 8 + name.length + 4 + dims.length * 8 + 4 + 8, 0
-    ) / 32) * 32;
-
-    let currentDataOff = 0;
-    for (let ti = 0; ti < weightTensors.length; ti++) {
-        const [name, dims] = weightTensors[ti];
-        off = writeStr(dv, off, name);
-        off = writeU32(dv, off, dims.length);
-        for (const d of dims) { dv.setBigUint64(off, BigInt(d), true); off += 8; }
-        off = writeU32(dv, off, 0); // F32
-
-        const alignedOff = Math.ceil(currentDataOff / 32) * 32;
-        dv.setBigUint64(off, BigInt(alignedOff), true); off += 8;
-        currentDataOff = alignedOff + dims.reduce((a, d) => a * d, 1) * 4;
-    }
-
-    // Write data section
-    const dataWriteStart = Math.ceil(off / 32) * 32;
-    currentDataOff = 0;
-    for (const [name, dims] of weightTensors) {
-        const nElements = dims.reduce((a, d) => a * d, 1);
-        const bytes = nElements * 4;
-        const alignedOff = Math.ceil(currentDataOff / 32) * 32;
-        for (let i = 0; i < nElements; i++) {
-            const val = Math.sin(i * 0.1 + dims[0]) * 0.1;
-            dv.setFloat32(dataWriteStart + alignedOff + i * 4, val, true);
-        }
-        currentDataOff = alignedOff + bytes;
-    }
-
-    return buf.slice(0, dataWriteStart + currentDataOff);
+    return buf;
 }
 
 // ── Test runner ───────────────────────────────────────────────────
@@ -413,6 +374,9 @@ function finish(success) {
     summaryEl.innerHTML = `<strong>${success ? 'ALL TESTS PASSED' : 'TEST FAILED'}</strong><br>${passed} passed, ${failed} failed out of ${steps.length} steps`;
     btn.disabled = false;
 }
+
+document.getElementById('start-btn').addEventListener('click', runSmokeTest);
+runSmokeTest();
 </script>
 </body>
 </html>
