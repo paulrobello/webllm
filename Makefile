@@ -2,7 +2,7 @@
         wasm-build wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
         bench-eval-models bench-inference bench-inference-save bench-all \
-        smoke-test smoke-serve smoke-stop smoke-open smoke-test-full \
+        smoke-test smoke-serve smoke-stop smoke-open smoke-run \
         run-all help
 
 # ---------------------------------------------------------------------------
@@ -103,8 +103,13 @@ smoke-stop: ## Kill the smoke-test HTTP server
 smoke-open: ## Open smoke-test in default browser
 	open http://localhost:$(SMOKE_PORT)/real-model.html
 
-smoke-test-full: smoke-test ## Build, serve, and open smoke test
-	@echo "Smoke test built. Run 'make smoke-serve' in another terminal, then 'make smoke-open'."
+smoke-run: smoke-test ## Build, serve in background, open browser (Ctrl-C to stop)
+	@echo "Serving smoke-test on http://localhost:$(SMOKE_PORT) ..."
+	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
+	@cd smoke-test && python3 -m http.server $(SMOKE_PORT) &
+	@sleep 1 && open http://localhost:$(SMOKE_PORT)/real-model.html
+	@echo "Press Ctrl-C to stop the server."
+	@wait
 
 # ---------------------------------------------------------------------------
 # Benchmarks
