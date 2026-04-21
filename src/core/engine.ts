@@ -84,7 +84,7 @@ export class WebLLM {
 	async unloadModel(id: string): Promise<void> {
 		const inf = this.inferenceEngines.get(id);
 		if (inf) {
-			inf.dispose();
+			await inf.dispose();
 			this.inferenceEngines.delete(id);
 		}
 		const wasm = this.wasmModules.get(id);
@@ -138,7 +138,7 @@ export class WebLLM {
 			ids: number[],
 			positions: number[],
 		): Promise<Float32Array> => {
-			return inf.forward(new Int32Array(ids), new Int32Array(positions));
+			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
 		};
 
 		const genConfig: GenerationConfig = {
@@ -252,7 +252,7 @@ export class WebLLM {
 		}
 		this.wasmModules.clear();
 		for (const [, inf] of this.inferenceEngines) {
-			inf.dispose();
+			await inf.dispose();
 		}
 		this.inferenceEngines.clear();
 		this.modelManager.clear();

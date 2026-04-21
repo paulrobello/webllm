@@ -62,7 +62,7 @@ export class Generator {
 		forwardPass: (
 			tokenIds: number[],
 			positions: number[],
-		) => Promise<Float32Array>,
+		) => Float32Array | Promise<Float32Array>,
 		config: GenerationConfig,
 	): AsyncGenerator<number, GenerationResult> {
 		const startTime = performance.now();

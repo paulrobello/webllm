@@ -40,30 +40,54 @@ export type BufferPtr = number;
 /**
  * WebAssembly bridge for GGML inference via the ggml-webgpu backend.
  *
- * Manages the Emscripten MODULARIZE module and exposes typed methods
- * for tensor operations, graph building, and GPU compute.
+ * The ggml-webgpu build uses ASYNCIFY=1 (not JSPI) so that only
+ * webgpu_init() is async (it calls WaitAny internally). All other
+ * WASM exports (tensor ops, graph compute) are synchronous — they
+ * never call Asyncify.handleSleep, so the ASYNCIFY wrapper returns
+ * immediately.
+ *
+ * Uses stack-based memory allocation to avoid issues with malloc/free
+ * in ASYNCIFY builds.
  */
 export class GgmlWasm {
 	// biome-ignore lint/suspicious/noExplicitAny: Emscripten module has dynamic shape
 	private m: any = null;
 	private initialized = false;
 
-	/**
-	 * Load the Emscripten module and initialize the WebGPU backend.
-	 */
+	private async callWithAsyncify<T>(fn: () => T): Promise<T> {
+		const previousAsync = this.m.Asyncify?.currData ?? null;
+		try {
+			const result = fn();
+			if (
+				this.m.Asyncify?.currData &&
+				this.m.Asyncify.currData !== previousAsync
+			) {
+				return await this.m.Asyncify.whenDone();
+			}
+			return result;
+		} catch (error) {
+			if (
+				this.m.Asyncify?.currData &&
+				this.m.Asyncify.currData !== previousAsync
+			) {
+				return await this.m.Asyncify.whenDone();
+			}
+			throw error;
+		}
+	}
+
 	async init(config: GgmlWasmConfig): Promise<void> {
 		const factory = (await import(config.wasmUrl)).default;
 		this.m = await factory();
-		const result: number = this.m._webgpu_init();
+		const result = await this.callWithAsyncify<number>(() =>
+			this.m._webgpu_init(),
+		);
 		if (result !== 0) {
 			throw new Error(`WebGPU backend init failed (code ${result})`);
 		}
 		this.initialized = true;
 	}
 
-	/**
-	 * Shut down the backend and release the WASM module.
-	 */
 	async shutdown(): Promise<void> {
 		if (!this.initialized) return;
 		this.m._webgpu_shutdown();
@@ -71,47 +95,53 @@ export class GgmlWasm {
 		this.m = null;
 	}
 
-	// ── WASM heap helpers ────────────────────────────────────────────────
+	// ── Memory helpers ─────────────────────────────────────────────────
 
-	/** Allocate WASM heap memory. Returns a pointer. */
 	malloc(size: number): number {
 		return this.m._malloc(size);
 	}
 
-	/** Free WASM heap memory. */
 	free(ptr: number): void {
 		this.m._free(ptr);
 	}
 
-	/** Get HEAPU8 view of WASM memory. */
+	stackSave(): number {
+		return this.m.stackSave();
+	}
+
+	stackRestore(sp: number): void {
+		this.m.stackRestore(sp);
+	}
+
+	stackAlloc(size: number): number {
+		return this.m.stackAlloc(size);
+	}
+
+	withStack<T>(size: number, fn: (ptr: number) => T): T {
+		const sp = this.m.stackSave();
+		try {
+			return fn(this.m.stackAlloc(size));
+		} finally {
+			this.m.stackRestore(sp);
+		}
+	}
+
 	get heapU8(): Uint8Array {
 		return this.m.HEAPU8;
 	}
 
-	/** Get HEAPF32 view of WASM memory. */
 	get heapF32(): Float32Array {
 		return this.m.HEAPF32;
 	}
 
-	/** Write a string to WASM memory. Returns pointer. */
-	stringToNewUTF8(str: string): number {
-		return this.m.stringToUTF8(
-			str,
-			this.m._malloc(str.length + 1),
-			str.length + 1,
-		);
-	}
-
 	// ── Context ──────────────────────────────────────────────────────────
 
-	/** Create a ggml context with the given memory budget (bytes). */
 	ctxCreate(memSize: number): number {
 		const rc = this.m._ctx_create(memSize);
-		if (rc !== 0) throw new Error(`ctx_create failed (${rc})`);
+		if (rc < 0) throw new Error(`ctx_create failed (${rc})`);
 		return rc;
 	}
 
-	/** Free the current ggml context. */
 	ctxFree(): void {
 		this.m._ctx_free();
 	}
@@ -140,10 +170,10 @@ export class GgmlWasm {
 		return this.m._tensor_new_4d(type, ne0, ne1, ne2, ne3);
 	}
 
-	tensorSetName(tensor: TensorPtr, name: string): void {
-		const namePtr = this.stringToNewUTF8(name);
-		this.m._tensor_set_name(tensor, namePtr);
-		this.free(namePtr);
+	tensorSetName(_tensor: TensorPtr, _name: string): void {
+		// Skip naming — tensor names are only used for debugging.
+		// _tensor_set_name requires stack alloc + WASM call which is
+		// incompatible with ASYNCIFY. Tracked JS-side in nameToTensor.
 	}
 
 	// ── Tensor properties ────────────────────────────────────────────────
@@ -174,19 +204,41 @@ export class GgmlWasm {
 
 	// ── Tensor data I/O ──────────────────────────────────────────────────
 
-	/**
-	 * Copy data from a WASM heap region into a tensor.
-	 * Both `srcHeapPtr` and the tensor data must be in WASM memory.
-	 */
 	tensorSetData(tensor: TensorPtr, srcHeapPtr: number, size: number): void {
 		this.m._tensor_set_data(tensor, srcHeapPtr, size);
 	}
 
-	/**
-	 * Copy tensor data to a WASM heap region.
-	 */
 	tensorGetData(tensor: TensorPtr, dstHeapPtr: number, size: number): void {
 		this.m._tensor_get_data(tensor, dstHeapPtr, size);
+	}
+
+	/** Upload bytes from JS ArrayBuffer to a GPU tensor via stack buffer. */
+	uploadToTensor(tensor: TensorPtr, data: Uint8Array, offset = 0): void {
+		const sp = this.stackSave();
+		try {
+			const ptr = this.stackAlloc(data.byteLength);
+			this.heapU8.set(data, ptr);
+			this.m._backend_tensor_set(tensor, ptr, offset, data.byteLength);
+		} finally {
+			this.stackRestore(sp);
+		}
+	}
+
+	/** Download tensor data from GPU to a new Uint8Array via heap buffer. */
+	async downloadFromTensor(
+		tensor: TensorPtr,
+		byteLength: number,
+		offset = 0,
+	): Promise<Uint8Array> {
+		const ptr = this.malloc(byteLength);
+		try {
+			await this.callWithAsyncify<void>(() =>
+				this.m._backend_tensor_get(tensor, ptr, offset, byteLength),
+			);
+			return new Uint8Array(this.heapU8.buffer, ptr, byteLength).slice();
+		} finally {
+			this.free(ptr);
+		}
 	}
 
 	// ── Graph operations ─────────────────────────────────────────────────
@@ -217,6 +269,7 @@ export class GgmlWasm {
 
 	opRope(
 		x: TensorPtr,
+		pos: TensorPtr,
 		nDims: number,
 		mode: number,
 		nCtxOrig: number,
@@ -229,6 +282,7 @@ export class GgmlWasm {
 	): TensorPtr {
 		return this.m._op_rope(
 			x,
+			pos,
 			nDims,
 			mode,
 			nCtxOrig,
@@ -319,13 +373,14 @@ export class GgmlWasm {
 		this.m._graph_build_forward_expand(graph, tensor);
 	}
 
-	graphCompute(graph: GraphPtr): number {
-		return this.m._graph_compute(graph);
+	async graphCompute(graph: GraphPtr): Promise<number> {
+		return await this.callWithAsyncify<number>(() =>
+			this.m._graph_compute(graph),
+		);
 	}
 
 	// ── Backend buffer ───────────────────────────────────────────────────
 
-	/** Allocate all tensors in the current context on the GPU backend. */
 	backendAllocCtxTensors(): BufferPtr {
 		return this.m._backend_alloc_ctx_tensors();
 	}
@@ -334,7 +389,6 @@ export class GgmlWasm {
 		this.m._backend_buffer_free(buffer);
 	}
 
-	/** Upload data from WASM heap to a tensor on the GPU. */
 	backendTensorSet(
 		tensor: TensorPtr,
 		srcHeapPtr: number,
@@ -344,14 +398,15 @@ export class GgmlWasm {
 		this.m._backend_tensor_set(tensor, srcHeapPtr, offset, size);
 	}
 
-	/** Download tensor data from GPU to WASM heap. */
-	backendTensorGet(
+	async backendTensorGet(
 		tensor: TensorPtr,
 		dstHeapPtr: number,
 		offset: number,
 		size: number,
-	): void {
-		this.m._backend_tensor_get(tensor, dstHeapPtr, offset, size);
+	): Promise<void> {
+		await this.callWithAsyncify<void>(() =>
+			this.m._backend_tensor_get(tensor, dstHeapPtr, offset, size),
+		);
 	}
 
 	backendTensorAlignment(): number {
