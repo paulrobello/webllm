@@ -175,9 +175,18 @@ export class ModelInference {
 		// Causal attention mask tensor: [totalLen, nTokens]. Values are 0 for
 		// visible positions and -Infinity for masked. ggml_soft_max_ext consumes
 		// this alongside the pre-scale multiplier.
+		//
+		// For single-token decode (nTokens == 1) the mask is trivially all
+		// zeros — the sole query sees every prior key — so we can skip creating
+		// and uploading the tensor entirely and pass a null mask to
+		// soft_max_ext. Saves one tensor alloc + one `backendTensorSet` per
+		// decode step.
 		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
+		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
-		const maskTensor = wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols);
+		const maskTensor = needsMask
+			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
+			: 0;
 
 		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
@@ -249,7 +258,10 @@ export class ModelInference {
 				pastLen * kNb1,
 			);
 			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
-			const kWrite = wasm.opCpy(wasm.opCont(kRopeP), kWriteView);
+			// ggml_cpy handles non-contiguous src via strides, so the previously
+			// mandatory opCont is redundant — dropping it saves a GPU dispatch per
+			// layer per forward.
+			const kWrite = wasm.opCpy(kRopeP, kWriteView);
 			// Expand into the graph NOW so the cpy node precedes attention reads.
 			wasm.graphBuildForwardExpand(graph, kWrite);
 
@@ -271,7 +283,8 @@ export class ModelInference {
 				vNb2,
 				pastLen * vNb0,
 			);
-			const vWrite = wasm.opCpy(wasm.opCont(v3P), vWriteView);
+			// opCpy handles strided src — opCont skipped (see K write above).
+			const vWrite = wasm.opCpy(v3P, vWriteView);
 			wasm.graphBuildForwardExpand(graph, vWrite);
 
 			// Read K from cache: [headDim, totalLen, nKvHeads]
@@ -366,32 +379,35 @@ export class ModelInference {
 
 			// Causal mask: mask[key, query] = -Infinity if key > pastLen + query,
 			// else 0. Shape [totalLen, nTokensPadded] stored row-major (ne[0] =
-			// totalLen = key dim, ne[1] = query dim).
-			const maskBytes = totalLen * maskPaddedCols * 4;
-			const maskHeap = wasm.malloc(maskBytes);
-			try {
-				const mask = new Float32Array(
-					wasm.heapU8.buffer,
-					maskHeap,
-					totalLen * maskPaddedCols,
-				);
-				const NEG_INF = -Infinity;
-				for (let q = 0; q < nTokens; q++) {
-					const rowBase = q * totalLen;
-					const visibleUpTo = pastLen + q;
-					for (let k = 0; k < totalLen; k++) {
-						mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+			// totalLen = key dim, ne[1] = query dim). Skipped entirely when
+			// nTokens == 1 because a single query sees every prior key (all zeros).
+			if (needsMask) {
+				const maskBytes = totalLen * maskPaddedCols * 4;
+				const maskHeap = wasm.malloc(maskBytes);
+				try {
+					const mask = new Float32Array(
+						wasm.heapU8.buffer,
+						maskHeap,
+						totalLen * maskPaddedCols,
+					);
+					const NEG_INF = -Infinity;
+					for (let q = 0; q < nTokens; q++) {
+						const rowBase = q * totalLen;
+						const visibleUpTo = pastLen + q;
+						for (let k = 0; k < totalLen; k++) {
+							mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+						}
 					}
+					// Padding rows past nTokens: fill with 0 (unused, but keeps the
+					// buffer fully defined).
+					for (let q = nTokens; q < maskPaddedCols; q++) {
+						const rowBase = q * totalLen;
+						for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
+					}
+					wasm.backendTensorSet(maskTensor, maskHeap, 0, maskBytes);
+				} finally {
+					wasm.free(maskHeap);
 				}
-				// Padding rows past nTokens: fill with 0 (unused, but keeps the
-				// buffer fully defined).
-				for (let q = nTokens; q < maskPaddedCols; q++) {
-					const rowBase = q * totalLen;
-					for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
-				}
-				wasm.backendTensorSet(maskTensor, maskHeap, 0, maskBytes);
-			} finally {
-				wasm.free(maskHeap);
 			}
 		}
 

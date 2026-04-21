@@ -107,25 +107,28 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ## Low impact / polish
 
-### 7. Skip redundant `opCont` calls
-- **Where**: K/V cache writes in `forward()` — `opCpy(opCont(permute), view)`.
-- **Today**: `opCont` is always called before the cpy; if the permute
-  happens to produce strides that already match the view, the cont is
-  unnecessary.
-- **Change**: detect equal-stride case and pass the permute view
-  directly; ggml's cpy handles non-contiguous src with matching strides.
-- **Expected**: a few % at best. Cheapest possible refinement.
-- **Risk**: minimal.
+### 7. Skip redundant `opCont` calls ✅ DONE
+- **Where**: K/V cache writes in `forward()`.
+- **Change**: dropped the `opCont` before `opCpy` for both K and V writes.
+  `ggml_cpy` handles strided source via `src->nb[]` in the shader params,
+  so the extra contiguity dispatch was pure overhead (44 dispatches per
+  forward: 2 × 22 layers).
+- **Actual gain**: roughly flat after accounting for noise — between
+  +0 and +2% on top of item 5. Still worth keeping: fewer dispatches,
+  cleaner code, and it saves scratch tensor allocations in the graph
+  context.
 
-### 8. Pre-allocate the mask tensor
-- **Where**: `forward()`, the `wasm.tensorNew2d` for the causal mask
-  is called every step.
-- **Today**: mask allocated and filled fresh per forward call.
-- **Change**: allocate once at `initKVCache` time with
-  `maxContextLength × nTokensMax` size; only update the last-row's
-  newly-visible key column per decode step.
-- **Expected**: a few %; matters mostly in combination with (1).
-- **Risk**: low. Memory-for-time tradeoff.
+### 8. Skip mask tensor for nTokens=1 decode ✅ DONE (partial)
+- **Where**: `forward()` mask allocation + upload + softmax_ext call.
+- **Change**: for single-token decode the causal mask is trivially all
+  zeros (one query, all prior keys visible). Set `needsMask = nTokens > 1`,
+  skip the `tensorNew2d` and `backendTensorSet` when false. `opSoftMaxExt`
+  accepts null mask (our WASM bridge and the webgpu backend both handle it).
+- **Actual gain**: flat — the mask was small enough that the skip doesn't
+  show up in benchmarks. Still a cleanup.
+- **Not done**: pre-allocating the mask tensor at `initKVCache` time.
+  Would require views into a persistent tensor and still fresh uploads
+  per step; deferred.
 
 ### 9. Reduce Asyncify boundary crossings
 - **Where**: every JS↔WASM hop for `backendTensorSet` + the graphCompute.
