@@ -11,6 +11,12 @@ export type {
 	ToolResult,
 } from "./characters/tool-system.js";
 export { ToolSystem } from "./characters/tool-system.js";
+export type {
+	ChatMessage,
+	CompletionChunk,
+	CompletionConfig,
+	CompletionStats,
+} from "./core/chat-types.js";
 export { WebLLM } from "./core/engine.js";
 export type { GameLoopCallback, GameLoopConfig } from "./core/game-loop.js";
 export { GameLoop } from "./core/game-loop.js";
@@ -54,6 +60,7 @@ export { Sampler } from "./inference/sampler.js";
 export { StreamRouter } from "./inference/stream-router.js";
 export type { TokenData, TokenizerConfig } from "./inference/tokenizer.js";
 export {
+	StreamingDecoder,
 	TokenAttribute,
 	Tokenizer,
 	TokenizerType,

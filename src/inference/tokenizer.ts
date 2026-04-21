@@ -54,6 +54,8 @@ export interface TokenizerConfig {
 	addPrefixSpace?: boolean;
 	/** Pre-compiled character map for normalization. SPM only. */
 	precompiledCharsmap?: Uint8Array;
+	/** Raw chat template string from GGUF metadata (tokenizer.chat_template). */
+	chatTemplate?: string;
 }
 
 /** SentencePiece whitespace marker (U+2581). */
@@ -291,6 +293,11 @@ export class Tokenizer {
 	/** Vocabulary size. */
 	get vocabSize(): number {
 		return this.config.vocabSize;
+	}
+
+	/** Raw tokenizer configuration (including chatTemplate). */
+	get options(): TokenizerConfig {
+		return this.config;
 	}
 
 	/**
@@ -626,5 +633,47 @@ export class Tokenizer {
 
 	private spmPrefixEnabled(): boolean {
 		return this.config.addPrefixSpace !== false;
+	}
+}
+
+/**
+ * Incremental (streaming) text decoder.
+ *
+ * Call push(tokenId) after each sampled token and read the return value
+ * for the new text fragment. Re-decodes the full accumulated array and diffs
+ * against the previous result — safe with SPM byte-fallback tokens.
+ */
+export class StreamingDecoder {
+	private tokenizer: Tokenizer;
+	private tokenIds: number[] = [];
+	private prevText = "";
+
+	constructor(tokenizer: Tokenizer) {
+		this.tokenizer = tokenizer;
+	}
+
+	/** Append a token and return the new text fragment. */
+	push(tokenId: number): string {
+		this.tokenIds.push(tokenId);
+		const fullText = this.tokenizer.decode(this.tokenIds);
+		const delta = fullText.slice(this.prevText.length);
+		this.prevText = fullText;
+		return delta;
+	}
+
+	/** Full decoded text so far. */
+	get text(): string {
+		return this.prevText;
+	}
+
+	/** Accumulated token IDs. */
+	get tokens(): readonly number[] {
+		return this.tokenIds;
+	}
+
+	/** Reset for a new generation. */
+	reset(): void {
+		this.tokenIds = [];
+		this.prevText = "";
 	}
 }

@@ -1,5 +1,9 @@
 import type { Character, CharacterConfig } from "../characters/character.js";
 import { CharacterManager } from "../characters/character-manager.js";
+import {
+	formatChatDelta,
+	formatChatPrompt,
+} from "../inference/chat-template.js";
 import { type GenerationConfig, Generator } from "../inference/generation.js";
 import { GgmlWasm } from "../inference/ggml-wasm.js";
 import {
@@ -8,12 +12,17 @@ import {
 } from "../inference/lightweight.js";
 import { ModelInference } from "../inference/model-inference.js";
 import { Sampler } from "../inference/sampler.js";
-import { Tokenizer } from "../inference/tokenizer.js";
+import { StreamingDecoder, Tokenizer } from "../inference/tokenizer.js";
 import { GgufParser } from "../models/gguf-parser.js";
 import type { GgufContext } from "../models/gguf-types.js";
 import { InferenceSession } from "../models/inference-session.js";
 import { KVCache } from "../models/kv-cache.js";
 import { ModelLoader } from "../models/model-loader.js";
+import type {
+	ChatMessage,
+	CompletionChunk,
+	CompletionConfig,
+} from "./chat-types.js";
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
 import { PipelineCache } from "./pipeline-cache.js";
@@ -27,6 +36,11 @@ import type {
 	WebLLMConfig,
 } from "./types.js";
 
+interface ConversationSession {
+	session: InferenceSession;
+	messageCount: number;
+}
+
 export class WebLLM {
 	private _config: WebLLMConfig;
 	private memoryPool: MemoryPool;
@@ -37,6 +51,7 @@ export class WebLLM {
 	private eventHandlers = new Map<string, Set<EventHandler>>();
 	private wasmModules = new Map<string, GgmlWasm>();
 	private inferenceEngines = new Map<string, ModelInference>();
+	private sessions = new Map<string, ConversationSession>();
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
@@ -82,6 +97,7 @@ export class WebLLM {
 	}
 
 	async unloadModel(id: string): Promise<void> {
+		this.sessions.delete(id);
 		const inf = this.inferenceEngines.get(id);
 		if (inf) {
 			await inf.dispose();
@@ -166,6 +182,160 @@ export class WebLLM {
 		return tokenizer.decode(genTokens);
 	}
 
+	/**
+	 * Streaming chat completion with multi-turn KV cache reuse.
+	 *
+	 * Yields CompletionChunks with incremental text, followed by a final
+	 * done=true chunk carrying generation stats. The KV cache is reused
+	 * across calls when the message array grows incrementally.
+	 */
+	async *chatCompletion(
+		modelId: string,
+		messages: ChatMessage[],
+		config?: CompletionConfig,
+	): AsyncGenerator<CompletionChunk, void> {
+		const entry = this.modelManager.get(modelId);
+		if (!entry) throw new Error(`Model "${modelId}" not found`);
+		if (!entry.loaded || !entry.tokenizer)
+			throw new Error(`Model "${modelId}" not fully loaded`);
+
+		const inf = this.inferenceEngines.get(modelId);
+		if (!inf) throw new Error(`No inference engine for model "${modelId}"`);
+
+		const tokenizer = entry.tokenizer;
+		const sampler = new Sampler({
+			temperature: config?.temperature,
+			topK: config?.topK,
+			topP: config?.topP,
+			repetitionPenalty: config?.repetitionPenalty,
+		});
+
+		const sessionInfo = this.getOrCreateSession(modelId);
+		const session = sessionInfo.session;
+		const prevMsgCount = sessionInfo.messageCount;
+		const tmpl = tokenizer.options.chatTemplate;
+
+		let promptTokens: number[];
+
+		if (
+			messages.length > prevMsgCount &&
+			prevMsgCount > 0 &&
+			session.currentPosition === inf.cachedTokenCount
+		) {
+			const delta = formatChatDelta(messages, prevMsgCount, tmpl);
+			promptTokens = tokenizer.encode(delta);
+		} else {
+			const prompt = formatChatPrompt(messages, tmpl);
+			promptTokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
+			session.reset();
+			inf.resetKVCache();
+		}
+		sessionInfo.messageCount = messages.length;
+
+		const eosId = tokenizer.eosId;
+		const maxTokens = config?.maxTokens ?? 512;
+
+		const forwardPass = async (
+			ids: number[],
+			positions: number[],
+		): Promise<Float32Array> => {
+			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
+		};
+
+		const genConfig: GenerationConfig = {
+			prompt: "",
+			maxTokens,
+			temperature: config?.temperature ?? 1.0,
+			topK: config?.topK ?? 0,
+			topP: config?.topP ?? 1.0,
+			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
+			stopTokens: config?.stopTokenIds,
+		};
+
+		const startTime = performance.now();
+		const decoder = new StreamingDecoder(tokenizer);
+		let tokenCount = 0;
+		let timeToFirstTokenMs = 0;
+
+		const gen = Generator.generate(
+			promptTokens,
+			sampler,
+			session,
+			eosId,
+			forwardPass,
+			genConfig,
+			config?.signal,
+		);
+
+		try {
+			for await (const tokenId of gen) {
+				if (tokenCount === 0)
+					timeToFirstTokenMs = performance.now() - startTime;
+				tokenCount++;
+				const delta = decoder.push(tokenId);
+				yield { text: delta, done: false };
+			}
+		} catch {
+			// On error or abort, yield what we have as the final chunk
+			const elapsed = performance.now() - startTime;
+			yield {
+				text: "",
+				done: true,
+				stats: {
+					tokenCount,
+					tokensPerSecond: tokenCount / (elapsed / 1000) || 0,
+					timeToFirstTokenMs,
+					totalMs: elapsed,
+					text: decoder.text,
+				},
+			};
+			return;
+		}
+
+		// Final yield with stats
+		const elapsed = performance.now() - startTime;
+		yield {
+			text: "",
+			done: true,
+			stats: {
+				tokenCount,
+				tokensPerSecond: tokenCount / (elapsed / 1000) || 0,
+				timeToFirstTokenMs,
+				totalMs: elapsed,
+				text: decoder.text,
+			},
+		};
+	}
+
+	/** Clear conversation history and KV cache for a model. */
+	resetConversation(modelId: string): void {
+		this.sessions.delete(modelId);
+		const inf = this.inferenceEngines.get(modelId);
+		if (inf) inf.resetKVCache();
+	}
+
+	private getOrCreateSession(modelId: string): ConversationSession {
+		let entry = this.sessions.get(modelId);
+		if (!entry) {
+			entry = {
+				session: new InferenceSession(
+					{
+						maxTokens: 2048,
+						temperature: 1,
+						topK: 0,
+						topP: 1,
+						repetitionPenalty: 1,
+						contextOverflowPolicy: "stop",
+					},
+					0,
+				),
+				messageCount: 0,
+			};
+			this.sessions.set(modelId, entry);
+		}
+		return entry;
+	}
+
 	static async loadModelFromBuffer(
 		data: ArrayBuffer,
 		name: string,
@@ -247,6 +417,7 @@ export class WebLLM {
 	}
 
 	async shutdown(): Promise<void> {
+		this.sessions.clear();
 		for (const [, wasm] of this.wasmModules) {
 			await wasm.shutdown();
 		}

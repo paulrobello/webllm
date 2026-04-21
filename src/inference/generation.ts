@@ -51,6 +51,7 @@ export class Generator {
 	 * @param eosTokenId - End-of-sequence token ID.
 	 * @param forwardPass - Function that runs the model forward pass and returns logits.
 	 * @param config - Generation configuration.
+	 * @param signal - Optional AbortSignal to cancel generation mid-stream.
 	 * @yields Sampled token IDs (one at a time, excluding prompt tokens).
 	 * @returns Generation statistics after the loop completes.
 	 */
@@ -64,6 +65,7 @@ export class Generator {
 			positions: number[],
 		) => Float32Array | Promise<Float32Array>,
 		config: GenerationConfig,
+		signal?: AbortSignal,
 	): AsyncGenerator<number, GenerationResult> {
 		const startTime = performance.now();
 
@@ -75,15 +77,30 @@ export class Generator {
 		session.advance(promptTokenIds.length);
 		for (const id of promptTokenIds) session.pushToken(id);
 
+		if (signal?.aborted) {
+			const elapsed = performance.now() - startTime;
+			return {
+				tokens: [...session.tokens],
+				text: "",
+				tokenCount: 0,
+				tokensPerSecond: 0,
+				timeToFirstTokenMs: elapsed,
+			};
+		}
+
 		// 2. Sample first token from prefill logits
 		const firstTokenTime = performance.now();
+		const recentTokens = [...promptTokenIds];
+		sampler.applyRepetitionPenalty(logits, recentTokens.slice(-64));
 		let sampledId = sampler.sample(logits);
 		yield sampledId;
 		session.pushToken(sampledId);
+		recentTokens.push(sampledId);
 		let generatedCount = 1;
 
 		// 3. Autoregressive decode loop
 		while (!session.shouldStop(sampledId, eosTokenId)) {
+			if (signal?.aborted) break;
 			if (generatedCount >= config.maxTokens) break;
 			if (config.stopTokens?.includes(sampledId)) break;
 
@@ -92,8 +109,13 @@ export class Generator {
 				[session.currentPosition],
 			);
 			session.advance(1);
+
+			if (signal?.aborted) break;
+
+			sampler.applyRepetitionPenalty(stepLogits, recentTokens.slice(-64));
 			sampledId = sampler.sample(stepLogits);
 			generatedCount++;
+			recentTokens.push(sampledId);
 
 			if (config.stopTokens?.includes(sampledId)) break;
 			if (sampledId === eosTokenId) break;
