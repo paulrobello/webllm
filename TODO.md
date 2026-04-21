@@ -5,10 +5,11 @@ Q4_0 via Emscripten WebGPU in-browser.
 
 **Current: ~58–59 tok/s decode, ~125 ms prefill** after items 2, 3, 5, 7, 8, 9.
 
-Per-step decode is ~17 ms. Further decode speedup likely requires either
-graph reuse (item 1) to cut JS/WASM rebuild overhead, or flash attention
-(item 4, currently blocked upstream on emdawnwebgpu) to cut the per-step
-GPU work at longer contexts.
+Per-step decode is ~16.75 ms. Profiling on 2026-04-21 showed decode graph
+build is not the bottleneck: JS/WASM-side non-GPU overhead for the current
+path is only ~1.7% of step time, while `graphCompute` (~41.3%) and logits
+readback (`downloadLogits`, ~56.9%) dominate. Further decode speedup likely
+requires reducing GPU work or readback cost, not moving graph build into C.
 
 Items in rough order of expected impact. Each entry explains the idea, where
 the code lives today, the expected win, and the risk/tradeoff.

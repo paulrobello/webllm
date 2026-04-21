@@ -7,6 +7,7 @@
 >            greedy continuation: *"Paris.2. The capital of Spain is Madrid.3.
 >            The capital of Italy is Rome.4. The capital of..."*
 >            `"The quick brown"` → top-1 **"▁fo"** (18.22), "fox" at #2.
+>            Current measured perf is ~58–59 tok/s decode, ~125 ms prefill.
 > **Plan file:** `/Users/probello/.claude/plans/i-want-to-create-mutable-toucan.md`
 
 ---
@@ -80,8 +81,38 @@ Paris.2. The capital of Spain is Madrid.3. The capital of Italy is Rome.
 4. The capital of [...]
 ```
 
-Coherent, factually correct, grammatically sound. ~46 tok/s decode, ~130 ms
-prefill on TinyLlama 1.1B Q4_0 through the Emscripten WebGPU backend.
+Coherent, factually correct, grammatically sound. Current measured perf is
+~58–59 tok/s decode, ~125 ms prefill on TinyLlama 1.1B Q4_0 through the
+Emscripten WebGPU backend.
+
+---
+
+## 2026-04-21 decode profiling result
+
+A follow-up profiling pass instrumented `ModelInference.forward()` phase by
+phase and added `bun run eval/perf.ts --profile` to scrape per-step decode
+traces from the smoke-test page.
+
+Result for single-token decode steps:
+
+- total: **16.75 ms**
+- `ctxCreate`: **0.00 ms** (0.0%)
+- `buildGraph`: **0.21 ms** (1.3%)
+- `backendAlloc`: **0.05 ms** (0.3%)
+- `uploadLeaves`: **0.02 ms** (0.1%)
+- `graphCompute`: **6.92 ms** (41.3%)
+- `downloadLogits`: **9.53 ms** (56.9%)
+- `teardown`: **0.02 ms** (0.1%)
+
+Conclusion: the planned "build decode graph in C" rewrite is **not worth
+pursuing right now**. The targeted non-GPU overhead (`ctxCreate` +
+`buildGraph` + `backendAlloc` + `teardown`) is only **1.7%** of the decode
+step, far below the 30% gate from the plan. The dominant costs are GPU
+compute and logits readback.
+
+Phase A was therefore **skipped**. If decode perf work resumes, the highest
+leverage directions are reducing readback cost or reducing GPU work, not
+moving graph construction from TS into C.
 
 ---
 
@@ -189,14 +220,18 @@ cd smoke-test && python3 -m http.server 8031
 
 ## Next Session (if needed)
 
-The pipeline is working. Polish tasks that remain:
+The pipeline is working. Highest-value follow-ups now are:
 
-1. Strip inline diagnostic scaffolding from `real-model.html` for a clean
+1. Investigate whether decode can avoid or shrink full-vocab logits readback;
+   profiling says this is the biggest per-step cost.
+2. Look for GPU-side reductions in decode compute (`graphCompute`) before any
+   TS→C graph-build rewrite; the profiling gate ruled that rewrite out for now.
+3. Strip inline diagnostic scaffolding from `real-model.html` for a clean
    chat-style demo. Keep the debug methods in `model-inference.ts`.
-2. Wire up the existing `Generator` + `InferenceSession` classes for a
+4. Wire up the existing `Generator` + `InferenceSession` classes for a
    proper streaming JS API.
-3. The latent 3+ binding buffer-conflict edge case in
+5. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` remains untested — no llama op hits
    it today.
-4. Test on a larger model (Phi-2, Llama-2-7B) now that the small model
+6. Test on a larger model (Phi-2, Llama-2-7B) now that the small model
    works.
