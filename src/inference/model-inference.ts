@@ -365,35 +365,34 @@ export class ModelInference {
 		const graphBuf = wasm.backendAllocCtxTensors();
 
 		// Upload leaf input data AFTER backend buffers are assigned.
-		// backendTensorSet writes into the real GPU buffer; tensorSetData
-		// (memcpy via tensor->data) is invalid for backend-allocated tensors.
+		// All three buffers (pos / tokenIds / mask) are written in a single
+		// WASM call via backendTensorSet3 to avoid 2–3 separate FFI hops per
+		// forward. Mask slot is skipped entirely (tensor = 0) when !needsMask.
 		{
-			const sp = wasm.stackSave();
+			const posBytes = nTokens * 4;
+			const idsBytes = nTokens * 4;
+			const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
+			const totalBytes = posBytes + idsBytes + maskBytes;
+
+			const heap = wasm.malloc(totalBytes);
 			try {
-				const posPtr = wasm.stackAlloc(nTokens * 4);
+				const posPtr = heap;
+				const idsPtr = heap + posBytes;
+				const maskPtr = heap + posBytes + idsBytes;
+
 				const posView = new Int32Array(wasm.heapU8.buffer, posPtr, nTokens);
-				for (let i = 0; i < nTokens; i++) posView[i] = positions[i];
-				wasm.backendTensorSet(posTensor, posPtr, 0, nTokens * 4);
-
-				const idsPtr = wasm.stackAlloc(nTokens * 4);
 				const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, nTokens);
-				for (let i = 0; i < nTokens; i++) idsView[i] = tokenIds[i];
-				wasm.backendTensorSet(tokenIdsTensor, idsPtr, 0, nTokens * 4);
-			} finally {
-				wasm.stackRestore(sp);
-			}
+				for (let i = 0; i < nTokens; i++) {
+					posView[i] = positions[i];
+					idsView[i] = tokenIds[i];
+				}
 
-			// Causal mask: mask[key, query] = -Infinity if key > pastLen + query,
-			// else 0. Shape [totalLen, nTokensPadded] stored row-major (ne[0] =
-			// totalLen = key dim, ne[1] = query dim). Skipped entirely when
-			// nTokens == 1 because a single query sees every prior key (all zeros).
-			if (needsMask) {
-				const maskBytes = totalLen * maskPaddedCols * 4;
-				const maskHeap = wasm.malloc(maskBytes);
-				try {
+				if (needsMask) {
+					// Causal mask: mask[key, query] = -Infinity if key > pastLen + query,
+					// else 0. Shape [totalLen, nTokensPadded] stored row-major.
 					const mask = new Float32Array(
 						wasm.heapU8.buffer,
-						maskHeap,
+						maskPtr,
 						totalLen * maskPaddedCols,
 					);
 					const NEG_INF = -Infinity;
@@ -404,16 +403,26 @@ export class ModelInference {
 							mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
 						}
 					}
-					// Padding rows past nTokens: fill with 0 (unused, but keeps the
-					// buffer fully defined).
+					// Padding rows past nTokens: zero (unused but keeps buffer defined).
 					for (let q = nTokens; q < maskPaddedCols; q++) {
 						const rowBase = q * totalLen;
 						for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
 					}
-					wasm.backendTensorSet(maskTensor, maskHeap, 0, maskBytes);
-				} finally {
-					wasm.free(maskHeap);
 				}
+
+				wasm.backendTensorSet3(
+					posTensor,
+					posPtr,
+					posBytes,
+					tokenIdsTensor,
+					idsPtr,
+					idsBytes,
+					needsMask ? maskTensor : 0,
+					maskPtr,
+					maskBytes,
+				);
+			} finally {
+				wasm.free(heap);
 			}
 		}
 

@@ -3,12 +3,12 @@
 Baseline (pre-optimization): ~44 tok/s decode, ~130 ms prefill on TinyLlama 1.1B
 Q4_0 via Emscripten WebGPU in-browser.
 
-**Current: ~58 tok/s decode (+33%), ~125 ms prefill** after items 2, 3, and 5.
+**Current: ~58–59 tok/s decode, ~125 ms prefill** after items 2, 3, 5, 7, 8, 9.
 
-Per-step decode is ~17.5 ms, which matches what `ggml_backend_webgpu_graph_compute`
-can achieve in the browser for this graph size. Further decode speedup likely
-requires either graph reuse (item 1) to cut JS/WASM rebuild overhead, or
-flash attention (item 4) to cut the per-step GPU work at longer contexts.
+Per-step decode is ~17 ms. Further decode speedup likely requires either
+graph reuse (item 1) to cut JS/WASM rebuild overhead, or flash attention
+(item 4, currently blocked upstream on emdawnwebgpu) to cut the per-step
+GPU work at longer contexts.
 
 Items in rough order of expected impact. Each entry explains the idea, where
 the code lives today, the expected win, and the risk/tradeoff.
@@ -143,14 +143,23 @@ the code lives today, the expected win, and the risk/tradeoff.
   Would require views into a persistent tensor and still fresh uploads
   per step; deferred.
 
-### 9. Reduce Asyncify boundary crossings
-- **Where**: every JS↔WASM hop for `backendTensorSet` + the graphCompute.
-- **Today**: each tensor upload is a separate call with Asyncify suspend
-  setup.
-- **Change**: bundle the position/token-id/mask uploads into a single
-  WASM-side helper that takes one pointer. Reduces FFI overhead.
-- **Expected**: low single digits; only worth doing alongside (1).
-- **Risk**: low.
+### 9. Reduce JS↔WASM boundary crossings ✅ DONE
+- **Where**: `src/wasm/webgpu-bridge.cpp` + `src/inference/ggml-wasm.ts`
+  + `forward()` in `model-inference.ts`.
+- **Change**: added `backend_tensor_set3(t1, d1, sz1, t2, d2, sz2, t3, d3, sz3)`
+  in the C bridge — a null tensor pointer skips that slot. Forward() now
+  does a single `malloc(totalBytes)` for the combined pos + ids + mask
+  buffer, fills all three regions in JS, and makes one bundled WASM call
+  instead of 2–3 separate `backend_tensor_set` hops. Also swapped the
+  stackAlloc/stackRestore pair for a plain `malloc/free` since the buffer
+  now lives across the shape of the upload.
+- **Actual gain**: **+5-7% decode throughput** (median 55.6 → 58.7 tok/s
+  over 5-run median benchmarks). Bigger than expected — the per-call
+  cost of Emscripten's `invoke_*` trampolines (which cover our sync
+  calls too, because Asyncify is enabled globally) was more than I had
+  budgeted for.
+- **Baseline updated**: `eval/reports/perf-baseline.json` now reflects
+  58.7 tok/s.
 
 ### 10. Benchmark the current pipeline ✅ DONE
 - **Where**: `eval/perf.ts` + `make bench-inference` + `make bench-inference-save`.

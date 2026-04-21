@@ -442,6 +442,26 @@ export class GgmlWasm {
 		this.m._backend_tensor_set(tensor, srcHeapPtr, offset, size);
 	}
 
+	/**
+	 * Write up to three backend tensors in a single WASM call. Designed for
+	 * per-forward leaf inputs (pos, tokenIds, mask) to save FFI hops. Pass a
+	 * tensor pointer of 0 to skip that slot — e.g. skip the mask when it's
+	 * not needed on single-token decode.
+	 */
+	backendTensorSet3(
+		t1: TensorPtr,
+		d1: number,
+		sz1: number,
+		t2: TensorPtr,
+		d2: number,
+		sz2: number,
+		t3: TensorPtr,
+		d3: number,
+		sz3: number,
+	): void {
+		this.m._backend_tensor_set3(t1, d1, sz1, t2, d2, sz2, t3, d3, sz3);
+	}
+
 	async backendTensorGet(
 		tensor: TensorPtr,
 		dstHeapPtr: number,

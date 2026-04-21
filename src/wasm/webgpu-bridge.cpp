@@ -246,6 +246,19 @@ void backend_tensor_set(void* tensor, const void* data, int32_t offset, int32_t 
     ggml_backend_tensor_set((struct ggml_tensor*)tensor, data, offset, size);
 }
 
+// Batched upload for per-forward leaf inputs (pos / token ids / mask).
+// Saves 1-2 JS->WASM FFI hops per forward. A null tensor pointer skips
+// that slot (for the common "no mask on single-token decode" case).
+void backend_tensor_set3(
+    void* t1, const void* d1, int32_t sz1,
+    void* t2, const void* d2, int32_t sz2,
+    void* t3, const void* d3, int32_t sz3
+) {
+    if (t1) ggml_backend_tensor_set((struct ggml_tensor*)t1, d1, 0, sz1);
+    if (t2) ggml_backend_tensor_set((struct ggml_tensor*)t2, d2, 0, sz2);
+    if (t3) ggml_backend_tensor_set((struct ggml_tensor*)t3, d3, 0, sz3);
+}
+
 void backend_tensor_get(void* tensor, void* out, int32_t offset, int32_t size) {
     ggml_backend_tensor_get((struct ggml_tensor*)tensor, out, offset, size);
 }

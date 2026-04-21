@@ -50,7 +50,7 @@ if(EMSCRIPTEN)
         "_op_repeat,_op_diag_mask_inf,_op_norm,_op_get_rows,"
         "_graph_new,_graph_build_forward_expand,_graph_compute,"
         "_backend_alloc_ctx_tensors,_backend_buffer_free,"
-        "_backend_tensor_set,_backend_tensor_get,_backend_tensor_alignment"
+        "_backend_tensor_set,_backend_tensor_set3,_backend_tensor_get,_backend_tensor_alignment"
     )
     add_executable(webllm-wasm webgpu-bridge.cpp)
     target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)
