@@ -51,3 +51,4 @@ smoke-test/models/
 *.gguf
 .pi/extensions/discord-relay/state.json
 handoff.md
+.worktrees/
