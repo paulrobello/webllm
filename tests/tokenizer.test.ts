@@ -33,6 +33,8 @@ function makeSpmConfig(tokens: TokenData[]): TokenizerConfig {
 		bosTokenId: 1,
 		padTokenId: 0,
 		vocabSize: tokens.length,
+		// Synthetic vocab has no ▁-prefixed entries — skip LLaMA-style normalization.
+		addPrefixSpace: false,
 	};
 }
 
@@ -102,5 +104,66 @@ describe("Tokenizer", () => {
 		const tok = new Tokenizer(makeBpeConfig(BASIC_TOKENS, new Map()));
 		const t = tok.getToken(3);
 		expect(t?.text).toBe("a");
+	});
+
+	test("SPM encode prepends ▁ and replaces spaces (LLaMA-style)", () => {
+		// Mini vocab with intermediate merges so the pairwise algorithm can chain
+		// single chars up to ▁hi / ▁world. Score ordering (higher score = preferred)
+		// drives the greedy merge.
+		const tokens: TokenData[] = [
+			{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL }, // 0
+			{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL }, // 1
+			{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL }, // 2
+			{ text: "▁", score: -20, attr: TokenAttribute.NORMAL }, // 3
+			{ text: "h", score: -20, attr: TokenAttribute.NORMAL }, // 4
+			{ text: "i", score: -20, attr: TokenAttribute.NORMAL }, // 5
+			{ text: "w", score: -20, attr: TokenAttribute.NORMAL }, // 6
+			{ text: "o", score: -20, attr: TokenAttribute.NORMAL }, // 7
+			{ text: "r", score: -20, attr: TokenAttribute.NORMAL }, // 8
+			{ text: "l", score: -20, attr: TokenAttribute.NORMAL }, // 9
+			{ text: "d", score: -20, attr: TokenAttribute.NORMAL }, // 10
+			{ text: "▁h", score: -5, attr: TokenAttribute.NORMAL }, // 11
+			{ text: "▁w", score: -5, attr: TokenAttribute.NORMAL }, // 12
+			{ text: "▁hi", score: -1, attr: TokenAttribute.NORMAL }, // 13
+			{ text: "▁world", score: -1, attr: TokenAttribute.NORMAL }, // 14
+			{ text: "▁wo", score: -3, attr: TokenAttribute.NORMAL }, // 15
+			{ text: "▁wor", score: -2, attr: TokenAttribute.NORMAL }, // 16
+			{ text: "▁worl", score: -2, attr: TokenAttribute.NORMAL }, // 17
+		];
+		const cfg: TokenizerConfig = {
+			type: TokenizerType.SPM,
+			tokens,
+			bpeRanks: new Map(),
+			addedTokens: new Map(),
+			eosTokenId: 2,
+			bosTokenId: 1,
+			padTokenId: 0,
+			vocabSize: tokens.length,
+			// addPrefixSpace defaults to true
+		};
+		const tok = new Tokenizer(cfg);
+		expect(tok.encode("hi world")).toEqual([13, 14]);
+	});
+
+	test("SPM decode converts ▁ back to space and strips leading prefix", () => {
+		const tokens: TokenData[] = [
+			{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "▁hi", score: -1, attr: TokenAttribute.NORMAL },
+			{ text: "▁world", score: -1, attr: TokenAttribute.NORMAL },
+		];
+		const cfg: TokenizerConfig = {
+			type: TokenizerType.SPM,
+			tokens,
+			bpeRanks: new Map(),
+			addedTokens: new Map(),
+			eosTokenId: 2,
+			bosTokenId: 1,
+			padTokenId: 0,
+			vocabSize: tokens.length,
+		};
+		const tok = new Tokenizer(cfg);
+		expect(tok.decode([3, 4])).toBe("hi world");
 	});
 });

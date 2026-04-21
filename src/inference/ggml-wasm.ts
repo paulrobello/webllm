@@ -212,15 +212,34 @@ export class GgmlWasm {
 		this.m._tensor_get_data(tensor, dstHeapPtr, size);
 	}
 
-	/** Upload bytes from JS ArrayBuffer to a GPU tensor via stack buffer. */
+	/** Upload bytes from JS ArrayBuffer to a GPU tensor via heap buffer. */
 	uploadToTensor(tensor: TensorPtr, data: Uint8Array, offset = 0): void {
-		const sp = this.stackSave();
+		const ptr = this.malloc(data.byteLength);
 		try {
-			const ptr = this.stackAlloc(data.byteLength);
 			this.heapU8.set(data, ptr);
 			this.m._backend_tensor_set(tensor, ptr, offset, data.byteLength);
 		} finally {
-			this.stackRestore(sp);
+			this.free(ptr);
+		}
+	}
+
+	/** Upload bytes chunk-by-chunk to avoid large heap allocations. */
+	uploadToTensorChunked(
+		tensor: TensorPtr,
+		data: Uint8Array,
+		chunkSize = 4 * 1024 * 1024,
+	): void {
+		const total = data.byteLength;
+		const ptr = this.malloc(Math.min(chunkSize, total));
+		try {
+			for (let off = 0; off < total; off += chunkSize) {
+				const end = Math.min(off + chunkSize, total);
+				const slice = data.subarray(off, end);
+				this.heapU8.set(slice, ptr);
+				this.m._backend_tensor_set(tensor, ptr, off, slice.byteLength);
+			}
+		} finally {
+			this.free(ptr);
 		}
 	}
 
@@ -353,6 +372,10 @@ export class GgmlWasm {
 
 	opRepeat(x: TensorPtr, y: TensorPtr): TensorPtr {
 		return this.m._op_repeat(x, y);
+	}
+
+	opGetRows(a: TensorPtr, b: TensorPtr): TensorPtr {
+		return this.m._op_get_rows(a, b);
 	}
 
 	opDiagMaskInf(x: TensorPtr, nPast: number): TensorPtr {

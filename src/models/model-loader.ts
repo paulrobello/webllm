@@ -43,18 +43,29 @@ export class ModelLoader {
 			"llama",
 		) as ModelHyperparams["architecture"];
 
+		const embeddingLength = getMetaNumber(
+			ctx,
+			`${arch}.embedding_length`,
+			4096,
+		);
+		const headCount = getMetaNumber(ctx, `${arch}.attention.head_count`, 32);
+
 		return {
 			architecture: arch,
 			contextLength: getMetaNumber(ctx, `${arch}.context_length`, 2048),
-			embeddingLength: getMetaNumber(ctx, `${arch}.embedding_length`, 4096),
-			headCount: getMetaNumber(ctx, `${arch}.attention.head_count`, 32),
-			headCountKv: getMetaNumber(ctx, `${arch}.attention.head_count_kv`, 32),
+			embeddingLength,
+			headCount,
+			headCountKv: getMetaNumber(
+				ctx,
+				`${arch}.attention.head_count_kv`,
+				headCount,
+			),
 			layerCount: getMetaNumber(ctx, `${arch}.block_count`, 32),
 			vocabularySize: 0, // filled after tokenizer parse
 			embeddingHeadLength: getMetaNumber(
 				ctx,
 				`${arch}.attention.key_length`,
-				128,
+				embeddingLength / headCount,
 			),
 			feedForwardLength: getMetaNumber(
 				ctx,

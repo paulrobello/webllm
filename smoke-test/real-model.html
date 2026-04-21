@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebLLM Real Model Test</title>
+<style>
+:root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #c9d1d9; --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Menlo', monospace; font-size: 13px; line-height: 1.6; padding: 24px; max-width: 900px; margin: 0 auto; }
+h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
+.subtitle { color: #8b949e; margin-bottom: 16px; }
+#log { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px; white-space: pre-wrap; word-break: break-all; min-height: 200px; max-height: 600px; overflow-y: auto; margin-bottom: 16px; }
+.step { padding: 2px 0; }
+.step.pending { color: #8b949e; }
+.step.running { color: var(--yellow); }
+.step.pass { color: var(--green); }
+.step.fail { color: var(--red); }
+.step .label { font-weight: bold; }
+.error-detail { padding: 4px 0 2px 16px; color: var(--red); font-size: 12px; }
+#chat-container { display: none; margin-top: 16px; }
+#chat-output { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px; min-height: 200px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin-bottom: 8px; }
+#chat-input { width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-family: inherit; font-size: 14px; }
+#chat-input:focus { outline: 1px solid var(--blue); }
+#chat-btn { background: var(--blue); color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: inherit; margin-top: 8px; }
+#chat-btn:disabled { opacity: 0.5; cursor: default; }
+#progress-bar { display: none; width: 100%; height: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-bottom: 8px; }
+#progress-fill { height: 100%; background: var(--blue); width: 0%; transition: width 0.1s; }
+#progress-text { text-align: center; font-size: 11px; line-height: 20px; color: #fff; }
+</style>
+</head>
+<body>
+<h1>WebLLM Real Model Test</h1>
+<p class="subtitle">Load TinyLlama 1.1B Q4_0 and generate text</p>
+
+<div id="progress-bar"><div id="progress-fill"><span id="progress-text">0%</span></div></div>
+<div id="log"></div>
+
+<div id="chat-container">
+<div id="chat-output"></div>
+<input id="chat-input" type="text" placeholder="Type a message..." disabled>
+<button id="chat-btn" disabled>Generate</button>
+</div>
+
+<script type="module">
+const assetSuffix = window.location.search || "";
+const {
+    GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer, Generator, Sampler
+} = await import(`./webllm-bundle.js${assetSuffix}`);
+
+const MODEL_URL = "./models/tinyllama-1.1b-chat-q4_0.gguf";
+
+const logEl = document.getElementById('log');
+const progressEl = document.getElementById('progress-bar');
+const progressFill = document.getElementById('progress-fill');
+const progressText = document.getElementById('progress-text');
+const chatContainer = document.getElementById('chat-container');
+const chatOutput = document.getElementById('chat-output');
+const chatInput = document.getElementById('chat-input');
+const chatBtn = document.getElementById('chat-btn');
+
+let runtimeErrors = [];
+const origError = console.error.bind(console);
+console.error = (...args) => {
+    const text = args.map(a => a instanceof Error ? `${a.message}\n${a.stack || ''}` : String(a)).join(' ');
+    runtimeErrors.push(text);
+    origError(...args);
+};
+
+function log(cls, msg) {
+    const el = document.createElement('div');
+    el.className = `step ${cls}`;
+    el.textContent = msg;
+    logEl.appendChild(el);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setProgress(pct) {
+    progressFill.style.width = `${pct}%`;
+    progressText.textContent = `${pct.toFixed(0)}%`;
+}
+
+let inference = null;
+let tokenizer = null;
+let wasm = null;
+let parsedModel = null;
+
+async function loadAndTest() {
+    const t0 = performance.now();
+
+    // Step 1: Fetch model
+    log('running', '[1/7] Fetching model...');
+    progressEl.style.display = 'block';
+    let modelBuffer;
+    try {
+        const resp = await fetch(MODEL_URL);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const total = Number(resp.headers.get('content-length') || 0);
+        const reader = resp.body.getReader();
+        const chunks = [];
+        let received = 0;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            if (total > 0) setProgress((received / total) * 30);
+        }
+        modelBuffer = new Uint8Array(received);
+        let off = 0;
+        for (const chunk of chunks) {
+            modelBuffer.set(chunk, off);
+            off += chunk.length;
+        }
+        modelBuffer = modelBuffer.buffer;
+        log('pass', `[1/7] Model fetched: ${(received / 1e6).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+    } catch (e) {
+        log('fail', `[1/7] Fetch failed: ${e.message}`);
+        return;
+    }
+
+    // Step 2: Parse GGUF
+    log('running', '[2/7] Parsing GGUF...');
+    let ggufCtx, parsed;
+    try {
+        ggufCtx = GgufParser.parse(modelBuffer);
+        parsed = ModelLoader.parseModel(modelBuffer);
+        parsedModel = parsed;
+        const hp = parsed.hyperparams;
+        log('pass', `[2/7] GGUF parsed: arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount}/${hp.headCountKv} layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`);
+    } catch (e) {
+        log('fail', `[2/7] Parse failed: ${e.message}\n${e.stack || ''}`);
+        return;
+    }
+
+    // Step 3: Init WASM
+    log('running', '[3/7] Initializing WebGPU backend...');
+    try {
+        wasm = new GgmlWasm();
+        await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
+        log('pass', '[3/7] WebGPU backend initialized');
+    } catch (e) {
+        log('fail', `[3/7] Init failed: ${e.message}\n${e.stack || ''}`);
+        return;
+    }
+
+    // Step 4: Load weights
+    log('running', '[4/7] Loading weights into GPU...');
+    setProgress(35);
+    try {
+        inference = new ModelInference(wasm, parsed.hyperparams);
+        const t1 = performance.now();
+        inference.loadWeights(ggufCtx, modelBuffer);
+        const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
+        log('pass', `[4/7] Weights loaded in ${weightTime}s`);
+        setProgress(80);
+    } catch (e) {
+        log('fail', `[4/7] Weight load failed: ${e.message}\n${e.stack || ''}`);
+        return;
+    }
+
+    // Step 5: Init KV cache
+    log('running', '[5/7] Initializing KV cache...');
+    try {
+        await inference.initKVCache(parsed.kvCacheConfig.maxContextLength);
+        log('pass', `[5/7] KV cache: ${parsed.kvCacheConfig.maxContextLength} slots x ${parsed.hyperparams.layerCount} layers`);
+        setProgress(85);
+    } catch (e) {
+        log('fail', `[5/7] KV cache failed: ${e.message}\n${e.stack || ''}`);
+        return;
+    }
+
+    // Step 6: Create tokenizer
+    log('running', '[6/7] Creating tokenizer...');
+    try {
+        tokenizer = new Tokenizer(parsed.tokenizerConfig);
+        const testEncode = tokenizer.encode("hello");
+        log('pass', `[6/7] Tokenizer ready: vocab=${tokenizer.vocabSize}, encode("hello")=[${testEncode}]`);
+    } catch (e) {
+        log('fail', `[6/7] Tokenizer failed: ${e.message}\n${e.stack || ''}`);
+        return;
+    }
+
+    // Step 7: Generate text
+    log('running', '[7/7] Generating text...');
+    setProgress(90);
+    try {
+        const prompt = "Once upon a time";
+        const tokens = tokenizer.encode(prompt);
+        const positions = tokens.map((_, i) => i);
+        const hp = parsed.hyperparams;
+
+        // Prefill
+        const t1 = performance.now();
+        const logits = await inference.forward(
+            new Int32Array(tokens),
+            new Int32Array(positions),
+        );
+
+        // Check if logits are all zero (computation didn't run)
+        const nonZero = logits.filter(v => v !== 0).length;
+        if (nonZero === 0) {
+            log('fail', '  WARNING: All logits are zero! Forward pass produced no output.');
+            // Try a manual single-token forward to debug
+            const testTokens = new Int32Array([1]); // BOS token
+            const testPos = new Int32Array([0]);
+            const testLogits = await inference.forward(testTokens, testPos);
+            const testNonZero = testLogits.filter(v => v !== 0).length;
+            log('running', `  Single BOS token test: ${testNonZero} non-zero logits out of ${testLogits.length}`);
+            log('running', `  First 10 logits: [${Array.from(testLogits.slice(0,10)).map(v => v.toFixed(4)).join(',')}]`);
+            log('running', `  Max logit: ${Math.max(...testLogits).toFixed(4)} at idx ${testLogits.indexOf(Math.max(...testLogits))}`);
+        }
+        const prefillMs = performance.now() - t1;
+
+        // Sample first token
+        let maxIdx = 0, maxVal = logits[0];
+        for (let i = 1; i < logits.length; i++) {
+            if (logits[i] > maxVal) { maxVal = logits[i]; maxIdx = i; }
+        }
+
+        log('running', `  prompt tokens: [${tokens}]`);
+        log('running', `  first generated token: ${maxIdx} (logit=${maxVal.toFixed(4)})`);
+        log('running', `  logits range: min=${Math.min(...logits.slice(0,100)).toFixed(4)} max=${Math.max(...logits).toFixed(4)} non-zero=${logits.filter(v => v !== 0).length}`);
+        log('running', `  eosId: ${parsed.tokenizerConfig.eosTokenId}`);
+        log('running', `  prompt decoded: "${tokenizer.decode(tokens)}"`);
+
+        let generated = [maxIdx];
+        const eosId = parsed.tokenizerConfig.eosTokenId;
+        const maxGen = 40;
+
+        // Decode loop. The first generated token sits at position tokens.length
+        // (right after the last prompt token), step N at tokens.length + step.
+        for (let step = 0; step < maxGen; step++) {
+            const pos = tokens.length + step;
+            const stepLogits = await inference.forward(
+                new Int32Array([generated[generated.length - 1]]),
+                new Int32Array([pos]),
+            );
+
+            let idx = 0, val = stepLogits[0];
+            for (let i = 1; i < stepLogits.length; i++) {
+                if (stepLogits[i] > val) { val = stepLogits[i]; idx = i; }
+            }
+            if (idx === eosId) break;
+            generated.push(idx);
+        }
+
+        const totalTime = performance.now() - t1;
+        const outputText = tokenizer.decode([...tokens, ...generated]);
+        const genTokens = generated.length;
+        log('running', `  generated token IDs: [${generated}]`);
+        const genTime = totalTime - prefillMs;
+
+        log('pass', `[7/7] Generated ${genTokens} tokens in ${(totalTime / 1000).toFixed(1)}s (prefill: ${prefillMs.toFixed(0)}ms, decode: ${genTime.toFixed(0)}ms, ${(genTokens / (genTime / 1000)).toFixed(1)} tok/s)`);
+        log('pass', `Output: "${outputText}"`);
+
+        setProgress(100);
+    } catch (e) {
+        log('fail', `[7/7] Generation failed: ${e.message}\n${e.stack || ''}`);
+        return;
+    }
+
+    // Show chat interface
+    chatContainer.style.display = 'block';
+    chatInput.disabled = false;
+    chatBtn.disabled = false;
+    chatInput.focus();
+}
+
+// Chat handler
+chatBtn.addEventListener('click', runChat);
+chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !chatBtn.disabled) runChat();
+});
+
+async function runChat() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatBtn.disabled = true;
+    chatInput.disabled = true;
+    chatOutput.textContent += `User: ${text}\n`;
+    chatOutput.textContent += `Assistant: `;
+
+    try {
+        const tokens = tokenizer.encode(text);
+        const cached = inference.cachedTokenCount;
+        const positions = tokens.map((_, i) => cached + i);
+
+        // Prefill
+        const logits = await inference.forward(
+            new Int32Array(tokens),
+            new Int32Array(positions),
+        );
+
+        let maxIdx = 0, maxVal = logits[0];
+        for (let i = 1; i < logits.length; i++) {
+            if (logits[i] > maxVal) { maxVal = logits[i]; maxIdx = i; }
+        }
+
+        let generated = [maxIdx];
+        const eosId = parsedModel?.tokenizerConfig?.eosTokenId ?? 2;
+
+        for (let step = 0; step < 100; step++) {
+            const pos = cached + tokens.length + step + 1;
+            const stepLogits = await inference.forward(
+                new Int32Array([generated[generated.length - 1]]),
+                new Int32Array([pos]),
+            );
+            let idx = 0, val = stepLogits[0];
+            for (let i = 1; i < stepLogits.length; i++) {
+                if (stepLogits[i] > val) { val = stepLogits[i]; idx = i; }
+            }
+            if (idx === eosId) break;
+            generated.push(idx);
+            const decoded = tokenizer.decode(generated);
+            chatOutput.textContent = chatOutput.textContent.replace(/Assistant: .*$/s, `Assistant: ${decoded}`);
+        }
+
+        const finalText = tokenizer.decode(generated);
+        chatOutput.textContent += `${finalText}\n\n`;
+    } catch (e) {
+        chatOutput.textContent += `[Error: ${e.message}]\n\n`;
+    }
+
+    chatBtn.disabled = false;
+    chatInput.disabled = false;
+    chatInput.value = '';
+    chatInput.focus();
+}
+
+loadAndTest();
+</script>
+</body>
+</html>

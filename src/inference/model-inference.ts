@@ -100,7 +100,10 @@ export class ModelInference {
 			if (!tensor) continue;
 			const srcOffset = ggufCtx.dataOffset + t.offset;
 			const nbytes = wasm.tensorNbytes(tensor);
-			wasm.uploadToTensor(tensor, new Uint8Array(ggufData, srcOffset, nbytes));
+			wasm.uploadToTensorChunked(
+				tensor,
+				new Uint8Array(ggufData, srcOffset, nbytes),
+			);
 		}
 	}
 
@@ -160,39 +163,17 @@ export class ModelInference {
 		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
 		wasm.ctxCreate(graphMem);
 
-		const embDim = hp.embeddingLength;
 		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
 
-		// Position tensor for RoPE (1D I32)
+		// Leaf input tensors — data is uploaded below, AFTER backendAllocCtxTensors
+		// assigns real GPU buffers. ctxCreate uses no_alloc=true so tensor->data
+		// is null until then; tensorSetData (memcpy to tensor->data) would be a no-op.
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
-		{
-			const sp = wasm.stackSave();
-			try {
-				const ptr = wasm.stackAlloc(nTokens * 4);
-				const posView = new Int32Array(wasm.heapU8.buffer, ptr, nTokens);
-				for (let i = 0; i < nTokens; i++) posView[i] = positions[i];
-				wasm.tensorSetData(posTensor, ptr, nTokens * 4);
-			} finally {
-				wasm.stackRestore(sp);
-			}
-		}
+		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 
-		// Embedding lookup
-		const x = wasm.tensorNew2d(GgmlType.F32, embDim, nTokens);
-		const tokEmbNb1 = wasm.tensorNb(weights.tokEmb, 1);
-		const xNb1 = wasm.tensorNb(x, 1);
-		for (let t = 0; t < nTokens; t++) {
-			const embRow = wasm.opView2d(
-				weights.tokEmb,
-				embDim,
-				1,
-				tokEmbNb1,
-				tokenIds[t] * tokEmbNb1,
-			);
-			const xRow = wasm.opView2d(x, embDim, 1, xNb1, t * xNb1);
-			wasm.opCpy(embRow, xRow);
-		}
+		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
+		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 
 		let cur = x;
 		for (let il = 0; il < hp.layerCount; il++) {
@@ -324,6 +305,27 @@ export class ModelInference {
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
 
 		const graphBuf = wasm.backendAllocCtxTensors();
+
+		// Upload leaf input data AFTER backend buffers are assigned.
+		// backendTensorSet writes into the real GPU buffer; tensorSetData
+		// (memcpy via tensor->data) is invalid for backend-allocated tensors.
+		{
+			const sp = wasm.stackSave();
+			try {
+				const posPtr = wasm.stackAlloc(nTokens * 4);
+				const posView = new Int32Array(wasm.heapU8.buffer, posPtr, nTokens);
+				for (let i = 0; i < nTokens; i++) posView[i] = positions[i];
+				wasm.backendTensorSet(posTensor, posPtr, 0, nTokens * 4);
+
+				const idsPtr = wasm.stackAlloc(nTokens * 4);
+				const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, nTokens);
+				for (let i = 0; i < nTokens; i++) idsView[i] = tokenIds[i];
+				wasm.backendTensorSet(tokenIdsTensor, idsPtr, 0, nTokens * 4);
+			} finally {
+				wasm.stackRestore(sp);
+			}
+		}
+
 		const graph = wasm.graphNew(hp.layerCount * 32 + 64);
 		wasm.graphBuildForwardExpand(graph, logits);
 		await wasm.graphCompute(graph);

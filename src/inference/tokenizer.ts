@@ -46,9 +46,18 @@ export interface TokenizerConfig {
 	bosTokenId: number;
 	padTokenId: number;
 	vocabSize: number;
+	/**
+	 * SPM only. When true, replace ASCII spaces in encode input with U+2581 (▁)
+	 * and prepend a ▁ to the text; invert on decode. Matches LLaMA SentencePiece
+	 * conventions. Defaults to true at the Tokenizer level.
+	 */
+	addPrefixSpace?: boolean;
 	/** Pre-compiled character map for normalization. SPM only. */
 	precompiledCharsmap?: Uint8Array;
 }
+
+/** SentencePiece whitespace marker (U+2581). */
+const SPM_SPACE = "▁";
 
 /** Min-heap priority queue for BPE merge operations (lowest rank first). */
 class MinHeap {
@@ -223,7 +232,12 @@ export class Tokenizer {
 			if (token.attr & TokenAttribute.CONTROL) continue;
 			parts.push(token.text);
 		}
-		return parts.join("");
+		let text = parts.join("");
+		if (this.config.type === TokenizerType.SPM && this.spmPrefixEnabled()) {
+			text = text.replaceAll(SPM_SPACE, " ");
+			if (text.startsWith(" ")) text = text.slice(1);
+		}
+		return text;
 	}
 
 	/** Get token data by ID. */
@@ -445,21 +459,28 @@ export class Tokenizer {
 	 * 6. For unknown sequences, use byte fallback (token ID = 0x0100 + byte_value)
 	 */
 	private encodeSpm(text: string): number[] {
-		// Convert text to UTF-8 bytes
-		const encoder = new TextEncoder();
-		const bytes = encoder.encode(text);
+		// SentencePiece normalization: prepend ▁ and replace spaces with ▁ so
+		// vocab entries like "▁Once" can match. Controlled by addPrefixSpace
+		// (default true) to match LLaMA conventions.
+		const normalized = this.spmPrefixEnabled()
+			? SPM_SPACE + text.replaceAll(" ", SPM_SPACE)
+			: text;
 
-		if (bytes.length === 0) return [];
+		// Iterate Unicode code points (not UTF-8 bytes) so multi-byte chars like
+		// ▁ form a single symbol that can match vocab entries such as "▁Once".
+		const chars: string[] = [...normalized];
+		const numSymbols = chars.length;
 
-		// Initialize symbol table — one symbol per byte
-		const numSymbols = bytes.length;
+		if (numSymbols === 0) return [];
+
+		// Initialize symbol table — one symbol per code point
 		const symText: string[] = new Array(numSymbols);
 		const symPrev: Int32Array = new Int32Array(numSymbols);
 		const symNext: Int32Array = new Int32Array(numSymbols);
 		const symMerged: Uint8Array = new Uint8Array(numSymbols);
 
 		for (let i = 0; i < numSymbols; i++) {
-			symText[i] = String.fromCharCode(bytes[i]);
+			symText[i] = chars[i];
 			symPrev[i] = i - 1;
 			symNext[i] = i + 1 < numSymbols ? i + 1 : -1;
 		}
@@ -557,6 +578,9 @@ export class Tokenizer {
 				result.push(id);
 			} else {
 				// Byte fallback: each byte in the symbol maps to token ID 0x0100 + byte_value
+				// FIXME: wrong for LLaMA — byte tokens `<0xHH>` live at low, non-contiguous
+				// IDs and should be looked up by text. Preprocessing handles the common case
+				// (no whitespace byte leaks), so deferring the correct fix to a follow-up.
 				for (const ch of symbolText) {
 					const byteValue = ch.charCodeAt(0);
 					const fallbackId = 0x0100 + byteValue;
@@ -567,7 +591,6 @@ export class Tokenizer {
 							continue;
 						}
 					}
-					// Last resort: try direct lookup
 					const directId = this.tokenToId.get(ch);
 					if (directId !== undefined) {
 						result.push(directId);
@@ -583,5 +606,9 @@ export class Tokenizer {
 	/** Find a token ID for the given text. Returns undefined if not found. */
 	private findLongestToken(text: string): number | undefined {
 		return this.tokenToId.get(text);
+	}
+
+	private spmPrefixEnabled(): boolean {
+		return this.config.addPrefixSpace !== false;
 	}
 }

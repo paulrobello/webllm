@@ -45,4 +45,9 @@ docs/superpowers
 smoke-test/webllm-bundle.js
 smoke-test/webllm-wasm.js
 smoke-test/webllm-wasm.wasm
+
+# Downloaded model files
+smoke-test/models/
+*.gguf
 .pi/extensions/discord-relay/state.json
+handoff.md

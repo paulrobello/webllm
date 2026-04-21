@@ -47,7 +47,7 @@ if(EMSCRIPTEN)
         "_op_mul_mat,_op_add,_op_mul,_op_rms_norm,_op_silu,_op_gelu,"
         "_op_rope,_op_reshape_2d,_op_reshape_3d,_op_permute,_op_cont,"
         "_op_view_2d,_op_view_3d,_op_cpy,_op_soft_max,_op_scale,"
-        "_op_repeat,_op_diag_mask_inf,_op_norm,"
+        "_op_repeat,_op_diag_mask_inf,_op_norm,_op_get_rows,"
         "_graph_new,_graph_build_forward_expand,_graph_compute,"
         "_backend_alloc_ctx_tensors,_backend_buffer_free,"
         "_backend_tensor_set,_backend_tensor_get,_backend_tensor_alignment"
@@ -66,9 +66,11 @@ if(EMSCRIPTEN)
         "-sUSE_ES6_IMPORT_META=1"
         "-sALLOW_MEMORY_GROWTH=1"
         "-sMAXIMUM_MEMORY=4GB"
+        "-sSTACK_SIZE=8388608"
         "-sENVIRONMENT='web'"
         "-sASYNCIFY_STACK_SIZE=1048576"
-        "-O3"
+        "-O1"
+        "-sASSERTIONS=2"
         "--emit-symbol-map"
     )
     set_target_properties(webllm-wasm PROPERTIES

@@ -193,6 +193,10 @@ void* op_repeat(void* x, void* y) {
     return ggml_repeat(current_ctx(), (struct ggml_tensor*)x, (struct ggml_tensor*)y);
 }
 
+void* op_get_rows(void* a, void* b) {
+    return ggml_get_rows(current_ctx(), (struct ggml_tensor*)a, (struct ggml_tensor*)b);
+}
+
 void* op_diag_mask_inf(void* x, int32_t n_past) {
     return ggml_diag_mask_inf(current_ctx(), (struct ggml_tensor*)x, n_past);
 }
