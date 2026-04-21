@@ -44,6 +44,7 @@ export type BufferPtr = number;
  * for tensor operations, graph building, and GPU compute.
  */
 export class GgmlWasm {
+	// biome-ignore lint/suspicious/noExplicitAny: Emscripten module has dynamic shape
 	private m: any = null;
 	private initialized = false;
 
@@ -94,7 +95,11 @@ export class GgmlWasm {
 
 	/** Write a string to WASM memory. Returns pointer. */
 	stringToNewUTF8(str: string): number {
-		return this.m.stringToUTF8(str, this.m._malloc(str.length + 1), str.length + 1);
+		return this.m.stringToUTF8(
+			str,
+			this.m._malloc(str.length + 1),
+			str.length + 1,
+		);
 	}
 
 	// ── Context ──────────────────────────────────────────────────────────
@@ -125,7 +130,13 @@ export class GgmlWasm {
 		return this.m._tensor_new_3d(type, ne0, ne1, ne2);
 	}
 
-	tensorNew4d(type: number, ne0: number, ne1: number, ne2: number, ne3: number): TensorPtr {
+	tensorNew4d(
+		type: number,
+		ne0: number,
+		ne1: number,
+		ne2: number,
+		ne3: number,
+	): TensorPtr {
 		return this.m._tensor_new_4d(type, ne0, ne1, ne2, ne3);
 	}
 
@@ -205,11 +216,29 @@ export class GgmlWasm {
 	}
 
 	opRope(
-		x: TensorPtr, nDims: number, mode: number, nCtxOrig: number,
-		freqBase: number, freqScale: number, extFactor: number,
-		attnFactor: number, betaFast: number, betaSlow: number,
+		x: TensorPtr,
+		nDims: number,
+		mode: number,
+		nCtxOrig: number,
+		freqBase: number,
+		freqScale: number,
+		extFactor: number,
+		attnFactor: number,
+		betaFast: number,
+		betaSlow: number,
 	): TensorPtr {
-		return this.m._op_rope(x, nDims, mode, nCtxOrig, freqBase, freqScale, extFactor, attnFactor, betaFast, betaSlow);
+		return this.m._op_rope(
+			x,
+			nDims,
+			mode,
+			nCtxOrig,
+			freqBase,
+			freqScale,
+			extFactor,
+			attnFactor,
+			betaFast,
+			betaSlow,
+		);
 	}
 
 	opReshape2d(x: TensorPtr, ne0: number, ne1: number): TensorPtr {
@@ -220,7 +249,13 @@ export class GgmlWasm {
 		return this.m._op_reshape_3d(x, ne0, ne1, ne2);
 	}
 
-	opPermute(x: TensorPtr, d0: number, d1: number, d2: number, d3: number): TensorPtr {
+	opPermute(
+		x: TensorPtr,
+		d0: number,
+		d1: number,
+		d2: number,
+		d3: number,
+	): TensorPtr {
 		return this.m._op_permute(x, d0, d1, d2, d3);
 	}
 
@@ -228,11 +263,25 @@ export class GgmlWasm {
 		return this.m._op_cont(x);
 	}
 
-	opView2d(x: TensorPtr, ne0: number, ne1: number, nb1: number, offset: number): TensorPtr {
+	opView2d(
+		x: TensorPtr,
+		ne0: number,
+		ne1: number,
+		nb1: number,
+		offset: number,
+	): TensorPtr {
 		return this.m._op_view_2d(x, ne0, ne1, nb1, offset);
 	}
 
-	opView3d(x: TensorPtr, ne0: number, ne1: number, ne2: number, nb1: number, nb2: number, offset: number): TensorPtr {
+	opView3d(
+		x: TensorPtr,
+		ne0: number,
+		ne1: number,
+		ne2: number,
+		nb1: number,
+		nb2: number,
+		offset: number,
+	): TensorPtr {
 		return this.m._op_view_3d(x, ne0, ne1, ne2, nb1, nb2, offset);
 	}
 
@@ -286,12 +335,22 @@ export class GgmlWasm {
 	}
 
 	/** Upload data from WASM heap to a tensor on the GPU. */
-	backendTensorSet(tensor: TensorPtr, srcHeapPtr: number, offset: number, size: number): void {
+	backendTensorSet(
+		tensor: TensorPtr,
+		srcHeapPtr: number,
+		offset: number,
+		size: number,
+	): void {
 		this.m._backend_tensor_set(tensor, srcHeapPtr, offset, size);
 	}
 
 	/** Download tensor data from GPU to WASM heap. */
-	backendTensorGet(tensor: TensorPtr, dstHeapPtr: number, offset: number, size: number): void {
+	backendTensorGet(
+		tensor: TensorPtr,
+		dstHeapPtr: number,
+		offset: number,
+		size: number,
+	): void {
 		this.m._backend_tensor_get(tensor, dstHeapPtr, offset, size);
 	}
 

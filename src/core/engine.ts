@@ -1,6 +1,6 @@
 import type { Character, CharacterConfig } from "../characters/character.js";
 import { CharacterManager } from "../characters/character-manager.js";
-import { Generator, type GenerationConfig } from "../inference/generation.js";
+import { type GenerationConfig, Generator } from "../inference/generation.js";
 import { GgmlWasm } from "../inference/ggml-wasm.js";
 import {
 	LightweightModel,
@@ -9,9 +9,9 @@ import {
 import { ModelInference } from "../inference/model-inference.js";
 import { Sampler } from "../inference/sampler.js";
 import { Tokenizer } from "../inference/tokenizer.js";
-import { InferenceSession } from "../models/inference-session.js";
 import { GgufParser } from "../models/gguf-parser.js";
 import type { GgufContext } from "../models/gguf-types.js";
+import { InferenceSession } from "../models/inference-session.js";
 import { KVCache } from "../models/kv-cache.js";
 import { ModelLoader } from "../models/model-loader.js";
 import { MemoryPool } from "./memory-pool.js";
@@ -43,7 +43,9 @@ export class WebLLM {
 		this.memoryPool = new MemoryPool(config.memoryBudget);
 		this.characterManager = new CharacterManager();
 		this.modelManager = new ModelManager(this.memoryPool);
-		this.scheduler = new Scheduler({ frameBudgetMs: config.frameBudgetMs ?? 8 });
+		this.scheduler = new Scheduler({
+			frameBudgetMs: config.frameBudgetMs ?? 8,
+		});
 		this._pipelineCache = new PipelineCache(config.cacheDir ?? "webllm-cache");
 	}
 
@@ -51,7 +53,10 @@ export class WebLLM {
 		return new WebLLM(config);
 	}
 
-	async loadModel(name: string, options: ModelLoadOptions): Promise<ModelHandle> {
+	async loadModel(
+		name: string,
+		options: ModelLoadOptions,
+	): Promise<ModelHandle> {
 		const id = `model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const entry: ModelEntry = {
 			id,
@@ -78,39 +83,61 @@ export class WebLLM {
 
 	async unloadModel(id: string): Promise<void> {
 		const inf = this.inferenceEngines.get(id);
-		if (inf) { inf.dispose(); this.inferenceEngines.delete(id); }
+		if (inf) {
+			inf.dispose();
+			this.inferenceEngines.delete(id);
+		}
 		const wasm = this.wasmModules.get(id);
-		if (wasm) { await wasm.shutdown(); this.wasmModules.delete(id); }
+		if (wasm) {
+			await wasm.shutdown();
+			this.wasmModules.delete(id);
+		}
 		await this.modelManager.unregister(id);
 	}
 
-	async loadLightweightModel(config: Omit<LightweightModelConfig, "device">): Promise<LightweightModel> {
-		const model = new LightweightModel({ device: this._config.device, ...config });
+	async loadLightweightModel(
+		config: Omit<LightweightModelConfig, "device">,
+	): Promise<LightweightModel> {
+		const model = new LightweightModel({
+			device: this._config.device,
+			...config,
+		});
 		await model.init();
 		return model;
 	}
 
-	async chat(modelId: string, prompt: string, config?: Partial<GenerationConfig>): Promise<string> {
+	async chat(
+		modelId: string,
+		prompt: string,
+		config?: Partial<GenerationConfig>,
+	): Promise<string> {
 		const entry = this.modelManager.get(modelId);
 		if (!entry) throw new Error(`Model "${modelId}" not found`);
-		if (!entry.loaded || !entry.tokenizer) throw new Error(`Model "${modelId}" not fully loaded`);
+		if (!entry.loaded || !entry.tokenizer)
+			throw new Error(`Model "${modelId}" not fully loaded`);
 
 		const inf = this.inferenceEngines.get(modelId);
 		if (!inf) throw new Error(`No inference engine for model "${modelId}"`);
 
 		const tokenizer = entry.tokenizer;
 		const sampler = new Sampler(config ?? {});
-		const session = new InferenceSession({
-			maxTokens: config?.maxTokens ?? 512,
-			temperature: config?.temperature ?? 1.0,
-			topK: config?.topK ?? 0,
-			topP: config?.topP ?? 1.0,
-			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
-			contextOverflowPolicy: "truncate",
-		}, 0);
+		const session = new InferenceSession(
+			{
+				maxTokens: config?.maxTokens ?? 512,
+				temperature: config?.temperature ?? 1.0,
+				topK: config?.topK ?? 0,
+				topP: config?.topP ?? 1.0,
+				repetitionPenalty: config?.repetitionPenalty ?? 1.0,
+				contextOverflowPolicy: "truncate",
+			},
+			0,
+		);
 
 		const tokens = tokenizer.encode(prompt);
-		const forwardPass = async (ids: number[], positions: number[]): Promise<Float32Array> => {
+		const forwardPass = async (
+			ids: number[],
+			positions: number[],
+		): Promise<Float32Array> => {
 			return inf.forward(new Int32Array(ids), new Int32Array(positions));
 		};
 
@@ -123,9 +150,18 @@ export class WebLLM {
 			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
 		};
 
-		const gen = Generator.generate(tokens, sampler, session, tokenizer.eosId ?? 2, forwardPass, genConfig);
+		const gen = Generator.generate(
+			tokens,
+			sampler,
+			session,
+			tokenizer.eosId ?? 2,
+			forwardPass,
+			genConfig,
+		);
 		const genTokens: number[] = [];
-		for await (const token of gen) { genTokens.push(token); }
+		for await (const token of gen) {
+			genTokens.push(token);
+		}
 
 		return tokenizer.decode(genTokens);
 	}
@@ -135,7 +171,11 @@ export class WebLLM {
 		name: string,
 		config: WebLLMConfig,
 		wasmUrl = "webllm-wasm.js",
-	): Promise<{ handle: ModelHandle; engine: WebLLM; inference: ModelInference }> {
+	): Promise<{
+		handle: ModelHandle;
+		engine: WebLLM;
+		inference: ModelInference;
+	}> {
 		const engine = await WebLLM.init(config);
 
 		const parsed = ModelLoader.parseModel(data);
@@ -164,11 +204,21 @@ export class WebLLM {
 		return { handle, engine, inference };
 	}
 
-	get config(): WebLLMConfig { return this._config; }
-	get pipelineCache(): PipelineCache { return this._pipelineCache; }
-	getMemoryPool(): MemoryPool { return this.memoryPool; }
-	getScheduler(): Scheduler { return this.scheduler; }
-	getModelManager(): ModelManager { return this.modelManager; }
+	get config(): WebLLMConfig {
+		return this._config;
+	}
+	get pipelineCache(): PipelineCache {
+		return this._pipelineCache;
+	}
+	getMemoryPool(): MemoryPool {
+		return this.memoryPool;
+	}
+	getScheduler(): Scheduler {
+		return this.scheduler;
+	}
+	getModelManager(): ModelManager {
+		return this.modelManager;
+	}
 
 	createCharacter(config: CharacterConfig): Character {
 		return this.characterManager.create(config);
@@ -187,7 +237,8 @@ export class WebLLM {
 	}
 
 	on(event: string, handler: EventHandler): void {
-		if (!this.eventHandlers.has(event)) this.eventHandlers.set(event, new Set());
+		if (!this.eventHandlers.has(event))
+			this.eventHandlers.set(event, new Set());
 		this.eventHandlers.get(event)?.add(handler);
 	}
 
@@ -196,9 +247,13 @@ export class WebLLM {
 	}
 
 	async shutdown(): Promise<void> {
-		for (const [, wasm] of this.wasmModules) { await wasm.shutdown(); }
+		for (const [, wasm] of this.wasmModules) {
+			await wasm.shutdown();
+		}
 		this.wasmModules.clear();
-		for (const [, inf] of this.inferenceEngines) { inf.dispose(); }
+		for (const [, inf] of this.inferenceEngines) {
+			inf.dispose();
+		}
 		this.inferenceEngines.clear();
 		this.modelManager.clear();
 		this.scheduler.clear();

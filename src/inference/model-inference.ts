@@ -1,6 +1,12 @@
-import { GgmlWasm, type TensorPtr, type BufferPtr, GgmlType, RopeMode } from "./ggml-wasm.js";
 import type { ModelHyperparams } from "../core/types.js";
 import type { GgufContext, GgufTensorInfo } from "../models/gguf-types.js";
+import {
+	type BufferPtr,
+	GgmlType,
+	type GgmlWasm,
+	RopeMode,
+	type TensorPtr,
+} from "./ggml-wasm.js";
 
 interface LayerWeights {
 	attnNorm: TensorPtr;
@@ -35,6 +41,7 @@ interface LayerKVCache {
  */
 export class ModelInference {
 	private wasm: GgmlWasm;
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: accessed via destructuring in methods
 	private hp: ModelHyperparams;
 	private weights: WeightTensors | null = null;
 	private weightBuf: BufferPtr = 0;
@@ -132,8 +139,18 @@ export class ModelInference {
 		this.kvLayers = [];
 		for (let i = 0; i < hp.layerCount; i++) {
 			this.kvLayers.push({
-				k: wasm.tensorNew3d(GgmlType.F32, hp.embeddingHeadLength, maxContextLength, hp.headCountKv),
-				v: wasm.tensorNew3d(GgmlType.F32, hp.embeddingHeadLength, maxContextLength, hp.headCountKv),
+				k: wasm.tensorNew3d(
+					GgmlType.F32,
+					hp.embeddingHeadLength,
+					maxContextLength,
+					hp.headCountKv,
+				),
+				v: wasm.tensorNew3d(
+					GgmlType.F32,
+					hp.embeddingHeadLength,
+					maxContextLength,
+					hp.headCountKv,
+				),
 			});
 		}
 
@@ -185,12 +202,16 @@ export class ModelInference {
 
 		for (let t = 0; t < nTokens; t++) {
 			const embRow = wasm.opView2d(
-				weights.tokEmb, embDim, 1,
+				weights.tokEmb,
+				embDim,
+				1,
 				wasm.tensorNb(weights.tokEmb, 1),
 				tokenIds[t] * wasm.tensorNb(weights.tokEmb, 1),
 			);
 			const xRow = wasm.opView2d(
-				x, embDim, 1,
+				x,
+				embDim,
+				1,
 				wasm.tensorNb(x, 1),
 				t * wasm.tensorNb(x, 1),
 			);
@@ -217,10 +238,30 @@ export class ModelInference {
 			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
 
 			// RoPE on Q and K
-			const qRope = wasm.opRope(q3, headDim, RopeMode.NORMAL, hp.contextLength,
-				hp.ropeFreqBase, hp.ropeScale, 0.0, 1.0, 0.0, 0.0);
-			const kRope = wasm.opRope(k3, headDim, RopeMode.NORMAL, hp.contextLength,
-				hp.ropeFreqBase, hp.ropeScale, 0.0, 1.0, 0.0, 0.0);
+			const qRope = wasm.opRope(
+				q3,
+				headDim,
+				RopeMode.NORMAL,
+				hp.contextLength,
+				hp.ropeFreqBase,
+				hp.ropeScale,
+				0.0,
+				1.0,
+				0.0,
+				0.0,
+			);
+			const kRope = wasm.opRope(
+				k3,
+				headDim,
+				RopeMode.NORMAL,
+				hp.contextLength,
+				hp.ropeFreqBase,
+				hp.ropeScale,
+				0.0,
+				1.0,
+				0.0,
+				0.0,
+			);
 
 			// Store new K and V into cache at positions [pastLen..pastLen+nTokens-1]
 			const kNb1 = wasm.tensorNb(kv.k, 1);
@@ -228,18 +269,46 @@ export class ModelInference {
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
 
-			const kWriteView = wasm.opView3d(kv.k, headDim, nTokens, hp.headCountKv,
-				kNb1, kNb2, pastLen * kNb1);
-			const vWriteView = wasm.opView3d(kv.v, headDim, nTokens, hp.headCountKv,
-				vNb1, vNb2, pastLen * vNb1);
+			const kWriteView = wasm.opView3d(
+				kv.k,
+				headDim,
+				nTokens,
+				hp.headCountKv,
+				kNb1,
+				kNb2,
+				pastLen * kNb1,
+			);
+			const vWriteView = wasm.opView3d(
+				kv.v,
+				headDim,
+				nTokens,
+				hp.headCountKv,
+				vNb1,
+				vNb2,
+				pastLen * vNb1,
+			);
 			wasm.opCpy(kRope, kWriteView);
 			wasm.opCpy(v3, vWriteView);
 
 			// Read full K and V from cache [0..totalLen-1]
-			const fullK = wasm.opView3d(kv.k, headDim, totalLen, hp.headCountKv,
-				kNb1, kNb2, 0);
-			const fullV = wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv,
-				vNb1, vNb2, 0);
+			const fullK = wasm.opView3d(
+				kv.k,
+				headDim,
+				totalLen,
+				hp.headCountKv,
+				kNb1,
+				kNb2,
+				0,
+			);
+			const fullV = wasm.opView3d(
+				kv.v,
+				headDim,
+				totalLen,
+				hp.headCountKv,
+				vNb1,
+				vNb2,
+				0,
+			);
 
 			// Permute for attention: [headDim, nTokens/totalLen, nHeads/nKvHeads]
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
@@ -265,7 +334,8 @@ export class ModelInference {
 			// Merge heads: permute back then reshape
 			const merged = wasm.opReshape2d(
 				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-				nHeads * headDim, nTokens,
+				nHeads * headDim,
+				nTokens,
 			);
 
 			// Output projection + residual
@@ -306,7 +376,11 @@ export class ModelInference {
 			wasm.backendTensorGet(logits, heapPtr, 0, logitsBytes);
 		}
 
-		const result = new Float32Array(wasm.heapU8.buffer, heapPtr, hp.vocabularySize).slice();
+		const result = new Float32Array(
+			wasm.heapU8.buffer,
+			heapPtr,
+			hp.vocabularySize,
+		).slice();
 		wasm.free(heapPtr);
 		wasm.backendBufferFree(graphBuf);
 		wasm.ctxFree();
@@ -339,7 +413,10 @@ export class ModelInference {
 	}
 
 	/** Create a ggml tensor from GGUF info and register in name map. */
-	private makeTensor(tensorMap: Map<string, GgufTensorInfo>, name: string): TensorPtr {
+	private makeTensor(
+		tensorMap: Map<string, GgufTensorInfo>,
+		name: string,
+	): TensorPtr {
 		const info = tensorMap.get(name);
 		if (!info) throw new Error(`Weight "${name}" not found in GGUF`);
 
@@ -349,7 +426,8 @@ export class ModelInference {
 
 		if (d.length === 1) tensor = this.wasm.tensorNew1d(t, d[0]);
 		else if (d.length === 2) tensor = this.wasm.tensorNew2d(t, d[0], d[1]);
-		else if (d.length === 3) tensor = this.wasm.tensorNew3d(t, d[0], d[1], d[2]);
+		else if (d.length === 3)
+			tensor = this.wasm.tensorNew3d(t, d[0], d[1], d[2]);
 		else tensor = this.wasm.tensorNew4d(t, d[0], d[1], d[2], d[3]);
 
 		this.wasm.tensorSetName(tensor, name);

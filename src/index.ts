@@ -43,12 +43,12 @@ export type {
 } from "./inference/generation.js";
 export { Generator } from "./inference/generation.js";
 export { GgmlWasm } from "./inference/ggml-wasm.js";
-export { ModelInference } from "./inference/model-inference.js";
 export type {
 	LightweightModelConfig,
 	LightweightWeights,
 } from "./inference/lightweight.js";
 export { LightweightModel } from "./inference/lightweight.js";
+export { ModelInference } from "./inference/model-inference.js";
 export type { SamplerConfig } from "./inference/sampler.js";
 export { Sampler } from "./inference/sampler.js";
 export { StreamRouter } from "./inference/stream-router.js";
