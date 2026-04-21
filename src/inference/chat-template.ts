@@ -192,16 +192,24 @@ const FORMATTERS: Record<
 	unknown: formatZephyr, // fallback — most common for small models
 };
 
+const DEFAULT_SYSTEM =
+	"You are a helpful assistant. Answer questions directly and concisely.";
+
 /**
  * Format messages into a prompt string using the detected template type.
  * Falls back to zephyr format when the template is unknown or empty.
+ * Prepends a default system message if none is present.
  */
 export function formatChatPrompt(
 	messages: ChatMessage[],
 	template?: string,
 ): string {
 	const tmpl = detectChatTemplate(template ?? "");
-	return FORMATTERS[tmpl](messages, true);
+	const hasSystem = messages.length > 0 && messages[0].role === "system";
+	const msgs = hasSystem
+		? messages
+		: [{ role: "system" as const, content: DEFAULT_SYSTEM }, ...messages];
+	return FORMATTERS[tmpl](msgs, true);
 }
 
 /** Return only the new portion given the number of previously formatted messages. */
@@ -214,7 +222,19 @@ export function formatChatDelta(
 	if (prevCount >= messages.length) return "";
 	const tmpl = detectChatTemplate(template ?? "");
 	const formatter = FORMATTERS[tmpl] ?? FORMATTERS.zephyr;
-	const full = formatter(messages, true);
-	const prev = formatter(messages.slice(0, prevCount), false);
+	const hasSystem = messages.length > 0 && messages[0].role === "system";
+	const msgs = hasSystem
+		? messages
+		: [{ role: "system" as const, content: DEFAULT_SYSTEM }, ...messages];
+	const full = formatter(msgs, true);
+	const prev = formatter(
+		hasSystem
+			? messages.slice(0, prevCount)
+			: [
+					{ role: "system" as const, content: DEFAULT_SYSTEM },
+					...messages.slice(0, prevCount),
+				],
+		false,
+	);
 	return full.slice(prev.length);
 }

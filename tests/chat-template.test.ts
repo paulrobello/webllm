@@ -55,9 +55,11 @@ describe("detectChatTemplate", () => {
 });
 
 describe("formatChatPrompt llama2", () => {
-	test("single user", () => {
+	test("single user gets default system", () => {
 		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
-		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe("[INST] Hello [/INST] ");
+		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe(
+			"[INST] <<SYS>>\nYou are a helpful assistant. Answer questions directly and concisely.\n<</SYS>>\n\nHello [/INST] ",
+		);
 	});
 	test("system + user", () => {
 		const m: ChatMessage[] = [
@@ -68,26 +70,26 @@ describe("formatChatPrompt llama2", () => {
 			"[INST] <<SYS>>\nSys\n<</SYS>>\n\nHi [/INST] ",
 		);
 	});
-	test("multi-turn", () => {
+	test("multi-turn gets default system", () => {
 		const m: ChatMessage[] = [
 			{ role: "user", content: "Q1" },
 			{ role: "assistant", content: "A1" },
 			{ role: "user", content: "Q2" },
 		];
 		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe(
-			"[INST] Q1 [/INST] A1</s><s>[INST] Q2 [/INST] ",
+			"[INST] <<SYS>>\nYou are a helpful assistant. Answer questions directly and concisely.\n<</SYS>>\n\nQ1 [/INST] A1</s><s>[INST] Q2 [/INST] ",
 		);
 	});
 });
 
 describe("formatChatPrompt zephyr", () => {
-	test("single user", () => {
+	test("single user gets default system", () => {
 		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
 		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
-			"<|user|>\nHello</s><|assistant|>",
+			"<|system|>\nYou are a helpful assistant. Answer questions directly and concisely.</s><|user|>\nHello</s><|assistant|>",
 		);
 	});
-	test("system + user", () => {
+	test("system + user unchanged", () => {
 		const m: ChatMessage[] = [
 			{ role: "system", content: "Be nice" },
 			{ role: "user", content: "Hi" },
@@ -96,14 +98,14 @@ describe("formatChatPrompt zephyr", () => {
 			"<|system|>\nBe nice</s><|user|>\nHi</s><|assistant|>",
 		);
 	});
-	test("multi-turn", () => {
+	test("multi-turn gets default system", () => {
 		const m: ChatMessage[] = [
 			{ role: "user", content: "Q1" },
 			{ role: "assistant", content: "A1" },
 			{ role: "user", content: "Q2" },
 		];
 		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
-			"<|user|>\nQ1</s><|assistant|>\nA1</s><|user|>\nQ2</s><|assistant|>",
+			"<|system|>\nYou are a helpful assistant. Answer questions directly and concisely.</s><|user|>\nQ1</s><|assistant|>\nA1</s><|user|>\nQ2</s><|assistant|>",
 		);
 	});
 });
@@ -120,9 +122,11 @@ describe("formatChatPrompt mistral-v7", () => {
 			"[SYSTEM_PROMPT] Be helpful.[/SYSTEM_PROMPT][INST] Hello[/INST] Hi there</s>[INST] Bye[/INST]",
 		);
 	});
-	test("no system", () => {
+	test("no system gets default system", () => {
 		const m: ChatMessage[] = [{ role: "user", content: "Hi" }];
-		expect(formatChatPrompt(m, MISTRAL_TMPL)).toBe("[INST] Hi[/INST]");
+		expect(formatChatPrompt(m, MISTRAL_TMPL)).toBe(
+			"[SYSTEM_PROMPT] You are a helpful assistant. Answer questions directly and concisely.[/SYSTEM_PROMPT][INST] Hi[/INST]",
+		);
 	});
 });
 
