@@ -2,7 +2,7 @@
         wasm-build wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
         bench-eval-models bench-inference bench-inference-save bench-all \
-        smoke-test smoke-serve smoke-open smoke-test-full \
+        smoke-test smoke-serve smoke-stop smoke-open smoke-test-full \
         run-all help
 
 # ---------------------------------------------------------------------------
@@ -96,6 +96,9 @@ smoke-test: wasm-build ## Bundle + copy WASM artifacts into smoke-test/
 
 smoke-serve: ## Serve smoke-test/ on http://localhost:$(SMOKE_PORT)
 	cd smoke-test && python3 -m http.server $(SMOKE_PORT)
+
+smoke-stop: ## Kill the smoke-test HTTP server
+	lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
 
 smoke-open: ## Open smoke-test in default browser
 	open http://localhost:$(SMOKE_PORT)/real-model.html
