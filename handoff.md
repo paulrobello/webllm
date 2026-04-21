@@ -32,6 +32,15 @@ Side-by-side comparison of per-layer hidden-state magnitude:
 subsequent layer — my pipeline reproduces the right qualitative behavior
 but with dramatically less amplification.
 
+Single-token probe against HF (id=22172 "▁hello"):
+- HF top-5: ▁to(9.93), .(9.65), ,(9.60), :(9.44), !(9.12)
+- Mine top-5: гля(9.74), indows(9.68), ▁rör(8.87), urale(8.75), alone(8.69)
+
+Logit magnitudes are in the same ballpark (~9-10), but the
+*directions* are completely different. Without the outliers at dim 624
+and neighbors, the final hidden state projects onto different logit
+directions, giving different (wrong) top-k tokens.
+
 That's a concrete, reproducible smoking gun for a specific numerical
 issue somewhere in layer 2's attention+FFN pathway (or shared across
 all layers but only visible once outliers develop). Next session's
