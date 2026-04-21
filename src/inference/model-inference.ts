@@ -175,12 +175,24 @@ export class ModelInference {
 		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 
+		// Create the graph up front so each layer can expand its KV-cache writes
+		// into it *before* attention ops that read kv.k / kv.v are added. Without
+		// this ordering, the cpy (write) and the view (read) have no dependency
+		// edge, so attention reads stale data (zeros).
+		const graph = wasm.graphNew(hp.layerCount * 64 + 128);
+
 		let cur = x;
 		for (let il = 0; il < hp.layerCount; il++) {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
 
-			const normed = wasm.opRmsNorm(cur, hp.normEpsilon);
+			// LLaMA RMSNorm: (x / rms(x)) * gamma. ggml_rms_norm only does the
+			// normalize step — the per-dim gain `attn_norm.weight` must be applied
+			// separately. Same for `ffn_norm.weight` and the final `output_norm.weight`.
+			const normed = wasm.opMul(
+				wasm.opRmsNorm(cur, hp.normEpsilon),
+				lw.attnNorm,
+			);
 
 			const q = wasm.opMulMat(lw.qProj, normed);
 			const k = wasm.opMulMat(lw.kProj, normed);
@@ -230,9 +242,12 @@ export class ModelInference {
 				pastLen * kNb1,
 			);
 			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
-			wasm.opCpy(wasm.opCont(kRopeP), kWriteView);
+			const kWrite = wasm.opCpy(wasm.opCont(kRopeP), kWriteView);
+			// Expand into the graph NOW so the cpy node precedes attention reads.
+			wasm.graphBuildForwardExpand(graph, kWrite);
 
 			// Write V to cache: permute v3(2,0,1,3) -> [nTokens, headDim, nKvHeads]
+			const vNb0 = wasm.tensorNb(kv.v, 0);
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
 			const v3P = wasm.opPermute(v3, 2, 0, 1, 3);
@@ -243,9 +258,10 @@ export class ModelInference {
 				hp.headCountKv,
 				vNb1,
 				vNb2,
-				pastLen * 4,
+				pastLen * vNb0,
 			);
-			wasm.opCpy(wasm.opCont(v3P), vWriteView);
+			const vWrite = wasm.opCpy(wasm.opCont(v3P), vWriteView);
+			wasm.graphBuildForwardExpand(graph, vWrite);
 
 			// Read K from cache: [headDim, totalLen, nKvHeads]
 			const fullK = wasm.opView3d(
@@ -290,7 +306,10 @@ export class ModelInference {
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
 
-			const ffnNormed = wasm.opRmsNorm(attnResidual, hp.normEpsilon);
+			const ffnNormed = wasm.opMul(
+				wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+				lw.ffnNorm,
+			);
 			const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
 			const up = wasm.opMulMat(lw.upProj, ffnNormed);
 			const ffnHidden = wasm.opMul(wasm.opSilu(gate), up);
@@ -299,7 +318,10 @@ export class ModelInference {
 			cur = wasm.opAdd(ffnOut, attnResidual);
 		}
 
-		const finalNorm = wasm.opRmsNorm(cur, hp.normEpsilon);
+		const finalNorm = wasm.opMul(
+			wasm.opRmsNorm(cur, hp.normEpsilon),
+			weights.norm,
+		);
 		const logits = weights.output
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
@@ -326,8 +348,11 @@ export class ModelInference {
 			}
 		}
 
-		const graph = wasm.graphNew(hp.layerCount * 32 + 64);
+		// KV cache writes are already expanded into the graph per layer (above),
+		// so they precede attention reads. Finally add logits + its dependency
+		// chain — nodes already in the graph are deduped by build_forward_expand.
 		wasm.graphBuildForwardExpand(graph, logits);
+
 		await wasm.graphCompute(graph);
 
 		const logitsBytes = hp.vocabularySize * 4;
@@ -347,6 +372,44 @@ export class ModelInference {
 		this.nCached = totalLen;
 
 		return result;
+	}
+
+	/** DEBUG: read back a slice of kv.k for a given layer. */
+	async debugReadKCache(
+		layerIdx: number,
+		nBytes: number,
+		offset = 0,
+	): Promise<Float32Array> {
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		const tensor = this.kvLayers[layerIdx].k;
+		const bytes = await this.wasm.downloadFromTensor(tensor, nBytes, offset);
+		return new Float32Array(bytes.buffer, bytes.byteOffset, nBytes / 4);
+	}
+
+	/** DEBUG: read back a slice of kv.v for a given layer. */
+	async debugReadVCache(
+		layerIdx: number,
+		nBytes: number,
+		offset = 0,
+	): Promise<Float32Array> {
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		const tensor = this.kvLayers[layerIdx].v;
+		const bytes = await this.wasm.downloadFromTensor(tensor, nBytes, offset);
+		return new Float32Array(bytes.buffer, bytes.byteOffset, nBytes / 4);
+	}
+
+	/** DEBUG: read back first N floats of an F32 norm weight. */
+	async debugReadNormWeight(
+		which: "output" | "attn0" | "ffn0",
+		nFloats = 8,
+	): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		let tensor: TensorPtr;
+		if (which === "output") tensor = this.weights.norm;
+		else if (which === "attn0") tensor = this.weights.layers[0].attnNorm;
+		else tensor = this.weights.layers[0].ffnNorm;
+		const bytes = await this.wasm.downloadFromTensor(tensor, nFloats * 4, 0);
+		return new Float32Array(bytes.buffer, bytes.byteOffset, nFloats);
 	}
 
 	async dispose(): Promise<void> {

@@ -181,12 +181,132 @@ async function loadAndTest() {
         return;
     }
 
+    // Step 7-norm: probe F32 norm weights — if these are zeros or garbage,
+    // the F32 upload path is broken (all prior tensors were quantized).
+    log('running', '[7-norm] F32 norm weight probe...');
+    try {
+        const attn = await inference.debugReadNormWeight('attn0', 8);
+        const ffn = await inference.debugReadNormWeight('ffn0', 8);
+        const out = await inference.debugReadNormWeight('output', 8);
+        log('running', `  blk.0.attn_norm first8: [${Array.from(attn).map(v=>v.toFixed(4)).join(',')}]`);
+        log('running', `  blk.0.ffn_norm  first8: [${Array.from(ffn).map(v=>v.toFixed(4)).join(',')}]`);
+        log('running', `  output_norm     first8: [${Array.from(out).map(v=>v.toFixed(4)).join(',')}]`);
+    } catch (e) {
+        log('fail', `[7-norm] failed: ${e.message}`);
+    }
+
+    // Step 7-debug: probe kv.k[layer=0] after a prefill to see whether
+    // K writes are persisting to the cache at all.
+    log('running', '[7-debug] KV write probe...');
+    try {
+        inference.resetKVCache();
+        const probeTokens = tokenizer.encode("hello");
+        await inference.forward(new Int32Array(probeTokens), new Int32Array(probeTokens.map((_,i)=>i)));
+        const k0 = await inference.debugReadKCache(0, 64 * 4, 0);
+        const nzK = Array.from(k0).filter(v => Math.abs(v) > 1e-9).length;
+        const sumAbsK = Array.from(k0).reduce((s,v)=>s+Math.abs(v), 0);
+        log('running', `  kv.k[layer=0][pos=0][head=0] nonzero=${nzK}/64 sumAbs=${sumAbsK.toFixed(4)}`);
+        // V cache layout is [maxCtx, headDim, nKvHeads]. Read V[pos=0, :, head=0]
+        // which is `headDim` floats starting at byte offset 0, each stride nb[0]=maxCtx*4=8192.
+        // Simpler to read with a stride: dump raw first 64 F32 = V[pos=0..63, dim=0, head=0] (first 64 positions along dim 0).
+        const v0 = await inference.debugReadVCache(0, 64 * 4, 0);
+        const nzV = Array.from(v0).filter(v => Math.abs(v) > 1e-9).length;
+        const sumAbsV = Array.from(v0).reduce((s,v)=>s+Math.abs(v), 0);
+        log('running', `  kv.v[layer=0][pos=0..63][dim=0][head=0] nonzero=${nzV}/64 sumAbs=${sumAbsV.toFixed(4)} first4=[${Array.from(v0.slice(0,4)).map(v=>v.toFixed(4)).join(',')}]`);
+    } catch (e) {
+        log('fail', `[7-debug] KV probe failed: ${e.message}\n${e.stack || ''}`);
+    }
+
+    // Step 7-sanity: single BOS token. A base LLaMA should predict common English
+    // continuations (the, I, A, ...) with modest confidence.
+    log('running', '[7-sanity] single BOS continuation...');
+    try {
+        inference.resetKVCache();
+        const logits = await inference.forward(
+            new Int32Array([tokenizer.bosId]),
+            new Int32Array([0]),
+        );
+        // Top 5 picks
+        const arr = Array.from(logits).map((v, i) => [i, v]);
+        arr.sort((a, b) => b[1] - a[1]);
+        const top5 = arr.slice(0, 5).map(([id, v]) => {
+            const t = tokenizer.getToken(id);
+            return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
+        });
+        log('running', `  BOS→top5: ${top5.join(", ")}`);
+    } catch (e) {
+        log('fail', `[7-sanity] failed: ${e.message}`);
+    }
+
+    // Step 7a: KV-history differential diagnostic.
+    // Run the SAME probe token after two DIFFERENT prefixes. If the decode
+    // logits are (nearly) identical, attention is ignoring KV history.
+    log('running', '[7a] KV history differential...');
+    try {
+        const probe = tokenizer.encode("world");
+        if (probe.length !== 1) throw new Error(`probe not single-token: ${probe}`);
+
+        const prefixA = tokenizer.encode("hello");
+        const prefixB = tokenizer.encode("Once upon a time");
+
+        async function logitsAfterPrefix(prefix) {
+            inference.resetKVCache();
+            await inference.forward(new Int32Array(prefix), new Int32Array(prefix.map((_,i)=>i)));
+            const decodeLogits = await inference.forward(
+                new Int32Array(probe),
+                new Int32Array([prefix.length]),
+            );
+            return decodeLogits;
+        }
+
+        const lA = await logitsAfterPrefix(prefixA);
+        const lB = await logitsAfterPrefix(prefixB);
+
+        let diffCount = 0, maxAbsDiff = 0;
+        for (let i = 0; i < lA.length; i++) {
+            const d = Math.abs(lA[i] - lB[i]);
+            if (d > 1e-5) diffCount++;
+            if (d > maxAbsDiff) maxAbsDiff = d;
+        }
+        const topA = Array.from(lA).reduce((m,v,i,a)=>a[m]>=v?m:i, 0);
+        const topB = Array.from(lB).reduce((m,v,i,a)=>a[m]>=v?m:i, 0);
+        const verdict = diffCount > 100 ? 'HISTORY MATTERS' : 'HISTORY IGNORED';
+        log('running', `  probe="world" [${probe}] prefixA=${prefixA.length} tokens, prefixB=${prefixB.length} tokens`);
+        log('running', `  diff logits=${diffCount}/${lA.length}, maxAbsDiff=${maxAbsDiff.toExponential(3)}`);
+        log('running', `  topA=${topA} (${lA[topA].toFixed(3)})  topB=${topB} (${lB[topB].toFixed(3)})  => ${verdict}`);
+
+        // Reset KV cache before the main generation block
+        inference.resetKVCache();
+    } catch (e) {
+        log('fail', `[7a] KV diagnostic failed: ${e.message}\n${e.stack || ''}`);
+    }
+
     // Step 7: Generate text
     log('running', '[7/7] Generating text...');
     setProgress(90);
     try {
+        // Probe a few prompts so we can spot whether outputs are sensible. For
+        // each, run a single prefill and log top-5.
+        for (const p of ["The", "The quick brown", "The capital of France is"]) {
+            inference.resetKVCache();
+            const tks = [tokenizer.bosId, ...tokenizer.encode(p)];
+            const lgts = await inference.forward(
+                new Int32Array(tks),
+                new Int32Array(tks.map((_, i) => i)),
+            );
+            const arr = Array.from(lgts).map((v, i) => [i, v]);
+            arr.sort((a, b) => b[1] - a[1]);
+            const top = arr.slice(0, 5).map(([id, v]) => {
+                const t = tokenizer.getToken(id);
+                return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
+            });
+            log('running', `  "<s> ${p}" → ${top.join(", ")}`);
+        }
+        inference.resetKVCache();
+
         const prompt = "Once upon a time";
-        const tokens = tokenizer.encode(prompt);
+        // Prepend BOS — base llama-family models are trained with it at position 0
+        const tokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
         const positions = tokens.map((_, i) => i);
         const hp = parsed.hyperparams;
 
@@ -220,8 +340,16 @@ async function loadAndTest() {
 
         log('running', `  prompt tokens: [${tokens}]`);
         log('running', `  first generated token: ${maxIdx} (logit=${maxVal.toFixed(4)})`);
-        log('running', `  logits range: min=${Math.min(...logits.slice(0,100)).toFixed(4)} max=${Math.max(...logits).toFixed(4)} non-zero=${logits.filter(v => v !== 0).length}`);
-        log('running', `  eosId: ${parsed.tokenizerConfig.eosTokenId}`);
+        // Top 10 predictions after the prompt
+        {
+            const arr = Array.from(logits).map((v, i) => [i, v]);
+            arr.sort((a, b) => b[1] - a[1]);
+            const top = arr.slice(0, 10).map(([id, v]) => {
+                const t = tokenizer.getToken(id);
+                return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
+            });
+            log('running', `  prefill top10: ${top.join(", ")}`);
+        }
         log('running', `  prompt decoded: "${tokenizer.decode(tokens)}"`);
 
         let generated = [maxIdx];
