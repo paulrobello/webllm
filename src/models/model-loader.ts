@@ -115,6 +115,7 @@ export class ModelLoader {
 			bosTokenId,
 			padTokenId: -1,
 			vocabSize: tokens.length,
+			chatTemplate: getMetaString(ctx, "tokenizer.chat_template", ""),
 		};
 	}
 
