@@ -12,7 +12,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 # Disable everything we don't need
 set(GGML_WEBGPU ON CACHE BOOL "" FORCE)
-set(GGML_WEBGPU_JSPI ON CACHE BOOL "" FORCE)
+set(GGML_WEBGPU_JSPI OFF CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 set(GGML_CPU OFF CACHE BOOL "" FORCE)
 set(GGML_BLAS OFF CACHE BOOL "" FORCE)
@@ -60,13 +60,14 @@ if(EMSCRIPTEN)
     )
     target_link_options(webllm-wasm PRIVATE
         "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
-        "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32']"
+        "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
         "-sMODULARIZE=1"
         "-sEXPORT_ES6=1"
         "-sUSE_ES6_IMPORT_META=1"
         "-sALLOW_MEMORY_GROWTH=1"
         "-sMAXIMUM_MEMORY=4GB"
         "-sENVIRONMENT='web'"
+        "-sASYNCIFY_STACK_SIZE=1048576"
         "-O3"
         "--emit-symbol-map"
     )

@@ -33,9 +33,10 @@ h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
 <div id="summary"></div>
 
 <script type="module">
-import {
+const assetSuffix = window.location.search || "";
+const {
     GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer
-} from "./webllm-bundle.js";
+} = await import(`./webllm-bundle.js${assetSuffix}`);
 
 const GGUF_MAGIC = 0x46554747;
 const GGUF_VERSION = 3;
@@ -114,14 +115,14 @@ function buildTinyGGUF() {
         const p = (s) => `blk.${i}.${s}`;
         weightTensors.push(
             [p("attn_norm.weight"), [t.embDim]],
-            [p("attn_q.weight"), [t.headCount * t.headDim, t.embDim]],
-            [p("attn_k.weight"), [t.headCountKv * t.headDim, t.embDim]],
-            [p("attn_v.weight"), [t.headCountKv * t.headDim, t.embDim]],
-            [p("attn_output.weight"), [t.embDim, t.headCount * t.headDim]],
+            [p("attn_q.weight"), [t.embDim, t.headCount * t.headDim]],
+            [p("attn_k.weight"), [t.embDim, t.headCountKv * t.headDim]],
+            [p("attn_v.weight"), [t.embDim, t.headCountKv * t.headDim]],
+            [p("attn_output.weight"), [t.headCount * t.headDim, t.embDim]],
             [p("ffn_norm.weight"), [t.embDim]],
-            [p("ffn_gate.weight"), [t.ffDim, t.embDim]],
-            [p("ffn_up.weight"), [t.ffDim, t.embDim]],
-            [p("ffn_down.weight"), [t.embDim, t.ffDim]],
+            [p("ffn_gate.weight"), [t.embDim, t.ffDim]],
+            [p("ffn_up.weight"), [t.embDim, t.ffDim]],
+            [p("ffn_down.weight"), [t.ffDim, t.embDim]],
         );
     }
 
@@ -213,6 +214,35 @@ const btn = document.getElementById('start-btn');
 
 let steps = [];
 let currentStep = 0;
+let runtimeErrors = [];
+
+const originalConsoleError = console.error.bind(console);
+console.error = (...args) => {
+    const text = args.map(arg => arg instanceof Error ? `${arg.message}\n${arg.stack || ''}` : String(arg)).join(' ');
+    runtimeErrors.push(text);
+    originalConsoleError(...args);
+};
+window.addEventListener('error', (event) => {
+    const text = event.error?.stack || event.message || 'Unknown window error';
+    runtimeErrors.push(text);
+});
+window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason;
+    const text = reason?.stack || reason?.message || String(reason);
+    runtimeErrors.push(text);
+});
+
+function relevantRuntimeErrors() {
+    return runtimeErrors.filter(msg => {
+        if (!msg) return false;
+        if (msg.includes('adapter_info:')) return false;
+        return true;
+    });
+}
+
+function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function addStep(name) {
     const el = document.createElement('div');
@@ -244,6 +274,7 @@ async function runSmokeTest() {
     summaryEl.innerHTML = '';
     steps = [];
     currentStep = 0;
+    runtimeErrors = [];
 
     // Step 0: Check WebGPU
     const s0 = addStep('Check WebGPU support');
@@ -293,7 +324,7 @@ async function runSmokeTest() {
     // Step 5: Initialize WebGPU backend
     const s5 = addStep('Initialize WebGPU backend via WASM');
     try {
-        await wasm.init({ wasmUrl: './webllm-wasm.js' });
+        await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
         setStep(s5, 'pass', 'Backend initialized');
     } catch (e) { setStep(s5, 'fail', e.message); return finish(false); }
 
@@ -302,14 +333,14 @@ async function runSmokeTest() {
     let inference;
     try {
         inference = new ModelInference(wasm, parsed.hyperparams);
-        inference.loadWeights(ggufCtx, ggufBuf);
+        await inference.loadWeights(ggufCtx, ggufBuf);
         setStep(s6, 'pass', `Weights loaded, tensor map: ${inference.constructor.name}`);
     } catch (e) { setStep(s6, 'fail', e.message + '\n' + (e.stack || '')); return finish(false); }
 
     // Step 7: Initialize KV cache
     const s7 = addStep('Initialize KV cache');
     try {
-        inference.initKVCache(parsed.kvCacheConfig.maxContextLength);
+        await inference.initKVCache(parsed.kvCacheConfig.maxContextLength);
         setStep(s7, 'pass', `KV cache: ${parsed.kvCacheConfig.maxContextLength} slots, ${parsed.hyperparams.layerCount} layers`);
     } catch (e) { setStep(s7, 'fail', e.message); return finish(false); }
 
@@ -329,7 +360,7 @@ async function runSmokeTest() {
         const tokenIds = new Int32Array([1, 3, 4]); // BOS + tok3 + tok4
         const positions = new Int32Array([0, 1, 2]);
         const t0 = performance.now();
-        logits = inference.forward(tokenIds, positions);
+        logits = await inference.forward(tokenIds, positions);
         const elapsed = performance.now() - t0;
         setStep(s9, 'pass', `Logits shape: [${logits.length}], cached: ${inference.cachedTokenCount}, ${elapsed.toFixed(1)}ms`);
     } catch (e) { setStep(s9, 'fail', e.message + '\n' + (e.stack || '')); return finish(false); }
@@ -340,7 +371,7 @@ async function runSmokeTest() {
         const tokenIds = new Int32Array([5]);
         const positions = new Int32Array([3]);
         const t0 = performance.now();
-        const logits2 = inference.forward(tokenIds, positions);
+        const logits2 = await inference.forward(tokenIds, positions);
         const elapsed = performance.now() - t0;
         setStep(s10, 'pass', `Logits shape: [${logits2.length}], cached: ${inference.cachedTokenCount}, ${elapsed.toFixed(1)}ms`);
     } catch (e) { setStep(s10, 'fail', e.message + '\n' + (e.stack || '')); return finish(false); }
@@ -356,13 +387,33 @@ async function runSmokeTest() {
         setStep(s11, 'pass', `Argmax: token ${maxIdx} (logit=${maxVal.toFixed(4)}) text="${tokenText}"`);
     } catch (e) { setStep(s11, 'fail', e.message); return finish(false); }
 
-    // Step 12: Cleanup
-    const s12 = addStep('Dispose resources');
+    // Step 12: Verify no runtime/backend errors were emitted before cleanup
+    const s12 = addStep('Verify no backend/runtime errors were emitted before cleanup');
+    await wait(100);
+    const preCleanupErrors = relevantRuntimeErrors();
+    if (preCleanupErrors.length > 0) {
+        setStep(s12, 'fail', preCleanupErrors.join('\n---\n'));
+        return finish(false);
+    }
+    setStep(s12, 'pass');
+
+    // Step 13: Cleanup
+    const s13 = addStep('Dispose resources');
     try {
-        inference.dispose();
+        await inference.dispose();
         await wasm.shutdown();
-        setStep(s12, 'pass', 'All GPU resources freed');
-    } catch (e) { setStep(s12, 'fail', e.message); return finish(false); }
+        setStep(s13, 'pass', 'All GPU resources freed');
+    } catch (e) { setStep(s13, 'fail', e.message); return finish(false); }
+
+    // Step 14: Verify no runtime/backend errors were emitted after cleanup
+    const s14 = addStep('Verify no backend/runtime errors were emitted after cleanup');
+    await wait(100);
+    const postCleanupErrors = relevantRuntimeErrors();
+    if (postCleanupErrors.length > 0) {
+        setStep(s14, 'fail', postCleanupErrors.join('\n---\n'));
+        return finish(false);
+    }
+    setStep(s14, 'pass');
 
     finish(true);
 }

@@ -56,7 +56,7 @@ wasm-build:
 	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
 	emcmake cmake .. \
 		-DGGML_WEBGPU=ON \
-		-DGGML_WEBGPU_JSPI=ON \
+		-DGGML_WEBGPU_JSPI=OFF \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DGGML_CPU=OFF \
 		-DGGML_BLAS=OFF \
