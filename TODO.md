@@ -3,7 +3,12 @@
 Baseline (pre-optimization): ~44 tok/s decode, ~130 ms prefill on TinyLlama 1.1B
 Q4_0 via Emscripten WebGPU in-browser.
 
-**Current: ~58 tok/s decode (+33%), ~125 ms prefill** after items 2 and 3.
+**Current: ~58 tok/s decode (+33%), ~125 ms prefill** after items 2, 3, and 5.
+
+Per-step decode is ~17.5 ms, which matches what `ggml_backend_webgpu_graph_compute`
+can achieve in the browser for this graph size. Further decode speedup likely
+requires either graph reuse (item 1) to cut JS/WASM rebuild overhead, or
+flash attention (item 4) to cut the per-step GPU work at longer contexts.
 
 Items in rough order of expected impact. Each entry explains the idea, where
 the code lives today, the expected win, and the risk/tradeoff.
@@ -12,7 +17,7 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ## High impact
 
-### 1. Decode graph reuse
+### 1. Decode graph reuse (deferred)
 - **Where**: `src/inference/model-inference.ts::forward()`
 - **Today**: every call to `forward()` calls `ctxCreate`, builds the full
   ~440-op graph, calls `backendAllocCtxTensors`, uploads leaf inputs, runs
@@ -20,16 +25,20 @@ the code lives today, the expected win, and the risk/tradeoff.
   shape is identical across steps.
 - **Change**: cache the graph for `nTokens=1` decode. Only update:
   - leaf inputs (`posTensor`, `tokenIdsTensor`, mask row for current position)
-  - the K/V cache offsets (these are encoded into the graph nodes today via
-    `pastLen * kNb1` constants, so this needs either graph reuse with
-    runtime offset, or re-binding the view offsets without a full rebuild)
+  - the K/V cache offsets (encoded into the graph nodes via `pastLen * kNb1`
+    constants, so this needs either graph reuse with runtime offset or
+    rebuilding just the KV views each step)
 - **Expected**: 2–5× decode throughput. The JS-side graph construction +
-  WASM asyncify round trip is currently the dominant per-step CPU cost.
+  WASM asyncify round trip is currently a meaningful chunk of per-step cost.
 - **Risk**: the ggml graph stores absolute offsets inside view tensors.
-  Reusing the graph requires re-running `ggml_view_3d` with new offset
-  each step without recomputing downstream topology. Likely easiest to
-  cache two graphs (prefill and decode) and use a "token slot" buffer
-  that's rotated each step so offsets are stable.
+  Reusing the graph requires either:
+  - Adding a C-side helper that mutates view tensor offsets in place, or
+  - Refactoring KV cache layout so writes always go to a fixed slot and the
+    "real" position is a permutation applied separately, or
+  - Pre-building graphs for every possible past-length (memory hungry)
+- **Status**: deferred. Big structural change relative to its current
+  expected win at 17.5 ms/step. Revisit if we can measure that graph
+  building (not GPU compute) is actually the bottleneck.
 
 ### 2. Re-enable batched compute passes in the WebGPU backend ✅ DONE
 - **Where**: `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`
