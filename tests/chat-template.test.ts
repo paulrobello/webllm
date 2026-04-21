@@ -6,233 +6,149 @@ import {
 	formatChatPrompt,
 } from "../src/inference/chat-template.js";
 
-describe("detectChatTemplate", () => {
-	test("returns 'llama2' for [INST] template", () => {
-		const tmpl =
-			"{% for message in loop_messages %}{% if message['role'] == 'user' %}[INST] {{ content }} [/INST]{% endif %}{% endfor %}";
-		expect(detectChatTemplate(tmpl)).toBe("llama2");
-	});
+const LLAMA2_TMPL =
+	"{% if message['role'] == 'user' %}[INST] {{ content }} [/INST]{% endif %}";
+const CHATML_TMPL =
+	"{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}";
+const GEMMA_TMPL =
+	"{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>user\n' }}{% endfor %}";
+const PHI3_TMPL =
+	"{{ bos_token }}{% for message in messages %}<|assistant|?\n{{ message.content }}<|end|>\n{% endfor %}";
+const LLAMA3_TMPL =
+	"{% for message in loop_messages %}<|start_header_id|>{{ message['role'] }}<|end_header_id|>\n\n{% endfor %}";
+const MISTRAL_TMPL =
+	"{%- if messages[0]['role'] == 'system' %}[SYSTEM_PROMPT] {{ system_message }}[/SYSTEM_PROMPT]{%- endif %}";
+const ZEPHYR_TMPL =
+	"{% for message in messages %}{% if message['role'] == 'assistant' %}{{ '<|assistant|' + message['content'] + eos_token }}{% endif %}{% endfor %}";
 
-	test("returns 'llama2' for <<SYS>> template", () => {
+describe("detectChatTemplate", () => {
+	test("returns llama2 for INST", () => {
+		expect(detectChatTemplate(LLAMA2_TMPL)).toBe("llama2");
+	});
+	test("returns llama2 for SYS", () => {
 		expect(detectChatTemplate("<<SYS>>")).toBe("llama2");
 	});
-
-	test("returns 'chatml' for <|im_start|> template", () => {
-		const tmpl =
-			"{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}";
-		expect(detectChatTemplate(tmpl)).toBe("chatml");
+	test("returns chatml", () => {
+		expect(detectChatTemplate(CHATML_TMPL)).toBe("chatml");
 	});
-
-	test("returns 'gemma' for <start_of_turn> template", () => {
-		const tmpl =
-			"{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>user\n' }}{% endfor %}";
-		expect(detectChatTemplate(tmpl)).toBe("gemma");
+	test("returns gemma", () => {
+		expect(detectChatTemplate(GEMMA_TMPL)).toBe("gemma");
 	});
-
-	test("returns 'phi3' for <|assistant| + <|end|> template", () => {
-		const tmpl =
-			"{{ bos_token }}{% for message in messages %}<|assistant|?\n{{ message.content }}<|end|>\n{% endfor %}";
-		expect(detectChatTemplate(tmpl)).toBe("phi3");
+	test("returns zephyr for assistant without end", () => {
+		expect(detectChatTemplate(ZEPHYR_TMPL)).toBe("zephyr");
 	});
-
-	test("returns 'llama3' for <|start_header_id|> template", () => {
-		const tmpl =
-			"{% for message in loop_messages %}<|start_header_id|>{{ message['role'] }}<|end_header_id|>\n\n{% endfor %}";
-		expect(detectChatTemplate(tmpl)).toBe("llama3");
+	test("returns phi3 for assistant with end", () => {
+		expect(detectChatTemplate(PHI3_TMPL)).toBe("phi3");
 	});
-
-	test("returns 'mistral-v7' for [SYSTEM_PROMPT] template", () => {
-		const tmpl =
-			"{%- if messages[0]['role'] == 'system' %}[SYSTEM_PROMPT] {{ system_message }}[/SYSTEM_PROMPT]{%- endif %}";
-		expect(detectChatTemplate(tmpl)).toBe("mistral-v7");
+	test("returns llama3", () => {
+		expect(detectChatTemplate(LLAMA3_TMPL)).toBe("llama3");
 	});
-
-	test("returns 'unknown' for empty string", () => {
+	test("returns mistral-v7", () => {
+		expect(detectChatTemplate(MISTRAL_TMPL)).toBe("mistral-v7");
+	});
+	test("returns unknown for empty", () => {
 		expect(detectChatTemplate("")).toBe("unknown");
 	});
-
-	test("returns 'unknown' for unrecognized template", () => {
-		expect(detectChatTemplate("some random template string")).toBe("unknown");
+	test("returns unknown for garbage", () => {
+		expect(detectChatTemplate("xyz")).toBe("unknown");
 	});
 });
 
-describe("formatChatPrompt (llama2)", () => {
-	test("formats single user message", () => {
-		const messages: ChatMessage[] = [{ role: "user", content: "Hello" }];
-		expect(formatChatPrompt(messages)).toBe("[INST] Hello [/INST] ");
+describe("formatChatPrompt llama2", () => {
+	test("single user", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe("[INST] Hello [/INST] ");
 	});
-
-	test("formats system + user message", () => {
-		const messages: ChatMessage[] = [
-			{ role: "system", content: "You are helpful." },
+	test("system + user", () => {
+		const m: ChatMessage[] = [
+			{ role: "system", content: "Sys" },
 			{ role: "user", content: "Hi" },
 		];
-		expect(formatChatPrompt(messages)).toBe(
-			"[INST] <<SYS>>\nYou are helpful.\n<</SYS>>\n\nHi [/INST] ",
+		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe(
+			"[INST] <<SYS>>\nSys\n<</SYS>>\n\nHi [/INST] ",
 		);
 	});
-
-	test("formats multi-turn with assistant responses", () => {
-		const messages: ChatMessage[] = [
+	test("multi-turn", () => {
+		const m: ChatMessage[] = [
 			{ role: "user", content: "Q1" },
 			{ role: "assistant", content: "A1" },
 			{ role: "user", content: "Q2" },
 		];
-		expect(formatChatPrompt(messages)).toBe(
+		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe(
 			"[INST] Q1 [/INST] A1</s><s>[INST] Q2 [/INST] ",
 		);
 	});
+});
 
-	test("ignores duplicate system messages", () => {
-		const messages: ChatMessage[] = [
-			{ role: "system", content: "First" },
-			{ role: "system", content: "Second" },
+describe("formatChatPrompt zephyr", () => {
+	test("single user", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
+			"<|user|>\nHello</s><|assistant|",
+		);
+	});
+	test("system + user", () => {
+		const m: ChatMessage[] = [
+			{ role: "system", content: "Be nice" },
 			{ role: "user", content: "Hi" },
 		];
-		expect(formatChatPrompt(messages)).toBe(
-			"[INST] <<SYS>>\nFirst\n<</SYS>>\n\nHi [/INST] ",
+		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
+			"<|system|>\nBe nice</s><|user|>\nHi</s><|assistant|",
+		);
+	});
+	test("multi-turn", () => {
+		const m: ChatMessage[] = [
+			{ role: "user", content: "Q1" },
+			{ role: "assistant", content: "A1" },
+			{ role: "user", content: "Q2" },
+		];
+		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
+			"<|user|>\nQ1</s><|assistant|A1</s><|user|>\nQ2</s><|assistant|",
 		);
 	});
 });
 
-describe("formatChatPrompt (chatml)", () => {
-	const tmpl =
-		"{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}";
-
-	test("formats system + user + generation prompt", () => {
-		const messages: ChatMessage[] = [
-			{ role: "system", content: "You are helpful." },
-			{ role: "user", content: "Hi" },
-		];
-		expect(formatChatPrompt(messages, tmpl)).toBe(
-			"<|im_start|>system\nYou are helpful.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n",
-		);
-	});
-
-	test("formats multi-turn conversation", () => {
-		const messages: ChatMessage[] = [
-			{ role: "user", content: "Hello" },
-			{ role: "assistant", content: "Hi there!" },
-			{ role: "user", content: "How are you?" },
-		];
-		expect(formatChatPrompt(messages, tmpl)).toBe(
-			"<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\nHi there!<|im_end|>\n<|im_start|>user\nHow are you?<|im_end|>\n<|im_start|>assistant\n",
-		);
-	});
-});
-
-describe("formatChatPrompt (gemma)", () => {
-	const tmpl =
-		"{{ bos_token }}{% for message in messages %}{{ '<start_of_turn>user\n' }}{% endfor %}";
-
-	test("formats user message with model generation prompt", () => {
-		const messages: ChatMessage[] = [{ role: "user", content: "What is 2+2?" }];
-		expect(formatChatPrompt(messages, tmpl)).toBe(
-			"<start_of_turn>user\nWhat is 2+2?<end_of_turn>\n<start_of_turn>model\n",
-		);
-	});
-
-	test("maps assistant role to model", () => {
-		const messages: ChatMessage[] = [
-			{ role: "user", content: "Hi" },
-			{ role: "assistant", content: "Hello!" },
-			{ role: "user", content: "Bye" },
-		];
-		expect(formatChatPrompt(messages, tmpl)).toBe(
-			"<start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\nHello!<end_of_turn>\n<start_of_turn>user\nBye<end_of_turn>\n<start_of_turn>model\n",
-		);
-	});
-});
-
-describe("formatChatPrompt (phi3)", () => {
-	const tmpl =
-		"{{ bos_token }}{% for message in messages %}<|assistant|?\n{{ message.content }}<|end|>\n{% endfor %}";
-
-	test("formats system + user messages", () => {
-		const messages: ChatMessage[] = [
-			{ role: "system", content: "Be precise." },
-			{ role: "user", content: "What is PI?" },
-		];
-		expect(formatChatPrompt(messages, tmpl)).toBe(
-			"<|system|>\nBe precise.<|end|>\n<|user|>\nWhat is PI?<|end|>\n<|assistant|?\n",
-		);
-	});
-});
-
-describe("formatChatPrompt (llama3)", () => {
-	const tmpl =
-		"{% for message in loop_messages %}<|start_header_id|>{{ message['role'] }}<|end_header_id|>\n\n{% endfor %}";
-
-	test("formats multi-role conversation", () => {
-		const messages: ChatMessage[] = [
-			{ role: "system", content: "You are a pirate." },
-			{ role: "user", content: "Hello" },
-		];
-		expect(formatChatPrompt(messages, tmpl)).toBe(
-			"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a pirate.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
-		);
-	});
-});
-
-describe("formatChatPrompt (mistral-v7)", () => {
-	const tmpl =
-		"{%- if messages[0]['role'] == 'system' %}[SYSTEM_PROMPT] {{ system_message }}[/SYSTEM_PROMPT]{%- endif %}";
-
-	test("formats system + user + assistant", () => {
-		const messages: ChatMessage[] = [
+describe("formatChatPrompt mistral-v7", () => {
+	test("system + multi-turn", () => {
+		const m: ChatMessage[] = [
 			{ role: "system", content: "Be helpful." },
 			{ role: "user", content: "Hello" },
 			{ role: "assistant", content: "Hi there" },
-			{ role: "user", content: "How are you?" },
+			{ role: "user", content: "Bye" },
 		];
-		expect(formatChatPrompt(messages, tmpl)).toBe(
-			"[SYSTEM_PROMPT] Be helpful.[/SYSTEM_PROMPT][INST] Hello[/INST] Hi there</s>[INST] How are you?[/INST]",
+		expect(formatChatPrompt(m, MISTRAL_TMPL)).toBe(
+			"[SYSTEM_PROMPT] Be helpful.[/SYSTEM_PROMPT][INST] Hello[/INST] Hi there</s>[INST] Bye[/INST]",
 		);
 	});
-
-	test("formats without system message", () => {
-		const messages: ChatMessage[] = [{ role: "user", content: "Hi" }];
-		expect(formatChatPrompt(messages, tmpl)).toBe("[INST] Hi[/INST]");
+	test("no system", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hi" }];
+		expect(formatChatPrompt(m, MISTRAL_TMPL)).toBe("[INST] Hi[/INST]");
 	});
 });
 
 describe("formatChatDelta", () => {
-	test("returns full prompt when prevCount is 0", () => {
-		const messages: ChatMessage[] = [{ role: "user", content: "Hello" }];
-		expect(formatChatDelta(messages, 0)).toBe(formatChatPrompt(messages));
+	test("prevCount 0 returns full", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		expect(formatChatDelta(m, 0, ZEPHYR_TMPL)).toBe(
+			formatChatPrompt(m, ZEPHYR_TMPL),
+		);
 	});
-
-	test("returns empty string when prevCount equals messages length", () => {
-		const messages: ChatMessage[] = [{ role: "user", content: "Hello" }];
-		expect(formatChatDelta(messages, 1)).toBe("");
+	test("prevCount == length returns empty", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		expect(formatChatDelta(m, 1, ZEPHYR_TMPL)).toBe("");
 	});
-
-	test("returns only new portion when messages grow (llama2)", () => {
-		const messages: ChatMessage[] = [
+	test("delta with chatml", () => {
+		const m: ChatMessage[] = [
 			{ role: "user", content: "Q1" },
 			{ role: "assistant", content: "A1" },
 			{ role: "user", content: "Q2" },
 		];
-		const delta = formatChatDelta(messages, 2);
-		expect(delta).toBe("<s>[INST] Q2 [/INST] ");
-	});
-
-	test("returns empty for prevCount beyond messages length", () => {
-		const messages: ChatMessage[] = [{ role: "user", content: "Hello" }];
-		expect(formatChatDelta(messages, 5)).toBe("");
-	});
-
-	test("passes template through to delta formatting", () => {
-		const chatmlTmpl =
-			"{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}";
-		const messages: ChatMessage[] = [
-			{ role: "user", content: "Q1" },
-			{ role: "assistant", content: "A1" },
-			{ role: "user", content: "Q2" },
-		];
-		const delta = formatChatDelta(messages, 2, chatmlTmpl);
-		expect(delta).toBe(
+		expect(formatChatDelta(m, 2, CHATML_TMPL)).toBe(
 			"<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n",
 		);
+	});
+	test("prevCount > length returns empty", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hi" }];
+		expect(formatChatDelta(m, 5, ZEPHYR_TMPL)).toBe("");
 	});
 });

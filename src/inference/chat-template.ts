@@ -7,6 +7,7 @@ export type ChatTemplateType =
 	| "phi3"
 	| "llama3"
 	| "mistral-v7"
+	| "zephyr"
 	| "unknown";
 
 /**
@@ -18,6 +19,8 @@ export function detectChatTemplate(template: string): ChatTemplateType {
 	if (template.includes("<|im_start|>")) return "chatml";
 	if (template.includes("[SYSTEM_PROMPT]")) return "mistral-v7";
 	if (template.includes("<start_of_turn>")) return "gemma";
+	if (template.includes("<|assistant|") && !template.includes("<|end|>"))
+		return "zephyr";
 	if (template.includes("<|assistant|") && template.includes("<|end|>"))
 		return "phi3";
 	if (template.includes("<|start_header_id|>")) return "llama3";
@@ -42,7 +45,6 @@ function formatLlama2(
 				systemContent = msg.content;
 				hasSystem = true;
 			}
-			// Skip duplicate system messages entirely
 		} else {
 			turns.push(msg);
 		}
@@ -149,6 +151,33 @@ function formatMistralV7(
 	return prompt;
 }
 
+/**
+ * Zephyr format (used by TinyLlama-Chat, HuggingFaceH4/zephyr, etc.)
+ *
+ * Uses pipe-delimited role markers:
+ *   <|system|>\n{content}</s>
+ *   <|user|>\n{content}</s>
+ *   <|assistant|{content}</s>
+ * Generation prompt: <|assistant|   (no newline)
+ */
+function formatZephyr(
+	messages: ChatMessage[],
+	addGenerationPrompt: boolean,
+): string {
+	let prompt = "";
+	for (const msg of messages) {
+		if (msg.role === "assistant") {
+			prompt += `<|assistant|${msg.content}</s>`;
+		} else {
+			prompt += `<|${msg.role}|>\n${msg.content}</s>`;
+		}
+	}
+	if (addGenerationPrompt) {
+		prompt += "<|assistant|";
+	}
+	return prompt;
+}
+
 const FORMATTERS: Record<
 	ChatTemplateType,
 	(messages: ChatMessage[], addGenerationPrompt: boolean) => string
@@ -159,12 +188,13 @@ const FORMATTERS: Record<
 	phi3: formatPhi3,
 	llama3: formatLlama3,
 	"mistral-v7": formatMistralV7,
-	unknown: formatLlama2, // fallback to llama2
+	zephyr: formatZephyr,
+	unknown: formatZephyr, // fallback — most common for small models
 };
 
 /**
  * Format messages into a prompt string using the detected template type.
- * Falls back to llama2 format when the template is unknown or empty.
+ * Falls back to zephyr format when the template is unknown or empty.
  */
 export function formatChatPrompt(
 	messages: ChatMessage[],
@@ -183,7 +213,7 @@ export function formatChatDelta(
 	if (prevCount <= 0) return formatChatPrompt(messages, template);
 	if (prevCount >= messages.length) return "";
 	const tmpl = detectChatTemplate(template ?? "");
-	const formatter = FORMATTERS[tmpl] ?? FORMATTERS.llama2;
+	const formatter = FORMATTERS[tmpl] ?? FORMATTERS.zephyr;
 	const full = formatter(messages, true);
 	const prev = formatter(messages.slice(0, prevCount), false);
 	return full.slice(prev.length);
