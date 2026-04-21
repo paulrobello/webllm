@@ -366,6 +366,22 @@ export class GgmlWasm {
 		return this.m._op_soft_max(x);
 	}
 
+	/**
+	 * Fused scale + mask + softmax.
+	 * @param mask - F32 tensor [ne0, ne1] broadcast over higher dims. 0 = visible,
+	 *               -Infinity = masked. Pass 0 for no mask.
+	 * @param scale - Multiplier applied to x before softmax.
+	 * @param maxBias - ALiBi max bias. Pass 0 for standard causal attention.
+	 */
+	opSoftMaxExt(
+		x: TensorPtr,
+		mask: TensorPtr,
+		scale: number,
+		maxBias: number,
+	): TensorPtr {
+		return this.m._op_soft_max_ext(x, mask, scale, maxBias);
+	}
+
 	opScale(x: TensorPtr, s: number): TensorPtr {
 		return this.m._op_scale(x, s);
 	}

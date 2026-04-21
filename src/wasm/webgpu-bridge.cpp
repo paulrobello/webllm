@@ -185,6 +185,11 @@ void* op_soft_max(void* x) {
     return ggml_soft_max(current_ctx(), (struct ggml_tensor*)x);
 }
 
+void* op_soft_max_ext(void* x, void* mask, float scale, float max_bias) {
+    return ggml_soft_max_ext(current_ctx(), (struct ggml_tensor*)x,
+                             (struct ggml_tensor*)mask, scale, max_bias);
+}
+
 void* op_scale(void* x, float s) {
     return ggml_scale(current_ctx(), (struct ggml_tensor*)x, s);
 }

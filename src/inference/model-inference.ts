@@ -172,6 +172,13 @@ export class ModelInference {
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 
+		// Causal attention mask tensor: [totalLen, nTokens]. Values are 0 for
+		// visible positions and -Infinity for masked. ggml_soft_max_ext consumes
+		// this alongside the pre-scale multiplier.
+		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
+		const maskPaddedCols = padTo(nTokens, 32);
+		const maskTensor = wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols);
+
 		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 
@@ -289,9 +296,14 @@ export class ModelInference {
 
 			// QK^T: K=[headDim, totalLen, nKvHeads], Q=[headDim, nTokens, nHeads] -> [totalLen, nTokens, nHeads]
 			const qk = wasm.opMulMat(fullK, qp);
-			const qkScaled = wasm.opScale(qk, 1.0 / Math.sqrt(headDim));
-			const qkMasked = wasm.opDiagMaskInf(qkScaled, pastLen);
-			const attnW = wasm.opSoftMax(qkMasked);
+			// Fused scale + causal mask + softmax via ggml_soft_max_ext — same
+			// op llama.cpp uses. Replaces a buggy custom diag_mask_inf shader.
+			const attnW = wasm.opSoftMaxExt(
+				qk,
+				maskTensor,
+				1.0 / Math.sqrt(headDim),
+				0.0,
+			);
 
 			// V * attn: V=[totalLen, headDim, nKvHeads], attn=[totalLen, nTokens, nHeads] -> [headDim, nTokens, nHeads]
 			const attnOut = wasm.opMulMat(fullV, attnW);
@@ -346,6 +358,36 @@ export class ModelInference {
 			} finally {
 				wasm.stackRestore(sp);
 			}
+
+			// Causal mask: mask[key, query] = -Infinity if key > pastLen + query,
+			// else 0. Shape [totalLen, nTokensPadded] stored row-major (ne[0] =
+			// totalLen = key dim, ne[1] = query dim).
+			const maskBytes = totalLen * maskPaddedCols * 4;
+			const maskHeap = wasm.malloc(maskBytes);
+			try {
+				const mask = new Float32Array(
+					wasm.heapU8.buffer,
+					maskHeap,
+					totalLen * maskPaddedCols,
+				);
+				const NEG_INF = -Infinity;
+				for (let q = 0; q < nTokens; q++) {
+					const rowBase = q * totalLen;
+					const visibleUpTo = pastLen + q;
+					for (let k = 0; k < totalLen; k++) {
+						mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+					}
+				}
+				// Padding rows past nTokens: fill with 0 (unused, but keeps the
+				// buffer fully defined).
+				for (let q = nTokens; q < maskPaddedCols; q++) {
+					const rowBase = q * totalLen;
+					for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
+				}
+				wasm.backendTensorSet(maskTensor, maskHeap, 0, maskBytes);
+			} finally {
+				wasm.free(maskHeap);
+			}
 		}
 
 		// KV cache writes are already expanded into the graph per layer (above),
@@ -374,6 +416,33 @@ export class ModelInference {
 		return result;
 	}
 
+	// ── Debug tooling ────────────────────────────────────────────────────
+	//
+	// These helpers sidestep the normal forward() path to read intermediate
+	// tensors directly from the GPU. They exist because the inference pipeline
+	// has a long, subtle chain of ops where any one broken step poisons every
+	// subsequent prediction, and it's very hard to tell from the final logits
+	// alone which step broke. Keep them around — the next bug will need them too.
+	//
+	// Usage from the browser console (see `smoke-test/real-model.html` for the
+	// scaffolding that exposes `window.inference` / `window.tokenizer`):
+	//
+	//   // Raw dequantized embedding row for a token
+	//   const x = await window.inference.debugReadEmbeddingRow(1);  // BOS
+	//
+	//   // K / V cache contents after a forward pass (use a probe prefill first)
+	//   window.inference.resetKVCache();
+	//   await window.inference.forward(new Int32Array([22172]), new Int32Array([0]));
+	//   const k = await window.inference.debugReadKCache(0, 64*4, 0);
+	//   const v = await window.inference.debugReadVCache(0, 64*4, 0);
+	//
+	//   // First N floats of any F32 norm weight after loadWeights()
+	//   const g = await window.inference.debugReadNormWeight("attn0", 8);
+	//
+	//   // Fully run the transformer up through layer L for a single token
+	//   // and return the hidden state. Great for "where does it diverge?".
+	//   const h = await window.inference.debugLayerOutput(1, /* layerIdx= */ 0);
+
 	/** DEBUG: read back a slice of kv.k for a given layer. */
 	async debugReadKCache(
 		layerIdx: number,
@@ -396,6 +465,228 @@ export class ModelInference {
 		const tensor = this.kvLayers[layerIdx].v;
 		const bytes = await this.wasm.downloadFromTensor(tensor, nBytes, offset);
 		return new Float32Array(bytes.buffer, bytes.byteOffset, nBytes / 4);
+	}
+
+	/**
+	 * DEBUG: run a single layer of the transformer and return the final `cur`
+	 * tensor for a single token. For sanity checking whether attention /
+	 * FFN / residual are producing reasonable magnitudes.
+	 */
+	async debugLayerOutput(
+		tokenId: number,
+		layerIdx: number,
+	): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		const { wasm, hp, weights } = this;
+		const nbytes = hp.embeddingLength * 4;
+
+		wasm.ctxCreate(16 * 1024 * 1024);
+		try {
+			const posTensor = wasm.tensorNew1d(GgmlType.I32, 1);
+			const idsTensor = wasm.tensorNew1d(GgmlType.I32, 1);
+			const maskTensor = wasm.tensorNew2d(GgmlType.F32, 1, 32);
+
+			let cur = wasm.opGetRows(weights.tokEmb, idsTensor);
+			const graph = wasm.graphNew(2048);
+
+			for (let il = 0; il <= layerIdx; il++) {
+				const lw = weights.layers[il];
+				const kv = this.kvLayers[il];
+				const normed = wasm.opMul(
+					wasm.opRmsNorm(cur, hp.normEpsilon),
+					lw.attnNorm,
+				);
+				const q = wasm.opMulMat(lw.qProj, normed);
+				const k = wasm.opMulMat(lw.kProj, normed);
+				const v = wasm.opMulMat(lw.vProj, normed);
+				const q3 = wasm.opReshape3d(q, hp.embeddingHeadLength, hp.headCount, 1);
+				const k3 = wasm.opReshape3d(
+					k,
+					hp.embeddingHeadLength,
+					hp.headCountKv,
+					1,
+				);
+				const v3 = wasm.opReshape3d(
+					v,
+					hp.embeddingHeadLength,
+					hp.headCountKv,
+					1,
+				);
+				const qRope = wasm.opRope(
+					q3,
+					posTensor,
+					hp.embeddingHeadLength,
+					RopeMode.NORMAL,
+					hp.contextLength,
+					hp.ropeFreqBase,
+					hp.ropeScale,
+					0,
+					1,
+					0,
+					0,
+				);
+				const kRope = wasm.opRope(
+					k3,
+					posTensor,
+					hp.embeddingHeadLength,
+					RopeMode.NORMAL,
+					hp.contextLength,
+					hp.ropeFreqBase,
+					hp.ropeScale,
+					0,
+					1,
+					0,
+					0,
+				);
+				const kNb1 = wasm.tensorNb(kv.k, 1);
+				const kNb2 = wasm.tensorNb(kv.k, 2);
+				const kWriteView = wasm.opView3d(
+					kv.k,
+					hp.embeddingHeadLength,
+					1,
+					hp.headCountKv,
+					kNb1,
+					kNb2,
+					0,
+				);
+				const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
+				wasm.graphBuildForwardExpand(
+					graph,
+					wasm.opCpy(wasm.opCont(kRopeP), kWriteView),
+				);
+				const vNb0 = wasm.tensorNb(kv.v, 0);
+				const vNb1 = wasm.tensorNb(kv.v, 1);
+				const vNb2 = wasm.tensorNb(kv.v, 2);
+				const v3P = wasm.opPermute(v3, 2, 0, 1, 3);
+				const vWriteView = wasm.opView3d(
+					kv.v,
+					1,
+					hp.embeddingHeadLength,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					0,
+				);
+				wasm.graphBuildForwardExpand(
+					graph,
+					wasm.opCpy(wasm.opCont(v3P), vWriteView),
+				);
+				const fullK = wasm.opView3d(
+					kv.k,
+					hp.embeddingHeadLength,
+					1,
+					hp.headCountKv,
+					kNb1,
+					kNb2,
+					0,
+				);
+				const fullV = wasm.opView3d(
+					kv.v,
+					1,
+					hp.embeddingHeadLength,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					0,
+				);
+				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+				const qk = wasm.opMulMat(fullK, qp);
+				const attnW = wasm.opSoftMaxExt(
+					qk,
+					maskTensor,
+					1 / Math.sqrt(hp.embeddingHeadLength),
+					0,
+				);
+				const attnOut = wasm.opMulMat(fullV, attnW);
+				const merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					hp.headCount * hp.embeddingHeadLength,
+					1,
+				);
+				const oProj = wasm.opMulMat(lw.oProj, merged);
+				const attnResidual = wasm.opAdd(oProj, cur);
+				const ffnNormed = wasm.opMul(
+					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+					lw.ffnNorm,
+				);
+				const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
+				const up = wasm.opMulMat(lw.upProj, ffnNormed);
+				const ffnHidden = wasm.opMul(wasm.opSilu(gate), up);
+				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+				cur = wasm.opAdd(ffnOut, attnResidual);
+				// Reset vNb0 to silence lint
+				void vNb0;
+			}
+
+			wasm.graphBuildForwardExpand(graph, cur);
+			const graphBuf = wasm.backendAllocCtxTensors();
+
+			// Upload inputs
+			const sp = wasm.stackSave();
+			try {
+				const posPtr = wasm.stackAlloc(4);
+				new Int32Array(wasm.heapU8.buffer, posPtr, 1)[0] = 0;
+				wasm.backendTensorSet(posTensor, posPtr, 0, 4);
+				const idsPtr = wasm.stackAlloc(4);
+				new Int32Array(wasm.heapU8.buffer, idsPtr, 1)[0] = tokenId;
+				wasm.backendTensorSet(idsTensor, idsPtr, 0, 4);
+			} finally {
+				wasm.stackRestore(sp);
+			}
+			const maskHeap = wasm.malloc(32 * 4);
+			try {
+				new Float32Array(wasm.heapU8.buffer, maskHeap, 32).fill(0);
+				wasm.backendTensorSet(maskTensor, maskHeap, 0, 32 * 4);
+			} finally {
+				wasm.free(maskHeap);
+			}
+			await wasm.graphCompute(graph);
+
+			const bytes = await wasm.downloadFromTensor(cur, nbytes, 0);
+			wasm.backendBufferFree(graphBuf);
+			return new Float32Array(bytes.buffer, bytes.byteOffset, nbytes / 4);
+		} finally {
+			wasm.ctxFree();
+		}
+	}
+
+	/**
+	 * DEBUG: dequantize and return the embedding row for a single token by
+	 * running a one-op graph: `opGetRows(tokEmb, [tokenId])`. Requires
+	 * `initKVCache` to have been called first (needs a ctx on the stack).
+	 */
+	async debugReadEmbeddingRow(tokenId: number): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		const { wasm, hp, weights } = this;
+		const nbytes = hp.embeddingLength * 4;
+
+		wasm.ctxCreate(64 * 1024);
+		try {
+			const idsTensor = wasm.tensorNew1d(GgmlType.I32, 1);
+			const out = wasm.opGetRows(weights.tokEmb, idsTensor);
+			const graph = wasm.graphNew(8);
+			wasm.graphBuildForwardExpand(graph, out);
+			const graphBuf = wasm.backendAllocCtxTensors();
+
+			// Upload the token id.
+			const sp = wasm.stackSave();
+			try {
+				const ptr = wasm.stackAlloc(4);
+				new Int32Array(wasm.heapU8.buffer, ptr, 1)[0] = tokenId;
+				wasm.backendTensorSet(idsTensor, ptr, 0, 4);
+			} finally {
+				wasm.stackRestore(sp);
+			}
+
+			await wasm.graphCompute(graph);
+
+			const bytes = await wasm.downloadFromTensor(out, nbytes, 0);
+			wasm.backendBufferFree(graphBuf);
+			return new Float32Array(bytes.buffer, bytes.byteOffset, nbytes / 4);
+		} finally {
+			wasm.ctxFree();
+		}
 	}
 
 	/** DEBUG: read back first N floats of an F32 norm weight. */

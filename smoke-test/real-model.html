@@ -176,6 +176,10 @@ async function loadAndTest() {
         tokenizer = new Tokenizer(parsed.tokenizerConfig);
         const testEncode = tokenizer.encode("hello");
         log('pass', `[6/7] Tokenizer ready: vocab=${tokenizer.vocabSize}, encode("hello")=[${testEncode}]`);
+        // Expose for console probing
+        window.inference = inference;
+        window.tokenizer = tokenizer;
+        window.parsedModel = parsed;
     } catch (e) {
         log('fail', `[6/7] Tokenizer failed: ${e.message}\n${e.stack || ''}`);
         return;
@@ -304,13 +308,10 @@ async function loadAndTest() {
         }
         inference.resetKVCache();
 
-        // TinyLlama-1.1B-Chat-v1.0 uses the Zephyr-style chat template.
-        // Wrap the user prompt so the chat-tuned model sees what it expects.
-        const userMessage = "Once upon a time, there was a small dragon. Continue the story in 2-3 sentences.";
-        const prompt =
-            "<|system|>\nYou are a helpful assistant.</s>\n" +
-            `<|user|>\n${userMessage}</s>\n` +
-            "<|assistant|>\n";
+        // Simplest possible test: raw prompt + greedy, to see if the pipeline
+        // can produce a coherent continuation at all.
+        const userMessage = "The capital of France is";
+        const prompt = userMessage;
         const tokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
         const positions = tokens.map((_, i) => i);
 
@@ -333,17 +334,12 @@ async function loadAndTest() {
             log('running', `  prefill top10: ${top.join(", ")}`);
         }
 
-        // Sampler: temperature + top-k + top-p + repetition penalty.
-        const sampler = new Sampler({
-            temperature: 0.8,
-            topK: 40,
-            topP: 0.95,
-            repetitionPenalty: 1.15,
-            seed: 42,
-        });
+        // Greedy sampler — no randomness, just argmax. This eliminates sampling
+        // as a variable when diagnosing pipeline output.
+        const sampler = new Sampler({ temperature: 0 });
 
         const eosId = parsed.tokenizerConfig.eosTokenId;
-        const maxGen = 120;
+        const maxGen = 30;
         const generated = [];
         const recent = [...tokens];
 

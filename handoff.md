@@ -1,135 +1,152 @@
 # Handoff: WebLLM Real Model Inference
 
 > **Date:** 2026-04-21
-> **Status:** End-to-end inference working. TinyLlama 1.1B Q4_0 forward pass produces
->            calibrated logits; KV cache is written, retrieved, and used by attention;
->            causal mask is applied correctly per head; RMSNorm gains are applied.
->            Model generates valid English words.
+> **Status:** Inference pipeline produces non-zero logits with working KV cache and
+>            attention that depends on history, but predictions are systematically
+>            weaker than the HuggingFace reference. There is still at least one
+>            subtle bug somewhere in the attention or residual-stream scaling
+>            path; the most likely bug site is outlined below.
 > **Plan file:** `/Users/probello/.claude/plans/i-want-to-create-mutable-toucan.md`
 
 ---
 
-## Current Smoke Test Output
+## The residual bug (what we know)
 
-```
-encode("hello")                           → [22172]  (LLaMA "▁hello")
-encode("Once upon a time")                → [9038, 2501, 263, 931]
-norm weights match GGUF byte-for-byte     ✓
-kv.k[layer=0][pos=0][head=0] non-zero     ✓ (64/64, sumAbs=17.4)
-KV history diff test                      HISTORY MATTERS (maxAbsDiff=16.2)
-prefill top-10 for "<s> Once upon a time":
-  ▁Crown, spl, CO, że, c, el, rac, ex, ▁Princess, top
-prefill top-5 for "<s> The quick brown":
-  -, ▁the, ,, ▁and, ▁or
-first generated token                     25306 ("▁Crown"), logit 8.67
-performance                               ~39 tok/s decode, 130 ms prefill
-runtime errors                            none
-visible smoke-test fails                  0
-```
+### Evidence
 
-Output quality is limited by greedy decoding + a small chat-tuned model on a
-non-chat-format prompt — not by forward-pass bugs.
+| Probe                              | HuggingFace FP32 | Our pipeline |
+|-----------------------------------|------------------|--------------|
+| `"The capital of France is"` no BOS | top-1 **Paris** (12.50) | top-1 **▁a** (9.18); Paris not in top-5 |
+| `"The capital of France is"` + BOS  | top-1 **Paris** (13.39) | top-1 **tes** (7.52); predictions radically wrong |
+| Embedding row rms for BOS           | (not checked)    | 0.0022 (matches manual Q4_0 dequant of GGUF bytes) |
+| K cache after prefill of "hello"    | —                | non-zero, reasonable magnitude (rms ~0.35) |
+| K cache after prefill of BOS alone  | —                | 17× smaller (rms ~0.022) |
+| KV history differential             | —                | HISTORY MATTERS — attention does use the cache |
+| Norm weights                       | —                | GPU bytes match raw GGUF F32 bytes exactly |
+| Tokenization                       | —                | Matches HF IDs exactly |
+| Mask shader                        | —                | Fixed to use `row_in_head = (idx / ne0) % ne1` |
 
-## What Was Fixed This Session
+My final logits are systematically ~3 smaller than HF's (top logits ~9 vs ~12).
+The delta between HF's top-1 (Paris, 12.50) and HF's #3 (▁a, 12.09) is only
+0.4 — small enough that a ~0.5 logit error can flip the ranking. So the
+remaining bug likely produces a small but *systematic* error that accumulates
+through the 22 layers and scrambles the top-k ranking at the output head.
 
-Seven distinct bugs were identified and fixed; each is commented in the code:
+### Most plausible remaining culprits
 
-1. **All-zero logits** — embedding lookup used `opCpy` from a Q4_0 view to an F32
-   view, which is not a supported type pair on the WebGPU backend
-   (`ggml-webgpu.cpp:3527-3532`). Replaced with `ggml_get_rows(tokEmb, tokenIds)`.
-2. **Leaf input data silently discarded** — `ctxCreate` uses `no_alloc=true`, so
-   `tensor->data` is null at `tensorSetData` time. Moved the leaf-input uploads
-   (`posTensor`, `tokenIdsTensor`) to *after* `backendAllocCtxTensors`, using
-   `backendTensorSet`.
-3. **SPM tokenizer dropped whitespace** —
-   - `encodeSpm` iterated raw UTF-8 bytes as Latin-1 JS chars, so multi-byte
-     vocab entries like `▁` could never match. Now iterates Unicode code points.
-   - Added LLaMA-style SPM normalization: prepend `▁` and replace spaces with `▁`
-     on encode; strip leading `▁` and convert back to space on decode. Controlled
-     by `TokenizerConfig.addPrefixSpace` (default `true`).
-4. **Decode position off-by-one** in `smoke-test/real-model.html` —
-   `pos = tokens.length + step + 1` skipped position `tokens.length`. Fixed to
-   `tokens.length + step`.
-5. **Debug `fprintf` spam** removed from `ggml_backend_webgpu_build_multi`; kept
-   the correctness logic.
-6. **KV cache writes orphaned by `graph_build_forward_expand`** — the `cpy`
-   results weren't reachable from `logits`, so graph expansion pruned them and
-   the cache stayed zero.
-7. **KV writes ordered AFTER attention reads** — even after fix (6), both
-   writes and reads were in the graph but `fullK`/`fullV` are *views* of
-   `kv.k`/`kv.v` with no explicit dependency edge to the cpy ops. So attention
-   mul-mats read the old (zero) cache. Fix: construct the graph up-front,
-   `graphBuildForwardExpand` each KV cpy in the layer loop *before* the
-   attention ops for that layer are added (which happens transitively when the
-   next layer's cpy is expanded). Final `graphBuildForwardExpand(graph, logits)`
-   fills in the tail.
-8. **RMSNorm gain (`gamma`) never applied** — `ggml_rms_norm(x, eps)` only
-   normalizes; it does not multiply by the learned per-dim scale. LLaMA's
-   RMSNorm is `(x / rms(x)) * gamma`. Added the missing `opMul(norm, lw.attnNorm
-   | lw.ffnNorm | weights.norm)` at all three norm sites.
-9. **`GGML_OP_DIAG_MASK_INF` causal mask broken for heads past head 0** — my
-   custom WGSL shader indexed `i = idx / ne0`, treating `i` as monotonic across
-   heads. For head 1+, `i` was always ≥ ne1 so the condition `j > i + n_past`
-   was trivially false and the mask never fired. Result: every head after head 0
-   saw the full sequence, including future tokens. Fixed to
-   `row_in_head = (idx / ne0) % ne1` so the condition compares per-head query
-   index against key index.
+1. **GQA broadcast via ggml_mul_mat.** TinyLlama has 32 query heads and 4 KV
+   heads (ratio 8). The webgpu `ggml_webgpu_mul_mat` passes
+   `(src1->ne[2] / src0->ne[2])` as a broadcast factor and relies on the
+   shader to index the correct kv head per query head. If that shader path is
+   buggy in the browser-Emscripten build (different from native Dawn), GQA
+   attention produces subtly wrong outputs. Easiest test: run with a
+   non-GQA model (nHeads == nKvHeads) and see if output quality improves.
 
-Other minor fixes applied along the way:
-- V-cache write offset uses `tensorNb(kv.v, 0)` instead of a hardcoded `4`.
-- Graph node budget bumped to `layerCount * 64 + 128` (was 32 * layerCount + 64)
-  to accommodate the KV write ops.
+2. **Non-contiguous V-view mul_mat.** `fullV` is a strided view of `kv.v`
+   with `nb[0]=4`, `nb[1]=maxCtx*4` — the memory layout is **sparse** along
+   the M dimension (headDim). If the webgpu mul_mat shader assumes the
+   M-dimension stride equals K*type_size (contiguous), it reads wrong bytes
+   for every position after the first headDim entry. llama.cpp runs the
+   same view successfully on native Dawn; the bug may be
+   Emscripten/browser-specific.
 
-## Remaining Work
+3. **RoPE dimension count mismatch.** GGUF has `llama.rope.dimension_count`
+   which the loader doesn't read (uses headDim as default). For TinyLlama
+   they happen to match (both 64), so this isn't the current bug, but worth
+   flagging if another model behaves worse.
 
-### 1. Raw TinyLlama-1.1B output quality
+### What is definitively NOT the bug
 
-Even with Zephyr chat template + temperature 0.8 + top-k 40 + top-p 0.95 +
-repetition penalty 1.15, TinyLlama-1.1B-Chat produces semantically weak text
-(mix of real words and multilingual/subword tokens). This is a model-size
-limitation, not a pipeline bug — the KV cache, attention mask, and RMSNorm
-scaling all check out under probes. Try a larger model or accept it.
-
-### 2. Browser buffer-conflict temp-buffer: latent 3+ binding edge case
-
-Nested loop in `ggml_backend_webgpu_build_multi` can miss a conflict between
-bindings b and c if entry a was already rewritten to a temp buffer. No llama op
-has 3+ tensor bindings, so it doesn't bite today.
-
-### Done in this follow-up
-
-- SPM byte-fallback fixed to look up `<0xHH>` tokens by text; decode reassembles
-  byte-fallback tokens into proper UTF-8. Unicode regression test added.
-- WASM build switched from `-O1 -sASSERTIONS=2` to `-O3 -sASSERTIONS=0`
-  (WASM went from 3.4 MB to 1.77 MB).
-- Smoke test now uses the Sampler (temperature + top-k + top-p + repetition
-  penalty) instead of manual argmax.
-- Smoke test wraps the prompt in TinyLlama's Zephyr-style chat template
-  (`<|system|>` / `<|user|>` / `<|assistant|>`).
+- Tokenizer (SPM + ▁ prefix + byte fallback — all tested against HF).
+- Embedding dequant (manual Python Q4_0 dequant matches our GPU readback
+  exactly for every probed token).
+- RMSNorm epsilon (1e-5 matches GGUF).
+- RMSNorm gain application (verified present at all three sites).
+- Norm weight values (match GGUF bytes exactly).
+- KV cache population (probed, works).
+- Attention's causal mask (custom shader fixed for multi-head and then
+  replaced entirely by `ggml_soft_max_ext`; both gave same behavior).
+- Forward-expand ordering of KV writes vs attention reads (verified
+  via history-differential).
 
 ---
 
-## Files Modified This Session
+## Debug Tools (kept, documented, for the next run)
 
-### In this repo (`/Users/probello/Repos/webllm/`)
+`src/inference/model-inference.ts` exposes four debug methods. From the
+browser console when the smoke test is loaded (`window.inference` and
+`window.tokenizer` are stashed):
+
+```js
+// Raw dequantized embedding row
+await window.inference.debugReadEmbeddingRow(1);  // BOS
+
+// K / V cache slice (probe prefill first)
+window.inference.resetKVCache();
+await window.inference.forward(new Int32Array([22172]), new Int32Array([0]));
+await window.inference.debugReadKCache(/*layer*/ 0, /*nBytes*/ 64*4, /*offset*/ 0);
+await window.inference.debugReadVCache(0, 64*4, 0);
+
+// F32 norm weight first N floats
+await window.inference.debugReadNormWeight("attn0", 8);  // "attn0" | "ffn0" | "output"
+
+// Final hidden state after layers [0..L] for a single token (full transformer
+// rebuild through layer L; no KV sharing with the main forward pass)
+await window.inference.debugLayerOutput(/*tokenId*/ 1, /*layerIdx*/ 0);
+```
+
+`smoke-test/real-model.html` runs these automatically and prints the
+results, plus a `[7a] KV history differential` that compares decode
+logits for the same probe token after two different prefixes (the key
+signal for "attention ignoring history"). Keep them — they caught four
+of the bugs fixed so far and will catch the next one too.
+
+---
+
+## What Was Fixed (cumulative)
+
+1. Embedding lookup used `opCpy` Q4_0→F32 (unsupported; replaced with
+   `ggml_get_rows`).
+2. Leaf input data (`posTensor`, `tokenIdsTensor`, mask) must be written
+   with `backendTensorSet` *after* `backendAllocCtxTensors`.
+3. SPM tokenizer: ▁ normalization (encode + decode), code-point
+   iteration, byte-fallback via `<0xHH>` text.
+4. KV writes were orphaned by `graph_build_forward_expand` (unreachable
+   from logits) — now explicitly expanded per layer.
+5. KV writes ordered BEFORE attention reads in the graph node list
+   (same-graph create-up-front + per-layer expansion pattern).
+6. RMSNorm gamma was never multiplied in — now applied at all three
+   norm sites (attn, ffn, final).
+7. Custom `GGML_OP_DIAG_MASK_INF` shader broken past head 0; later
+   replaced entirely by `ggml_soft_max_ext` with an explicit causal
+   mask tensor.
+8. WASM build -O1 → -O3 (3.4MB → 1.77MB).
+9. Sampling wired in via the existing `Sampler` class (temp / top-k /
+   top-p / repetition penalty).
+10. `ggml_soft_max_ext` + `op_get_rows` WASM bindings added.
+
+---
+
+## Files Modified (this session + last session)
+
+### This repo (`/Users/probello/Repos/webllm/`)
 
 | File | Change |
 |------|--------|
-| `src/inference/model-inference.ts` | `opGetRows` for embedding; `opMul(rms_norm, gamma)` at attn/ffn/final norm; graph is created up front and KV cpys expanded per layer; V-offset uses `tensorNb(kv.v, 0)`; debug readback helpers; `backendTensorSet` after backend alloc for leaf inputs |
-| `src/inference/ggml-wasm.ts` | `opGetRows(a, b)` binding |
-| `src/inference/tokenizer.ts` | SPM ▁ normalization (encode + decode), code-point iteration, `addPrefixSpace` config |
-| `src/wasm/webgpu-bridge.cpp` | `op_get_rows` wrapper |
-| `src/wasm/CMakeLists.txt` | `_op_get_rows` exported |
-| `src/models/model-loader.ts` | `embeddingHeadLength` = `embeddingLength / headCount` default; `headCountKv` defaults to `headCount` |
-| `smoke-test/real-model.html` | End-to-end test; decode position fixed; added F32 norm probe, KV write probe, KV history differential, single-BOS sanity, multi-prompt top-k dumps |
-| `tests/tokenizer.test.ts` | SPM tests opt out of prefix-space for synthetic vocabs; two new ▁-normalization tests |
+| `src/inference/model-inference.ts` | All the structural fixes above; `maskTensor` creation + upload; graph created up-front; per-layer `build_forward_expand` for KV writes; `debugReadKCache` / `debugReadVCache` / `debugReadEmbeddingRow` / `debugReadNormWeight` / `debugLayerOutput` |
+| `src/inference/ggml-wasm.ts` | `opGetRows(a, b)` + `opSoftMaxExt(x, mask, scale, maxBias)` bindings |
+| `src/inference/tokenizer.ts` | SPM ▁ normalization + byte fallback via `<0xHH>` lookup |
+| `src/wasm/webgpu-bridge.cpp` | `op_get_rows` + `op_soft_max_ext` wrappers |
+| `src/wasm/CMakeLists.txt` | Exports; `-O3 -sASSERTIONS=0` |
+| `smoke-test/real-model.html` | Diagnostic pipeline (norm probe, KV write probe, KV history differential, per-prompt top-k dumps, sampling, TinyLlama Zephyr chat template variants, single-BOS sanity). `window.{inference, tokenizer, parsedModel}` exposed for console probing. |
+| `tests/tokenizer.test.ts` | SPM ▁ tests + byte-fallback test (café) |
 
-### In llama.cpp dependency (`/Users/probello/Repos/llama.cpp/`, uncommitted)
+### llama.cpp (`/Users/probello/Repos/llama.cpp/`, uncommitted)
 
 | File | Change |
 |------|--------|
 | `ggml/src/ggml.c` | Iterative `ggml_visit_parents_graph` for deep transformer graphs |
-| `ggml/src/ggml-webgpu/ggml-webgpu.cpp` | `GGML_OP_DIAG_MASK_INF` shader **fixed to index row-in-head correctly**; `batch_compute_passes = false`; per-dispatch compute passes; non-aborting error handler under `__EMSCRIPTEN__`; buffer-conflict temp-buffer copies (debug `fprintf`s removed) |
+| `ggml/src/ggml-webgpu/ggml-webgpu.cpp` | Custom `GGML_OP_DIAG_MASK_INF` shader (fixed row-in-head); `batch_compute_passes = false`; per-dispatch compute passes; non-aborting error handler under `__EMSCRIPTEN__`; buffer-conflict temp-buffer copies |
 
 ---
 
@@ -141,16 +158,34 @@ make wasm-build
 bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
 cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
 cd smoke-test && python3 -m http.server 8031
-# Force-bust caches via unique query, e.g. ?v=$(date +%s)
-# Reuse agentchrome tab 2B4CAD087712E09145E6699CB897AFF3 on port 60925.
+# Cache-bust: ?v=$(date +%s). Reuse tab 2B4CAD087712E09145E6699CB897AFF3 on port 60925.
+```
+
+Ground-truth reference available via `llama-cli` (brew-installed) and HF
+transformers:
+
+```bash
+# Chat mode (uses chat template internally)
+llama-cli -m smoke-test/models/tinyllama-1.1b-chat-q4_0.gguf
+
+# Raw token-level reference
+uv run --no-project --with transformers --with torch --with sentencepiece \
+  python3 -c '<HF script — see handoff for template>'
 ```
 
 ---
 
 ## Next Session Starting Point
 
-Forward pass, KV cache, attention mask, RMSNorm, tokenizer, sampling, chat
-template, and -O3 WASM are all in place. Output quality from TinyLlama-1.1B is
-the ceiling — try a bigger model (LLaMA-2-7B, Phi-2, etc.), or wire up the
-`Generator` + `InferenceSession` classes into a proper JS streaming API and
-strip the inline smoke-test diagnostics.
+1. Run the diagnostic differential — `debugLayerOutput(450, L)` for
+   L=0..22, compare its rms / values to HF's per-layer hidden states.
+   The layer where they diverge is where the bug lives.
+2. If layer 0 matches HF: the bug is in the multi-layer residual path
+   (KV cache dependency ordering at later layers? CPU-like build order?).
+3. If layer 0 already differs: bug is in a single layer. Most likely
+   candidate is the GQA `mul_mat(fullK, qp)` or the non-contiguous V-view
+   `mul_mat(fullV, attnW)` on the browser WebGPU backend. Isolate by
+   running a non-GQA model (e.g. a Phi-2 or a llama-2-7b-base if vram
+   allows).
+4. Once it works, strip diagnostic scaffolding from `real-model.html`
+   (keep the debug methods in `model-inference.ts` — they pay their rent).
