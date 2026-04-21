@@ -45,7 +45,8 @@ h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
 <script type="module">
 const assetSuffix = window.location.search || "";
 const {
-    GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer, Generator, Sampler, StreamingDecoder
+    GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer, Generator, Sampler, StreamingDecoder,
+    formatChatPrompt, formatChatDelta
 } = await import(`./webllm-bundle.js${assetSuffix}`);
 
 const MODEL_URL = "./models/tinyllama-1.1b-chat-q4_0.gguf";
@@ -313,10 +314,11 @@ async function loadAndTest() {
         }
         inference.resetKVCache();
 
-        // Simplest possible test: raw prompt + greedy, to see if the pipeline
-        // can produce a coherent continuation at all.
+        // Simplest possible test: chat-formatted prompt + greedy
         const userMessage = "Hello! Can you tell me a short joke?";
-        const prompt = userMessage;
+        const chatTmpl = parsed.tokenizerConfig.chatTemplate;
+        const messages = [{ role: 'user', content: userMessage }];
+        const prompt = formatChatPrompt(messages, chatTmpl);
         const tokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
         const positions = tokens.map((_, i) => i);
 
@@ -410,12 +412,24 @@ async function runChat() {
         const sampler = new Sampler({ temperature: 0 });
         const decoder = new StreamingDecoder(tokenizer);
         const eosId = parsedModel?.tokenizerConfig?.eosTokenId ?? 2;
+        const chatTmpl = parsedModel?.tokenizerConfig?.chatTemplate;
 
         if (!window._chatSession) {
-            window._chatSession = { position: 0, history: [] };
+            window._chatSession = { position: 0, history: [], messages: [], prevCount: 0 };
         }
         const sess = window._chatSession;
-        const promptTokens = tokenizer.encode(text);
+
+        sess.messages.push({ role: 'user', content: text });
+        const prevCount = sess.prevCount;
+        let promptText;
+        if (prevCount > 0) {
+            promptText = formatChatDelta(sess.messages, prevCount, chatTmpl);
+        } else {
+            promptText = formatChatPrompt(sess.messages, chatTmpl);
+        }
+        const promptTokens = [tokenizer.bosId, ...tokenizer.encode(promptText)];
+        sess.prevCount = sess.messages.length;
+
         const forwardPass = async (ids, positions) => {
             return await inference.forward(new Int32Array(ids), new Int32Array(positions));
         };
@@ -439,7 +453,7 @@ async function runChat() {
 
         for await (const tokenId of Generator.generate(
             promptTokens, sampler, mockSession, eosId, forwardPass,
-            { prompt: text, maxTokens: 100, temperature: 0, topK: 40, topP: 1, repetitionPenalty: 1 }
+            { prompt: promptText, maxTokens: 100, temperature: 0, topK: 40, topP: 1, repetitionPenalty: 1 }
         )) {
             tokenCount++;
             const delta = decoder.push(tokenId);
@@ -451,6 +465,7 @@ async function runChat() {
 
         sess.position = mockSession.currentPosition;
         sess.history = [...mockSession.tokens];
+        sess.messages.push({ role: 'assistant', content: fullText });
 
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
         const tps = (tokenCount / ((performance.now() - startTime) / 1000)).toFixed(1);

@@ -43,6 +43,12 @@ export type {
 	TensorInfo,
 	WebLLMConfig,
 } from "./core/types.js";
+export type { ChatTemplateType } from "./inference/chat-template.js";
+export {
+	detectChatTemplate,
+	formatChatDelta,
+	formatChatPrompt,
+} from "./inference/chat-template.js";
 export type {
 	GenerationConfig,
 	GenerationResult,
