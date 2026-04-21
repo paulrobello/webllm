@@ -1,12 +1,19 @@
 import type { Character, CharacterConfig } from "../characters/character.js";
 import { CharacterManager } from "../characters/character-manager.js";
-import type { GenerationConfig } from "../inference/generation.js";
+import { Generator, type GenerationConfig } from "../inference/generation.js";
+import { GgmlWasm } from "../inference/ggml-wasm.js";
 import {
 	LightweightModel,
 	type LightweightModelConfig,
 } from "../inference/lightweight.js";
-import type { Tokenizer } from "../inference/tokenizer.js";
+import { ModelInference } from "../inference/model-inference.js";
+import { Sampler } from "../inference/sampler.js";
+import { Tokenizer } from "../inference/tokenizer.js";
+import { InferenceSession } from "../models/inference-session.js";
+import { GgufParser } from "../models/gguf-parser.js";
+import type { GgufContext } from "../models/gguf-types.js";
 import { KVCache } from "../models/kv-cache.js";
+import { ModelLoader } from "../models/model-loader.js";
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
 import { PipelineCache } from "./pipeline-cache.js";
@@ -20,9 +27,6 @@ import type {
 	WebLLMConfig,
 } from "./types.js";
 
-/**
- * Main entry point for browser-native LLM inference with multi-model scheduling and character system.
- */
 export class WebLLM {
 	private _config: WebLLMConfig;
 	private memoryPool: MemoryPool;
@@ -31,39 +35,23 @@ export class WebLLM {
 	private modelManager: ModelManager;
 	private characterManager: CharacterManager;
 	private eventHandlers = new Map<string, Set<EventHandler>>();
+	private wasmModules = new Map<string, GgmlWasm>();
+	private inferenceEngines = new Map<string, ModelInference>();
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
 		this.memoryPool = new MemoryPool(config.memoryBudget);
 		this.characterManager = new CharacterManager();
 		this.modelManager = new ModelManager(this.memoryPool);
-		this.scheduler = new Scheduler({
-			frameBudgetMs: config.frameBudgetMs ?? 8,
-		});
+		this.scheduler = new Scheduler({ frameBudgetMs: config.frameBudgetMs ?? 8 });
 		this._pipelineCache = new PipelineCache(config.cacheDir ?? "webllm-cache");
 	}
 
-	/**
-	 * Create and initialize a new WebLLM instance.
-	 *
-	 * @param config - Engine configuration including device, memory budget, and frame budget.
-	 * @returns Initialized WebLLM instance.
-	 */
 	static async init(config: WebLLMConfig): Promise<WebLLM> {
 		return new WebLLM(config);
 	}
 
-	/**
-	 * Load a model by name with the given options and register it with the model manager.
-	 *
-	 * @param name - Human-readable model identifier.
-	 * @param options - Load options including priority, context length, and GPU layers.
-	 * @returns Handle to the loaded model.
-	 */
-	async loadModel(
-		name: string,
-		options: ModelLoadOptions,
-	): Promise<ModelHandle> {
+	async loadModel(name: string, options: ModelLoadOptions): Promise<ModelHandle> {
 		const id = `model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const entry: ModelEntry = {
 			id,
@@ -88,138 +76,129 @@ export class WebLLM {
 		return entry;
 	}
 
-	/**
-	 * Unload a model by ID, freeing its memory allocations and KV cache.
-	 *
-	 * @param id - The model handle ID to unload.
-	 */
 	async unloadModel(id: string): Promise<void> {
+		const inf = this.inferenceEngines.get(id);
+		if (inf) { inf.dispose(); this.inferenceEngines.delete(id); }
+		const wasm = this.wasmModules.get(id);
+		if (wasm) { await wasm.shutdown(); this.wasmModules.delete(id); }
 		await this.modelManager.unregister(id);
 	}
 
-	/**
-	 * Load a lightweight model for auxiliary tasks such as tokenization or embedding.
-	 *
-	 * @param config - Model configuration excluding the device field (inherited from engine).
-	 * @returns Initialized lightweight model instance.
-	 */
-	async loadLightweightModel(
-		config: Omit<LightweightModelConfig, "device">,
-	): Promise<LightweightModel> {
-		const model = new LightweightModel({
-			device: this._config.device,
-			...config,
-		});
+	async loadLightweightModel(config: Omit<LightweightModelConfig, "device">): Promise<LightweightModel> {
+		const model = new LightweightModel({ device: this._config.device, ...config });
 		await model.init();
 		return model;
 	}
 
-	/**
-	 * Run a chat completion.
-	 *
-	 * Stub — requires WASM forward pass integration (post-Phase 2).
-	 */
-	async chat(
-		_modelId: string,
-		_prompt: string,
-		_config?: Partial<GenerationConfig>,
-	): Promise<string> {
-		throw new Error("chat() requires WASM forward pass integration");
+	async chat(modelId: string, prompt: string, config?: Partial<GenerationConfig>): Promise<string> {
+		const entry = this.modelManager.get(modelId);
+		if (!entry) throw new Error(`Model "${modelId}" not found`);
+		if (!entry.loaded || !entry.tokenizer) throw new Error(`Model "${modelId}" not fully loaded`);
+
+		const inf = this.inferenceEngines.get(modelId);
+		if (!inf) throw new Error(`No inference engine for model "${modelId}"`);
+
+		const tokenizer = entry.tokenizer;
+		const sampler = new Sampler(config ?? {});
+		const session = new InferenceSession({
+			maxTokens: config?.maxTokens ?? 512,
+			temperature: config?.temperature ?? 1.0,
+			topK: config?.topK ?? 0,
+			topP: config?.topP ?? 1.0,
+			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
+			contextOverflowPolicy: "truncate",
+		}, 0);
+
+		const tokens = tokenizer.encode(prompt);
+		const forwardPass = async (ids: number[], positions: number[]): Promise<Float32Array> => {
+			return inf.forward(new Int32Array(ids), new Int32Array(positions));
+		};
+
+		const genConfig: GenerationConfig = {
+			prompt,
+			maxTokens: config?.maxTokens ?? 512,
+			temperature: config?.temperature ?? 1.0,
+			topK: config?.topK ?? 0,
+			topP: config?.topP ?? 1.0,
+			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
+		};
+
+		const gen = Generator.generate(tokens, sampler, session, tokenizer.eosId ?? 2, forwardPass, genConfig);
+		const genTokens: number[] = [];
+		for await (const token of gen) { genTokens.push(token); }
+
+		return tokenizer.decode(genTokens);
 	}
 
-	/**
-	 * Load a model from a raw GGUF buffer.
-	 *
-	 * Stub — requires GPU buffer integration (post-Phase 2).
-	 */
 	static async loadModelFromBuffer(
-		_data: ArrayBuffer,
-		_options: ModelLoadOptions,
-		_config: WebLLMConfig,
-	): Promise<ModelHandle> {
-		throw new Error("loadModelFromBuffer() requires GPU buffer integration");
-	}
-	/** Current engine configuration. */
-	get config(): WebLLMConfig {
-		return this._config;
-	}
-	/** Pipeline cache for reusing WebGPU compute pipelines across sessions. */
-	get pipelineCache(): PipelineCache {
-		return this._pipelineCache;
-	}
-	/** @returns The shared GPU memory pool. */
-	getMemoryPool(): MemoryPool {
-		return this.memoryPool;
-	}
-	/** @returns The priority-based task scheduler. */
-	getScheduler(): Scheduler {
-		return this.scheduler;
-	}
-	/** @returns The multi-model lifecycle coordinator. */
-	getModelManager(): ModelManager {
-		return this.modelManager;
+		data: ArrayBuffer,
+		name: string,
+		config: WebLLMConfig,
+		wasmUrl = "webllm-wasm.js",
+	): Promise<{ handle: ModelHandle; engine: WebLLM; inference: ModelInference }> {
+		const engine = await WebLLM.init(config);
+
+		const parsed = ModelLoader.parseModel(data);
+		const ggufCtx = GgufParser.parse(data) as GgufContext;
+
+		const wasm = new GgmlWasm();
+		await wasm.init({ wasmUrl });
+
+		const inference = new ModelInference(wasm, parsed.hyperparams);
+		inference.loadWeights(ggufCtx, data);
+
+		const handle = await engine.loadModel(name, { priority: 0 });
+
+		const entry = engine.getModelManager().get(handle.id);
+		if (entry) {
+			entry.hyperparams = parsed.hyperparams;
+			entry.tokenizer = new Tokenizer(parsed.tokenizerConfig);
+			entry.kvCache = new KVCache(parsed.kvCacheConfig);
+			entry.loaded = true;
+		}
+
+		engine.wasmModules.set(handle.id, wasm);
+		engine.inferenceEngines.set(handle.id, inference);
+
+		return { handle, engine, inference };
 	}
 
-	/**
-	 * Create a new character with the given configuration.
-	 *
-	 * @param config - Character personality and behavior configuration.
-	 * @returns The created character instance.
-	 */
+	get config(): WebLLMConfig { return this._config; }
+	get pipelineCache(): PipelineCache { return this._pipelineCache; }
+	getMemoryPool(): MemoryPool { return this.memoryPool; }
+	getScheduler(): Scheduler { return this.scheduler; }
+	getModelManager(): ModelManager { return this.modelManager; }
+
 	createCharacter(config: CharacterConfig): Character {
 		return this.characterManager.create(config);
 	}
 
-	/**
-	 * Retrieve a character by ID.
-	 *
-	 * @param id - Character identifier.
-	 * @returns The character, or undefined if not found.
-	 */
 	getCharacter(id: string): Character | undefined {
 		return this.characterManager.get(id);
 	}
 
-	/**
-	 * Remove a character by ID.
-	 *
-	 * @param id - Character identifier to remove.
-	 */
 	async removeCharacter(id: string): Promise<void> {
 		await this.characterManager.remove(id);
 	}
 
-	/** @returns The character lifecycle manager. */
 	getCharacterManager(): CharacterManager {
 		return this.characterManager;
 	}
 
-	/**
-	 * Subscribe to an engine event.
-	 *
-	 * @param event - Event name.
-	 * @param handler - Callback invoked when the event fires.
-	 */
 	on(event: string, handler: EventHandler): void {
-		if (!this.eventHandlers.has(event))
-			this.eventHandlers.set(event, new Set());
+		if (!this.eventHandlers.has(event)) this.eventHandlers.set(event, new Set());
 		this.eventHandlers.get(event)?.add(handler);
 	}
 
-	/**
-	 * Unsubscribe from an engine event.
-	 *
-	 * @param event - Event name.
-	 * @param handler - Previously registered callback to remove.
-	 */
 	off(event: string, handler: EventHandler): void {
 		this.eventHandlers.get(event)?.delete(handler);
 	}
 
-	/**
-	 * Tear down all models, scheduler tasks, and event listeners.
-	 */
 	async shutdown(): Promise<void> {
+		for (const [, wasm] of this.wasmModules) { await wasm.shutdown(); }
+		this.wasmModules.clear();
+		for (const [, inf] of this.inferenceEngines) { inf.dispose(); }
+		this.inferenceEngines.clear();
 		this.modelManager.clear();
 		this.scheduler.clear();
 		this.eventHandlers.clear();
