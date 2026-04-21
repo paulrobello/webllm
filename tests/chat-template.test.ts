@@ -84,7 +84,7 @@ describe("formatChatPrompt zephyr", () => {
 	test("single user", () => {
 		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
 		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
-			"<|user|>\nHello</s><|assistant|",
+			"<|user|>\nHello</s><|assistant|>",
 		);
 	});
 	test("system + user", () => {
@@ -93,7 +93,7 @@ describe("formatChatPrompt zephyr", () => {
 			{ role: "user", content: "Hi" },
 		];
 		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
-			"<|system|>\nBe nice</s><|user|>\nHi</s><|assistant|",
+			"<|system|>\nBe nice</s><|user|>\nHi</s><|assistant|>",
 		);
 	});
 	test("multi-turn", () => {
@@ -103,7 +103,7 @@ describe("formatChatPrompt zephyr", () => {
 			{ role: "user", content: "Q2" },
 		];
 		expect(formatChatPrompt(m, ZEPHYR_TMPL)).toBe(
-			"<|user|>\nQ1</s><|assistant|A1</s><|user|>\nQ2</s><|assistant|",
+			"<|user|>\nQ1</s><|assistant|>\nA1</s><|user|>\nQ2</s><|assistant|>",
 		);
 	});
 });

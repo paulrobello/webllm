@@ -167,13 +167,13 @@ function formatZephyr(
 	let prompt = "";
 	for (const msg of messages) {
 		if (msg.role === "assistant") {
-			prompt += `<|assistant|${msg.content}</s>`;
+			prompt += `<|assistant|>\n${msg.content}</s>`;
 		} else {
 			prompt += `<|${msg.role}|>\n${msg.content}</s>`;
 		}
 	}
 	if (addGenerationPrompt) {
-		prompt += "<|assistant|";
+		prompt += "<|assistant|>";
 	}
 	return prompt;
 }

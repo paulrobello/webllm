@@ -420,14 +420,11 @@ async function runChat() {
         const sess = window._chatSession;
 
         sess.messages.push({ role: 'user', content: text });
-        const prevCount = sess.prevCount;
-        let promptText;
-        if (prevCount > 0) {
-            promptText = formatChatDelta(sess.messages, prevCount, chatTmpl);
-        } else {
-            promptText = formatChatPrompt(sess.messages, chatTmpl);
-        }
+        const promptText = formatChatPrompt(sess.messages, chatTmpl);
         const promptTokens = [tokenizer.bosId, ...tokenizer.encode(promptText)];
+        inference.resetKVCache();
+        sess.position = 0;
+        sess.history = [];
         sess.prevCount = sess.messages.length;
 
         const forwardPass = async (ids, positions) => {
@@ -453,7 +450,7 @@ async function runChat() {
 
         for await (const tokenId of Generator.generate(
             promptTokens, sampler, mockSession, eosId, forwardPass,
-            { prompt: promptText, maxTokens: 100, temperature: 0, topK: 40, topP: 1, repetitionPenalty: 1 }
+            { prompt: text, maxTokens: 100, temperature: 0, topK: 40, topP: 1, repetitionPenalty: 1 }
         )) {
             tokenCount++;
             const delta = decoder.push(tokenId);

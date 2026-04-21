@@ -258,7 +258,7 @@ export class Tokenizer {
 		flushBytes(parts);
 
 		let text = parts.join("");
-		if (this.config.type === TokenizerType.SPM && this.spmPrefixEnabled()) {
+		if (this.config.type === TokenizerType.SPM) {
 			text = text.replaceAll(SPM_SPACE, " ");
 			if (text.startsWith(" ")) text = text.slice(1);
 		}
@@ -632,7 +632,7 @@ export class Tokenizer {
 	}
 
 	private spmPrefixEnabled(): boolean {
-		return this.config.addPrefixSpace !== false;
+		return this.config.addPrefixSpace === true;
 	}
 }
 

@@ -106,11 +106,28 @@ export class ModelLoader {
 		const eosTokenId = getMetaNumber(ctx, "tokenizer.ggml.eos_token_id", 2);
 		const bosTokenId = getMetaNumber(ctx, "tokenizer.ggml.bos_token_id", 1);
 
+		const addedTokens = new Map<string, number>();
+
+		// GGUF token_type 2 = CONTROL (special tokens like <s>, </s>, <unk>)
+		for (let i = 0; i < tokens.length && i < rawTokenTypes.length; i++) {
+			if (rawTokenTypes[i] === 2) {
+				addedTokens.set(tokens[i].text, i);
+			}
+		}
+
+		// Always ensure EOS and BOS are in addedTokens regardless of token_type
+		if (eosTokenId >= 0 && eosTokenId < tokens.length) {
+			addedTokens.set(tokens[eosTokenId].text, eosTokenId);
+		}
+		if (bosTokenId >= 0 && bosTokenId < tokens.length) {
+			addedTokens.set(tokens[bosTokenId].text, bosTokenId);
+		}
+
 		return {
 			type,
 			tokens,
 			bpeRanks: new Map(),
-			addedTokens: new Map(),
+			addedTokens,
 			eosTokenId,
 			bosTokenId,
 			padTokenId: -1,

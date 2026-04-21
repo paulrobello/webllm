@@ -139,7 +139,7 @@ describe("Tokenizer", () => {
 			bosTokenId: 1,
 			padTokenId: 0,
 			vocabSize: tokens.length,
-			// addPrefixSpace defaults to true
+			addPrefixSpace: true,
 		};
 		const tok = new Tokenizer(cfg);
 		expect(tok.encode("hi world")).toEqual([13, 14]);
@@ -170,8 +170,8 @@ describe("Tokenizer", () => {
 			vocabSize: tokens.length,
 		};
 		const tok = new Tokenizer(cfg);
-		// "café" -> after ▁ prefix "▁café" -> [▁, c, a, f, <0xC3>, <0xA9>]
-		expect(tok.encode("café")).toEqual([3, 4, 5, 6, 7, 8]);
+		// "café" -> no ▁ prefix -> [c, a, f, <0xC3>, <0xA9>]
+		expect(tok.encode("café")).toEqual([4, 5, 6, 7, 8]);
 	});
 
 	test("SPM decode reassembles byte-fallback tokens into UTF-8 characters", () => {
