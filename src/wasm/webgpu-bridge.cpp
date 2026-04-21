@@ -4,9 +4,14 @@
 #include "ggml-webgpu.h"
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 static ggml_backend_t g_backend = nullptr;
-static struct ggml_context* g_ctx = nullptr;
+static std::vector<struct ggml_context*> g_ctx_stack;
+
+static struct ggml_context* current_ctx() {
+    return g_ctx_stack.empty() ? nullptr : g_ctx_stack.back();
+}
 
 extern "C" {
 
@@ -22,13 +27,18 @@ int32_t webgpu_init() {
 }
 
 void webgpu_shutdown() {
+    // Free all contexts (bottom-up)
+    for (auto it = g_ctx_stack.rbegin(); it != g_ctx_stack.rend(); ++it) {
+        if (*it) ggml_free(*it);
+    }
+    g_ctx_stack.clear();
     if (g_backend) {
         ggml_backend_free(g_backend);
         g_backend = nullptr;
     }
 }
 
-// ── Context management ──────────────────────────────────────────────────
+// ── Context management (stack-based) ────────────────────────────────────
 
 int32_t ctx_create(int64_t mem_size) {
     struct ggml_init_params params = {
@@ -36,33 +46,36 @@ int32_t ctx_create(int64_t mem_size) {
         .mem_buffer = nullptr,
         .no_alloc   = true,
     };
-    g_ctx = ggml_init(params);
-    return g_ctx ? 0 : -1;
+    auto* ctx = ggml_init(params);
+    if (!ctx) return -1;
+    g_ctx_stack.push_back(ctx);
+    return (int32_t)(g_ctx_stack.size() - 1);
 }
 
 void ctx_free() {
-    if (g_ctx) {
-        ggml_free(g_ctx);
-        g_ctx = nullptr;
+    if (!g_ctx_stack.empty()) {
+        auto* ctx = g_ctx_stack.back();
+        g_ctx_stack.pop_back();
+        if (ctx) ggml_free(ctx);
     }
 }
 
 // ── Tensor creation ─────────────────────────────────────────────────────
 
 void* tensor_new_1d(int32_t type, int64_t ne0) {
-    return ggml_new_tensor_1d(g_ctx, (ggml_type)type, ne0);
+    return ggml_new_tensor_1d(current_ctx(), (ggml_type)type, ne0);
 }
 
 void* tensor_new_2d(int32_t type, int64_t ne0, int64_t ne1) {
-    return ggml_new_tensor_2d(g_ctx, (ggml_type)type, ne0, ne1);
+    return ggml_new_tensor_2d(current_ctx(), (ggml_type)type, ne0, ne1);
 }
 
 void* tensor_new_3d(int32_t type, int64_t ne0, int64_t ne1, int64_t ne2) {
-    return ggml_new_tensor_3d(g_ctx, (ggml_type)type, ne0, ne1, ne2);
+    return ggml_new_tensor_3d(current_ctx(), (ggml_type)type, ne0, ne1, ne2);
 }
 
 void* tensor_new_4d(int32_t type, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) {
-    return ggml_new_tensor_4d(g_ctx, (ggml_type)type, ne0, ne1, ne2, ne3);
+    return ggml_new_tensor_4d(current_ctx(), (ggml_type)type, ne0, ne1, ne2, ne3);
 }
 
 void tensor_set_name(void* tensor, const char* name) {
@@ -108,90 +121,90 @@ void tensor_get_data(void* tensor, void* out, size_t size) {
 // ── Graph operations ────────────────────────────────────────────────────
 
 void* op_mul_mat(void* a, void* b) {
-    return ggml_mul_mat(g_ctx, (struct ggml_tensor*)a, (struct ggml_tensor*)b);
+    return ggml_mul_mat(current_ctx(), (struct ggml_tensor*)a, (struct ggml_tensor*)b);
 }
 
 void* op_add(void* a, void* b) {
-    return ggml_add(g_ctx, (struct ggml_tensor*)a, (struct ggml_tensor*)b);
+    return ggml_add(current_ctx(), (struct ggml_tensor*)a, (struct ggml_tensor*)b);
 }
 
 void* op_mul(void* a, void* b) {
-    return ggml_mul(g_ctx, (struct ggml_tensor*)a, (struct ggml_tensor*)b);
+    return ggml_mul(current_ctx(), (struct ggml_tensor*)a, (struct ggml_tensor*)b);
 }
 
 void* op_rms_norm(void* x, float eps) {
-    return ggml_rms_norm(g_ctx, (struct ggml_tensor*)x, eps);
+    return ggml_rms_norm(current_ctx(), (struct ggml_tensor*)x, eps);
 }
 
 void* op_silu(void* x) {
-    return ggml_silu(g_ctx, (struct ggml_tensor*)x);
+    return ggml_silu(current_ctx(), (struct ggml_tensor*)x);
 }
 
 void* op_gelu(void* x) {
-    return ggml_gelu(g_ctx, (struct ggml_tensor*)x);
+    return ggml_gelu(current_ctx(), (struct ggml_tensor*)x);
 }
 
 void* op_rope(void* x, int32_t n_dims, int32_t mode, int32_t n_ctx_orig,
               float freq_base, float freq_scale, float ext_factor,
               float attn_factor, float beta_fast, float beta_slow) {
-    return ggml_rope_ext(g_ctx, (struct ggml_tensor*)x, nullptr, nullptr,
+    return ggml_rope_ext(current_ctx(), (struct ggml_tensor*)x, nullptr, nullptr,
                          n_dims, mode, n_ctx_orig, freq_base, freq_scale,
                          ext_factor, attn_factor, beta_fast, beta_slow);
 }
 
 void* op_reshape_2d(void* x, int64_t ne0, int64_t ne1) {
-    return ggml_reshape_2d(g_ctx, (struct ggml_tensor*)x, ne0, ne1);
+    return ggml_reshape_2d(current_ctx(), (struct ggml_tensor*)x, ne0, ne1);
 }
 
 void* op_reshape_3d(void* x, int64_t ne0, int64_t ne1, int64_t ne2) {
-    return ggml_reshape_3d(g_ctx, (struct ggml_tensor*)x, ne0, ne1, ne2);
+    return ggml_reshape_3d(current_ctx(), (struct ggml_tensor*)x, ne0, ne1, ne2);
 }
 
 void* op_permute(void* x, int32_t dim0, int32_t dim1, int32_t dim2, int32_t dim3) {
-    return ggml_permute(g_ctx, (struct ggml_tensor*)x, dim0, dim1, dim2, dim3);
+    return ggml_permute(current_ctx(), (struct ggml_tensor*)x, dim0, dim1, dim2, dim3);
 }
 
 void* op_cont(void* x) {
-    return ggml_cont(g_ctx, (struct ggml_tensor*)x);
+    return ggml_cont(current_ctx(), (struct ggml_tensor*)x);
 }
 
 void* op_view_2d(void* x, int64_t ne0, int64_t ne1, size_t nb1, size_t offset) {
-    return ggml_view_2d(g_ctx, (struct ggml_tensor*)x, ne0, ne1, nb1, offset);
+    return ggml_view_2d(current_ctx(), (struct ggml_tensor*)x, ne0, ne1, nb1, offset);
 }
 
 void* op_view_3d(void* x, int64_t ne0, int64_t ne1, int64_t ne2,
                  size_t nb1, size_t nb2, size_t offset) {
-    return ggml_view_3d(g_ctx, (struct ggml_tensor*)x, ne0, ne1, ne2, nb1, nb2, offset);
+    return ggml_view_3d(current_ctx(), (struct ggml_tensor*)x, ne0, ne1, ne2, nb1, nb2, offset);
 }
 
 void* op_cpy(void* src, void* dst) {
-    return ggml_cpy(g_ctx, (struct ggml_tensor*)src, (struct ggml_tensor*)dst);
+    return ggml_cpy(current_ctx(), (struct ggml_tensor*)src, (struct ggml_tensor*)dst);
 }
 
 void* op_soft_max(void* x) {
-    return ggml_soft_max(g_ctx, (struct ggml_tensor*)x);
+    return ggml_soft_max(current_ctx(), (struct ggml_tensor*)x);
 }
 
 void* op_scale(void* x, float s) {
-    return ggml_scale(g_ctx, (struct ggml_tensor*)x, s);
+    return ggml_scale(current_ctx(), (struct ggml_tensor*)x, s);
 }
 
 void* op_repeat(void* x, void* y) {
-    return ggml_repeat(g_ctx, (struct ggml_tensor*)x, (struct ggml_tensor*)y);
+    return ggml_repeat(current_ctx(), (struct ggml_tensor*)x, (struct ggml_tensor*)y);
 }
 
 void* op_diag_mask_inf(void* x, int32_t n_past) {
-    return ggml_diag_mask_inf(g_ctx, (struct ggml_tensor*)x, n_past);
+    return ggml_diag_mask_inf(current_ctx(), (struct ggml_tensor*)x, n_past);
 }
 
 void* op_norm(void* x, float eps) {
-    return ggml_norm(g_ctx, (struct ggml_tensor*)x, eps);
+    return ggml_norm(current_ctx(), (struct ggml_tensor*)x, eps);
 }
 
 // ── Graph compute ───────────────────────────────────────────────────────
 
 void* graph_new(int32_t size) {
-    return ggml_new_graph_custom(g_ctx, (size_t)size, false);
+    return ggml_new_graph_custom(current_ctx(), (size_t)size, false);
 }
 
 void graph_build_forward_expand(void* graph, void* tensor) {
@@ -207,7 +220,7 @@ int32_t graph_compute(void* graph) {
 // ── Backend buffer ──────────────────────────────────────────────────────
 
 void* backend_alloc_ctx_tensors() {
-    return ggml_backend_alloc_ctx_tensors(g_ctx, g_backend);
+    return ggml_backend_alloc_ctx_tensors(current_ctx(), g_backend);
 }
 
 void backend_buffer_free(void* buffer) {

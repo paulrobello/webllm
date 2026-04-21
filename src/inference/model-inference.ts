@@ -21,11 +21,17 @@ interface WeightTensors {
 	layers: LayerWeights[];
 }
 
+interface LayerKVCache {
+	k: TensorPtr;
+	v: TensorPtr;
+}
+
 /**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
  * then builds and executes computation graphs for transformer forward passes.
+ * Supports incremental decoding via KV cache for O(n) autoregressive generation.
  */
 export class ModelInference {
 	private wasm: GgmlWasm;
@@ -33,6 +39,10 @@ export class ModelInference {
 	private weights: WeightTensors | null = null;
 	private weightBuf: BufferPtr = 0;
 	private nameToTensor = new Map<string, TensorPtr>();
+
+	private kvLayers: LayerKVCache[] | null = null;
+	private kvBuf: BufferPtr = 0;
+	private nCached = 0;
 
 	constructor(wasm: GgmlWasm, hyperparams: ModelHyperparams) {
 		this.wasm = wasm;
@@ -98,27 +108,76 @@ export class ModelInference {
 			wasm.backendTensorSet(tensor, heapPtr, 0, nbytes);
 			wasm.free(heapPtr);
 		}
+
+		// Weight context stays on the stack; do NOT call ctxFree here.
+	}
+
+	/**
+	 * Allocate GPU tensors for the KV cache.
+	 *
+	 * Must be called after loadWeights(). Creates per-layer K and V tensors
+	 * sized for the maximum context length, in a separate ggml context that
+	 * persists across forward passes.
+	 */
+	initKVCache(maxContextLength: number): void {
+		if (this.kvLayers) return; // already initialized
+
+		const { hp, wasm } = this;
+		const perLayerBytes = hp.embeddingHeadLength * maxContextLength * 4; // f32
+		const totalBytes = hp.layerCount * 2 * perLayerBytes;
+		const memSize = hp.layerCount * 2 * 4096 + totalBytes;
+
+		wasm.ctxCreate(memSize);
+
+		this.kvLayers = [];
+		for (let i = 0; i < hp.layerCount; i++) {
+			this.kvLayers.push({
+				k: wasm.tensorNew3d(GgmlType.F32, hp.embeddingHeadLength, maxContextLength, hp.headCountKv),
+				v: wasm.tensorNew3d(GgmlType.F32, hp.embeddingHeadLength, maxContextLength, hp.headCountKv),
+			});
+		}
+
+		this.kvBuf = wasm.backendAllocCtxTensors();
+		// KV context stays on the stack; do NOT call ctxFree here.
+		this.nCached = 0;
+	}
+
+	/** Reset the KV cache position counter without reallocating GPU memory. */
+	resetKVCache(): void {
+		this.nCached = 0;
+	}
+
+	/** Number of tokens currently stored in the KV cache. */
+	get cachedTokenCount(): number {
+		return this.nCached;
 	}
 
 	/**
 	 * Run a forward pass producing logits for the given tokens at the given positions.
 	 *
+	 * On the first call (prefill), processes all prompt tokens and populates the KV cache.
+	 * On subsequent calls (decode), processes only the new token(s) and reuses cached K/V.
+	 *
 	 * @param tokenIds - Token IDs to process (prefill: all prompt tokens; decode: single token)
 	 * @param positions - Position indices for each token
-	 * @returns Float32Array of logits, length = vocabularySize (last token's logits for decode)
+	 * @returns Float32Array of logits, length = vocabularySize
 	 */
-	forward(tokenIds: Int32Array, positions: Int32Array): Float32Array {
+	forward(tokenIds: Int32Array, _positions: Int32Array): Float32Array {
 		if (!this.weights) throw new Error("Weights not loaded");
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const { hp, wasm, weights } = this;
 		const nTokens = tokenIds.length;
+		const pastLen = this.nCached;
+		const totalLen = pastLen + nTokens;
 
-		// Fresh context for the compute graph (weights live in their own context)
-		const graphMem = hp.layerCount * 8192 + nTokens * hp.embeddingLength * 8;
+		// Fresh context for the compute graph (weights and KV cache stay in their own contexts)
+		const graphMem = hp.layerCount * 8192 + totalLen * hp.embeddingLength * 8;
 		wasm.ctxCreate(graphMem);
 
 		const embDim = hp.embeddingLength;
 		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
+		const useGQA = hp.headCountKv !== hp.headCount;
 
 		// Input: embedding lookup for each token
 		const x = wasm.tensorNew2d(GgmlType.F32, embDim, nTokens);
@@ -142,6 +201,7 @@ export class ModelInference {
 		let cur = x;
 		for (let il = 0; il < hp.layerCount; il++) {
 			const lw = weights.layers[il];
+			const kv = this.kvLayers[il];
 
 			// Pre-attention RMS norm
 			const normed = wasm.opRmsNorm(cur, hp.normEpsilon);
@@ -162,18 +222,44 @@ export class ModelInference {
 			const kRope = wasm.opRope(k3, headDim, RopeMode.NORMAL, hp.contextLength,
 				hp.ropeFreqBase, hp.ropeScale, 0.0, 1.0, 0.0, 0.0);
 
-			// Permute for attention: [headDim, nTokens, nHeads]
-			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-			const kp = wasm.opPermute(kRope, 0, 2, 1, 3);
-			const vp = wasm.opPermute(v3, 0, 2, 1, 3);
+			// Store new K and V into cache at positions [pastLen..pastLen+nTokens-1]
+			const kNb1 = wasm.tensorNb(kv.k, 1);
+			const kNb2 = wasm.tensorNb(kv.k, 2);
+			const vNb1 = wasm.tensorNb(kv.v, 1);
+			const vNb2 = wasm.tensorNb(kv.v, 2);
 
-			// QK^T
+			const kWriteView = wasm.opView3d(kv.k, headDim, nTokens, hp.headCountKv,
+				kNb1, kNb2, pastLen * kNb1);
+			const vWriteView = wasm.opView3d(kv.v, headDim, nTokens, hp.headCountKv,
+				vNb1, vNb2, pastLen * vNb1);
+			wasm.opCpy(kRope, kWriteView);
+			wasm.opCpy(v3, vWriteView);
+
+			// Read full K and V from cache [0..totalLen-1]
+			const fullK = wasm.opView3d(kv.k, headDim, totalLen, hp.headCountKv,
+				kNb1, kNb2, 0);
+			const fullV = wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv,
+				vNb1, vNb2, 0);
+
+			// Permute for attention: [headDim, nTokens/totalLen, nHeads/nKvHeads]
+			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+			let kp = wasm.opPermute(fullK, 0, 2, 1, 3);
+			let vp = wasm.opPermute(fullV, 0, 2, 1, 3);
+
+			// GQA: repeat K and V from nKvHeads to nHeads if needed
+			if (useGQA) {
+				kp = wasm.opRepeat(kp, qp);
+				vp = wasm.opRepeat(vp, qp);
+			}
+
+			// QK^T: [totalLen, nTokens, nHeads]
 			const qk = wasm.opMulMat(kp, qp);
 			const qkScaled = wasm.opScale(qk, 1.0 / Math.sqrt(headDim));
-			const qkMasked = wasm.opDiagMaskInf(qkScaled, positions[0]);
+			const qkMasked = wasm.opDiagMaskInf(qkScaled, pastLen);
 			const attnW = wasm.opSoftMax(qkMasked);
 
-			// Attention * V
+			// Attention * V: [nTokens, nHeads, totalLen] * [headDim, totalLen, nHeads] -> [headDim, nTokens, nHeads]
+			// After permute back and merge: [nHeads*headDim, nTokens]
 			const attnOut = wasm.opMulMat(vp, attnW);
 
 			// Merge heads: permute back then reshape
@@ -225,18 +311,31 @@ export class ModelInference {
 		wasm.backendBufferFree(graphBuf);
 		wasm.ctxFree();
 
+		// Update cache position
+		this.nCached = totalLen;
+
 		return result;
 	}
 
 	/** Free all GPU resources. */
 	dispose(): void {
+		if (this.kvBuf) {
+			this.wasm.backendBufferFree(this.kvBuf);
+			this.kvBuf = 0;
+		}
 		if (this.weightBuf) {
 			this.wasm.backendBufferFree(this.weightBuf);
 			this.weightBuf = 0;
 		}
+		// Free contexts in reverse order (stack discipline)
+		if (this.kvLayers) {
+			this.wasm.ctxFree();
+			this.kvLayers = null;
+		}
 		this.wasm.ctxFree();
 		this.weights = null;
 		this.nameToTensor.clear();
+		this.nCached = 0;
 	}
 
 	/** Create a ggml tensor from GGUF info and register in name map. */

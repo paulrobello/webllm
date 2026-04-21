@@ -146,6 +146,7 @@ export class WebLLM {
 
 		const inference = new ModelInference(wasm, parsed.hyperparams);
 		inference.loadWeights(ggufCtx, data);
+		inference.initKVCache(parsed.kvCacheConfig.maxContextLength);
 
 		const handle = await engine.loadModel(name, { priority: 0 });
 
