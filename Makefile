@@ -1,6 +1,6 @@
 .PHONY: build test lint fmt typecheck checkall clean install deps wasm-build \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
-        bench-eval-models bench-all run-all
+        bench-eval-models bench-all run-all smoke-test smoke-serve
 
 install:
 	bun install
@@ -77,3 +77,10 @@ wasm-clean:
 
 clean:
 	rm -rf dist node_modules src/wasm/build
+
+smoke-test: wasm-build
+	bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
+
+smoke-serve:
+	cd smoke-test && python3 -m http.server 8031

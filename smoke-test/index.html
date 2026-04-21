@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebLLM Smoke Test</title>
+<style>
+:root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #c9d1d9; --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Menlo', monospace; font-size: 13px; line-height: 1.6; padding: 24px; max-width: 900px; margin: 0 auto; }
+h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
+.subtitle { color: #8b949e; margin-bottom: 24px; }
+#log { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px; white-space: pre-wrap; word-break: break-all; min-height: 200px; }
+.step { padding: 4px 0; }
+.step.pending { color: #8b949e; }
+.step.running { color: var(--yellow); }
+.step.pass { color: var(--green); }
+.step.fail { color: var(--red); }
+.step .label { font-weight: bold; }
+.error-detail { padding: 8px 0 4px 16px; color: var(--red); font-size: 12px; }
+.summary { margin-top: 16px; padding: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); }
+.summary.pass { border-color: var(--green); }
+.summary.fail { border-color: var(--red); }
+#start-btn { background: var(--blue); color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: inherit; margin-bottom: 16px; }
+#start-btn:disabled { opacity: 0.5; cursor: default; }
+</style>
+</head>
+<body>
+<h1>WebLLM Browser Smoke Test</h1>
+<p class="subtitle">End-to-end pipeline: WASM init &rarr; GGUF parse &rarr; weight load &rarr; KV cache &rarr; forward pass &rarr; token decode</p>
+<button id="start-btn">Run Smoke Test</button>
+<div id="log"></div>
+<div id="summary"></div>
+
+<script type="module">
+import {
+    GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer
+} from "./webllm-bundle.js";
+
+document.getElementById('start-btn').addEventListener('click', runSmokeTest);
+const GGUF_MAGIC = 0x46475547;
+const GGUF_VERSION = 3;
+
+// ── GGUF helpers ──────────────────────────────────────────────────
+function writeStr(dv, off, s) {
+    dv.setBigUint64(off, BigInt(s.length), true); off += 8;
+    for (let i = 0; i < s.length; i++) dv.setUint8(off++, s.charCodeAt(i));
+    return off;
+}
+function writeU32(dv, off, v) { dv.setUint32(off, v, true); return off + 4; }
+function writeKvStr(dv, off, k, v) { off = writeStr(dv, off, k); off = writeU32(dv, off, 8); return writeStr(dv, off, v); }
+function writeKvU32(dv, off, k, v) { off = writeStr(dv, off, k); off = writeU32(dv, off, 4); return writeU32(dv, off, v); }
+function writeKvF32(dv, off, k, v) { off = writeStr(dv, off, k); off = writeU32(dv, off, 10); dv.setFloat32(off, v, true); return off + 4; }
+function writeKvStrArr(dv, off, k, vals) {
+    off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 8);
+    dv.setBigUint64(off, BigInt(vals.length), true); off += 8;
+    for (const v of vals) off = writeStr(dv, off, v);
+    return off;
+}
+function writeKvF32Arr(dv, off, k, vals) {
+    off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 10);
+    dv.setBigUint64(off, BigInt(vals.length), true); off += 8;
+    for (const v of vals) { dv.setFloat32(off, v, true); off += 4; }
+    return off;
+}
+function writeKvI32Arr(dv, off, k, vals) {
+    off = writeStr(dv, off, k); off = writeU32(dv, off, 9); off = writeU32(dv, off, 4);
+    dv.setBigUint64(off, BigInt(vals.length), true); off += 8;
+    for (const v of vals) { dv.setInt32(off, v, true); off += 4; }
+    return off;
+}
+
+// Tiny model: 1 layer, 8-dim embedding, 2 heads, head_dim=4, 16 vocab, ff=16
+const TINY = {
+    arch: "llama", embDim: 8, headCount: 2, headCountKv: 2, headDim: 4,
+    nLayers: 1, ffDim: 16, vocabSize: 16, ctxLen: 32, normEps: 1e-5,
+    ropeFreqBase: 10000,
+};
+
+function buildTinyGGUF() {
+    const t = TINY;
+    const tokens = [];
+    for (let i = 0; i < t.vocabSize; i++) tokens.push(`tok${i}`);
+    const scores = new Array(t.vocabSize).fill(-1);
+    const tokenTypes = new Array(t.vocabSize).fill(1); // NORMAL
+
+    // Metadata keys
+    const kvs = [
+        ["general.architecture", "str", t.arch],
+        [`${t.arch}.context_length`, "u32", t.ctxLen],
+        [`${t.arch}.embedding_length`, "u32", t.embDim],
+        [`${t.arch}.attention.head_count`, "u32", t.headCount],
+        [`${t.arch}.attention.head_count_kv`, "u32", t.headCountKv],
+        [`${t.arch}.block_count`, "u32", t.nLayers],
+        [`${t.arch}.attention.key_length`, "u32", t.headDim],
+        [`${t.arch}.attention.value_length`, "u32", t.headDim],
+        [`${t.arch}.feed_forward_length`, "u32", t.ffDim],
+        [`${t.arch}.attention.layer_norm_rms_epsilon`, "f32", t.normEps],
+        [`${t.arch}.rope.freq_base`, "f32", t.ropeFreqBase],
+        ["tokenizer.ggml.model", "str", "llama"],
+        ["tokenizer.ggml.tokens", "strarr", tokens],
+        ["tokenizer.ggml.scores", "f32arr", scores],
+        ["tokenizer.ggml.token_type", "i32arr", tokenTypes],
+        ["tokenizer.ggml.eos_token_id", "u32", 2],
+        ["tokenizer.ggml.bos_token_id", "u32", 1],
+    ];
+
+    // Weight tensors: name, [dims], nelements
+    const weightTensors = [
+        ["token_embd.weight", [t.embDim, t.vocabSize]],
+        ["output_norm.weight", [t.embDim]],
+        ["output.weight", [t.embDim, t.vocabSize]],
+    ];
+    for (let i = 0; i < t.nLayers; i++) {
+        const p = (s) => `blk.${i}.${s}`;
+        weightTensors.push(
+            [p("attn_norm.weight"), [t.embDim]],
+            [p("attn_q.weight"), [t.headCount * t.headDim, t.embDim]],
+            [p("attn_k.weight"), [t.headCountKv * t.headDim, t.embDim]],
+            [p("attn_v.weight"), [t.headCountKv * t.headDim, t.embDim]],
+            [p("attn_output.weight"), [t.embDim, t.headCount * t.headDim]],
+            [p("ffn_norm.weight"), [t.embDim]],
+            [p("ffn_gate.weight"), [t.ffDim, t.embDim]],
+            [p("ffn_up.weight"), [t.ffDim, t.embDim]],
+            [p("ffn_down.weight"), [t.embDim, t.ffDim]],
+        );
+    }
+
+    // Calculate sizes
+    let kvSize = 0;
+    for (const [, type, val] of kvs) {
+        kvSize += 8 + kvs[0][0].length + 4; // key string overhead varies
+        // We'll recalc properly in the write loop
+    }
+    // Rough over-estimate: 100 bytes per KV entry
+    const headerSize = 24;
+    kvSize = 4096; // generous over-estimate
+    const tensorInfoSize = weightTensors.length * (8 + 32 + 4 + 8*2 + 4 + 8);
+    const totalTensorData = weightTensors.reduce((s, [, dims]) =>
+        s + dims.reduce((a, d) => a * d, 1) * 4, 0);
+    const alignment = 32;
+    const alignedData = Math.ceil(totalTensorData / alignment) * alignment;
+
+    const totalSize = headerSize + kvSize + tensorInfoSize + alignedData + 4096;
+    const buf = new ArrayBuffer(totalSize);
+    const dv = new DataView(buf);
+    let off = 0;
+
+    // Header
+    dv.setUint32(off, GGUF_MAGIC, true); off += 4;
+    dv.setUint32(off, GGUF_VERSION, true); off += 4;
+    dv.setBigUint64(off, BigInt(weightTensors.length), true); off += 8;
+    dv.setBigUint64(off, BigInt(kvs.length), true); off += 8;
+
+    // Write KV entries
+    for (const [key, type, val] of kvs) {
+        if (type === "str") off = writeKvStr(dv, off, key, val);
+        else if (type === "u32") off = writeKvU32(dv, off, key, val);
+        else if (type === "f32") off = writeKvF32(dv, off, key, val);
+        else if (type === "strarr") off = writeKvStrArr(dv, off, key, val);
+        else if (type === "f32arr") off = writeKvF32Arr(dv, off, key, val);
+        else if (type === "i32arr") off = writeKvI32Arr(dv, off, key, val);
+    }
+
+    // Write tensor infos
+    for (const [name, dims] of weightTensors) {
+        off = writeStr(dv, off, name);
+        off = writeU32(dv, off, dims.length);
+        for (const d of dims) { dv.setBigUint64(off, BigInt(d), true); off += 8; }
+        off = writeU32(dv, off, 0); // type = F32
+        dv.setBigUint64(off, BigInt(0), true); off += 8; // offset (filled later)
+    }
+
+    // Align data section
+    const alignment2 = 32;
+    const dataStart = Math.ceil(off / alignment2) * alignment2;
+    let dataOff = 0;
+
+    // Fill tensor data with deterministic pseudo-random values
+    const tensorDataOffsets = [];
+    for (const [name, dims] of weightTensors) {
+        const nElements = dims.reduce((a, d) => a * d, 1);
+        const bytes = nElements * 4;
+        const alignedOff = Math.ceil(dataOff / alignment2) * alignment2;
+        tensorDataOffsets.push(alignedOff);
+
+        // Simple deterministic fill: sin-based pattern
+        for (let i = 0; i < nElements; i++) {
+            const val = Math.sin(i * 0.1 + dims[0]) * 0.1;
+            dv.setFloat32(dataStart + alignedOff + i * 4, val, true);
+        }
+        dataOff = alignedOff + bytes;
+    }
+
+    // Go back and fill in tensor offsets
+    // Re-scan tensor infos to find offset fields
+    // Easier: rewrite the whole thing with known offsets
+    // Let's just rebuild from scratch with proper offsets
+    off = 0;
+    dv.setUint32(off, GGUF_MAGIC, true); off += 4;
+    dv.setUint32(off, GGUF_VERSION, true); off += 4;
+    dv.setBigUint64(off, BigInt(weightTensors.length), true); off += 8;
+    dv.setBigUint64(off, BigInt(kvs.length), true); off += 8;
+
+    for (const [key, type, val] of kvs) {
+        if (type === "str") off = writeKvStr(dv, off, key, val);
+        else if (type === "u32") off = writeKvU32(dv, off, key, val);
+        else if (type === "f32") off = writeKvF32(dv, off, key, val);
+        else if (type === "strarr") off = writeKvStrArr(dv, off, key, val);
+        else if (type === "f32arr") off = writeKvF32Arr(dv, off, key, val);
+        else if (type === "i32arr") off = writeKvI32Arr(dv, off, key, val);
+    }
+
+    const dataSectionStart = Math.ceil(off + weightTensors.reduce((s, [name, dims]) =>
+        s + 8 + name.length + 4 + dims.length * 8 + 4 + 8, 0
+    ) / 32) * 32;
+
+    let currentDataOff = 0;
+    for (let ti = 0; ti < weightTensors.length; ti++) {
+        const [name, dims] = weightTensors[ti];
+        off = writeStr(dv, off, name);
+        off = writeU32(dv, off, dims.length);
+        for (const d of dims) { dv.setBigUint64(off, BigInt(d), true); off += 8; }
+        off = writeU32(dv, off, 0); // F32
+
+        const alignedOff = Math.ceil(currentDataOff / 32) * 32;
+        dv.setBigUint64(off, BigInt(alignedOff), true); off += 8;
+        currentDataOff = alignedOff + dims.reduce((a, d) => a * d, 1) * 4;
+    }
+
+    // Write data section
+    const dataWriteStart = Math.ceil(off / 32) * 32;
+    currentDataOff = 0;
+    for (const [name, dims] of weightTensors) {
+        const nElements = dims.reduce((a, d) => a * d, 1);
+        const bytes = nElements * 4;
+        const alignedOff = Math.ceil(currentDataOff / 32) * 32;
+        for (let i = 0; i < nElements; i++) {
+            const val = Math.sin(i * 0.1 + dims[0]) * 0.1;
+            dv.setFloat32(dataWriteStart + alignedOff + i * 4, val, true);
+        }
+        currentDataOff = alignedOff + bytes;
+    }
+
+    return buf.slice(0, dataWriteStart + currentDataOff);
+}
+
+// ── Test runner ───────────────────────────────────────────────────
+const logEl = document.getElementById('log');
+const summaryEl = document.getElementById('summary');
+const btn = document.getElementById('start-btn');
+
+let steps = [];
+let currentStep = 0;
+
+function addStep(name) {
+    const el = document.createElement('div');
+    el.className = 'step pending';
+    el.innerHTML = `<span class="label">[${steps.length}]</span> ${name}`;
+    logEl.appendChild(el);
+    steps.push({ name, el, status: 'pending' });
+    return steps.length - 1;
+}
+
+function setStep(idx, status, detail) {
+    const s = steps[idx];
+    s.status = status;
+    s.el.className = `step ${status}`;
+    const icon = status === 'pass' ? 'OK' : status === 'fail' ? 'FAIL' : '...';
+    s.el.innerHTML = `<span class="label">[${idx}] ${icon}</span> ${s.name}`;
+    if (detail) {
+        const d = document.createElement('div');
+        d.className = 'error-detail';
+        d.textContent = detail;
+        s.el.appendChild(d);
+    }
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function runSmokeTest() {
+    btn.disabled = true;
+    logEl.innerHTML = '';
+    summaryEl.innerHTML = '';
+    steps = [];
+    currentStep = 0;
+
+    // Step 0: Check WebGPU
+    const s0 = addStep('Check WebGPU support');
+    try {
+        if (!navigator.gpu) throw new Error('navigator.gpu not available');
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('No WebGPU adapter found');
+        setStep(s0, 'pass');
+    } catch (e) { setStep(s0, 'fail', e.message); return finish(false); }
+
+    // Step 1: Build synthetic GGUF
+    const s1 = addStep('Build synthetic tiny GGUF model');
+    let ggufBuf;
+    try {
+        ggufBuf = buildTinyGGUF();
+        setStep(s1, 'pass', `Buffer size: ${ggufBuf.byteLength} bytes`);
+    } catch (e) { setStep(s1, 'fail', e.message); return finish(false); }
+
+    // Step 2: Parse GGUF
+    const s2 = addStep('Parse GGUF with GgufParser');
+    let ggufCtx;
+    try {
+        ggufCtx = GgufParser.parse(ggufBuf);
+        if (!ggufCtx.header || ggufCtx.header.magic !== GGUF_MAGIC) throw new Error('Bad magic');
+        setStep(s2, 'pass', `Tensors: ${ggufCtx.tensors.length}, Metadata: ${ggufCtx.metadata.size}`);
+    } catch (e) { setStep(s2, 'fail', e.message); return finish(false); }
+
+    // Step 3: Parse model (hyperparams + tokenizer)
+    const s3 = addStep('Parse model with ModelLoader');
+    let parsed;
+    try {
+        parsed = ModelLoader.parseModel(ggufBuf);
+        const hp = parsed.hyperparams;
+        setStep(s3, 'pass',
+            `arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount} kvHeads=${hp.headCountKv} ` +
+            `layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`);
+    } catch (e) { setStep(s3, 'fail', e.message); return finish(false); }
+
+    // Step 4: Load WASM module
+    const s4 = addStep('Load WASM module (webllm-wasm.js)');
+    let wasm;
+    try {
+        wasm = new GgmlWasm();
+        setStep(s4, 'pass', 'GgmlWasm instance created');
+    } catch (e) { setStep(s4, 'fail', e.message); return finish(false); }
+
+    // Step 5: Initialize WebGPU backend
+    const s5 = addStep('Initialize WebGPU backend via WASM');
+    try {
+        await wasm.init({ wasmUrl: './webllm-wasm.js' });
+        setStep(s5, 'pass', 'Backend initialized');
+    } catch (e) { setStep(s5, 'fail', e.message); return finish(false); }
+
+    // Step 6: Create ModelInference and load weights
+    const s6 = addStep('Load model weights into GPU tensors');
+    let inference;
+    try {
+        inference = new ModelInference(wasm, parsed.hyperparams);
+        inference.loadWeights(ggufCtx, ggufBuf);
+        setStep(s6, 'pass', `Weights loaded, tensor map: ${inference.constructor.name}`);
+    } catch (e) { setStep(s6, 'fail', e.message + '\n' + (e.stack || '')); return finish(false); }
+
+    // Step 7: Initialize KV cache
+    const s7 = addStep('Initialize KV cache');
+    try {
+        inference.initKVCache(parsed.kvCacheConfig.maxContextLength);
+        setStep(s7, 'pass', `KV cache: ${parsed.kvCacheConfig.maxContextLength} slots, ${parsed.hyperparams.layerCount} layers`);
+    } catch (e) { setStep(s7, 'fail', e.message); return finish(false); }
+
+    // Step 8: Create tokenizer
+    const s8 = addStep('Create tokenizer');
+    let tokenizer;
+    try {
+        tokenizer = new Tokenizer(parsed.tokenizerConfig);
+        const encoded = tokenizer.encode("hello");
+        setStep(s8, 'pass', `Vocab: ${tokenizer.vocabSize}, encode("hello")=[${encoded}]`);
+    } catch (e) { setStep(s8, 'fail', e.message); return finish(false); }
+
+    // Step 9: Run prefill forward pass
+    const s9 = addStep('Prefill forward pass (3 tokens)');
+    let logits;
+    try {
+        const tokenIds = new Int32Array([1, 3, 4]); // BOS + tok3 + tok4
+        const positions = new Int32Array([0, 1, 2]);
+        const t0 = performance.now();
+        logits = inference.forward(tokenIds, positions);
+        const elapsed = performance.now() - t0;
+        setStep(s9, 'pass', `Logits shape: [${logits.length}], cached: ${inference.cachedTokenCount}, ${elapsed.toFixed(1)}ms`);
+    } catch (e) { setStep(s9, 'fail', e.message + '\n' + (e.stack || '')); return finish(false); }
+
+    // Step 10: Run decode forward pass (single token)
+    const s10 = addStep('Decode forward pass (1 token, using KV cache)');
+    try {
+        const tokenIds = new Int32Array([5]);
+        const positions = new Int32Array([3]);
+        const t0 = performance.now();
+        const logits2 = inference.forward(tokenIds, positions);
+        const elapsed = performance.now() - t0;
+        setStep(s10, 'pass', `Logits shape: [${logits2.length}], cached: ${inference.cachedTokenCount}, ${elapsed.toFixed(1)}ms`);
+    } catch (e) { setStep(s10, 'fail', e.message + '\n' + (e.stack || '')); return finish(false); }
+
+    // Step 11: Sample token from logits
+    const s11 = addStep('Sample token from logits');
+    try {
+        let maxIdx = 0, maxVal = logits[0];
+        for (let i = 1; i < logits.length; i++) {
+            if (logits[i] > maxVal) { maxVal = logits[i]; maxIdx = i; }
+        }
+        const tokenText = tokenizer.decode([maxIdx]);
+        setStep(s11, 'pass', `Argmax: token ${maxIdx} (logit=${maxVal.toFixed(4)}) text="${tokenText}"`);
+    } catch (e) { setStep(s11, 'fail', e.message); return finish(false); }
+
+    // Step 12: Cleanup
+    const s12 = addStep('Dispose resources');
+    try {
+        inference.dispose();
+        await wasm.shutdown();
+        setStep(s12, 'pass', 'All GPU resources freed');
+    } catch (e) { setStep(s12, 'fail', e.message); return finish(false); }
+
+    finish(true);
+}
+
+function finish(success) {
+    const passed = steps.filter(s => s.status === 'pass').length;
+    const failed = steps.filter(s => s.status === 'fail').length;
+    summaryEl.className = `summary ${success ? 'pass' : 'fail'}`;
+    summaryEl.innerHTML = `<strong>${success ? 'ALL TESTS PASSED' : 'TEST FAILED'}</strong><br>${passed} passed, ${failed} failed out of ${steps.length} steps`;
+    btn.disabled = false;
+}
+</script>
+</body>
+</html>
