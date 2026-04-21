@@ -69,9 +69,8 @@ if(EMSCRIPTEN)
         "-sSTACK_SIZE=8388608"
         "-sENVIRONMENT='web'"
         "-sASYNCIFY_STACK_SIZE=1048576"
-        "-O1"
-        "-sASSERTIONS=2"
-        "--emit-symbol-map"
+        "-O3"
+        "-sASSERTIONS=0"
     )
     set_target_properties(webllm-wasm PROPERTIES
         PREFIX ""

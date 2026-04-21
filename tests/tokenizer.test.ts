@@ -145,6 +145,59 @@ describe("Tokenizer", () => {
 		expect(tok.encode("hi world")).toEqual([13, 14]);
 	});
 
+	test("SPM byte fallback emits <0xHH> tokens for unknown UTF-8 bytes", () => {
+		// Build a vocab that has no multi-char tokens for 'é' (0xC3 0xA9) —
+		// so it must fall back to <0xC3> and <0xA9> byte tokens.
+		const tokens: TokenData[] = [
+			{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL }, // 0
+			{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL }, // 1
+			{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL }, // 2
+			{ text: "▁", score: -20, attr: TokenAttribute.NORMAL }, // 3
+			{ text: "c", score: -10, attr: TokenAttribute.NORMAL }, // 4
+			{ text: "a", score: -10, attr: TokenAttribute.NORMAL }, // 5
+			{ text: "f", score: -10, attr: TokenAttribute.NORMAL }, // 6
+			{ text: "<0xC3>", score: 0, attr: TokenAttribute.BYTE }, // 7
+			{ text: "<0xA9>", score: 0, attr: TokenAttribute.BYTE }, // 8
+		];
+		const cfg: TokenizerConfig = {
+			type: TokenizerType.SPM,
+			tokens,
+			bpeRanks: new Map(),
+			addedTokens: new Map(),
+			eosTokenId: 2,
+			bosTokenId: 1,
+			padTokenId: 0,
+			vocabSize: tokens.length,
+		};
+		const tok = new Tokenizer(cfg);
+		// "café" -> after ▁ prefix "▁café" -> [▁, c, a, f, <0xC3>, <0xA9>]
+		expect(tok.encode("café")).toEqual([3, 4, 5, 6, 7, 8]);
+	});
+
+	test("SPM decode reassembles byte-fallback tokens into UTF-8 characters", () => {
+		const tokens: TokenData[] = [
+			{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "▁hi", score: -1, attr: TokenAttribute.NORMAL }, // 3
+			{ text: "<0xC3>", score: 0, attr: TokenAttribute.BYTE }, // 4
+			{ text: "<0xA9>", score: 0, attr: TokenAttribute.BYTE }, // 5
+		];
+		const cfg: TokenizerConfig = {
+			type: TokenizerType.SPM,
+			tokens,
+			bpeRanks: new Map(),
+			addedTokens: new Map(),
+			eosTokenId: 2,
+			bosTokenId: 1,
+			padTokenId: 0,
+			vocabSize: tokens.length,
+		};
+		const tok = new Tokenizer(cfg);
+		// "▁hi" + "é" (as two bytes) -> decode to "hié"
+		expect(tok.decode([3, 4, 5])).toBe("hié");
+	});
+
 	test("SPM decode converts ▁ back to space and strips leading prefix", () => {
 		const tokens: TokenData[] = [
 			{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },

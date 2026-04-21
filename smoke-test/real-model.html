@@ -304,11 +304,15 @@ async function loadAndTest() {
         }
         inference.resetKVCache();
 
-        const prompt = "Once upon a time";
-        // Prepend BOS — base llama-family models are trained with it at position 0
+        // TinyLlama-1.1B-Chat-v1.0 uses the Zephyr-style chat template.
+        // Wrap the user prompt so the chat-tuned model sees what it expects.
+        const userMessage = "Once upon a time, there was a small dragon. Continue the story in 2-3 sentences.";
+        const prompt =
+            "<|system|>\nYou are a helpful assistant.</s>\n" +
+            `<|user|>\n${userMessage}</s>\n` +
+            "<|assistant|>\n";
         const tokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
         const positions = tokens.map((_, i) => i);
-        const hp = parsed.hyperparams;
 
         // Prefill
         const t1 = performance.now();
@@ -316,31 +320,9 @@ async function loadAndTest() {
             new Int32Array(tokens),
             new Int32Array(positions),
         );
-
-        // Check if logits are all zero (computation didn't run)
-        const nonZero = logits.filter(v => v !== 0).length;
-        if (nonZero === 0) {
-            log('fail', '  WARNING: All logits are zero! Forward pass produced no output.');
-            // Try a manual single-token forward to debug
-            const testTokens = new Int32Array([1]); // BOS token
-            const testPos = new Int32Array([0]);
-            const testLogits = await inference.forward(testTokens, testPos);
-            const testNonZero = testLogits.filter(v => v !== 0).length;
-            log('running', `  Single BOS token test: ${testNonZero} non-zero logits out of ${testLogits.length}`);
-            log('running', `  First 10 logits: [${Array.from(testLogits.slice(0,10)).map(v => v.toFixed(4)).join(',')}]`);
-            log('running', `  Max logit: ${Math.max(...testLogits).toFixed(4)} at idx ${testLogits.indexOf(Math.max(...testLogits))}`);
-        }
         const prefillMs = performance.now() - t1;
 
-        // Sample first token
-        let maxIdx = 0, maxVal = logits[0];
-        for (let i = 1; i < logits.length; i++) {
-            if (logits[i] > maxVal) { maxVal = logits[i]; maxIdx = i; }
-        }
-
-        log('running', `  prompt tokens: [${tokens}]`);
-        log('running', `  first generated token: ${maxIdx} (logit=${maxVal.toFixed(4)})`);
-        // Top 10 predictions after the prompt
+        log('running', `  prompt tokens: ${tokens.length}`);
         {
             const arr = Array.from(logits).map((v, i) => [i, v]);
             arr.sort((a, b) => b[1] - a[1]);
@@ -350,37 +332,49 @@ async function loadAndTest() {
             });
             log('running', `  prefill top10: ${top.join(", ")}`);
         }
-        log('running', `  prompt decoded: "${tokenizer.decode(tokens)}"`);
 
-        let generated = [maxIdx];
+        // Sampler: temperature + top-k + top-p + repetition penalty.
+        const sampler = new Sampler({
+            temperature: 0.8,
+            topK: 40,
+            topP: 0.95,
+            repetitionPenalty: 1.15,
+            seed: 42,
+        });
+
         const eosId = parsed.tokenizerConfig.eosTokenId;
-        const maxGen = 40;
+        const maxGen = 120;
+        const generated = [];
+        const recent = [...tokens];
 
-        // Decode loop. The first generated token sits at position tokens.length
-        // (right after the last prompt token), step N at tokens.length + step.
+        // Sample first token from prefill logits (with repetition penalty over the prompt)
+        sampler.applyRepetitionPenalty(logits, recent.slice(-64));
+        let sampledId = sampler.sample(logits);
+        generated.push(sampledId);
+        recent.push(sampledId);
+
         for (let step = 0; step < maxGen; step++) {
+            if (sampledId === eosId) break;
             const pos = tokens.length + step;
             const stepLogits = await inference.forward(
-                new Int32Array([generated[generated.length - 1]]),
+                new Int32Array([sampledId]),
                 new Int32Array([pos]),
             );
-
-            let idx = 0, val = stepLogits[0];
-            for (let i = 1; i < stepLogits.length; i++) {
-                if (stepLogits[i] > val) { val = stepLogits[i]; idx = i; }
-            }
-            if (idx === eosId) break;
-            generated.push(idx);
+            sampler.applyRepetitionPenalty(stepLogits, recent.slice(-64));
+            sampledId = sampler.sample(stepLogits);
+            if (sampledId === eosId) break;
+            generated.push(sampledId);
+            recent.push(sampledId);
         }
 
         const totalTime = performance.now() - t1;
-        const outputText = tokenizer.decode([...tokens, ...generated]);
+        const outputText = tokenizer.decode(generated);
         const genTokens = generated.length;
-        log('running', `  generated token IDs: [${generated}]`);
         const genTime = totalTime - prefillMs;
 
         log('pass', `[7/7] Generated ${genTokens} tokens in ${(totalTime / 1000).toFixed(1)}s (prefill: ${prefillMs.toFixed(0)}ms, decode: ${genTime.toFixed(0)}ms, ${(genTokens / (genTime / 1000)).toFixed(1)} tok/s)`);
-        log('pass', `Output: "${outputText}"`);
+        log('pass', `User: ${userMessage}`);
+        log('pass', `Assistant: ${outputText}`);
 
         setProgress(100);
     } catch (e) {

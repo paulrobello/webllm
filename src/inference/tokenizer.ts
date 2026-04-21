@@ -225,13 +225,36 @@ export class Tokenizer {
 
 	/** Decode token IDs back to text, skipping CONTROL tokens. */
 	decode(ids: number[]): string {
+		// Convert byte-fallback tokens back to their raw bytes and decode as UTF-8.
+		// Mixed run of byte tokens (e.g. multi-byte ▁ or non-ASCII) must be buffered
+		// so TextDecoder sees a valid UTF-8 sequence.
+		const bytes: number[] = [];
+		const flushBytes = (acc: string[]) => {
+			if (bytes.length === 0) return;
+			acc.push(new TextDecoder().decode(new Uint8Array(bytes)));
+			bytes.length = 0;
+		};
+
 		const parts: string[] = [];
 		for (const id of ids) {
 			const token = this.idToToken[id];
 			if (!token) continue;
-			if (token.attr & TokenAttribute.CONTROL) continue;
+			if (token.attr & TokenAttribute.CONTROL) {
+				flushBytes(parts);
+				continue;
+			}
+			if (token.attr & TokenAttribute.BYTE) {
+				const m = /^<0x([0-9a-fA-F]{2})>$/.exec(token.text);
+				if (m) {
+					bytes.push(parseInt(m[1], 16));
+					continue;
+				}
+			}
+			flushBytes(parts);
 			parts.push(token.text);
 		}
+		flushBytes(parts);
+
 		let text = parts.join("");
 		if (this.config.type === TokenizerType.SPM && this.spmPrefixEnabled()) {
 			text = text.replaceAll(SPM_SPACE, " ");
@@ -570,6 +593,7 @@ export class Tokenizer {
 			}
 		}
 
+		const byteEncoder = new TextEncoder();
 		let current = head;
 		while (current !== -1) {
 			const symbolText = symText[current];
@@ -577,23 +601,15 @@ export class Tokenizer {
 			if (id !== undefined) {
 				result.push(id);
 			} else {
-				// Byte fallback: each byte in the symbol maps to token ID 0x0100 + byte_value
-				// FIXME: wrong for LLaMA — byte tokens `<0xHH>` live at low, non-contiguous
-				// IDs and should be looked up by text. Preprocessing handles the common case
-				// (no whitespace byte leaks), so deferring the correct fix to a follow-up.
-				for (const ch of symbolText) {
-					const byteValue = ch.charCodeAt(0);
-					const fallbackId = 0x0100 + byteValue;
-					if (fallbackId < this.idToToken.length) {
-						const token = this.idToToken[fallbackId];
-						if (token && token.attr & TokenAttribute.BYTE) {
-							result.push(fallbackId);
-							continue;
-						}
-					}
-					const directId = this.tokenToId.get(ch);
-					if (directId !== undefined) {
-						result.push(directId);
+				// Byte fallback: emit one <0xHH> token per UTF-8 byte of the symbol.
+				// LLaMA stores these by text (e.g. "<0x20>") at low, non-contiguous
+				// IDs, so look them up by name rather than a fixed base offset.
+				const bytes = byteEncoder.encode(symbolText);
+				for (let b = 0; b < bytes.length; b++) {
+					const byteTokenText = `<0x${bytes[b].toString(16).toUpperCase().padStart(2, "0")}>`;
+					const byteId = this.tokenToId.get(byteTokenText);
+					if (byteId !== undefined) {
+						result.push(byteId);
 					}
 				}
 			}
