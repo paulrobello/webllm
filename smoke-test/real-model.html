@@ -296,7 +296,7 @@ async function loadAndTest() {
     try {
         // Probe a few prompts so we can spot whether outputs are sensible. For
         // each, run a single prefill and log top-5.
-        for (const p of ["The", "The quick brown", "The capital of France is"]) {
+        for (const p of ["The", "The quick brown", "Hello, how are you"]) {
             inference.resetKVCache();
             const tks = [tokenizer.bosId, ...tokenizer.encode(p)];
             const lgts = await inference.forward(
@@ -315,7 +315,7 @@ async function loadAndTest() {
 
         // Simplest possible test: raw prompt + greedy, to see if the pipeline
         // can produce a coherent continuation at all.
-        const userMessage = "The capital of France is";
+        const userMessage = "Hello! Can you tell me a short joke?";
         const prompt = userMessage;
         const tokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
         const positions = tokens.map((_, i) => i);
