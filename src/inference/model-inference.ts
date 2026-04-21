@@ -111,6 +111,12 @@ export class ModelInference {
 		if (this.kvLayers) return;
 
 		const { hp, wasm } = this;
+		// NOTE: KV cache is F32. F16 was tried (see git history + TODO.md
+		// item 6) and measured -7.7% on short-context benchmarks — the
+		// F16×F32 mul_mat path plus F32->F16 conversion on writes outweigh
+		// the bandwidth savings until context gets much longer (~1000+ tokens).
+		// Left as F32; revisit when real long-context workloads become the
+		// perf target.
 		const perLayerBytes = hp.embeddingHeadLength * maxContextLength * 4;
 		const totalBytes = hp.layerCount * 2 * perLayerBytes;
 		const memSize = hp.layerCount * 2 * 16384 + totalBytes + (1 << 20);

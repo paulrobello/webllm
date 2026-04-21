@@ -98,19 +98,23 @@ the code lives today, the expected win, and the risk/tradeoff.
 - **Actual gain**: +1–2% (58 → ~58.5 tok/s). Modest — FFN compute is
   dominated by the three mul_mats, not by silu/mul. Kept for cleanliness.
 
-### 6. F16 KV cache
+### 6. F16 KV cache ❌ NET LOSS AT SHORT CONTEXT
 - **Where**: `src/inference/model-inference.ts::initKVCache`.
-- **Today**: KV cache is `F32`. At `maxCtx=2048, nKvHeads=4,
-  headDim=64, nLayers=22`, that's 2048×64×4×4 bytes × 22 layers × 2
-  (K+V) ≈ **46 MB**. Every attention step reads all of it.
-- **Change**: allocate K/V as `F16`. On write, convert (or upload
-  pre-converted bytes). Check `supports_op` for F16 read in mul_mat;
-  the backend already handles F16 K.
-- **Expected**: half the attention bandwidth; noticeable on longer
-  contexts. Prefill gets 10–15%, decode scales with context.
-- **Risk**: need to confirm WebGPU backend's mul_mat supports F16 K
-  with F32 Q (llama.cpp default). Currently V is also F32 — making V
-  F16 too drops another 2× on the V side.
+- **Was**: KV cache as `F32`. 46MB at max context.
+- **Tried**: switched K and V to `F16`. The WebGPU backend correctly
+  handles F16 K × F32 Q mul_mat (producing F32 output) and F32->F16
+  cpy for writes — no correctness regression, Paris still top-1.
+- **Measured**: **-7.7%** decode throughput on our smoke-test (55.3
+  tok/s vs 59.9 baseline). The F16×F32 mul_mat path in ggml-webgpu
+  isn't as fast as F32×F32 for small matrices, and the F32->F16 type
+  conversion on every KV write adds dispatch overhead that dominates
+  at short contexts where KV reads are tiny.
+- **Reverted**: code stays F32. Comment on `initKVCache` notes the
+  measurement.
+- **Reconsider when**: real long-context workloads (1000+ tokens)
+  dominate, at which point the bandwidth savings on attention reads
+  will overtake the write-path overhead. Worth revisiting if we add
+  F16 Q-cache path too so both sides of mul_mat are F16.
 
 ---
 
