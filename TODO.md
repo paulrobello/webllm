@@ -65,21 +65,30 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ## Medium impact
 
-### 4. Enable flash attention in the browser
+### 4. Enable flash attention in the browser ❌ BLOCKED UPSTREAM
 - **Where**: `ggml-webgpu.cpp::ggml_backend_webgpu_device_supports_op`
   under `GGML_OP_FLASH_ATTN_EXT` — currently `#ifndef __EMSCRIPTEN__`.
-- **Today**: flash attention is unconditionally disabled in the browser
-  because it requires `supports_subgroup_matrix`, which was assumed
-  absent.
-- **Change**: runtime-check `supports_subgroup_matrix` and subgroup
-  support via Dawn. Chrome Canary with WebGPU-subgroups supports this.
-  Enable the path when available; fall back otherwise.
-- **Expected**: sub-linear memory and compute for attention (`O(n)`
-  vs `O(n²)` with a 2K context). For the current single-prompt smoke
-  test this is modest; for real chat with long context it's the
-  difference between usable and unusable.
-- **Risk**: gated on browser support. Need to probe capabilities and
-  not crash when absent.
+- **Investigated**: Emscripten's Dawn port (`emdawnwebgpu`) does NOT
+  expose `wgpu::FeatureName::ChromiumExperimentalSubgroupMatrix` or
+  `wgpu::AdapterPropertiesSubgroupMatrixConfigs` in its `webgpu.h` /
+  `webgpu_cpp.h`. Only plain `Subgroups` is available (`WGPUFeatureName_Subgroups = 0x00000012`).
+  llama.cpp's flash-attention shaders specifically use subgroup-matrix
+  operations, so this isn't a runtime toggle — the API simply isn't
+  bound in browser builds. Native Dawn has it; the emdawnwebgpu port
+  lags.
+- **Blocker**: waiting on emdawnwebgpu to bind
+  `ChromiumExperimentalSubgroupMatrix`. Once bound, remove the
+  `#ifndef __EMSCRIPTEN__` guards in supports_op + encode_node, since
+  `supports_subgroup_matrix` is already correctly checked at runtime
+  inside the native path and would naturally evaluate to `false` in
+  browsers that don't support it.
+- **Alternative**: write a non-subgroup-matrix flash-attention shader
+  that uses plain workgroup memory + shared tiling. Much larger project —
+  effectively re-implementing flash-attn from scratch in WGSL. Not
+  worth it until the upstream binding lands.
+- **For now**: defer. Our standard attention path is correct and
+  manageable. Reconsider when Chrome ships stable subgroup-matrix
+  support and emdawnwebgpu rolls.
 
 ### 5. Fused SwiGLU op ✅ DONE
 - **Where**: `src/inference/model-inference.ts` FFN section.
