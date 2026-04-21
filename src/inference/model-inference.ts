@@ -253,11 +253,15 @@ export class ModelInference {
 			// Expand into the graph NOW so the cpy node precedes attention reads.
 			wasm.graphBuildForwardExpand(graph, kWrite);
 
-			// Write V to cache: permute v3(2,0,1,3) -> [nTokens, headDim, nKvHeads]
+			// Write V to cache: v3 is [headDim, nKvHeads, nTokens] and the cache
+			// layout is [nTokens, headDim, nKvHeads]. In ggml_permute the axisN
+			// argument is the DESTINATION axis for source dim N, so to map
+			// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(nTokens=0, headDim=1, nKvHeads=2)
+			// we pass (1, 2, 0, 3).
 			const vNb0 = wasm.tensorNb(kv.v, 0);
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			const v3P = wasm.opPermute(v3, 2, 0, 1, 3);
+			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
 			const vWriteView = wasm.opView3d(
 				kv.v,
 				nTokens,
@@ -468,18 +472,60 @@ export class ModelInference {
 	}
 
 	/**
-	 * DEBUG: run a single layer of the transformer and return the final `cur`
-	 * tensor for a single token. For sanity checking whether attention /
-	 * FFN / residual are producing reasonable magnitudes.
+	 * DEBUG: run the transformer stack for a single token and return the
+	 * hidden state at a specific checkpoint inside a specific layer.
+	 *
+	 * checkpoint:
+	 *   "layer_output" — cur after layer L (attn residual + ffn residual)
+	 *   "post_attn"    — cur after layer L's attn residual add, before FFN
+	 *   "pre_attn"     — cur entering layer L (= output of layer L-1)
+	 *   "attn_out"     — just oProj(...) for layer L, before residual add
+	 *   "ffn_out"      — just ffn_down(...) for layer L, before residual add
+	 *   "ffn_gate"     — raw ffn_gate_proj output (pre-silu)
+	 *   "ffn_up"       — raw ffn_up_proj output
+	 *   "ffn_hidden"   — silu(gate) * up, i.e. the input to ffn_down_proj
+	 *   "ffn_normed"   — input to FFN after RMSNorm + ffn_norm gain
+	 *   "attn_normed"  — input to attention after RMSNorm + attn_norm gain
+	 *   "attn_q"       — raw Q projection output (pre-reshape, pre-rope)
+	 *   "attn_k"       — raw K projection output
+	 *   "attn_v"       — raw V projection output
+	 *
+	 * The difference (post_attn - pre_attn) == attn_out, and
+	 * (layer_output - post_attn) == ffn_out — so these together pinpoint
+	 * which branch of a layer is under- or over-shooting.
 	 */
 	async debugLayerOutput(
 		tokenId: number,
 		layerIdx: number,
+		checkpoint:
+			| "layer_output"
+			| "post_attn"
+			| "pre_attn"
+			| "attn_out"
+			| "ffn_out"
+			| "ffn_gate"
+			| "ffn_up"
+			| "ffn_hidden"
+			| "ffn_normed"
+			| "attn_normed"
+			| "attn_q"
+			| "attn_k"
+			| "attn_v" = "layer_output",
 	): Promise<Float32Array> {
 		if (!this.weights) throw new Error("Weights not loaded");
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const { wasm, hp, weights } = this;
-		const nbytes = hp.embeddingLength * 4;
+		const isFfnIntermediate =
+			checkpoint === "ffn_gate" ||
+			checkpoint === "ffn_up" ||
+			checkpoint === "ffn_hidden";
+		const kvDim = hp.embeddingHeadLength * hp.headCountKv;
+		const nbytes =
+			(isFfnIntermediate
+				? hp.feedForwardLength
+				: checkpoint === "attn_k" || checkpoint === "attn_v"
+					? kvDim
+					: hp.embeddingLength) * 4;
 
 		wasm.ctxCreate(16 * 1024 * 1024);
 		try {
@@ -490,16 +536,38 @@ export class ModelInference {
 			let cur = wasm.opGetRows(weights.tokEmb, idsTensor);
 			const graph = wasm.graphNew(2048);
 
+			let returnTensor: TensorPtr = cur;
+
 			for (let il = 0; il <= layerIdx; il++) {
+				if (il === layerIdx && checkpoint === "pre_attn") {
+					returnTensor = cur;
+					break;
+				}
 				const lw = weights.layers[il];
 				const kv = this.kvLayers[il];
 				const normed = wasm.opMul(
 					wasm.opRmsNorm(cur, hp.normEpsilon),
 					lw.attnNorm,
 				);
+				if (il === layerIdx && checkpoint === "attn_normed") {
+					returnTensor = normed;
+					break;
+				}
 				const q = wasm.opMulMat(lw.qProj, normed);
+				if (il === layerIdx && checkpoint === "attn_q") {
+					returnTensor = q;
+					break;
+				}
 				const k = wasm.opMulMat(lw.kProj, normed);
+				if (il === layerIdx && checkpoint === "attn_k") {
+					returnTensor = k;
+					break;
+				}
 				const v = wasm.opMulMat(lw.vProj, normed);
+				if (il === layerIdx && checkpoint === "attn_v") {
+					returnTensor = v;
+					break;
+				}
 				const q3 = wasm.opReshape3d(q, hp.embeddingHeadLength, hp.headCount, 1);
 				const k3 = wasm.opReshape3d(
 					k,
@@ -558,7 +626,9 @@ export class ModelInference {
 				const vNb0 = wasm.tensorNb(kv.v, 0);
 				const vNb1 = wasm.tensorNb(kv.v, 1);
 				const vNb2 = wasm.tensorNb(kv.v, 2);
-				const v3P = wasm.opPermute(v3, 2, 0, 1, 3);
+				// Same V-permute fix as in forward(): (1, 2, 0, 3) maps
+				// src(headDim, nKvHeads, nTokens) -> dst(nTokens, headDim, nKvHeads).
+				const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
 				const vWriteView = wasm.opView3d(
 					kv.v,
 					1,
@@ -605,21 +675,52 @@ export class ModelInference {
 					1,
 				);
 				const oProj = wasm.opMulMat(lw.oProj, merged);
+				if (il === layerIdx && checkpoint === "attn_out") {
+					returnTensor = oProj;
+					break;
+				}
 				const attnResidual = wasm.opAdd(oProj, cur);
+				if (il === layerIdx && checkpoint === "post_attn") {
+					returnTensor = attnResidual;
+					break;
+				}
 				const ffnNormed = wasm.opMul(
 					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
 					lw.ffnNorm,
 				);
+				if (il === layerIdx && checkpoint === "ffn_normed") {
+					returnTensor = ffnNormed;
+					break;
+				}
 				const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
+				if (il === layerIdx && checkpoint === "ffn_gate") {
+					returnTensor = gate;
+					break;
+				}
 				const up = wasm.opMulMat(lw.upProj, ffnNormed);
+				if (il === layerIdx && checkpoint === "ffn_up") {
+					returnTensor = up;
+					break;
+				}
 				const ffnHidden = wasm.opMul(wasm.opSilu(gate), up);
+				if (il === layerIdx && checkpoint === "ffn_hidden") {
+					returnTensor = ffnHidden;
+					break;
+				}
 				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+				if (il === layerIdx && checkpoint === "ffn_out") {
+					returnTensor = ffnOut;
+					break;
+				}
 				cur = wasm.opAdd(ffnOut, attnResidual);
+				if (il === layerIdx && checkpoint === "layer_output") {
+					returnTensor = cur;
+				}
 				// Reset vNb0 to silence lint
 				void vNb0;
 			}
 
-			wasm.graphBuildForwardExpand(graph, cur);
+			wasm.graphBuildForwardExpand(graph, returnTensor);
 			const graphBuf = wasm.backendAllocCtxTensors();
 
 			// Upload inputs
@@ -643,7 +744,7 @@ export class ModelInference {
 			}
 			await wasm.graphCompute(graph);
 
-			const bytes = await wasm.downloadFromTensor(cur, nbytes, 0);
+			const bytes = await wasm.downloadFromTensor(returnTensor, nbytes, 0);
 			wasm.backendBufferFree(graphBuf);
 			return new Float32Array(bytes.buffer, bytes.byteOffset, nbytes / 4);
 		} finally {
