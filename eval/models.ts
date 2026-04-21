@@ -258,6 +258,26 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 
 	// --- Specialized models ---
 
+	{
+		id: "tinyllama-1.1b-chat-q4_0",
+		name: "TinyLlama 1.1B Chat v1.0",
+		family: "TinyLlama",
+		architecture: "llama",
+		paramsB: 1.1,
+		vramMB: 760,
+		defaultQuant: "q0f32",
+		availableQuants: ["q0f32"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 2048,
+		tier: "ultrafast",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+		// Actually Q4_0 but no q4_0 in our enum — this is the Q4_0 GGUF we use
+		// as the smoke-test reference model. See smoke-test/models/.
+		ggufUrl: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+	},
+
 	// --- Embedding models ---
 
 	{

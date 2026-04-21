@@ -139,16 +139,23 @@ the code lives today, the expected win, and the risk/tradeoff.
 - **Expected**: low single digits; only worth doing alongside (1).
 - **Risk**: low.
 
-### 10. Benchmark the current pipeline
-- **Where**: add to `bench/` or the smoke-test.
-- **Today**: we have "generated N tokens in T seconds" but no repeatable
-  benchmark that isolates prefill vs decode and tracks each optimization.
-- **Change**: scripted, same-model, same-prompt, same-seed benchmark
-  that outputs `prefill_ms`, `decode_ms`, `tok/s` and diffs vs a stored
-  baseline.
-- **Expected**: no inference speedup directly, but makes all the other
-  optimizations measurable instead of vibe-based.
-- **Risk**: none.
+### 10. Benchmark the current pipeline ✅ DONE
+- **Where**: `eval/perf.ts` + `make bench-inference` + `make bench-inference-save`.
+- **Change**:
+  - Added TinyLlama 1.1B Chat to `eval/models.ts` model catalog.
+  - New `eval/perf.ts` drives the smoke-test page in a running
+    agentchrome-attached Chrome, reloads it N times with cache busting,
+    scrapes `Generated N tokens in Ts (prefill: Mms, decode: Dms, T tok/s)`
+    from the DOM, and prints a per-run + median table.
+  - Compares median tok/s to `eval/reports/perf-baseline.json`; `--save`
+    writes current run as the new baseline.
+  - Wired into `Makefile` as `bench-inference` / `bench-inference-save`
+    and `package.json` as `bench:inference`.
+- **Actual gain**: 0 tok/s — infra only. Makes every future
+  optimization measurable with a 3-run median instead of squinting at
+  the smoke-test output.
+- **Current baseline**: 59.9 tok/s (3-run median) for TinyLlama-1.1B Q4_0 on
+  "The capital of France is".
 
 ---
 

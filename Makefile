@@ -1,6 +1,7 @@
 .PHONY: build test lint fmt typecheck checkall clean install deps wasm-build \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
-        bench-eval-models bench-all run-all smoke-test smoke-serve
+        bench-eval-models bench-inference bench-inference-save bench-all \
+        run-all smoke-test smoke-serve
 
 install:
 	bun install
@@ -46,6 +47,18 @@ bench-eval-list:
 
 bench-eval-models:
 	bun run bench:eval --models
+
+# End-to-end inference perf: drives the smoke-test page in an active
+# agentchrome-attached Chrome and records tok/s vs eval/reports/perf-baseline.json.
+# Requires `make smoke-serve` running and the smoke-test open in Chrome.
+PERF_MODEL ?= tinyllama-1.1b-chat-q4_0
+PERF_RUNS  ?= 3
+
+bench-inference:
+	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS)
+
+bench-inference-save:
+	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --save
 
 bench-all: bench-perf bench-eval
 
