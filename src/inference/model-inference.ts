@@ -37,6 +37,19 @@ interface LayerKVCache {
  * Captured only when `traceEnabled` is true — the default is off so the
  * hot path pays nothing. Used by the profile harness in `eval/perf.ts`.
  */
+export type DecodeMode = "full" | "greedy" | "topk";
+
+export interface DecodeResult {
+	/** Full logits (mode='full'). */
+	logits?: Float32Array;
+	/** Greedy argmax token ID (mode='greedy'). */
+	tokenId?: number;
+	/** Top-K indices (mode='topk'). */
+	topKIndices?: Int32Array;
+	/** Top-K logit values (mode='topk'). */
+	topKValues?: Float32Array;
+}
+
 export interface ForwardTrace {
 	nTokens: number;
 	pastLen: number;
@@ -502,6 +515,359 @@ export class ModelInference {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Decode a single token using GPU-side reduction (ARGMAX or TOP_K).
+	 * Avoids downloading the full vocabulary logits - returns either a single
+	 * token ID (greedy) or a reduced set of indices + values (topk).
+	 *
+	 * @param tokenIds  - Input token IDs (must be length 1 for decode).
+	 * @param positions - Corresponding positions.
+	 * @param mode      - 'greedy' for ARGMAX, 'topk' for TOP_K + GET_ROWS.
+	 * @param topK      - K value when mode is 'topk'.
+	 */
+	async forwardDecode(
+		tokenIds: Int32Array,
+		positions: Int32Array,
+		mode: DecodeMode,
+		topK?: number,
+	): Promise<DecodeResult> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		const { hp, wasm, weights } = this;
+		const nTokens = tokenIds.length;
+		const pastLen = this.nCached;
+		const totalLen = pastLen + nTokens;
+
+		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
+		wasm.ctxCreate(graphMem);
+
+		const headDim = hp.embeddingHeadLength;
+		const nHeads = hp.headCount;
+
+		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
+		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
+
+		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
+		const needsMask = nTokens > 1;
+		const maskPaddedCols = padTo(nTokens, 32);
+		const maskTensor = needsMask
+			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
+			: 0;
+
+		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		const graph = wasm.graphNew(hp.layerCount * 64 + 128);
+
+		let cur = x;
+		for (let il = 0; il < hp.layerCount; il++) {
+			const lw = weights.layers[il];
+			const kv = this.kvLayers[il];
+
+			const normed = wasm.opMul(
+				wasm.opRmsNorm(cur, hp.normEpsilon),
+				lw.attnNorm,
+			);
+
+			const q = wasm.opMulMat(lw.qProj, normed);
+			const k = wasm.opMulMat(lw.kProj, normed);
+			const v = wasm.opMulMat(lw.vProj, normed);
+
+			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
+			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
+			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
+
+			const qRope = wasm.opRope(
+				q3,
+				posTensor,
+				headDim,
+				RopeMode.NORMAL,
+				hp.contextLength,
+				hp.ropeFreqBase,
+				hp.ropeScale,
+				0.0,
+				1.0,
+				0.0,
+				0.0,
+			);
+			const kRope = wasm.opRope(
+				k3,
+				posTensor,
+				headDim,
+				RopeMode.NORMAL,
+				hp.contextLength,
+				hp.ropeFreqBase,
+				hp.ropeScale,
+				0.0,
+				1.0,
+				0.0,
+				0.0,
+			);
+
+			const kNb1 = wasm.tensorNb(kv.k, 1);
+			const kNb2 = wasm.tensorNb(kv.k, 2);
+			const kWriteView = wasm.opView3d(
+				kv.k,
+				headDim,
+				nTokens,
+				hp.headCountKv,
+				kNb1,
+				kNb2,
+				pastLen * kNb1,
+			);
+			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
+			wasm.graphBuildForwardExpand(graph, wasm.opCpy(kRopeP, kWriteView));
+
+			const vNb0 = wasm.tensorNb(kv.v, 0);
+			const vNb1 = wasm.tensorNb(kv.v, 1);
+			const vNb2 = wasm.tensorNb(kv.v, 2);
+			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+			const vWriteView = wasm.opView3d(
+				kv.v,
+				nTokens,
+				headDim,
+				hp.headCountKv,
+				vNb1,
+				vNb2,
+				pastLen * vNb0,
+			);
+			wasm.graphBuildForwardExpand(graph, wasm.opCpy(v3P, vWriteView));
+
+			const fullK = wasm.opView3d(
+				kv.k,
+				headDim,
+				totalLen,
+				hp.headCountKv,
+				kNb1,
+				kNb2,
+				0,
+			);
+			const fullV = wasm.opView3d(
+				kv.v,
+				totalLen,
+				headDim,
+				hp.headCountKv,
+				vNb1,
+				vNb2,
+				0,
+			);
+
+			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+			const qk = wasm.opMulMat(fullK, qp);
+			const attnW = wasm.opSoftMaxExt(
+				qk,
+				maskTensor,
+				1.0 / Math.sqrt(headDim),
+				0.0,
+			);
+			const attnOut = wasm.opMulMat(fullV, attnW);
+			const merged = wasm.opReshape2d(
+				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+				nHeads * headDim,
+				nTokens,
+			);
+			const oProj = wasm.opMulMat(lw.oProj, merged);
+			const attnResidual = wasm.opAdd(oProj, cur);
+
+			const ffnNormed = wasm.opMul(
+				wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+				lw.ffnNorm,
+			);
+			const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
+			const up = wasm.opMulMat(lw.upProj, ffnNormed);
+			const ffnHidden = wasm.opSwigluSplit(gate, up);
+			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+			cur = wasm.opAdd(ffnOut, attnResidual);
+		}
+
+		const finalNorm = wasm.opMul(
+			wasm.opRmsNorm(cur, hp.normEpsilon),
+			weights.norm,
+		);
+		const logits = weights.output
+			? wasm.opMulMat(weights.output, finalNorm)
+			: wasm.opMulMat(weights.tokEmb, finalNorm);
+
+		if (mode === "greedy") {
+			const argmaxResult = wasm.opArgmax(logits);
+			wasm.graphBuildForwardExpand(graph, argmaxResult);
+
+			const graphBuf = wasm.backendAllocCtxTensors();
+			this.uploadLeaves(
+				wasm,
+				tokenIds,
+				positions,
+				nTokens,
+				pastLen,
+				totalLen,
+				needsMask,
+				maskPaddedCols,
+				posTensor,
+				tokenIdsTensor,
+				maskTensor,
+			);
+
+			await wasm.graphCompute(graph);
+
+			const buf = await wasm.downloadFromTensor(argmaxResult, 4, 0);
+			const tokenId = new Int32Array(buf.buffer, buf.byteOffset, 1)[0];
+
+			wasm.backendBufferFree(graphBuf);
+			wasm.ctxFree();
+			this.nCached = totalLen;
+			return { tokenId };
+		}
+
+		if (mode === "topk" && topK && topK > 0) {
+			const topKIndices = wasm.opTopK(logits, topK);
+			const logitsCol = wasm.opReshape2d(logits, hp.vocabularySize, 1);
+			const topKValues2D = wasm.opGetRows(logitsCol, topKIndices);
+			const topKValues = wasm.opReshape2d(topKValues2D, topK, 1);
+
+			wasm.graphBuildForwardExpand(graph, topKValues);
+
+			const graphBuf = wasm.backendAllocCtxTensors();
+			this.uploadLeaves(
+				wasm,
+				tokenIds,
+				positions,
+				nTokens,
+				pastLen,
+				totalLen,
+				needsMask,
+				maskPaddedCols,
+				posTensor,
+				tokenIdsTensor,
+				maskTensor,
+			);
+
+			await wasm.graphCompute(graph);
+
+			const kBytes = topK * 4;
+			const idxBuf = await wasm.downloadFromTensor(topKIndices, kBytes, 0);
+			const valBuf = await wasm.downloadFromTensor(topKValues, kBytes, 0);
+
+			const indices = new Int32Array(
+				idxBuf.buffer,
+				idxBuf.byteOffset,
+				topK,
+			).slice();
+			const values = new Float32Array(
+				valBuf.buffer,
+				valBuf.byteOffset,
+				topK,
+			).slice();
+
+			wasm.backendBufferFree(graphBuf);
+			wasm.ctxFree();
+			this.nCached = totalLen;
+			return { topKIndices: indices, topKValues: values };
+		}
+
+		// Fallback: full logits
+		wasm.graphBuildForwardExpand(graph, logits);
+		const graphBuf = wasm.backendAllocCtxTensors();
+		this.uploadLeaves(
+			wasm,
+			tokenIds,
+			positions,
+			nTokens,
+			pastLen,
+			totalLen,
+			needsMask,
+			maskPaddedCols,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+		);
+
+		await wasm.graphCompute(graph);
+
+		const logitsBytes = hp.vocabularySize * 4;
+		const offset = nTokens > 1 ? (nTokens - 1) * logitsBytes : 0;
+		const resultBuf = await wasm.downloadFromTensor(
+			logits,
+			logitsBytes,
+			offset,
+		);
+		const fullLogits = new Float32Array(
+			resultBuf.buffer,
+			resultBuf.byteOffset,
+			hp.vocabularySize,
+		).slice();
+
+		wasm.backendBufferFree(graphBuf);
+		wasm.ctxFree();
+		this.nCached = totalLen;
+		return { logits: fullLogits };
+	}
+
+	/** Upload position, token ID, and mask data after backend alloc. */
+	private uploadLeaves(
+		wasm: GgmlWasm,
+		tokenIds: Int32Array,
+		positions: Int32Array,
+		nTokens: number,
+		pastLen: number,
+		totalLen: number,
+		needsMask: boolean,
+		maskPaddedCols: number,
+		posTensor: TensorPtr,
+		tokenIdsTensor: TensorPtr,
+		maskTensor: TensorPtr,
+	): void {
+		const posBytes = nTokens * 4;
+		const idsBytes = nTokens * 4;
+		const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
+		const totalBytes = posBytes + idsBytes + maskBytes;
+
+		const heap = wasm.malloc(totalBytes);
+		try {
+			const posPtr = heap;
+			const idsPtr = heap + posBytes;
+			const maskPtr = heap + posBytes + idsBytes;
+
+			const posView = new Int32Array(wasm.heapU8.buffer, posPtr, nTokens);
+			const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, nTokens);
+			for (let i = 0; i < nTokens; i++) {
+				posView[i] = positions[i];
+				idsView[i] = tokenIds[i];
+			}
+
+			if (needsMask) {
+				const mask = new Float32Array(
+					wasm.heapU8.buffer,
+					maskPtr,
+					totalLen * maskPaddedCols,
+				);
+				const NEG_INF = -Infinity;
+				for (let q = 0; q < nTokens; q++) {
+					const rowBase = q * totalLen;
+					const visibleUpTo = pastLen + q;
+					for (let k = 0; k < totalLen; k++) {
+						mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+					}
+				}
+				for (let q = nTokens; q < maskPaddedCols; q++) {
+					const rowBase = q * totalLen;
+					for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
+				}
+			}
+
+			wasm.backendTensorSet3(
+				posTensor,
+				posPtr,
+				posBytes,
+				tokenIdsTensor,
+				idsPtr,
+				idsBytes,
+				needsMask ? maskTensor : 0,
+				maskPtr,
+				maskBytes,
+			);
+		} finally {
+			wasm.free(heap);
+		}
 	}
 
 	// ── Debug tooling ────────────────────────────────────────────────────

@@ -10,7 +10,11 @@ import {
 	LightweightModel,
 	type LightweightModelConfig,
 } from "../inference/lightweight.js";
-import { ModelInference } from "../inference/model-inference.js";
+import {
+	type DecodeMode,
+	type DecodeResult,
+	ModelInference,
+} from "../inference/model-inference.js";
 import { Sampler } from "../inference/sampler.js";
 import { StreamingDecoder, Tokenizer } from "../inference/tokenizer.js";
 import { GgufParser } from "../models/gguf-parser.js";
@@ -242,6 +246,20 @@ export class WebLLM {
 			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
 		};
 
+		const forwardDecode = async (
+			ids: number[],
+			positions: number[],
+			mode: DecodeMode,
+			topK?: number,
+		): Promise<DecodeResult> => {
+			return await inf.forwardDecode(
+				new Int32Array(ids),
+				new Int32Array(positions),
+				mode,
+				topK,
+			);
+		};
+
 		const genConfig: GenerationConfig = {
 			prompt: "",
 			maxTokens,
@@ -265,6 +283,7 @@ export class WebLLM {
 			forwardPass,
 			genConfig,
 			config?.signal,
+			forwardDecode,
 		);
 
 		try {

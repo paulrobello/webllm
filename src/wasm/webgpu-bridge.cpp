@@ -208,6 +208,14 @@ void* op_get_rows(void* a, void* b) {
     return ggml_get_rows(current_ctx(), (struct ggml_tensor*)a, (struct ggml_tensor*)b);
 }
 
+void* op_argmax(void* src) {
+    return ggml_argmax(current_ctx(), (struct ggml_tensor*)src);
+}
+
+void* op_top_k(void* src, int32_t k) {
+    return ggml_top_k(current_ctx(), (struct ggml_tensor*)src, k);
+}
+
 void* op_diag_mask_inf(void* x, int32_t n_past) {
     return ggml_diag_mask_inf(current_ctx(), (struct ggml_tensor*)x, n_past);
 }

@@ -2,7 +2,7 @@
         wasm-build wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
         bench-eval-models bench-inference bench-inference-save bench-all \
-        smoke-test smoke-serve smoke-stop smoke-open smoke-run \
+        smoke-test smoke-serve smoke-stop smoke-open smoke-run smoke-bench \
         run-all help
 
 # ---------------------------------------------------------------------------
@@ -94,13 +94,13 @@ smoke-test: wasm-build ## Bundle + copy WASM artifacts into smoke-test/
 	bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
 	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
 
-smoke-serve: ## Serve smoke-test/ on http://localhost:$(SMOKE_PORT)
+smoke-serve: smoke-test ## Serve smoke-test/ on http://localhost:$(SMOKE_PORT)
 	cd smoke-test && python3 -m http.server $(SMOKE_PORT)
 
 smoke-stop: ## Kill the smoke-test HTTP server
 	lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
 
-smoke-open: ## Open smoke-test in default browser
+smoke-open: smoke-test ## Build + open smoke-test in default browser
 	open http://localhost:$(SMOKE_PORT)/real-model.html
 
 smoke-run: smoke-test ## Build, serve in background, open browser (Ctrl-C to stop)
@@ -110,6 +110,27 @@ smoke-run: smoke-test ## Build, serve in background, open browser (Ctrl-C to sto
 	@sleep 1 && open http://localhost:$(SMOKE_PORT)/real-model.html
 	@echo "Press Ctrl-C to stop the server."
 	@wait
+
+smoke-bench: smoke-test ## End-to-end inference benchmark with agentchrome (headed)
+	@echo "=== smoke-bench: $(PERF_MODEL), $(PERF_RUNS) runs ==="
+	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
+	@cd smoke-test && python3 -m http.server $(SMOKE_PORT) &
+	@sleep 1
+	@agentchrome connect --launch --headed 2>/dev/null || true; \
+	sleep 2; \
+	PORT=$$(agentchrome connect --status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('port',''))" 2>/dev/null); \
+	if [ -z "$$PORT" ]; then echo "ERROR: agentchrome not running"; kill %1 2>/dev/null; exit 1; fi; \
+	echo "agentchrome on port $$PORT"; \
+	agentchrome --port $$PORT tabs create "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || \
+		agentchrome --port $$PORT navigate "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || true; \
+	sleep 2; \
+	TAB=$$(agentchrome --port $$PORT tabs list 2>/dev/null | python3 -c "import sys,json; tabs=json.load(sys.stdin); t=[t for t in tabs if 'real-model' in t.get('url','')]; print(t[0]['id'] if t else '')" 2>/dev/null); \
+	if [ -n "$$TAB" ]; then \
+		bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --port $$PORT --tab $$TAB --profile; \
+	else \
+		bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --port $$PORT --profile; \
+	fi; \
+	kill %1 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Benchmarks

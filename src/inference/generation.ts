@@ -1,4 +1,5 @@
 import type { InferenceSession } from "../models/inference-session.js";
+import type { DecodeMode, DecodeResult } from "./model-inference.js";
 import type { Sampler } from "./sampler.js";
 
 /** Configuration for a single generation request. */
@@ -52,6 +53,7 @@ export class Generator {
 	 * @param forwardPass - Function that runs the model forward pass and returns logits.
 	 * @param config - Generation configuration.
 	 * @param signal - Optional AbortSignal to cancel generation mid-stream.
+	 * @param forwardDecode - Optional GPU-side decode function for reduced readback.
 	 * @yields Sampled token IDs (one at a time, excluding prompt tokens).
 	 * @returns Generation statistics after the loop completes.
 	 */
@@ -66,6 +68,12 @@ export class Generator {
 		) => Float32Array | Promise<Float32Array>,
 		config: GenerationConfig,
 		signal?: AbortSignal,
+		forwardDecode?: (
+			tokenIds: number[],
+			positions: number[],
+			mode: DecodeMode,
+			topK?: number,
+		) => Promise<DecodeResult>,
 	): AsyncGenerator<number, GenerationResult> {
 		const startTime = performance.now();
 
@@ -98,22 +106,69 @@ export class Generator {
 		recentTokens.push(sampledId);
 		let generatedCount = 1;
 
+		// Determine decode mode for subsequent steps
+		const useGpuDecode = !!forwardDecode;
+		const gpuMode: DecodeMode =
+			sampler.isGreedy && sampler.noPenalty
+				? "greedy"
+				: sampler.topK > 0
+					? "topk"
+					: "full";
+
 		// 3. Autoregressive decode loop
 		while (!session.shouldStop(sampledId, eosTokenId)) {
 			if (signal?.aborted) break;
 			if (generatedCount >= config.maxTokens) break;
 			if (config.stopTokens?.includes(sampledId)) break;
 
-			const stepLogits = await forwardPass(
-				[sampledId],
-				[session.currentPosition],
-			);
-			session.advance(1);
+			if (useGpuDecode && gpuMode === "greedy") {
+				// GPU ARGMAX — no CPU sampling needed
+				const result = await forwardDecode!(
+					[sampledId],
+					[session.currentPosition],
+					"greedy",
+				);
+				session.advance(1);
+				if (signal?.aborted) break;
+				sampledId = result.tokenId!;
+			} else if (useGpuDecode && gpuMode === "topk") {
+				// GPU TOP_K + CPU sampling on reduced set
+				const result = await forwardDecode!(
+					[sampledId],
+					[session.currentPosition],
+					"topk",
+					sampler.topK,
+				);
+				session.advance(1);
+				if (signal?.aborted) break;
+				sampledId = sampler.sampleFromTopK(
+					result.topKIndices!,
+					result.topKValues!,
+					recentTokens.slice(-64),
+				);
+			} else if (useGpuDecode && gpuMode === "full") {
+				// GPU full logits + full CPU sampling pipeline
+				const result = await forwardDecode!(
+					[sampledId],
+					[session.currentPosition],
+					"full",
+				);
+				session.advance(1);
+				if (signal?.aborted) break;
+				sampler.applyRepetitionPenalty(result.logits!, recentTokens.slice(-64));
+				sampledId = sampler.sample(result.logits!);
+			} else {
+				// Fallback: original path (no forwardDecode provided)
+				const stepLogits = await forwardPass(
+					[sampledId],
+					[session.currentPosition],
+				);
+				session.advance(1);
+				if (signal?.aborted) break;
+				sampler.applyRepetitionPenalty(stepLogits, recentTokens.slice(-64));
+				sampledId = sampler.sample(stepLogits);
+			}
 
-			if (signal?.aborted) break;
-
-			sampler.applyRepetitionPenalty(stepLogits, recentTokens.slice(-64));
-			sampledId = sampler.sample(stepLogits);
 			generatedCount++;
 			recentTokens.push(sampledId);
 

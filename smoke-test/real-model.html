@@ -359,15 +359,24 @@ async function loadAndTest() {
         for (let step = 0; step < maxGen; step++) {
             if (sampledId === eosId) break;
             const pos = tokens.length + step;
-            const stepLogits = await inference.forward(
-                new Int32Array([sampledId]),
-                new Int32Array([pos]),
-            );
-            if (profileMode && inference.lastTrace) {
-                window.__decodeTraces.push(inference.lastTrace);
+            if (sampler.isGreedy && sampler.noPenalty) {
+                const result = await inference.forwardDecode(
+                    new Int32Array([sampledId]),
+                    new Int32Array([pos]),
+                    'greedy',
+                );
+                sampledId = result.tokenId;
+            } else {
+                const stepLogits = await inference.forward(
+                    new Int32Array([sampledId]),
+                    new Int32Array([pos]),
+                );
+                if (profileMode && inference.lastTrace) {
+                    window.__decodeTraces.push(inference.lastTrace);
+                }
+                sampler.applyRepetitionPenalty(stepLogits, recent.slice(-64));
+                sampledId = sampler.sample(stepLogits);
             }
-            sampler.applyRepetitionPenalty(stepLogits, recent.slice(-64));
-            sampledId = sampler.sample(stepLogits);
             if (sampledId === eosId) break;
             generated.push(sampledId);
             recent.push(sampledId);
@@ -431,6 +440,10 @@ async function runChat() {
             return await inference.forward(new Int32Array(ids), new Int32Array(positions));
         };
 
+        const forwardDecode = async (ids, positions, mode, topK) => {
+            return await inference.forwardDecode(new Int32Array(ids), new Int32Array(positions), mode, topK);
+        };
+
         let fullText = '';
         let tokenCount = 0;
         const startTime = performance.now();
@@ -450,7 +463,8 @@ async function runChat() {
 
         for await (const tokenId of Generator.generate(
             promptTokens, sampler, mockSession, eosId, forwardPass,
-            { prompt: text, maxTokens: 100, temperature: 0, topK: 40, topP: 1, repetitionPenalty: 1 }
+            { prompt: text, maxTokens: 100, temperature: 0, topK: 40, topP: 1, repetitionPenalty: 1 },
+            undefined, forwardDecode
         )) {
             tokenCount++;
             const delta = decoder.push(tokenId);

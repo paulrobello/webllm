@@ -19,11 +19,11 @@ export interface SamplerConfig {
  * top-K truncation, top-P (nucleus) filtering, then weighted random sampling.
  */
 export class Sampler {
-	private temperature: number;
-	private topK: number;
-	private topP: number;
-	private repetitionPenalty: number;
-	private rng: () => number;
+	temperature: number;
+	topK: number;
+	topP: number;
+	repetitionPenalty: number;
+	rng: () => number;
 
 	/**
 	 * @param config - Sampler configuration. All fields optional; defaults to greedy-friendly values.
@@ -55,11 +55,18 @@ export class Sampler {
 		}
 	}
 
+	/** Whether greedy mode (temperature=0) is active. */
+	get isGreedy(): boolean {
+		return this.temperature === 0;
+	}
+
+	/** Whether no repetition penalty is applied. */
+	get noPenalty(): boolean {
+		return this.repetitionPenalty === 1.0;
+	}
+
 	/**
 	 * Run the full sampling pipeline on raw logits and return a token index.
-	 *
-	 * @param logits - Raw unnormalized log probabilities from the model.
-	 * @returns Sampled token index.
 	 */
 	sample(logits: Float32Array): number {
 		if (this.temperature === 0) return argmax(logits);
@@ -76,10 +83,57 @@ export class Sampler {
 	}
 
 	/**
+	 * Sample from a GPU-reduced top-K set (indices + values).
+	 * Operates only on the k candidates — skips full-vocab sort/softmax.
+	 */
+	sampleFromTopK(
+		indices: Int32Array,
+		values: Float32Array,
+		recentTokens: number[],
+	): number {
+		if (this.repetitionPenalty !== 1.0) {
+			const recentSet = new Set(recentTokens);
+			for (let i = 0; i < indices.length; i++) {
+				if (recentSet.has(indices[i])) {
+					values[i] =
+						values[i] > 0
+							? values[i] / this.repetitionPenalty
+							: values[i] * this.repetitionPenalty;
+				}
+			}
+		}
+
+		if (this.temperature === 0) {
+			let maxIdx = 0;
+			for (let i = 1; i < values.length; i++) {
+				if (values[i] > values[maxIdx]) maxIdx = i;
+			}
+			return indices[maxIdx];
+		}
+
+		const scaled = new Float32Array(values.length);
+		for (let i = 0; i < values.length; i++)
+			scaled[i] = values[i] / this.temperature;
+
+		if (this.topP < 1.0) {
+			const probs = softmax(scaled);
+			const order = Array.from({ length: probs.length }, (_, i) => i);
+			order.sort((a, b) => probs[b] - probs[a]);
+			let cumulative = 0;
+			const filtered = new Float32Array(values.length).fill(-Infinity);
+			for (const idx of order) {
+				cumulative += probs[idx];
+				filtered[idx] = scaled[idx];
+				if (cumulative >= this.topP) break;
+			}
+			return sampleProbs(softmax(filtered), indices, this.rng);
+		}
+
+		return sampleProbs(softmax(scaled), indices, this.rng);
+	}
+
+	/**
 	 * Scale logits by 1/temperature.
-	 *
-	 * @param logits - Raw logits.
-	 * @returns Temperature-scaled copy of logits.
 	 */
 	applyTemperature(logits: Float32Array): Float32Array {
 		if (this.temperature === 1.0) return new Float32Array(logits);
@@ -91,9 +145,6 @@ export class Sampler {
 
 	/**
 	 * Retain only the top-K highest logits, setting the rest to -Infinity.
-	 *
-	 * @param logits - Input logits.
-	 * @returns Filtered copy with non-top-K entries set to -Infinity.
 	 */
 	applyTopK(logits: Float32Array): Float32Array {
 		if (this.topK === 0 || this.topK >= logits.length)
@@ -107,9 +158,6 @@ export class Sampler {
 
 	/**
 	 * Retain the smallest set of top logits whose cumulative probability >= topP.
-	 *
-	 * @param logits - Input logits.
-	 * @returns Filtered copy with excluded entries set to -Infinity.
 	 */
 	applyTopP(logits: Float32Array): Float32Array {
 		if (this.topP >= 1.0) return new Float32Array(logits);
@@ -129,9 +177,6 @@ export class Sampler {
 	/**
 	 * Penalize logits for recently seen tokens to reduce repetition.
 	 * Mutates the input array in place.
-	 *
-	 * @param logits - Logits array to mutate.
-	 * @param recentTokens - Token IDs that should be penalized.
 	 */
 	applyRepetitionPenalty(logits: Float32Array, recentTokens: number[]): void {
 		if (this.repetitionPenalty === 1.0) return;
@@ -144,12 +189,6 @@ export class Sampler {
 	}
 }
 
-/**
- * Return the index of the maximum value in a Float32Array.
- *
- * @param arr - Input array.
- * @returns Index of the largest element.
- */
 function argmax(arr: Float32Array): number {
 	let maxIdx = 0;
 	let maxVal = arr[0];
@@ -162,12 +201,6 @@ function argmax(arr: Float32Array): number {
 	return maxIdx;
 }
 
-/**
- * Compute softmax probabilities from logits in a numerically stable way.
- *
- * @param logits - Raw logits.
- * @returns Probability distribution (same length, sums to 1).
- */
 function softmax(logits: Float32Array): Float32Array {
 	const max = Math.max(...logits);
 	const exps = new Float32Array(logits.length);
@@ -179,4 +212,18 @@ function softmax(logits: Float32Array): Float32Array {
 	const probs = new Float32Array(logits.length);
 	for (let i = 0; i < logits.length; i++) probs[i] = exps[i] / sum;
 	return probs;
+}
+
+/** Sample from probs using indices as the token ID mapping. */
+function sampleProbs(
+	probs: Float32Array,
+	indices: Int32Array,
+	rng: () => number,
+): number {
+	let r = rng();
+	for (let i = 0; i < probs.length; i++) {
+		r -= probs[i];
+		if (r <= 0) return indices[i];
+	}
+	return indices[probs.length - 1];
 }

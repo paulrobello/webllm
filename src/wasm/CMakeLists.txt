@@ -47,7 +47,7 @@ if(EMSCRIPTEN)
         "_op_mul_mat,_op_add,_op_mul,_op_rms_norm,_op_silu,_op_gelu,"
         "_op_rope,_op_reshape_2d,_op_reshape_3d,_op_permute,_op_cont,"
         "_op_view_2d,_op_view_3d,_op_cpy,_op_soft_max,_op_soft_max_ext,_op_swiglu_split,_op_scale,"
-        "_op_repeat,_op_diag_mask_inf,_op_norm,_op_get_rows,"
+        "_op_repeat,_op_diag_mask_inf,_op_norm,_op_get_rows,_op_argmax,_op_top_k,"
         "_graph_new,_graph_build_forward_expand,_graph_compute,"
         "_backend_alloc_ctx_tensors,_backend_buffer_free,"
         "_backend_tensor_set,_backend_tensor_set3,_backend_tensor_get,_backend_tensor_alignment"
