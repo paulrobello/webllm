@@ -129,6 +129,8 @@ async function run(
 		profile: boolean;
 	},
 ): Promise<void> {
+	await ensureModelDownloaded(model);
+
 	const { port, tab } = await resolveAgentchromeSession(opts.port, opts.tab);
 
 	// Trigger N page reloads with cache busting and collect tok/s from each.
@@ -136,7 +138,7 @@ async function run(
 	const allTraces: DecodeTrace[] = [];
 	for (let i = 0; i < nRuns; i++) {
 		process.stdout.write(`Run ${i + 1}/${nRuns}...`);
-		const base = `${SMOKE_TEST_URL}?perf=${Date.now()}-${i}`;
+		const base = `${SMOKE_TEST_URL}?model=${encodeURIComponent(model.id)}&ctx=${model.contextLength}&perf=${Date.now()}-${i}`;
 		const url = opts.profile ? `${base}&profile=1` : base;
 		agentchrome(port, tab, ["navigate", url]);
 		const result = await waitForSmokeTestResult(port, tab);
@@ -223,12 +225,64 @@ function compareToBaseline(current: PerfReport, baselinePath: string): void {
 		const diff = current.median.tokensPerSecond - baseline.median.tokensPerSecond;
 		const pct = (diff / baseline.median.tokensPerSecond) * 100;
 		const sign = diff >= 0 ? "+" : "";
-		console.log(
-			`\nvs baseline (${baseline.timestamp}): ${baseline.median.tokensPerSecond.toFixed(1)} tok/s → ${current.median.tokensPerSecond.toFixed(1)} tok/s (${sign}${diff.toFixed(1)} / ${sign}${pct.toFixed(1)}%)`,
-		);
+		console.log(`\nvs baseline (${baseline.timestamp}): ${baseline.median.tokensPerSecond.toFixed(1)} tok/s → ${current.median.tokensPerSecond.toFixed(1)} tok/s (${sign}${diff.toFixed(1)} / ${sign}${pct.toFixed(1)}%)`);
 	} catch (err) {
 		console.log(`\nCouldn't read baseline ${baselinePath}: ${err instanceof Error ? err.message : err}`);
 	}
+}
+
+async function ensureModelDownloaded(model: BenchmarkModel): Promise<void> {
+	const destDir = "smoke-test/models";
+	const destPath = `${destDir}/${model.id}.gguf`;
+	if (existsSync(destPath)) {
+		return;
+	}
+
+	console.log(`\nModel ${model.id} not found locally. Preparing to download...`);
+	mkdirSync(destDir, { recursive: true });
+
+	const repoUrl = model.ggufUrl;
+	if (!repoUrl.startsWith("https://huggingface.co/")) {
+		throw new Error(`Unsupported model URL format: ${repoUrl}`);
+	}
+
+	const repoName = repoUrl.replace("https://huggingface.co/", "");
+	const apiUrl = `https://huggingface.co/api/models/${repoName}/tree/main`;
+	
+	const res = await fetch(apiUrl);
+	if (!res.ok) {
+		throw new Error(`Failed to fetch model tree from Hugging Face: HTTP ${res.status}`);
+	}
+	
+	const files = await res.json() as Array<{ path: string; size: number }>;
+	
+	const preferredQuants = [
+		model.defaultQuant.toLowerCase(),
+		"q4_k_m",
+		"q4_0",
+		"q4_1",
+		"q5_k_m"
+	];
+	
+	let chosenFile: { path: string; size: number } | undefined;
+	for (const quant of preferredQuants) {
+		chosenFile = files.find(f => f.path.toLowerCase().endsWith(".gguf") && f.path.toLowerCase().includes(quant));
+		if (chosenFile) break;
+	}
+	
+	if (!chosenFile) {
+		chosenFile = files.find(f => f.path.toLowerCase().endsWith(".gguf"));
+	}
+
+	if (!chosenFile) {
+		throw new Error(`Could not find any .gguf files in ${repoUrl}`);
+	}
+
+	const downloadUrl = `https://huggingface.co/${repoName}/resolve/main/${chosenFile.path}`;
+	console.log(`Downloading ${chosenFile.path} (${(chosenFile.size / 1024 / 1024).toFixed(1)} MB) to ${destPath}...`);
+	
+	execFileSync("curl", ["-L", "--progress-bar", "-o", destPath, downloadUrl], { stdio: "inherit" });
+	console.log(`Download complete.\n`);
 }
 
 // ── agentchrome helpers ────────────────────────────────────────────────────

@@ -31,7 +31,7 @@ h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
 </head>
 <body>
 <h1>WebLLM Real Model Test</h1>
-<p class="subtitle">Load TinyLlama 1.1B Q4_0 and generate text</p>
+<p id="subtitle" class="subtitle">Load model and generate text</p>
 
 <div id="progress-bar"><div id="progress-fill"><span id="progress-text">0%</span></div></div>
 <div id="log"></div>
@@ -49,9 +49,13 @@ const {
     formatChatPrompt, formatChatDelta
 } = await import(`./webllm-bundle.js${assetSuffix}`);
 
-const MODEL_URL = "./models/tinyllama-1.1b-chat-q4_0.gguf";
+const params = new URLSearchParams(window.location.search);
+const modelId = params.get('model') || "tinyllama-1.1b-chat-q4_0";
+const requestedContextLength = Number(params.get('ctx') || 0);
+const MODEL_URL = `./models/${modelId}.gguf`;
 
 const logEl = document.getElementById('log');
+const subtitleEl = document.getElementById('subtitle');
 const progressEl = document.getElementById('progress-bar');
 const progressFill = document.getElementById('progress-fill');
 const progressText = document.getElementById('progress-text');
@@ -129,6 +133,10 @@ async function loadAndTest() {
         parsed = ModelLoader.parseModel(modelBuffer);
         parsedModel = parsed;
         const hp = parsed.hyperparams;
+        const subtitleContextLength = requestedContextLength > 0
+            ? Math.min(parsed.kvCacheConfig.maxContextLength, requestedContextLength)
+            : parsed.kvCacheConfig.maxContextLength;
+        subtitleEl.textContent = `Model: ${modelId} · arch=${hp.architecture} · ctx=${subtitleContextLength}`;
         log('pass', `[2/7] GGUF parsed: arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount}/${hp.headCountKv} layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`);
     } catch (e) {
         log('fail', `[2/7] Parse failed: ${e.message}\n${e.stack || ''}`);
@@ -168,8 +176,11 @@ async function loadAndTest() {
     // Step 5: Init KV cache
     log('running', '[5/7] Initializing KV cache...');
     try {
-        await inference.initKVCache(parsed.kvCacheConfig.maxContextLength);
-        log('pass', `[5/7] KV cache: ${parsed.kvCacheConfig.maxContextLength} slots x ${parsed.hyperparams.layerCount} layers`);
+        const kvContextLength = requestedContextLength > 0
+            ? Math.min(parsed.kvCacheConfig.maxContextLength, requestedContextLength)
+            : parsed.kvCacheConfig.maxContextLength;
+        await inference.initKVCache(kvContextLength);
+        log('pass', `[5/7] KV cache: ${kvContextLength} slots x ${parsed.hyperparams.layerCount} layers`);
         setProgress(85);
     } catch (e) {
         log('fail', `[5/7] KV cache failed: ${e.message}\n${e.stack || ''}`);
