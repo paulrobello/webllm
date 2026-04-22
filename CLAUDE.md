@@ -57,6 +57,7 @@ These issues already caused real regressions here and should be preserved as pro
 - Async tensor readback must not use `stackAlloc` across `await` boundaries; use heap allocation for async readback buffers.
 - The smoke test page must cache-bust imported assets too, not just the HTML URL. `webllm-bundle.js` and `webllm-wasm.js` should inherit the page query suffix.
 - Browser-side smoke-test success requires checking for runtime/backend console failures, not just visible step output.
+- The WebGPU backend currently logs `adapter_info:` during startup; in this repo that message is treated as benign informational output and should not be counted as a smoke-test failure.
 - Keep `-sASYNCIFY_STACK_SIZE=1048576` in the WASM build unless there is a verified replacement strategy.
 
 ### Local dependency note
@@ -69,7 +70,7 @@ for builds to work:
 cd ~/Repos/llama.cpp && git checkout webllm-browser-patches
 ```
 
-The branch contains two commits on top of upstream `master`:
+The branch currently contains four commits on top of upstream `master`:
 
 1. `ggml: iterative ggml_visit_parents_graph for WASM stack safety` —
    the recursive graph visitor overflows the JS/WASM stack on deep
@@ -78,9 +79,17 @@ The branch contains two commits on top of upstream `master`:
    wait/map paths, non-aborting device error handler, per-dispatch
    compute-pass fallback with overlap-only conflict detection,
    `GGML_OP_DIAG_MASK_INF` shader.
+3. `ggml-webgpu: add request-based browser readback API` — adds a real
+   request-based async GPU readback API for browser callers:
+   begin / poll / finish / cancel around queue completion + buffer map.
+4. `ggml-webgpu: harden async readback request cleanup` — fixes async
+   request cleanup and cancellation lifecycle so pending callbacks do not
+   race buffer teardown during browser readback.
 
 If browser regressions reappear, inspect that local branch before assuming
-the bug is entirely in this repo. To rebase onto a newer llama.cpp master:
-fetch, `git rebase master`, resolve any upstream changes to `ggml.c`
-(visitor) or `ggml-webgpu.cpp` (backend), rebuild via `make wasm-build`,
-re-run `make bench-inference` to confirm no perf regression.
+the bug is entirely in this repo. The main files to check are `ggml.c`,
+`ggml/include/ggml-webgpu.h`, and `ggml/src/ggml-webgpu/ggml-webgpu.cpp`.
+To rebase onto a newer llama.cpp master: fetch, `git rebase master`,
+resolve any upstream changes in those files, rebuild via `make wasm-build`,
+and re-run `make bench-inference` plus the browser smoke test to confirm no
+perf or runtime regression.
