@@ -292,6 +292,7 @@ the code lives today, the expected win, and the risk/tradeoff.
   current profiled traces suggest keeping the next optimization pass narrow and
   targeting matmul first, with encode overhead as the secondary decode-compute
   suspect.
+- **Update (2026-04-22):** Matmul follow-up attempt (increase legacy Q outputs per wg) showed no meaningful retained gain and was reverted.
 
 1. **If perf work resumes, keep it on narrow decode-compute tuning.**
    The current profiled traces still point to `graphCompute`, not readback, as
