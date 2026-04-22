@@ -107,13 +107,13 @@ export class Generator {
 		let generatedCount = 1;
 
 		// Determine decode mode for subsequent steps
-		const useGpuDecode = !!forwardDecode;
 		const gpuMode: DecodeMode =
 			sampler.isGreedy && sampler.noPenalty
 				? "greedy"
 				: sampler.topK > 0
 					? "topk"
 					: "full";
+		const decodeStep = forwardDecode;
 
 		// 3. Autoregressive decode loop
 		while (!session.shouldStop(sampledId, eosTokenId)) {
@@ -121,42 +121,51 @@ export class Generator {
 			if (generatedCount >= config.maxTokens) break;
 			if (config.stopTokens?.includes(sampledId)) break;
 
-			if (useGpuDecode && gpuMode === "greedy") {
+			if (decodeStep && gpuMode === "greedy") {
 				// GPU ARGMAX — no CPU sampling needed
-				const result = await forwardDecode!(
+				const result = await decodeStep(
 					[sampledId],
 					[session.currentPosition],
 					"greedy",
 				);
+				if (result.tokenId === undefined) {
+					throw new Error("forwardDecode(greedy) returned no tokenId");
+				}
 				session.advance(1);
 				if (signal?.aborted) break;
-				sampledId = result.tokenId!;
-			} else if (useGpuDecode && gpuMode === "topk") {
+				sampledId = result.tokenId;
+			} else if (decodeStep && gpuMode === "topk") {
 				// GPU TOP_K + CPU sampling on reduced set
-				const result = await forwardDecode!(
+				const result = await decodeStep(
 					[sampledId],
 					[session.currentPosition],
 					"topk",
 					sampler.topK,
 				);
+				if (!result.topKIndices || !result.topKValues) {
+					throw new Error("forwardDecode(topk) returned incomplete top-k data");
+				}
 				session.advance(1);
 				if (signal?.aborted) break;
 				sampledId = sampler.sampleFromTopK(
-					result.topKIndices!,
-					result.topKValues!,
+					result.topKIndices,
+					result.topKValues,
 					recentTokens.slice(-64),
 				);
-			} else if (useGpuDecode && gpuMode === "full") {
+			} else if (decodeStep && gpuMode === "full") {
 				// GPU full logits + full CPU sampling pipeline
-				const result = await forwardDecode!(
+				const result = await decodeStep(
 					[sampledId],
 					[session.currentPosition],
 					"full",
 				);
+				if (!result.logits) {
+					throw new Error("forwardDecode(full) returned no logits");
+				}
 				session.advance(1);
 				if (signal?.aborted) break;
-				sampler.applyRepetitionPenalty(result.logits!, recentTokens.slice(-64));
-				sampledId = sampler.sample(result.logits!);
+				sampler.applyRepetitionPenalty(result.logits, recentTokens.slice(-64));
+				sampledId = sampler.sample(result.logits);
 			} else {
 				// Fallback: original path (no forwardDecode provided)
 				const stepLogits = await forwardPass(
