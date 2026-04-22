@@ -399,6 +399,14 @@ export class GgmlWasm {
 		return this.m._op_get_rows(a, b);
 	}
 
+	opArgmax(src: TensorPtr): TensorPtr {
+		return this.m._op_argmax(src);
+	}
+
+	opTopK(src: TensorPtr, k: number): TensorPtr {
+		return this.m._op_top_k(src, k);
+	}
+
 	opDiagMaskInf(x: TensorPtr, nPast: number): TensorPtr {
 		return this.m._op_diag_mask_inf(x, nPast);
 	}
@@ -471,6 +479,30 @@ export class GgmlWasm {
 		await this.callWithAsyncify<void>(() =>
 			this.m._backend_tensor_get(tensor, dstHeapPtr, offset, size),
 		);
+	}
+
+	backendTensorGetAsyncBegin(
+		tensor: TensorPtr,
+		offset: number,
+		size: number,
+	): number {
+		return this.m._backend_tensor_get_async_begin(tensor, offset, size);
+	}
+
+	backendTensorGetAsyncPoll(requestId: number): number {
+		return this.m._backend_tensor_get_async_poll(requestId);
+	}
+
+	backendTensorGetAsyncFinish(
+		requestId: number,
+		dstHeapPtr: number,
+		size: number,
+	): void {
+		this.m._backend_tensor_get_async_finish(requestId, dstHeapPtr, size);
+	}
+
+	backendTensorGetAsyncCancel(requestId: number): void {
+		this.m._backend_tensor_get_async_cancel(requestId);
 	}
 
 	backendTensorAlignment(): number {
