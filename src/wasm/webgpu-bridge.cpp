@@ -298,4 +298,36 @@ int32_t backend_tensor_alignment() {
     return ggml_backend_get_alignment(g_backend);
 }
 
+void webgpu_set_graph_profiling_enabled(int32_t enabled) {
+    ggml_backend_webgpu_set_graph_profiling_enabled(enabled);
+}
+
+int32_t webgpu_last_graph_profile_valid() {
+    return ggml_backend_webgpu_last_graph_profile_valid();
+}
+
+int32_t webgpu_last_graph_profile_breakdown_available() {
+    return ggml_backend_webgpu_last_graph_profile_breakdown_available();
+}
+
+double webgpu_last_graph_profile_total_ms() {
+    return ggml_backend_webgpu_last_graph_profile_total_ms();
+}
+
+double webgpu_last_graph_profile_matmul_ms() {
+    return ggml_backend_webgpu_last_graph_profile_matmul_ms();
+}
+
+double webgpu_last_graph_profile_attention_ms() {
+    return ggml_backend_webgpu_last_graph_profile_attention_ms();
+}
+
+double webgpu_last_graph_profile_encode_overhead_ms() {
+    return ggml_backend_webgpu_last_graph_profile_encode_overhead_ms();
+}
+
+int32_t webgpu_last_graph_profile_dispatch_count() {
+    return ggml_backend_webgpu_last_graph_profile_dispatch_count();
+}
+
 } // extern "C"

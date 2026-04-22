@@ -4,6 +4,7 @@ import {
 	type BufferPtr,
 	GgmlType,
 	type GgmlWasm,
+	type GraphComputeProfile,
 	RopeMode,
 	type TensorPtr,
 } from "./ggml-wasm.js";
@@ -62,6 +63,12 @@ export interface ForwardTrace {
 	downloadResultMs: number;
 	teardownMs: number;
 	totalMs: number;
+	backendProfileTotalMs?: number;
+	backendMatmulMs?: number | null;
+	backendAttentionMs?: number | null;
+	backendEncodeOverheadMs?: number;
+	backendDispatchCount?: number;
+	backendBreakdownAvailable?: boolean;
 }
 
 /**
@@ -475,7 +482,10 @@ export class ModelInference {
 
 		const t4 = trace ? performance.now() : 0;
 
-		await wasm.graphCompute(graph);
+		const graphProfile = await this.computeGraphWithOptionalProfile(
+			trace,
+			graph,
+		);
 
 		const t5 = trace ? performance.now() : 0;
 
@@ -513,6 +523,7 @@ export class ModelInference {
 				t5,
 				t6,
 				t7,
+				graphProfile,
 			);
 		}
 
@@ -718,7 +729,10 @@ export class ModelInference {
 			);
 			const t4 = trace ? performance.now() : 0;
 
-			await wasm.graphCompute(graph);
+			const graphProfile = await this.computeGraphWithOptionalProfile(
+				trace,
+				graph,
+			);
 			const t5 = trace ? performance.now() : 0;
 
 			const buf = await wasm.downloadFromTensor(argmaxResult, 4, 0);
@@ -742,6 +756,7 @@ export class ModelInference {
 					t5,
 					t6,
 					t7,
+					graphProfile,
 				);
 			}
 			return { tokenId };
@@ -772,7 +787,10 @@ export class ModelInference {
 			);
 			const t4 = trace ? performance.now() : 0;
 
-			await wasm.graphCompute(graph);
+			const graphProfile = await this.computeGraphWithOptionalProfile(
+				trace,
+				graph,
+			);
 			const t5 = trace ? performance.now() : 0;
 
 			const kBytes = topK * 4;
@@ -808,6 +826,7 @@ export class ModelInference {
 					t5,
 					t6,
 					t7,
+					graphProfile,
 				);
 			}
 			return { topKIndices: indices, topKValues: values };
@@ -832,7 +851,10 @@ export class ModelInference {
 		);
 		const t4 = trace ? performance.now() : 0;
 
-		await wasm.graphCompute(graph);
+		const graphProfile = await this.computeGraphWithOptionalProfile(
+			trace,
+			graph,
+		);
 		const t5 = trace ? performance.now() : 0;
 
 		const logitsBytes = hp.vocabularySize * 4;
@@ -866,9 +888,25 @@ export class ModelInference {
 				t5,
 				t6,
 				t7,
+				graphProfile,
 			);
 		}
 		return { logits: fullLogits };
+	}
+
+	private async computeGraphWithOptionalProfile(
+		trace: boolean,
+		graph: number,
+	): Promise<GraphComputeProfile | null> {
+		// Detailed backend profiling is gated behind trace mode so normal
+		// inference and non-profile perf runs keep using the representative
+		// graphCompute() path.
+		if (!trace) {
+			await this.wasm.graphCompute(graph);
+			return null;
+		}
+		await this.wasm.graphComputeWithDetailedProfile(graph);
+		return this.wasm.getLastGraphComputeProfile();
 	}
 
 	private recordTrace(
@@ -883,6 +921,7 @@ export class ModelInference {
 		t5: number,
 		t6: number,
 		t7: number,
+		graphProfile?: GraphComputeProfile | null,
 	): void {
 		this.lastTrace = {
 			mode,
@@ -896,6 +935,12 @@ export class ModelInference {
 			downloadResultMs: t6 - t5,
 			teardownMs: t7 - t6,
 			totalMs: t7 - t0,
+			backendProfileTotalMs: graphProfile?.totalMs,
+			backendMatmulMs: graphProfile?.matmulMs,
+			backendAttentionMs: graphProfile?.attentionMs,
+			backendEncodeOverheadMs: graphProfile?.encodeOverheadMs,
+			backendDispatchCount: graphProfile?.dispatchCount,
+			backendBreakdownAvailable: graphProfile?.breakdownAvailable,
 		};
 	}
 

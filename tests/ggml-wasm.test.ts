@@ -3,8 +3,21 @@ import { GgmlWasm } from "../src/inference/ggml-wasm.js";
 
 type MockModule = {
 	HEAPU8: Uint8Array;
+	Asyncify?: {
+		currData: object | null;
+		whenDone(): Promise<number>;
+	};
 	_malloc(size: number): number;
 	_free(ptr: number): void;
+	_graph_compute?(graph: number): number;
+	_webgpu_set_graph_profiling_enabled?(enabled: number): void;
+	_webgpu_last_graph_profile_valid?(): number;
+	_webgpu_last_graph_profile_breakdown_available?(): number;
+	_webgpu_last_graph_profile_total_ms?(): number;
+	_webgpu_last_graph_profile_matmul_ms?(): number;
+	_webgpu_last_graph_profile_attention_ms?(): number;
+	_webgpu_last_graph_profile_encode_overhead_ms?(): number;
+	_webgpu_last_graph_profile_dispatch_count?(): number;
 	_backend_tensor_get(
 		tensor: number,
 		dstHeapPtr: number,
@@ -82,6 +95,142 @@ describe("GgmlWasm async readback wrappers", () => {
 			"finish:41:24:16",
 			"cancel:41",
 		]);
+	});
+});
+
+describe("GgmlWasm detailed graph profiling controls", () => {
+	test("graphComputeWithDetailedProfile scopes the backend profiling toggle to one compute", async () => {
+		const calls: string[] = [];
+		const { wasm } = createWasm({
+			_webgpu_set_graph_profiling_enabled: (enabled) => {
+				calls.push(`profile:${enabled}`);
+			},
+			_graph_compute: (graph) => {
+				calls.push(`compute:${graph}`);
+				return 123;
+			},
+		});
+
+		await expect(wasm.graphComputeWithDetailedProfile(7)).resolves.toBe(123);
+		expect(calls).toEqual(["profile:1", "compute:7", "profile:0"]);
+	});
+
+	test("serializes profiled and unprofiled graph computes so profiling does not leak across overlap", async () => {
+		const calls: string[] = [];
+		const deferred = () => {
+			let resolve!: (value: number) => void;
+			const promise = new Promise<number>((innerResolve) => {
+				resolve = innerResolve;
+			});
+			return { promise, resolve };
+		};
+		const pending = new Map<number, ReturnType<typeof deferred>>();
+		let activeGraph: number | null = null;
+		const asyncify = {
+			currData: null as object | null,
+			whenDone: () => pending.get(activeGraph!)!.promise,
+		};
+		const { wasm } = createWasm({
+			Asyncify: asyncify,
+			_webgpu_set_graph_profiling_enabled: (enabled) => {
+				calls.push(`profile:${enabled}`);
+			},
+			_graph_compute: (graph) => {
+				calls.push(`compute-start:${graph}`);
+				const token = {};
+				const request = deferred();
+				pending.set(graph, request);
+				activeGraph = graph;
+				asyncify.currData = token;
+				request.promise.then(() => {
+					calls.push(`compute-end:${graph}`);
+					if (asyncify.currData === token) {
+						asyncify.currData = null;
+					}
+				});
+				return graph * 10;
+			},
+		});
+
+		const profiled = wasm.graphComputeWithDetailedProfile(1);
+		const plain = wasm.graphCompute(2);
+		await Promise.resolve();
+
+		expect(calls).toEqual(["profile:1", "compute-start:1"]);
+
+		pending.get(1)?.resolve(10);
+		await expect(profiled).resolves.toBe(10);
+		await Promise.resolve();
+		expect(calls).toEqual([
+			"profile:1",
+			"compute-start:1",
+			"compute-end:1",
+			"profile:0",
+			"compute-start:2",
+		]);
+
+		pending.get(2)?.resolve(20);
+		await expect(plain).resolves.toBe(20);
+		expect(calls).toEqual([
+			"profile:1",
+			"compute-start:1",
+			"compute-end:1",
+			"profile:0",
+			"compute-start:2",
+			"compute-end:2",
+		]);
+	});
+});
+
+describe("GgmlWasm.getLastGraphComputeProfile", () => {
+	test("returns the last graph compute profiling summary when available", () => {
+		const { wasm } = createWasm({
+			_webgpu_last_graph_profile_valid: () => 1,
+			_webgpu_last_graph_profile_breakdown_available: () => 1,
+			_webgpu_last_graph_profile_total_ms: () => 12.5,
+			_webgpu_last_graph_profile_matmul_ms: () => 8.25,
+			_webgpu_last_graph_profile_attention_ms: () => 1.5,
+			_webgpu_last_graph_profile_encode_overhead_ms: () => 0.75,
+			_webgpu_last_graph_profile_dispatch_count: () => 14,
+		});
+
+		expect(wasm.getLastGraphComputeProfile()).toEqual({
+			totalMs: 12.5,
+			matmulMs: 8.25,
+			attentionMs: 1.5,
+			encodeOverheadMs: 0.75,
+			dispatchCount: 14,
+			breakdownAvailable: true,
+		});
+	});
+
+	test("returns null breakdown timings when GPU attribution is unavailable", () => {
+		const { wasm } = createWasm({
+			_webgpu_last_graph_profile_valid: () => 1,
+			_webgpu_last_graph_profile_breakdown_available: () => 0,
+			_webgpu_last_graph_profile_total_ms: () => 12.5,
+			_webgpu_last_graph_profile_matmul_ms: () => 0,
+			_webgpu_last_graph_profile_attention_ms: () => 0,
+			_webgpu_last_graph_profile_encode_overhead_ms: () => 0.75,
+			_webgpu_last_graph_profile_dispatch_count: () => 14,
+		});
+
+		expect(wasm.getLastGraphComputeProfile()).toEqual({
+			totalMs: 12.5,
+			matmulMs: null,
+			attentionMs: null,
+			encodeOverheadMs: 0.75,
+			dispatchCount: 14,
+			breakdownAvailable: false,
+		});
+	});
+
+	test("returns null when no graph compute profile has been recorded", () => {
+		const { wasm } = createWasm({
+			_webgpu_last_graph_profile_valid: () => 0,
+		});
+
+		expect(wasm.getLastGraphComputeProfile()).toBeNull();
 	});
 });
 

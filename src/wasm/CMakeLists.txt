@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD 17)
 # Disable everything we don't need
 set(GGML_WEBGPU ON CACHE BOOL "" FORCE)
 set(GGML_WEBGPU_JSPI OFF CACHE BOOL "" FORCE)
+set(GGML_WEBGPU_GPU_PROFILE ON CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 set(GGML_CPU OFF CACHE BOOL "" FORCE)
 set(GGML_BLAS OFF CACHE BOOL "" FORCE)
@@ -53,7 +54,11 @@ if(EMSCRIPTEN)
         "_backend_tensor_set,_backend_tensor_set3,_backend_tensor_get,"
         "_backend_tensor_get_async_begin,_backend_tensor_get_async_poll,"
         "_backend_tensor_get_async_finish,_backend_tensor_get_async_cancel,"
-        "_backend_tensor_get_async_callback_support,_backend_tensor_alignment"
+        "_backend_tensor_get_async_callback_support,_backend_tensor_alignment,"
+        "_webgpu_set_graph_profiling_enabled,"
+        "_webgpu_last_graph_profile_valid,_webgpu_last_graph_profile_breakdown_available,_webgpu_last_graph_profile_total_ms,"
+        "_webgpu_last_graph_profile_matmul_ms,_webgpu_last_graph_profile_attention_ms,"
+        "_webgpu_last_graph_profile_encode_overhead_ms,_webgpu_last_graph_profile_dispatch_count"
     )
     add_executable(webllm-wasm webgpu-bridge.cpp)
     target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)

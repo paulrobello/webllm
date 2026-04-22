@@ -55,6 +55,15 @@ export interface TensorDownloadRequest {
 	cancel(): void;
 }
 
+export interface GraphComputeProfile {
+	readonly totalMs: number;
+	readonly matmulMs: number | null;
+	readonly attentionMs: number | null;
+	readonly encodeOverheadMs: number;
+	readonly dispatchCount: number;
+	readonly breakdownAvailable: boolean;
+}
+
 /**
  * WebAssembly bridge for GGML inference via the ggml-webgpu backend.
  *
@@ -79,6 +88,16 @@ export class GgmlWasm {
 		}
 	>();
 	private readonly asyncTensorGetStates = new Map<number, number>();
+	private graphComputeQueue: Promise<void> = Promise.resolve();
+
+	private async enqueueGraphCompute<T>(op: () => Promise<T>): Promise<T> {
+		const run = this.graphComputeQueue.then(op, op);
+		this.graphComputeQueue = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return await run;
+	}
 
 	private async callWithAsyncify<T>(fn: () => T): Promise<T> {
 		const previousAsync = this.m.Asyncify?.currData ?? null;
@@ -640,9 +659,46 @@ export class GgmlWasm {
 	}
 
 	async graphCompute(graph: GraphPtr): Promise<number> {
-		return await this.callWithAsyncify<number>(() =>
-			this.m._graph_compute(graph),
+		return await this.enqueueGraphCompute(() =>
+			this.callWithAsyncify<number>(() => this.m._graph_compute(graph)),
 		);
+	}
+
+	setDetailedGraphComputeProfilingEnabled(enabled: boolean): void {
+		this.m._webgpu_set_graph_profiling_enabled?.(enabled ? 1 : 0);
+	}
+
+	async graphComputeWithDetailedProfile(graph: GraphPtr): Promise<number> {
+		return await this.enqueueGraphCompute(async () => {
+			this.setDetailedGraphComputeProfilingEnabled(true);
+			try {
+				return await this.callWithAsyncify<number>(() =>
+					this.m._graph_compute(graph),
+				);
+			} finally {
+				this.setDetailedGraphComputeProfilingEnabled(false);
+			}
+		});
+	}
+
+	getLastGraphComputeProfile(): GraphComputeProfile | null {
+		if (this.m._webgpu_last_graph_profile_valid?.() !== 1) {
+			return null;
+		}
+		const breakdownAvailable =
+			this.m._webgpu_last_graph_profile_breakdown_available?.() === 1;
+		return {
+			totalMs: this.m._webgpu_last_graph_profile_total_ms(),
+			matmulMs: breakdownAvailable
+				? this.m._webgpu_last_graph_profile_matmul_ms()
+				: null,
+			attentionMs: breakdownAvailable
+				? this.m._webgpu_last_graph_profile_attention_ms()
+				: null,
+			encodeOverheadMs: this.m._webgpu_last_graph_profile_encode_overhead_ms(),
+			dispatchCount: this.m._webgpu_last_graph_profile_dispatch_count(),
+			breakdownAvailable,
+		};
 	}
 
 	// ── Backend buffer ───────────────────────────────────────────────────

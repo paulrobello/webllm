@@ -3,7 +3,10 @@
 > **Date:** 2026-04-22
 > **Status:** End-to-end working. TinyLlama 1.1B Q4_0 produces coherent,
 > factually correct output in the browser with multi-turn chat.
-> Current perf: 129.3 tok/s decode on the latest profiled browser run.
+> Current Task 5 profiled investigation baseline: 93.5 tok/s decode on
+> `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0`.
+> Use this for hotspot attribution, not as the new steady-state shipping
+> throughput baseline.
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -76,15 +79,25 @@ await window.inference.debugLayerOutput(
 Baseline (pre-optimization): ~44 tok/s decode, ~130 ms prefill on TinyLlama 1.1B
 Q4_0 via Emscripten WebGPU in-browser.
 
-**Current: 129.3 tok/s decode** on the latest profiled browser run after the
-completion-driven async readback update.
+**Current Task 5 profiled investigation baseline: 93.5 tok/s decode** on
+`make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0` with the
+richer `--profile` trace enabled. Treat this as a profiling reference point
+for hotspot ranking, not as the new representative steady-state throughput
+baseline.
 
-At 129.3 tok/s, decode is about 7.7 ms/token. The same profiled run reports
-`downloadResultMs` mean **0.64 ms**, so readback is no longer the dominant
-per-step cost. The current bottleneck has shifted back to the rest of the
-decode path, with `graphCompute`/non-readback decode work now dominating the
-remaining latency. This also means the earlier "sync/poll latency dominates"
-summary is no longer current for the measured browser path.
+On the median profiled run, decode is about **10.7 ms/token** (`331 ms / 31`
+tokens), with `graphComputeMs` at **9.96 ms mean / 91.8%** of decode-step time
+and `downloadResultMs` at **0.62 ms mean / 5.7%**. The backend attribution in
+that same run shows `backendMatmulMs` at **4.02 ms / 40.4% of graph time**,
+`backendEncodeOverheadMs` at **2.81 ms / 28.2%**, and `backendAttentionMs` at
+**0.40 ms / 4.0%**. Readback is no longer the dominant per-step cost; the
+remaining bottleneck is still inside decode compute, led by matmul with encode
+/ dispatch preparation still material.
+
+The same median run reported **2027 ms wall time** for the whole smoke-bench
+page completion. That number is useful as an end-to-end harness datapoint, but
+it includes browser/page/model setup and should not be treated as a direct
+replacement for steady-state decode throughput.
 
 Items in rough order of expected impact. Each entry explains the idea, where
 the code lives today, the expected win, and the risk/tradeoff.
@@ -202,8 +215,11 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ### 10. Benchmark the current pipeline ✅ DONE
 - **Where**: `eval/perf.ts` + `make smoke-bench` + `make bench-inference-save`.
-- **Current baseline**: 129.3 tok/s on the latest profiled TinyLlama-1.1B Q4_0
-  browser run, with `downloadResultMs` mean 0.64 ms.
+- **Current Task 5 profiled investigation baseline**: 93.5 tok/s on the
+  profiled TinyLlama-1.1B Q4_0 browser run (`PERF_RUNS=3`), with median-run
+  wall time 2027 ms, `graphComputeMs` mean 9.96 ms, and `downloadResultMs`
+  mean 0.62 ms. Read this as a profiling baseline for hotspot ranking, not as
+  the new steady-state browser throughput baseline.
 - `make smoke-bench` — end-to-end: builds WASM+JS, starts server, launches
   agentchrome (headed), runs 3 perf iterations with `--profile`, cleans up.
   All smoke targets (`smoke-serve`, `smoke-open`, `smoke-run`, `smoke-bench`)
@@ -257,18 +273,39 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ## Next Steps
 
-1. **Wire up the existing `Generator` + `InferenceSession` classes for a proper
+### Decode hotspot decision / rebaseline (2026-04-22 Task 5)
+- **Current hotspot:** matmul path tuning remains the lead target.
+- **Profile-mode hotspot evidence:** `make smoke-bench PERF_RUNS=3
+  PERF_MODEL=tinyllama-1.1b-chat-q4_0` reported median **93.5 tok/s**, median
+  run **184 ms prefill**, **331 ms decode**, and **2027 ms wall time** for the
+  full page completion. Across 90 single-token greedy decode traces,
+  `graphComputeMs` averaged **9.96 ms / 91.8%** of step time while
+  `downloadResultMs` averaged **0.62 ms / 5.7%**. Because this came from
+  `--profile` mode, use it for hotspot ranking and direction, not as a new
+  steady-state throughput claim.
+- **Backend attribution:** `backendMatmulMs` averaged **4.02 ms / 40.4% of
+  graph time**, ahead of `backendEncodeOverheadMs` (**2.81 ms / 28.2%**) and
+  `backendAttentionMs` (**0.40 ms / 4.0%**). `backendDispatchCount` stayed at
+  **489** per token; that supports the encode/dispatch-overhead suspicion but
+  is not itself a timed bottleneck metric.
+- **Decision:** keep structural follow-up deferred. If perf work resumes, the
+  current profiled traces suggest keeping the next optimization pass narrow and
+  targeting matmul first, with encode overhead as the secondary decode-compute
+  suspect.
+
+1. **If perf work resumes, keep it on narrow decode-compute tuning.**
+   The current profiled traces still point to `graphCompute`, not readback, as
+   the dominant bucket. Start with matmul-path work first, then reassess
+   encode/dispatch overhead with fresh measurements.
+2. **Wire up the existing `Generator` + `InferenceSession` classes for a proper
    streaming JS API.**
-   The readback-specific latency work has already moved `downloadResultMs` down
-   to a 0.64 ms mean on the current profiled run, so the next planned product
-   milestone should take priority.
-2. **Profile and reduce the remaining non-readback decode cost.**
-   At 129.3 tok/s (~7.7 ms/token), most per-step latency now sits outside
-   `downloadResultMs`, so follow-up optimization should focus on the current
-   `graphCompute`/decode hot path rather than another readback-specific pass.
-3. **Decode graph reuse** (item 1) — still deferred but now worth reevaluating
-   against the new baseline if deeper profiling shows graph/build-side work is
-   becoming visible after the readback drop.
+   The optimization cycle is in a verified state, so the next product-facing
+   milestone can resume without pretending the profile-mode numbers are a new
+   shipping ceiling.
+3. **Decode graph reuse** (item 1) remains deferred.
+   The current richer trace still shows build/setup time as small compared with
+   `graphCompute`, so there is not yet enough evidence to make structural graph
+   reuse the next task.
 4. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
 5. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` remains untested — no llama op hits it today.

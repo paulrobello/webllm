@@ -14,6 +14,10 @@
  *   bun run eval/perf.ts --port <cdp-port>     # agentchrome port (default: auto-detect)
  *   bun run eval/perf.ts --profile             # also dump per-phase decode timings
  *
+ * Note: the `--profile` report is the integration-only verification seam for
+ * expanded browser decode traces in Task 2; there is no narrower TS unit-test
+ * seam for this path without broader refactoring.
+ *
  * Requires:
  *   - smoke-test server on http://localhost:8031 (run `make smoke-serve`)
  *   - a running agentchrome session with the smoke-test page loaded
@@ -27,6 +31,7 @@ import { getModelById, type BenchmarkModel } from "./models.js";
 
 interface PerfRun {
 	tokensGenerated: number;
+	wallClockMs: number;
 	totalMs: number;
 	prefillMs: number;
 	decodeMs: number;
@@ -43,6 +48,10 @@ interface PerfReport {
 	notes?: string;
 }
 
+interface SmokeTestResult extends Omit<PerfRun, "wallClockMs"> {
+	completionPageMs: number;
+}
+
 interface DecodeTrace {
 	mode: "full" | "greedy" | "topk";
 	nTokens: number;
@@ -55,6 +64,12 @@ interface DecodeTrace {
 	downloadResultMs: number;
 	teardownMs: number;
 	totalMs: number;
+	backendProfileTotalMs?: number;
+	backendMatmulMs?: number | null;
+	backendAttentionMs?: number | null;
+	backendEncodeOverheadMs?: number;
+	backendDispatchCount?: number;
+	backendBreakdownAvailable?: boolean;
 }
 
 const DEFAULT_MODEL_ID = "tinyllama-1.1b-chat-q4_0";
@@ -125,7 +140,14 @@ async function run(
 		const url = opts.profile ? `${base}&profile=1` : base;
 		agentchrome(port, tab, ["navigate", url]);
 		const result = await waitForSmokeTestResult(port, tab);
-		perfRuns.push(result);
+		perfRuns.push({
+			tokensGenerated: result.tokensGenerated,
+			wallClockMs: result.completionPageMs,
+			totalMs: result.totalMs,
+			prefillMs: result.prefillMs,
+			decodeMs: result.decodeMs,
+			tokensPerSecond: result.tokensPerSecond,
+		});
 		if (opts.profile) {
 			const traces = fetchDecodeTraces(port, tab);
 			const greedyDecodeTraces = traces.filter(
@@ -171,19 +193,20 @@ function printTable(report: PerfReport): void {
 	console.log(`Timestamp: ${report.timestamp}`);
 	console.log(`Prompt:    ${JSON.stringify(report.prompt.slice(0, 80))}${report.prompt.length > 80 ? "…" : ""}`);
 	console.log();
-	console.log("Run  Tokens  Total(ms)  Prefill(ms)  Decode(ms)  tok/s");
-	console.log("---  ------  ---------  -----------  ----------  -----");
+	console.log("Run  Tokens  Wall(ms)  Total(ms)  Prefill(ms)  Decode(ms)  tok/s");
+	console.log("---  ------  --------  ---------  -----------  ----------  -----");
 	for (let i = 0; i < report.runs.length; i++) {
 		const r = report.runs[i];
 		console.log(
-			`${String(i + 1).padStart(3)}  ${String(r.tokensGenerated).padStart(6)}  ${String(Math.round(r.totalMs)).padStart(9)}  ${String(Math.round(r.prefillMs)).padStart(11)}  ${String(Math.round(r.decodeMs)).padStart(10)}  ${r.tokensPerSecond.toFixed(1).padStart(5)}`,
+			`${String(i + 1).padStart(3)}  ${String(r.tokensGenerated).padStart(6)}  ${String(Math.round(r.wallClockMs)).padStart(8)}  ${String(Math.round(r.totalMs)).padStart(9)}  ${String(Math.round(r.prefillMs)).padStart(11)}  ${String(Math.round(r.decodeMs)).padStart(10)}  ${r.tokensPerSecond.toFixed(1).padStart(5)}`,
 		);
 	}
-	console.log("---  ------  ---------  -----------  ----------  -----");
+	console.log("---  ------  --------  ---------  -----------  ----------  -----");
 	const m = report.median;
 	console.log(
-		`med  ${String(m.tokensGenerated).padStart(6)}  ${String(Math.round(m.totalMs)).padStart(9)}  ${String(Math.round(m.prefillMs)).padStart(11)}  ${String(Math.round(m.decodeMs)).padStart(10)}  ${m.tokensPerSecond.toFixed(1).padStart(5)}`,
+		`p50* ${String(m.tokensGenerated).padStart(6)}  ${String(Math.round(m.wallClockMs)).padStart(8)}  ${String(Math.round(m.totalMs)).padStart(9)}  ${String(Math.round(m.prefillMs)).padStart(11)}  ${String(Math.round(m.decodeMs)).padStart(10)}  ${m.tokensPerSecond.toFixed(1).padStart(5)}`,
 	);
+	console.log("* row selected by median tok/s; other columns are from that run, not column-wise medians.");
 }
 
 function compareToBaseline(current: PerfReport, baselinePath: string): void {
@@ -251,15 +274,18 @@ async function resolveAgentchromeSession(
 	return { port, tab: smoke.id };
 }
 
-async function waitForSmokeTestResult(port: string, tab: string): Promise<PerfRun> {
-	const deadline = Date.now() + 180_000;
-	while (Date.now() < deadline) {
-		const out = agentchrome(port, tab, [
-			"js",
-			"exec",
-			`(() => {
+async function waitForSmokeTestResult(
+	port: string,
+	tab: string,
+): Promise<SmokeTestResult> {
+	const out = agentchrome(port, tab, [
+		"js",
+		"exec",
+		`(async () => {
+			const pattern = /Generated (\\d+) tokens in ([0-9.]+)s \\(prefill: (\\d+)ms, decode: (\\d+)ms, ([0-9.]+) tok\\/s\\)/;
+			const parse = () => {
 				const t = document.getElementById("log")?.textContent ?? "";
-				const m = t.match(/Generated (\\d+) tokens in ([0-9.]+)s \\(prefill: (\\d+)ms, decode: (\\d+)ms, ([0-9.]+) tok\\/s\\)/);
+				const m = t.match(pattern);
 				if (!m) return null;
 				return JSON.stringify({
 					tokensGenerated: +m[1],
@@ -267,19 +293,44 @@ async function waitForSmokeTestResult(port: string, tab: string): Promise<PerfRu
 					prefillMs: +m[3],
 					decodeMs: +m[4],
 					tokensPerSecond: +m[5],
+					completionPageMs: performance.now(),
 				});
-			})()`,
-		]);
-		// agentchrome returns `{"result": "..."}`; the inner result is our JSON or "null".
-		try {
-			const resp = JSON.parse(out);
-			if (resp.result && resp.result !== "null" && resp.type === "string") {
-				return JSON.parse(resp.result) as PerfRun;
-			}
-		} catch {
-			// keep polling
+			};
+
+			const ready = parse();
+			if (ready) return ready;
+
+			return await new Promise((resolve, reject) => {
+				const log = document.getElementById("log");
+				if (!log) {
+					reject(new Error("Missing #log element on smoke-test page"));
+					return;
+				}
+
+				const timeout = setTimeout(() => {
+					observer.disconnect();
+					reject(new Error("Timed out waiting for smoke-test result line on the page"));
+				}, 180_000);
+
+				const observer = new MutationObserver(() => {
+					const result = parse();
+					if (!result) return;
+					clearTimeout(timeout);
+					observer.disconnect();
+					resolve(result);
+				});
+
+				observer.observe(log, { childList: true, characterData: true, subtree: true });
+			});
+		})()`,
+	]);
+	try {
+		const resp = JSON.parse(out) as { result?: string; type?: string };
+		if (resp.result && resp.type === "string") {
+			return JSON.parse(resp.result) as SmokeTestResult;
 		}
-		await sleep(500);
+	} catch {
+		// fall through to the shared error below
 	}
 	throw new Error("Timed out waiting for smoke-test result line on the page");
 }
@@ -319,15 +370,99 @@ function printProfileTable(traces: DecodeTrace[]): void {
 	console.log("-----------------  --------  ----------  -------  ------");
 	const totalMean = traces.reduce((acc, t) => acc + t.totalMs, 0) / traces.length;
 	for (const k of keys) {
-		const vals = traces.map((t) => t[k] as number).sort((a, b) => a - b);
-		const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-		const median = vals[Math.floor(vals.length / 2)];
-		const p90 = vals[Math.floor(vals.length * 0.9)];
-		const pct = k === "totalMs" ? 100 : (mean / totalMean) * 100;
+		const stats = summarizeNumbers(traces.map((t) => t[k] as number));
+		const pct = k === "totalMs" ? 100 : (stats.mean / totalMean) * 100;
 		console.log(
-			`${k.padEnd(17)}  ${mean.toFixed(2).padStart(8)}  ${median.toFixed(2).padStart(10)}  ${p90.toFixed(2).padStart(7)}  ${pct.toFixed(1).padStart(5)}%`,
+			`${k.padEnd(17)}  ${stats.mean.toFixed(2).padStart(8)}  ${stats.median.toFixed(2).padStart(10)}  ${stats.p90.toFixed(2).padStart(7)}  ${pct.toFixed(1).padStart(5)}%`,
 		);
 	}
+
+	printBackendAttributionTable(traces);
+}
+
+function printBackendAttributionTable(traces: DecodeTrace[]): void {
+	const timedRows: Array<{
+		label: string;
+		values: number[];
+		graphValues: number[];
+	}> = [
+		{
+			label: "backendProfileTotalMs",
+			...collectTimedRow(traces, (t) => t.backendProfileTotalMs),
+		},
+		{
+			label: "backendEncodeOverheadMs",
+			...collectTimedRow(traces, (t) => t.backendEncodeOverheadMs),
+		},
+		{
+			label: "backendMatmulMs",
+			...collectTimedRow(traces, (t) => t.backendMatmulMs),
+		},
+		{
+			label: "backendAttentionMs",
+			...collectTimedRow(traces, (t) => t.backendAttentionMs),
+		},
+	];
+	const dispatchValues = traces
+		.map((t) => t.backendDispatchCount)
+		.filter((v): v is number => typeof v === "number");
+	if (timedRows.every((row) => row.values.length === 0) && dispatchValues.length === 0) {
+		return;
+	}
+
+	console.log("\nBackend decode attribution (when available)");
+	console.log("Field                   samples  mean      median    p90       %graph");
+	console.log("----------------------  -------  --------  --------  --------  ------");
+	for (const row of timedRows) {
+		if (row.values.length === 0) continue;
+		const stats = summarizeNumbers(row.values);
+		const graphStats = summarizeNumbers(row.graphValues);
+		const pct = graphStats.mean > 0 ? (stats.mean / graphStats.mean) * 100 : 0;
+		console.log(
+			`${row.label.padEnd(22)}  ${String(row.values.length).padStart(7)}  ${stats.mean.toFixed(2).padStart(8)}  ${stats.median.toFixed(2).padStart(8)}  ${stats.p90.toFixed(2).padStart(8)}  ${pct.toFixed(1).padStart(5)}%`,
+		);
+	}
+	if (dispatchValues.length > 0) {
+		const stats = summarizeNumbers(dispatchValues);
+		console.log(
+			`${"backendDispatchCount".padEnd(22)}  ${String(dispatchValues.length).padStart(7)}  ${stats.mean.toFixed(1).padStart(8)}  ${stats.median.toFixed(1).padStart(8)}  ${stats.p90.toFixed(1).padStart(8)}  ${"-".padStart(6)}`,
+		);
+	}
+
+	const breakdownTraces = traces.filter((t) => t.backendBreakdownAvailable === true).length;
+	if (breakdownTraces > 0 && breakdownTraces !== traces.length) {
+		console.log(
+			`Breakdown fields were present on ${breakdownTraces}/${traces.length} decode traces; %graph uses only the matching samples for each row.`,
+		);
+	}
+	console.log(
+		"Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.",
+	);
+}
+
+function collectTimedRow(
+	traces: DecodeTrace[],
+	selector: (trace: DecodeTrace) => number | null | undefined,
+): { values: number[]; graphValues: number[] } {
+	const values: number[] = [];
+	const graphValues: number[] = [];
+	for (const trace of traces) {
+		const value = selector(trace);
+		if (typeof value !== "number") continue;
+		values.push(value);
+		graphValues.push(trace.graphComputeMs);
+	}
+	return { values, graphValues };
+}
+
+function summarizeNumbers(values: number[]): { mean: number; median: number; p90: number } {
+	const sorted = [...values].sort((a, b) => a - b);
+	const mean = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+	return {
+		mean,
+		median: sorted[Math.floor(sorted.length / 2)],
+		p90: sorted[Math.floor(sorted.length * 0.9)],
+	};
 }
 
 async function extractSmokeTestPrompt(port: string, tab: string): Promise<string> {
@@ -346,10 +481,6 @@ async function extractSmokeTestPrompt(port: string, tab: string): Promise<string
 	} catch {
 		return "";
 	}
-}
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((r) => setTimeout(r, ms));
 }
 
 function printUsage(): void {
