@@ -4,20 +4,10 @@
 #include "ggml-webgpu.h"
 #include <cstdio>
 #include <cstring>
-#include <unordered_map>
 #include <vector>
 
 static ggml_backend_t g_backend = nullptr;
 static std::vector<struct ggml_context*> g_ctx_stack;
-
-struct backend_tensor_get_request {
-    ggml_tensor * tensor;
-    size_t offset;
-    size_t size;
-};
-
-static int32_t g_next_backend_tensor_get_request_id = 1;
-static std::unordered_map<int32_t, backend_tensor_get_request> g_backend_tensor_get_requests;
 
 static struct ggml_context* current_ctx() {
     return g_ctx_stack.empty() ? nullptr : g_ctx_stack.back();
@@ -37,7 +27,6 @@ int32_t webgpu_init() {
 }
 
 void webgpu_shutdown() {
-    g_backend_tensor_get_requests.clear();
     // Free all contexts (bottom-up)
     for (auto it = g_ctx_stack.rbegin(); it != g_ctx_stack.rend(); ++it) {
         if (*it) ggml_free(*it);
@@ -283,41 +272,22 @@ void backend_tensor_get(void* tensor, void* out, int32_t offset, int32_t size) {
 }
 
 int32_t backend_tensor_get_async_begin(void* tensor, int32_t offset, int32_t size) {
-    const int32_t request_id = g_next_backend_tensor_get_request_id++;
-    g_backend_tensor_get_requests[request_id] = {
-        .tensor = (struct ggml_tensor*)tensor,
-        .offset = (size_t)offset,
-        .size = (size_t)size,
-    };
-    return request_id;
+    return ggml_backend_webgpu_tensor_get_async_begin(
+        (const struct ggml_tensor*)tensor,
+        (size_t)offset,
+        (size_t)size);
 }
 
 int32_t backend_tensor_get_async_poll(int32_t request_id) {
-    return g_backend_tensor_get_requests.find(request_id) != g_backend_tensor_get_requests.end() ? 1 : -1;
+    return ggml_backend_webgpu_tensor_get_async_poll(request_id);
 }
 
 void backend_tensor_get_async_finish(int32_t request_id, void* out, int32_t size) {
-    const auto it = g_backend_tensor_get_requests.find(request_id);
-    if (it == g_backend_tensor_get_requests.end()) {
-        fprintf(stderr, "backend_tensor_get_async_finish: invalid request id %d\n", request_id);
-        return;
-    }
-
-    const backend_tensor_get_request request = it->second;
-    g_backend_tensor_get_requests.erase(it);
-
-    if ((size_t)size != request.size) {
-        fprintf(stderr,
-                "backend_tensor_get_async_finish: size mismatch for request %d (expected %zu, got %d)\n",
-                request_id, request.size, size);
-        return;
-    }
-
-    ggml_backend_tensor_get(request.tensor, out, request.offset, request.size);
+    ggml_backend_webgpu_tensor_get_async_finish(request_id, out, (size_t)size);
 }
 
 void backend_tensor_get_async_cancel(int32_t request_id) {
-    g_backend_tensor_get_requests.erase(request_id);
+    ggml_backend_webgpu_tensor_get_async_cancel(request_id);
 }
 
 int32_t backend_tensor_alignment() {

@@ -78,7 +78,16 @@ export class GgmlWasm {
 
 	async init(config: GgmlWasmConfig): Promise<void> {
 		const factory = (await import(config.wasmUrl)).default;
-		this.m = await factory();
+		this.m = await factory({
+			printErr: (text: unknown) => {
+				const message = String(text);
+				if (message.includes("adapter_info:")) {
+					console.info(message);
+					return;
+				}
+				console.error(message);
+			},
+		});
 		const result = await this.callWithAsyncify<number>(() =>
 			this.m._webgpu_init(),
 		);
