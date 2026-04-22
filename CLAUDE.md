@@ -93,3 +93,13 @@ To rebase onto a newer llama.cpp master: fetch, `git rebase master`,
 resolve any upstream changes in those files, rebuild via `make wasm-build`,
 and re-run `make bench-inference` plus the browser smoke test to confirm no
 perf or runtime regression.
+
+### llama.cpp local status note
+
+The local `~/Repos/llama.cpp` checkout may show an untracked path at:
+
+- `ggml/src/ggml-kompute/kompute/`
+
+Treat that path as a separate upstream/sub-repo artifact, not part of this
+project's WebLLM patch work. It can be ignored when checking whether the local
+`llama.cpp` dependency is clean for WebLLM-related changes.
