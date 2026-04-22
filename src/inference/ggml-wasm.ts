@@ -250,11 +250,25 @@ export class GgmlWasm {
 		offset = 0,
 	): Promise<Uint8Array> {
 		const ptr = this.malloc(byteLength);
+		let requestId: number | null = null;
+		let finished = false;
 		try {
-			await this.callWithAsyncify<void>(() =>
-				this.m._backend_tensor_get(tensor, ptr, offset, byteLength),
-			);
+			requestId = this.backendTensorGetAsyncBegin(tensor, offset, byteLength);
+			while (this.backendTensorGetAsyncPoll(requestId) === 0) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 1));
+			}
+			this.backendTensorGetAsyncFinish(requestId, ptr, byteLength);
+			finished = true;
 			return new Uint8Array(this.heapU8.buffer, ptr, byteLength).slice();
+		} catch (error) {
+			if (requestId !== null && !finished) {
+				try {
+					this.backendTensorGetAsyncCancel(requestId);
+				} catch {
+					// Best effort cancellation only.
+				}
+			}
+			throw error;
 		} finally {
 			this.free(ptr);
 		}
