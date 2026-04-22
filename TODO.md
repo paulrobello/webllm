@@ -76,14 +76,19 @@ await window.inference.debugLayerOutput(
 Baseline (pre-optimization): ~44 tok/s decode, ~130 ms prefill on TinyLlama 1.1B
 Q4_0 via Emscripten WebGPU in-browser.
 
-**Current: ~59 tok/s decode, ~195 ms prefill** after items 2, 3, 5, 7, 8, 9, 11.
+**Current: ~59 tok/s decode, ~195 ms prefill** after items 2, 3, 5, 7, 8, 9, 11,
+and the follow-up async browser readback integration.
 
-Per-step decode is ~17ms. The two dominant costs are `graphCompute` (~41%)
-and logits/ARGMAX readback (~57%). The readback cost is dominated by GPU sync
-barriers (two `emscripten_sleep(1)` polling loops: `OnSubmittedWorkDone` +
-`MapAsync`), NOT by data size — reducing from 128KB to 4 bytes (item 11) gave
-only +0.5%. Further decode speedup requires eliminating or hiding the sync
-barriers, not reducing data transfer.
+Per-step decode is still ~17ms. The two dominant costs are `graphCompute`
+(~41%) and logits/ARGMAX readback (~57%). We now have a real request-based
+async browser readback path (`begin / poll / finish / cancel`) wired from
+`llama.cpp` through the WASM bridge into `downloadFromTensor()`, and browser
+smoke validation passes cleanly. However, the current browser integration still
+polls readiness with `setTimeout(..., 1)` on the JS side, so the dominant cost
+remains synchronization latency rather than payload size. Reducing readback from
+128KB to 4 bytes (item 11) still only gave about +0.5%. Further decode speedup
+requires eliminating or hiding the remaining sync/poll latency, not reducing
+bytes transferred.
 
 Items in rough order of expected impact. Each entry explains the idea, where
 the code lives today, the expected win, and the risk/tradeoff.
@@ -221,19 +226,28 @@ the code lives today, the expected win, and the risk/tradeoff.
   mode: greedy (temp=0, no penalty), topk (topK>0), or full (fallback).
   Smoke test step 7 and chat handler both use the greedy path.
 - **Actual gain**: **+0.5%** (58.7 → 59.0 tok/s). Negligible.
-- **Why**: The readback bottleneck is GPU sync barriers, not data size.
-  `downloadFromTensor` does two sequential `emscripten_sleep(1)` polling loops
-  (`OnSubmittedWorkDone` → `MapAsync`) that dominate the ~9.5ms regardless of
-  whether the payload is 4 bytes or 128KB. Reducing data size only saves the
-  final memcpy (~0.01ms for 128KB).
+- **Why**: The readback bottleneck is synchronization latency, not data size.
+  At the time of measurement, `downloadFromTensor()` still paid queue/map wait
+  latency that dominated the ~9.5ms readback regardless of whether the payload
+  was 4 bytes or 128KB. Reducing data size only saved the final memcpy
+  (~0.01ms for 128KB).
+- **Follow-up completed**: the browser stack now has a real request-based async
+  readback path:
+  - `~/Repos/llama.cpp/ggml/include/ggml-webgpu.h`
+  - `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`
+  - `src/wasm/webgpu-bridge.cpp`
+  - `src/inference/ggml-wasm.ts::downloadFromTensor()`
+  This adds backend `begin / poll / finish / cancel` support, wires it through
+  the WASM bridge, and uses heap allocation safely across async boundaries.
+- **Current status**: correctness/integration is fixed and browser smoke passes,
+  but the JS layer still polls request readiness with `setTimeout(..., 1)`, so
+  the remaining performance issue is how that async path is scheduled/hidden,
+  not whether readback is request-based at all.
 - **Infrastructure value**: The ARGMAX/TOP_K bridge functions, `forwardDecode()`,
-  and generation-loop routing are still useful — they'll see real benefit once
-  the sync barrier problem is solved (JSPI, double-buffering, or callback-based
-  readback). The `sampleFromTopK()` sampler method enables CPU sampling on
-  GPU-reduced candidate sets for temperature > 0.
-- **Profile (after ARGMAX, greedy path active, "No decode traces captured")**:
-  - decode step still ~17ms total (graphCompute ~7ms + readback ~9.5ms)
-  - "No decode traces" confirms `forwardDecode` greedy path runs (no `forward()` tracing)
+  generation-loop routing, and the new async readback request API are all useful
+  foundations for the next round of latency-hiding work. The
+  `sampleFromTopK()` sampler method enables CPU sampling on GPU-reduced
+  candidate sets for temperature > 0.
 
 ---
 
@@ -247,31 +261,36 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ## Next Steps
 
-1. **Eliminate GPU readback sync barriers** — the single biggest win available.
-   The ~9.5ms readback is dominated by two sequential `emscripten_sleep(1)`
-   polling loops, not data size. Options:
-   - **JSPI (JavaScript Promise Integration)**: Replace ASYNCIFY+sleep polling
-     with true async. Emscripten's JSPI mode lets `OnSubmittedWorkDone` and
-     `MapAsync` resolve via Promises without blocking. Requires rebuilding the
-     WASM with `-sJSPI=1` and switching from `callWithAsyncify` to native
-     async exports. Currently blocked on emdawnwebgpu compatibility.
-   - **Double-buffered readback**: Pre-allocate a staging buffer. Kick off
-     GPU→staging copy, start next step's compute on the GPU, read back the
-     *previous* step's result while compute runs. Hides readback latency
-     behind useful GPU work. Requires restructuring the decode loop into a
-     two-step pipeline.
-   - **Callback-based readback**: Use `wgpuQueueOnSubmittedWorkDone` callback
-     instead of polling. Bind the callback to trigger a Promise resolve.
-     Requires restructuring how `downloadFromTensor` works (currently returns
-     synchronously after polling).
+1. **Reduce async readback latency in the live browser path** — the single
+   biggest remaining win available.
+   We now have request-based async readback end-to-end, but the web layer still
+   polls readiness with `setTimeout(..., 1)`, so the decode path still pays
+   synchronization latency even though correctness is fixed. The best follow-up
+   options are:
+   - **JSPI (JavaScript Promise Integration)**: Replace ASYNCIFY-era polling
+     with true Promise-driven async exports. Requires rebuilding the WASM with
+     `-sJSPI=1` and switching from `callWithAsyncify` to native async exports.
+     Still gated by emdawnwebgpu / browser support maturity.
+   - **Double-buffered readback**: Pre-allocate staging/readback resources,
+     kick off GPU→staging copy for step N, run compute for step N+1, and only
+     finish/read back step N while the next compute is already in flight.
+     This hides readback latency behind useful GPU work and likely offers the
+     biggest practical win without waiting on JSPI.
+   - **Promise/callback-driven JS wrapper**: Keep the request-based backend API,
+     but change the JS integration so `downloadFromTensor()` awaits a Promise
+     resolved by callback completion rather than polling in 1ms intervals.
 2. **Decode graph reuse** (item 1) — still deferred but worth revisiting if
-   readback cost drops. At 17ms/step with 7ms GPU compute + 9.5ms readback,
-   graph build at 0.21ms isn't worth the complexity. If readback drops to
-   ~2ms, graph build becomes ~3% of step time and still isn't worth it.
-3. Wire up the existing `Generator` + `InferenceSession` classes for a proper
+   readback cost drops. At ~17ms/step with ~7ms GPU compute + ~9.5ms readback,
+   graph build at ~0.21ms is not worth major complexity. If readback falls to
+   ~2ms, graph build becomes more visible but is still likely secondary.
+3. **Capture fresh perf numbers after the async readback integration** — now
+   that correctness and smoke coverage are fixed, rerun the perf harness to see
+   whether any small latency deltas came from the request-based path and to
+   establish the new post-integration baseline.
+4. Wire up the existing `Generator` + `InferenceSession` classes for a proper
    streaming JS API.
-4. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
-5. The latent 3+ binding buffer-conflict edge case in
+5. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
+6. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` remains untested — no llama op hits it today.
 
 ---
