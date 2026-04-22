@@ -37,6 +37,24 @@ export type GraphPtr = number;
 /** Opaque handle to a ggml backend buffer. */
 export type BufferPtr = number;
 
+export interface TensorDownloadTimings {
+	beginMs: number;
+	waitMs: number;
+	finishMs: number;
+	copyMs: number;
+}
+
+export interface TensorDownloadRequest {
+	readonly requestId: number;
+	readonly tensor: TensorPtr;
+	readonly offset: number;
+	readonly byteLength: number;
+	readonly timings: Readonly<TensorDownloadTimings>;
+	wait(): Promise<void>;
+	finish(): Promise<Uint8Array>;
+	cancel(): void;
+}
+
 /**
  * WebAssembly bridge for GGML inference via the ggml-webgpu backend.
  *
@@ -53,6 +71,14 @@ export class GgmlWasm {
 	// biome-ignore lint/suspicious/noExplicitAny: Emscripten module has dynamic shape
 	private m: any = null;
 	private initialized = false;
+	private readonly asyncTensorGetWaiters = new Map<
+		number,
+		{
+			resolve: () => void;
+			reject: (error: Error) => void;
+		}
+	>();
+	private readonly asyncTensorGetStates = new Map<number, number>();
 
 	private async callWithAsyncify<T>(fn: () => T): Promise<T> {
 		const previousAsync = this.m.Asyncify?.currData ?? null;
@@ -76,6 +102,68 @@ export class GgmlWasm {
 		}
 	}
 
+	private now(): number {
+		return globalThis.performance?.now() ?? Date.now();
+	}
+
+	private installAsyncTensorGetNotifier(): void {
+		if (this.m === null) {
+			return;
+		}
+		this.m.__webllmNotifyAsyncTensorGet = (
+			requestId: number,
+			state: number,
+		) => {
+			const waiter = this.asyncTensorGetWaiters.get(requestId);
+			if (!waiter) {
+				this.asyncTensorGetStates.set(requestId, state);
+				return;
+			}
+			this.asyncTensorGetWaiters.delete(requestId);
+			if (state === 2) {
+				waiter.resolve();
+				return;
+			}
+			waiter.reject(
+				new Error(
+					`Tensor download request ${requestId} failed in backend state ${state}`,
+				),
+			);
+		};
+	}
+
+	private usesAsyncTensorGetCallbacks(): boolean {
+		return this.m !== null && this.backendTensorGetAsyncCallbackSupport() === 1;
+	}
+
+	private waitForAsyncTensorGetCompletion(requestId: number): Promise<void> {
+		const completedState = this.asyncTensorGetStates.get(requestId);
+		if (completedState !== undefined) {
+			this.asyncTensorGetStates.delete(requestId);
+			if (completedState === 2) {
+				return Promise.resolve();
+			}
+			return Promise.reject(
+				new Error(
+					`Tensor download request ${requestId} failed in backend state ${completedState}`,
+				),
+			);
+		}
+		return new Promise<void>((resolve, reject) => {
+			this.asyncTensorGetWaiters.set(requestId, { resolve, reject });
+		});
+	}
+
+	private rejectAsyncTensorGetWaiter(requestId: number, error: Error): void {
+		this.asyncTensorGetStates.delete(requestId);
+		const waiter = this.asyncTensorGetWaiters.get(requestId);
+		if (!waiter) {
+			return;
+		}
+		this.asyncTensorGetWaiters.delete(requestId);
+		waiter.reject(error);
+	}
+
 	async init(config: GgmlWasmConfig): Promise<void> {
 		const factory = (await import(config.wasmUrl)).default;
 		this.m = await factory({
@@ -88,6 +176,7 @@ export class GgmlWasm {
 				console.error(message);
 			},
 		});
+		this.installAsyncTensorGetNotifier();
 		const result = await this.callWithAsyncify<number>(() =>
 			this.m._webgpu_init(),
 		);
@@ -100,6 +189,15 @@ export class GgmlWasm {
 	async shutdown(): Promise<void> {
 		if (!this.initialized) return;
 		this.m._webgpu_shutdown();
+		for (const [requestId, waiter] of this.asyncTensorGetWaiters) {
+			waiter.reject(
+				new Error(
+					`Tensor download request ${requestId} was interrupted by shutdown`,
+				),
+			);
+		}
+		this.asyncTensorGetWaiters.clear();
+		this.asyncTensorGetStates.clear();
 		this.initialized = false;
 		this.m = null;
 	}
@@ -252,34 +350,127 @@ export class GgmlWasm {
 		}
 	}
 
+	beginDownloadFromTensor(
+		tensor: TensorPtr,
+		byteLength: number,
+		offset = 0,
+	): TensorDownloadRequest {
+		this.installAsyncTensorGetNotifier();
+		const ptr = this.malloc(byteLength);
+		const timings: TensorDownloadTimings = {
+			beginMs: 0,
+			waitMs: 0,
+			finishMs: 0,
+			copyMs: 0,
+		};
+		const beginStart = this.now();
+		const requestId = this.backendTensorGetAsyncBegin(
+			tensor,
+			offset,
+			byteLength,
+		);
+		timings.beginMs = this.now() - beginStart;
+
+		let done = false;
+		let cancelled = false;
+		let waitPromise: Promise<void> | null = null;
+		let result: Uint8Array | null = null;
+
+		const releaseHeap = () => {
+			if (done) return;
+			done = true;
+			this.free(ptr);
+		};
+
+		const cancelInternal = () => {
+			if (cancelled || done) return;
+			cancelled = true;
+			this.rejectAsyncTensorGetWaiter(
+				requestId,
+				new Error(`Tensor download request ${requestId} was cancelled`),
+			);
+			try {
+				this.backendTensorGetAsyncCancel(requestId);
+			} catch {
+				// Best effort cancellation only.
+			} finally {
+				releaseHeap();
+			}
+		};
+
+		const ensureActive = () => {
+			if (cancelled) {
+				throw new Error(`Tensor download request ${requestId} was cancelled`);
+			}
+		};
+
+		const wait = async () => {
+			ensureActive();
+			if (waitPromise !== null) {
+				await waitPromise;
+				return;
+			}
+			waitPromise = (async () => {
+				const waitStart = this.now();
+				if (this.usesAsyncTensorGetCallbacks()) {
+					await this.waitForAsyncTensorGetCompletion(requestId);
+				} else {
+					while (this.backendTensorGetAsyncPoll(requestId) === 0) {
+						await new Promise<void>((resolve) => setTimeout(resolve, 1));
+					}
+				}
+				timings.waitMs = this.now() - waitStart;
+			})();
+			await waitPromise;
+		};
+
+		return {
+			requestId,
+			tensor,
+			offset,
+			byteLength,
+			timings,
+			wait,
+			finish: async () => {
+				ensureActive();
+				if (result !== null) {
+					return result;
+				}
+				try {
+					await wait();
+					ensureActive();
+					const finishStart = this.now();
+					this.backendTensorGetAsyncFinish(requestId, ptr, byteLength);
+					timings.finishMs = this.now() - finishStart;
+					const copyStart = this.now();
+					result = new Uint8Array(this.heapU8.buffer, ptr, byteLength).slice();
+					timings.copyMs = this.now() - copyStart;
+					return result;
+				} catch (error) {
+					cancelInternal();
+					throw error;
+				} finally {
+					releaseHeap();
+				}
+			},
+			cancel: () => {
+				cancelInternal();
+			},
+		};
+	}
+
 	/** Download tensor data from GPU to a new Uint8Array via heap buffer. */
 	async downloadFromTensor(
 		tensor: TensorPtr,
 		byteLength: number,
 		offset = 0,
 	): Promise<Uint8Array> {
-		const ptr = this.malloc(byteLength);
-		let requestId: number | null = null;
-		let finished = false;
+		const request = this.beginDownloadFromTensor(tensor, byteLength, offset);
 		try {
-			requestId = this.backendTensorGetAsyncBegin(tensor, offset, byteLength);
-			while (this.backendTensorGetAsyncPoll(requestId) === 0) {
-				await new Promise<void>((resolve) => setTimeout(resolve, 1));
-			}
-			this.backendTensorGetAsyncFinish(requestId, ptr, byteLength);
-			finished = true;
-			return new Uint8Array(this.heapU8.buffer, ptr, byteLength).slice();
+			return await request.finish();
 		} catch (error) {
-			if (requestId !== null && !finished) {
-				try {
-					this.backendTensorGetAsyncCancel(requestId);
-				} catch {
-					// Best effort cancellation only.
-				}
-			}
+			request.cancel();
 			throw error;
-		} finally {
-			this.free(ptr);
 		}
 	}
 
@@ -526,6 +717,10 @@ export class GgmlWasm {
 
 	backendTensorGetAsyncCancel(requestId: number): void {
 		this.m._backend_tensor_get_async_cancel(requestId);
+	}
+
+	backendTensorGetAsyncCallbackSupport(): number {
+		return this.m._backend_tensor_get_async_callback_support?.() ?? 0;
 	}
 
 	backendTensorAlignment(): number {

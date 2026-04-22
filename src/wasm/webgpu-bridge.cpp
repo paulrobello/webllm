@@ -290,6 +290,10 @@ void backend_tensor_get_async_cancel(int32_t request_id) {
     ggml_backend_webgpu_tensor_get_async_cancel(request_id);
 }
 
+int32_t backend_tensor_get_async_callback_support() {
+    return 1;
+}
+
 int32_t backend_tensor_alignment() {
     return ggml_backend_get_alignment(g_backend);
 }

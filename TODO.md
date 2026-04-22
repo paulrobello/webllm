@@ -3,7 +3,7 @@
 > **Date:** 2026-04-22
 > **Status:** End-to-end working. TinyLlama 1.1B Q4_0 produces coherent,
 > factually correct output in the browser with multi-turn chat.
-> Current perf: ~59 tok/s decode, ~195 ms prefill.
+> Current perf: 129.3 tok/s decode on the latest profiled browser run.
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -76,19 +76,15 @@ await window.inference.debugLayerOutput(
 Baseline (pre-optimization): ~44 tok/s decode, ~130 ms prefill on TinyLlama 1.1B
 Q4_0 via Emscripten WebGPU in-browser.
 
-**Current: ~59 tok/s decode, ~195 ms prefill** after items 2, 3, 5, 7, 8, 9, 11,
-and the follow-up async browser readback integration.
+**Current: 129.3 tok/s decode** on the latest profiled browser run after the
+completion-driven async readback update.
 
-Per-step decode is still ~17ms. The two dominant costs are `graphCompute`
-(~41%) and logits/ARGMAX readback (~57%). We now have a real request-based
-async browser readback path (`begin / poll / finish / cancel`) wired from
-`llama.cpp` through the WASM bridge into `downloadFromTensor()`, and browser
-smoke validation passes cleanly. However, the current browser integration still
-polls readiness with `setTimeout(..., 1)` on the JS side, so the dominant cost
-remains synchronization latency rather than payload size. Reducing readback from
-128KB to 4 bytes (item 11) still only gave about +0.5%. Further decode speedup
-requires eliminating or hiding the remaining sync/poll latency, not reducing
-bytes transferred.
+At 129.3 tok/s, decode is about 7.7 ms/token. The same profiled run reports
+`downloadResultMs` mean **0.64 ms**, so readback is no longer the dominant
+per-step cost. The current bottleneck has shifted back to the rest of the
+decode path, with `graphCompute`/non-readback decode work now dominating the
+remaining latency. This also means the earlier "sync/poll latency dominates"
+summary is no longer current for the measured browser path.
 
 Items in rough order of expected impact. Each entry explains the idea, where
 the code lives today, the expected win, and the risk/tradeoff.
@@ -206,8 +202,8 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ### 10. Benchmark the current pipeline ✅ DONE
 - **Where**: `eval/perf.ts` + `make smoke-bench` + `make bench-inference-save`.
-- **Current baseline**: 59.0 tok/s (3-run median) for TinyLlama-1.1B Q4_0
-  on "Hello! Can you tell me a short joke?".
+- **Current baseline**: 129.3 tok/s on the latest profiled TinyLlama-1.1B Q4_0
+  browser run, with `downloadResultMs` mean 0.64 ms.
 - `make smoke-bench` — end-to-end: builds WASM+JS, starts server, launches
   agentchrome (headed), runs 3 perf iterations with `--profile`, cleans up.
   All smoke targets (`smoke-serve`, `smoke-open`, `smoke-run`, `smoke-bench`)
@@ -239,10 +235,10 @@ the code lives today, the expected win, and the risk/tradeoff.
   - `src/inference/ggml-wasm.ts::downloadFromTensor()`
   This adds backend `begin / poll / finish / cancel` support, wires it through
   the WASM bridge, and uses heap allocation safely across async boundaries.
-- **Current status**: correctness/integration is fixed and browser smoke passes,
-  but the JS layer still polls request readiness with `setTimeout(..., 1)`, so
-  the remaining performance issue is how that async path is scheduled/hidden,
-  not whether readback is request-based at all.
+- **Current status**: correctness/integration is fixed, browser smoke passes,
+  and the latest profiled run shows the completion-driven path has reduced
+  `downloadResultMs` to a 0.64 ms mean. Readback is now a smaller slice of
+  decode latency than the rest of the step.
 - **Infrastructure value**: The ARGMAX/TOP_K bridge functions, `forwardDecode()`,
   generation-loop routing, and the new async readback request API are all useful
   foundations for the next round of latency-hiding work. The
@@ -261,37 +257,34 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ## Next Steps
 
-1. **Reduce async readback latency in the live browser path** — the single
-   biggest remaining win available.
-   We now have request-based async readback end-to-end, but the web layer still
-   polls readiness with `setTimeout(..., 1)`, so the decode path still pays
-   synchronization latency even though correctness is fixed. The best follow-up
-   options are:
-   - **JSPI (JavaScript Promise Integration)**: Replace ASYNCIFY-era polling
-     with true Promise-driven async exports. Requires rebuilding the WASM with
-     `-sJSPI=1` and switching from `callWithAsyncify` to native async exports.
-     Still gated by emdawnwebgpu / browser support maturity.
-   - **Double-buffered readback**: Pre-allocate staging/readback resources,
-     kick off GPU→staging copy for step N, run compute for step N+1, and only
-     finish/read back step N while the next compute is already in flight.
-     This hides readback latency behind useful GPU work and likely offers the
-     biggest practical win without waiting on JSPI.
-   - **Promise/callback-driven JS wrapper**: Keep the request-based backend API,
-     but change the JS integration so `downloadFromTensor()` awaits a Promise
-     resolved by callback completion rather than polling in 1ms intervals.
-2. **Decode graph reuse** (item 1) — still deferred but worth revisiting if
-   readback cost drops. At ~17ms/step with ~7ms GPU compute + ~9.5ms readback,
-   graph build at ~0.21ms is not worth major complexity. If readback falls to
-   ~2ms, graph build becomes more visible but is still likely secondary.
-3. **Capture fresh perf numbers after the async readback integration** — now
-   that correctness and smoke coverage are fixed, rerun the perf harness to see
-   whether any small latency deltas came from the request-based path and to
-   establish the new post-integration baseline.
-4. Wire up the existing `Generator` + `InferenceSession` classes for a proper
-   streaming JS API.
-5. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
-6. The latent 3+ binding buffer-conflict edge case in
+1. **Wire up the existing `Generator` + `InferenceSession` classes for a proper
+   streaming JS API.**
+   The readback-specific latency work has already moved `downloadResultMs` down
+   to a 0.64 ms mean on the current profiled run, so the next planned product
+   milestone should take priority.
+2. **Profile and reduce the remaining non-readback decode cost.**
+   At 129.3 tok/s (~7.7 ms/token), most per-step latency now sits outside
+   `downloadResultMs`, so follow-up optimization should focus on the current
+   `graphCompute`/decode hot path rather than another readback-specific pass.
+3. **Decode graph reuse** (item 1) — still deferred but now worth reevaluating
+   against the new baseline if deeper profiling shows graph/build-side work is
+   becoming visible after the readback drop.
+4. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
+5. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` remains untested — no llama op hits it today.
+6. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
+   next implementation step.
+   - **Go/no-go:** no-go for the current milestone; the completion-driven
+     readback path is the active baseline.
+   - **What would have to change if revisited:** flip the WASM build from the
+     current ASYNCIFY setup toward JSPI-related flags in
+     `src/wasm/CMakeLists.txt`, replace `ggml-wasm.ts::callWithAsyncify()` with
+     direct JSPI-compatible async export handling, re-audit Emscripten runtime
+     exports to remove Asyncify-specific methods and keep only the JSPI-needed
+     surface, assess whether the local `~/Repos/llama.cpp` branch's
+     `ggml-webgpu: browser + ASYNCIFY support bundle` needs a parallel JSPI
+     patch path, and verify browser support/behavior on the actual target
+     matrix before any migration.
 
 ---
 

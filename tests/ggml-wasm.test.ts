@@ -23,6 +23,8 @@ type MockModule = {
 		size: number,
 	): void;
 	_backend_tensor_get_async_cancel?(requestId: number): void;
+	_backend_tensor_get_async_callback_support?(): number;
+	__webllmNotifyAsyncTensorGet?(requestId: number, state: number): void;
 };
 
 function createWasm(overrides: Partial<MockModule> = {}) {
@@ -84,48 +86,126 @@ describe("GgmlWasm async readback wrappers", () => {
 });
 
 describe("GgmlWasm.downloadFromTensor", () => {
-	test("polls async readback requests until ready and returns copied bytes", async () => {
+	test("waits for callback-driven async readback completion without JS polling", async () => {
 		const { wasm, heapU8, calls } = createWasm({
 			_backend_tensor_get_async_begin: (tensor, offset, size) => {
 				calls.push(`begin:${tensor}:${offset}:${size}`);
 				return 77;
 			},
-			_backend_tensor_get_async_poll: (requestId) => {
-				calls.push(`poll:${requestId}`);
-				return calls.filter((call) => call === "poll:77").length >= 3 ? 1 : 0;
-			},
+			_backend_tensor_get_async_callback_support: () => 1,
 			_backend_tensor_get_async_finish: (requestId, dstHeapPtr, size) => {
 				calls.push(`finish:${requestId}:${dstHeapPtr}:${size}`);
 				heapU8.set([1, 2, 3, 4], dstHeapPtr);
 			},
 		});
+		const setTimeoutCalls: number[] = [];
+		const originalSetTimeout = globalThis.setTimeout;
+		globalThis.setTimeout = ((handler: TimerHandler, timeout?: number) => {
+			setTimeoutCalls.push(timeout ?? 0);
+			return originalSetTimeout(handler, timeout);
+		}) as typeof globalThis.setTimeout;
+
+		try {
+			const request = wasm.beginDownloadFromTensor(7, 4, 12);
+			queueMicrotask(() => {
+				(wasm as unknown as { m: MockModule }).m.__webllmNotifyAsyncTensorGet?.(
+					77,
+					2,
+				);
+			});
+			await request.wait();
+			await expect(request.finish()).resolves.toEqual(
+				new Uint8Array([1, 2, 3, 4]),
+			);
+			expect(setTimeoutCalls).toEqual([]);
+			expect(request.timings.beginMs).toBeGreaterThanOrEqual(0);
+			expect(request.timings.waitMs).toBeGreaterThanOrEqual(0);
+			expect(request.timings.finishMs).toBeGreaterThanOrEqual(0);
+			expect(request.timings.copyMs).toBeGreaterThanOrEqual(0);
+			expect(calls).toEqual([
+				"malloc:4",
+				"begin:7:12:4",
+				"finish:77:8:4",
+				"free:8",
+			]);
+		} finally {
+			globalThis.setTimeout = originalSetTimeout;
+		}
+	});
+
+	test("falls back to polling when callback completion is unavailable", async () => {
+		const { wasm, heapU8, calls } = createWasm({
+			_backend_tensor_get_async_begin: (tensor, offset, size) => {
+				calls.push(`begin:${tensor}:${offset}:${size}`);
+				return 78;
+			},
+			_backend_tensor_get_async_poll: (requestId) => {
+				calls.push(`poll:${requestId}`);
+				return calls.filter((call) => call === "poll:78").length >= 2 ? 1 : 0;
+			},
+			_backend_tensor_get_async_finish: (requestId, dstHeapPtr, size) => {
+				calls.push(`finish:${requestId}:${dstHeapPtr}:${size}`);
+				heapU8.set([5, 6, 7, 8], dstHeapPtr);
+			},
+		});
 
 		await expect(wasm.downloadFromTensor(7, 4, 12)).resolves.toEqual(
-			new Uint8Array([1, 2, 3, 4]),
+			new Uint8Array([5, 6, 7, 8]),
 		);
 		expect(calls).toEqual([
 			"malloc:4",
 			"begin:7:12:4",
-			"poll:77",
-			"poll:77",
-			"poll:77",
-			"finish:77:8:4",
+			"poll:78",
+			"poll:78",
+			"finish:78:8:4",
 			"free:8",
 		]);
 	});
 
-	test("frees heap memory when async finish throws", async () => {
+	test("keeps downloadFromTensor compatibility via the request wrapper", async () => {
+		const { wasm, heapU8, calls } = createWasm({
+			_backend_tensor_get_async_begin: (tensor, offset, size) => {
+				calls.push(`begin:${tensor}:${offset}:${size}`);
+				return 17;
+			},
+			_backend_tensor_get_async_poll: (requestId) => {
+				calls.push(`poll:${requestId}`);
+				return 1;
+			},
+			_backend_tensor_get_async_finish: (requestId, dstHeapPtr, size) => {
+				calls.push(`finish:${requestId}:${dstHeapPtr}:${size}`);
+				heapU8.set([9, 8, 7, 6], dstHeapPtr);
+			},
+		});
+
+		await expect(wasm.downloadFromTensor(7, 4, 12)).resolves.toEqual(
+			new Uint8Array([9, 8, 7, 6]),
+		);
+		expect(calls).toEqual([
+			"malloc:4",
+			"begin:7:12:4",
+			"poll:17",
+			"finish:17:8:4",
+			"free:8",
+		]);
+	});
+
+	test("cancels unfinished requests and frees heap memory when async finish throws", async () => {
 		const { wasm, calls } = createWasm({
 			_backend_tensor_get_async_begin: () => 99,
 			_backend_tensor_get_async_poll: () => 1,
 			_backend_tensor_get_async_finish: () => {
 				throw new Error("finish failed");
 			},
+			_backend_tensor_get_async_cancel: (requestId) => {
+				calls.push(`cancel:${requestId}`);
+			},
 		});
 
 		await expect(wasm.downloadFromTensor(3, 8, 0)).rejects.toThrow(
 			"finish failed",
 		);
+		expect(calls).toContain("cancel:99");
 		expect(calls).toContain("free:8");
 		expect(calls.at(-1)).toBe("free:8");
 	});

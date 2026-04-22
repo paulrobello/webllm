@@ -4,7 +4,11 @@ import {
 	formatChatDelta,
 	formatChatPrompt,
 } from "../inference/chat-template.js";
-import { type GenerationConfig, Generator } from "../inference/generation.js";
+import {
+	type GenerationConfig,
+	Generator,
+	generateTextStream,
+} from "../inference/generation.js";
 import { GgmlWasm } from "../inference/ggml-wasm.js";
 import {
 	LightweightModel,
@@ -16,7 +20,7 @@ import {
 	ModelInference,
 } from "../inference/model-inference.js";
 import { Sampler } from "../inference/sampler.js";
-import { StreamingDecoder, Tokenizer } from "../inference/tokenizer.js";
+import { Tokenizer } from "../inference/tokenizer.js";
 import { GgufParser } from "../models/gguf-parser.js";
 import type { GgufContext } from "../models/gguf-types.js";
 import { InferenceSession } from "../models/inference-session.js";
@@ -26,6 +30,9 @@ import type {
 	ChatMessage,
 	CompletionChunk,
 	CompletionConfig,
+	StreamChunk,
+	StreamConfig,
+	StreamInput,
 } from "./chat-types.js";
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
@@ -187,17 +194,16 @@ export class WebLLM {
 	}
 
 	/**
-	 * Streaming chat completion with multi-turn KV cache reuse.
+	 * Public streaming generation API for prompt or chat inputs.
 	 *
-	 * Yields CompletionChunks with incremental text, followed by a final
-	 * done=true chunk carrying generation stats. The KV cache is reused
-	 * across calls when the message array grows incrementally.
+	 * Yields incremental decoded chunks followed by a final done=true chunk
+	 * carrying completion metadata. Decode-mode selection remains internal.
 	 */
-	async *chatCompletion(
+	async *generateStream(
 		modelId: string,
-		messages: ChatMessage[],
-		config?: CompletionConfig,
-	): AsyncGenerator<CompletionChunk, void> {
+		input: StreamInput,
+		config?: StreamConfig,
+	): AsyncGenerator<StreamChunk, void> {
 		const entry = this.modelManager.get(modelId);
 		if (!entry) throw new Error(`Model "${modelId}" not found`);
 		if (!entry.loaded || !entry.tokenizer)
@@ -213,14 +219,104 @@ export class WebLLM {
 			topP: config?.topP,
 			repetitionPenalty: config?.repetitionPenalty,
 		});
+		const genConfig: GenerationConfig = {
+			prompt: typeof input === "string" ? input : "",
+			maxTokens: config?.maxTokens ?? 512,
+			temperature: config?.temperature ?? 1.0,
+			topK: config?.topK ?? 0,
+			topP: config?.topP ?? 1.0,
+			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
+			stopTokens: config?.stopTokenIds,
+		};
 
+		const promptTokens = Array.isArray(input)
+			? this.prepareChatPrompt(modelId, input, tokenizer, inf)
+			: tokenizer.encode(input);
+		const session = Array.isArray(input)
+			? this.getOrCreateSession(modelId).session
+			: new InferenceSession(
+					{
+						maxTokens: genConfig.maxTokens,
+						temperature: genConfig.temperature,
+						topK: genConfig.topK,
+						topP: genConfig.topP,
+						repetitionPenalty: genConfig.repetitionPenalty,
+						contextOverflowPolicy: "truncate",
+					},
+					0,
+				);
+
+		const forwardPass = async (
+			ids: number[],
+			positions: number[],
+		): Promise<Float32Array> => {
+			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
+		};
+
+		const forwardDecode =
+			typeof inf.forwardDecode === "function"
+				? async (
+						ids: number[],
+						positions: number[],
+						mode: DecodeMode,
+						topK?: number,
+					): Promise<DecodeResult> => {
+						return await inf.forwardDecode(
+							new Int32Array(ids),
+							new Int32Array(positions),
+							mode,
+							topK,
+						);
+					}
+				: undefined;
+
+		yield* generateTextStream({
+			promptTokenIds: promptTokens,
+			sampler,
+			session,
+			eosTokenId: tokenizer.eosId,
+			tokenizer,
+			forwardPass,
+			config: genConfig,
+			signal: config?.signal,
+			forwardDecode,
+		});
+	}
+
+	/**
+	 * Streaming chat completion with multi-turn KV cache reuse.
+	 *
+	 * Yields CompletionChunks with incremental text, followed by a final
+	 * done=true chunk carrying generation stats. The KV cache is reused
+	 * across calls when the message array grows incrementally.
+	 */
+	async *chatCompletion(
+		modelId: string,
+		messages: ChatMessage[],
+		config?: CompletionConfig,
+	): AsyncGenerator<CompletionChunk, void> {
+		yield* this.generateStream(modelId, messages, config);
+	}
+
+	/** Clear conversation history and KV cache for a model. */
+	resetConversation(modelId: string): void {
+		this.sessions.delete(modelId);
+		const inf = this.inferenceEngines.get(modelId);
+		if (inf) inf.resetKVCache();
+	}
+
+	private prepareChatPrompt(
+		modelId: string,
+		messages: ChatMessage[],
+		tokenizer: Tokenizer,
+		inf: ModelInference,
+	): number[] {
 		const sessionInfo = this.getOrCreateSession(modelId);
 		const session = sessionInfo.session;
 		const prevMsgCount = sessionInfo.messageCount;
 		const tmpl = tokenizer.options.chatTemplate;
 
 		let promptTokens: number[];
-
 		if (
 			messages.length > prevMsgCount &&
 			prevMsgCount > 0 &&
@@ -235,102 +331,7 @@ export class WebLLM {
 			inf.resetKVCache();
 		}
 		sessionInfo.messageCount = messages.length;
-
-		const eosId = tokenizer.eosId;
-		const maxTokens = config?.maxTokens ?? 512;
-
-		const forwardPass = async (
-			ids: number[],
-			positions: number[],
-		): Promise<Float32Array> => {
-			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
-		};
-
-		const forwardDecode = async (
-			ids: number[],
-			positions: number[],
-			mode: DecodeMode,
-			topK?: number,
-		): Promise<DecodeResult> => {
-			return await inf.forwardDecode(
-				new Int32Array(ids),
-				new Int32Array(positions),
-				mode,
-				topK,
-			);
-		};
-
-		const genConfig: GenerationConfig = {
-			prompt: "",
-			maxTokens,
-			temperature: config?.temperature ?? 1.0,
-			topK: config?.topK ?? 0,
-			topP: config?.topP ?? 1.0,
-			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
-			stopTokens: config?.stopTokenIds,
-		};
-
-		const startTime = performance.now();
-		const decoder = new StreamingDecoder(tokenizer);
-		let tokenCount = 0;
-		let timeToFirstTokenMs = 0;
-
-		const gen = Generator.generate(
-			promptTokens,
-			sampler,
-			session,
-			eosId,
-			forwardPass,
-			genConfig,
-			config?.signal,
-			forwardDecode,
-		);
-
-		try {
-			for await (const tokenId of gen) {
-				if (tokenCount === 0)
-					timeToFirstTokenMs = performance.now() - startTime;
-				tokenCount++;
-				const delta = decoder.push(tokenId);
-				yield { text: delta, done: false };
-			}
-		} catch {
-			// On error or abort, yield what we have as the final chunk
-			const elapsed = performance.now() - startTime;
-			yield {
-				text: "",
-				done: true,
-				stats: {
-					tokenCount,
-					tokensPerSecond: tokenCount / (elapsed / 1000) || 0,
-					timeToFirstTokenMs,
-					totalMs: elapsed,
-					text: decoder.text,
-				},
-			};
-			return;
-		}
-
-		// Final yield with stats
-		const elapsed = performance.now() - startTime;
-		yield {
-			text: "",
-			done: true,
-			stats: {
-				tokenCount,
-				tokensPerSecond: tokenCount / (elapsed / 1000) || 0,
-				timeToFirstTokenMs,
-				totalMs: elapsed,
-				text: decoder.text,
-			},
-		};
-	}
-
-	/** Clear conversation history and KV cache for a model. */
-	resetConversation(modelId: string): void {
-		this.sessions.delete(modelId);
-		const inf = this.inferenceEngines.get(modelId);
-		if (inf) inf.resetKVCache();
+		return promptTokens;
 	}
 
 	private getOrCreateSession(modelId: string): ConversationSession {

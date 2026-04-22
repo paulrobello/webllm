@@ -1,6 +1,7 @@
 import type { InferenceSession } from "../models/inference-session.js";
 import type { DecodeMode, DecodeResult } from "./model-inference.js";
 import type { Sampler } from "./sampler.js";
+import { StreamingDecoder, type Tokenizer } from "./tokenizer.js";
 
 /** Configuration for a single generation request. */
 export interface GenerationConfig {
@@ -20,6 +21,12 @@ export interface GenerationConfig {
 	stopTokens?: number[];
 }
 
+export type GenerationFinishReason =
+	| "aborted"
+	| "eos"
+	| "max-tokens"
+	| "stop-token";
+
 /** Statistics and output from a completed generation run. */
 export interface GenerationResult {
 	/** All tokens produced during generation (excluding prompt). */
@@ -32,6 +39,44 @@ export interface GenerationResult {
 	tokensPerSecond: number;
 	/** Latency from generation start to first sampled token, in ms. */
 	timeToFirstTokenMs: number;
+	/** Why generation stopped. */
+	finishReason: GenerationFinishReason;
+}
+
+export interface GenerationStreamChunk {
+	/** Incremental decoded text for a generated token. */
+	text: string;
+	/** Token ID for incremental chunks; omitted on the final chunk. */
+	tokenId?: number;
+	/** True only on the final yield carrying completion metadata. */
+	done: boolean;
+	/** Present and populated only when done=true. */
+	stats?: GenerationStreamResult;
+}
+
+export interface GenerationStreamResult extends GenerationResult {
+	/** Total wall-clock time in ms. */
+	totalMs: number;
+}
+
+export interface GenerationStreamOptions {
+	promptTokenIds: number[];
+	sampler: Sampler;
+	session: InferenceSession;
+	eosTokenId: number;
+	tokenizer: Tokenizer;
+	forwardPass: (
+		tokenIds: number[],
+		positions: number[],
+	) => Float32Array | Promise<Float32Array>;
+	config: GenerationConfig;
+	signal?: AbortSignal;
+	forwardDecode?: (
+		tokenIds: number[],
+		positions: number[],
+		mode: DecodeMode,
+		topK?: number,
+	) => Promise<DecodeResult>;
 }
 
 /**
@@ -76,6 +121,7 @@ export class Generator {
 		) => Promise<DecodeResult>,
 	): AsyncGenerator<number, GenerationResult> {
 		const startTime = performance.now();
+		let finishReason: GenerationFinishReason | undefined;
 
 		// 1. Prefill: process all prompt tokens at once
 		const promptPositions = promptTokenIds.map(
@@ -93,6 +139,7 @@ export class Generator {
 				tokenCount: 0,
 				tokensPerSecond: 0,
 				timeToFirstTokenMs: elapsed,
+				finishReason: "aborted",
 			};
 		}
 
@@ -117,9 +164,18 @@ export class Generator {
 
 		// 3. Autoregressive decode loop
 		while (!session.shouldStop(sampledId, eosTokenId)) {
-			if (signal?.aborted) break;
-			if (generatedCount >= config.maxTokens) break;
-			if (config.stopTokens?.includes(sampledId)) break;
+			if (signal?.aborted) {
+				finishReason = "aborted";
+				break;
+			}
+			if (generatedCount >= config.maxTokens) {
+				finishReason = "max-tokens";
+				break;
+			}
+			if (config.stopTokens?.includes(sampledId)) {
+				finishReason = "stop-token";
+				break;
+			}
 
 			if (decodeStep && gpuMode === "greedy") {
 				// GPU ARGMAX — no CPU sampling needed
@@ -181,13 +237,27 @@ export class Generator {
 			generatedCount++;
 			recentTokens.push(sampledId);
 
-			if (config.stopTokens?.includes(sampledId)) break;
-			if (sampledId === eosTokenId) break;
+			if (config.stopTokens?.includes(sampledId)) {
+				finishReason = "stop-token";
+				break;
+			}
+			if (sampledId === eosTokenId) {
+				finishReason = "eos";
+				break;
+			}
 			yield sampledId;
 			session.pushToken(sampledId);
 		}
 
 		// 4. Return stats
+		if (!finishReason) {
+			finishReason = signal?.aborted
+				? "aborted"
+				: sampledId === eosTokenId
+					? "eos"
+					: "max-tokens";
+		}
+
 		const elapsed = performance.now() - startTime;
 		const totalGenerated = session.tokens.length - promptTokenIds.length;
 		return {
@@ -196,6 +266,55 @@ export class Generator {
 			tokenCount: totalGenerated,
 			tokensPerSecond: totalGenerated / (elapsed / 1000),
 			timeToFirstTokenMs: firstTokenTime - startTime,
+			finishReason,
+		};
+	}
+}
+
+export async function* generateTextStream({
+	promptTokenIds,
+	sampler,
+	session,
+	eosTokenId,
+	tokenizer,
+	forwardPass,
+	config,
+	signal,
+	forwardDecode,
+}: GenerationStreamOptions): AsyncGenerator<
+	GenerationStreamChunk,
+	GenerationStreamResult
+> {
+	const startTime = performance.now();
+	const decoder = new StreamingDecoder(tokenizer);
+	const gen = Generator.generate(
+		promptTokenIds,
+		sampler,
+		session,
+		eosTokenId,
+		forwardPass,
+		config,
+		signal,
+		forwardDecode,
+	);
+
+	while (true) {
+		const next = await gen.next();
+		if (next.done) {
+			const stats: GenerationStreamResult = {
+				...next.value,
+				text: decoder.text,
+				totalMs: performance.now() - startTime,
+			};
+			yield { text: "", done: true, stats };
+			return stats;
+		}
+
+		const tokenId = next.value;
+		yield {
+			text: decoder.push(tokenId),
+			tokenId,
+			done: false,
 		};
 	}
 }

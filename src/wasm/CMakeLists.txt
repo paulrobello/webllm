@@ -53,7 +53,7 @@ if(EMSCRIPTEN)
         "_backend_tensor_set,_backend_tensor_set3,_backend_tensor_get,"
         "_backend_tensor_get_async_begin,_backend_tensor_get_async_poll,"
         "_backend_tensor_get_async_finish,_backend_tensor_get_async_cancel,"
-        "_backend_tensor_alignment"
+        "_backend_tensor_get_async_callback_support,_backend_tensor_alignment"
     )
     add_executable(webllm-wasm webgpu-bridge.cpp)
     target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)

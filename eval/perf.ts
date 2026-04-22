@@ -22,7 +22,7 @@
 import { parseArgs } from "node:util";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { getModelById, type BenchmarkModel } from "./models.js";
 
 interface PerfRun {
@@ -44,6 +44,7 @@ interface PerfReport {
 }
 
 interface DecodeTrace {
+	mode: "full" | "greedy" | "topk";
 	nTokens: number;
 	pastLen: number;
 	ctxCreateMs: number;
@@ -51,7 +52,7 @@ interface DecodeTrace {
 	backendAllocMs: number;
 	uploadLeavesMs: number;
 	graphComputeMs: number;
-	downloadLogitsMs: number;
+	downloadResultMs: number;
 	teardownMs: number;
 	totalMs: number;
 }
@@ -127,8 +128,10 @@ async function run(
 		perfRuns.push(result);
 		if (opts.profile) {
 			const traces = fetchDecodeTraces(port, tab);
-			const decodeOnly = traces.filter((t) => t.nTokens === 1);
-			allTraces.push(...decodeOnly);
+			const greedyDecodeTraces = traces.filter(
+				(t) => t.mode === "greedy" && t.nTokens === 1,
+			);
+			allTraces.push(...greedyDecodeTraces);
 		}
 		process.stdout.write(` ${result.tokensPerSecond.toFixed(1)} tok/s\n`);
 	}
@@ -307,7 +310,7 @@ function printProfileTable(traces: DecodeTrace[]): void {
 		"backendAllocMs",
 		"uploadLeavesMs",
 		"graphComputeMs",
-		"downloadLogitsMs",
+		"downloadResultMs",
 		"teardownMs",
 		"totalMs",
 	];

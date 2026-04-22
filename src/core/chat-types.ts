@@ -1,3 +1,5 @@
+import type { GenerationFinishReason } from "../inference/generation.js";
+
 /** A single message in a conversation. */
 export interface ChatMessage {
 	role: "system" | "user" | "assistant";
@@ -22,18 +24,14 @@ export interface CompletionConfig {
 	stopTokenIds?: number[];
 }
 
-/** Each yield from chatCompletion(). */
-export interface CompletionChunk {
-	/** Incremental text fragment (empty string on final done=true chunk). */
-	text: string;
-	/** True only on the final yield, which carries stats. */
-	done: boolean;
-	/** Present and populated only when done=true. */
-	stats?: CompletionStats;
-}
+/** Input accepted by the public streaming API. */
+export type StreamInput = string | ChatMessage[];
 
-/** Statistics from a completed chat completion. */
-export interface CompletionStats {
+/** Configuration for the public streaming API. */
+export type StreamConfig = CompletionConfig;
+
+/** Statistics from a completed streamed generation. */
+export interface StreamStats {
 	/** Number of tokens generated (excluding prompt). */
 	tokenCount: number;
 	/** Throughput in tokens per second. */
@@ -44,4 +42,21 @@ export interface CompletionStats {
 	totalMs: number;
 	/** Full response text. */
 	text: string;
+	/** Why generation stopped. */
+	finishReason: GenerationFinishReason;
 }
+
+/** Each yield from generateStream() / chatCompletion(). */
+export interface StreamChunk {
+	/** Incremental text fragment (empty string on final done=true chunk). */
+	text: string;
+	/** Generated token ID for incremental chunks; omitted on the final chunk. */
+	tokenId?: number;
+	/** True only on the final yield, which carries stats. */
+	done: boolean;
+	/** Present and populated only when done=true. */
+	stats?: StreamStats;
+}
+
+export type CompletionChunk = StreamChunk;
+export type CompletionStats = StreamStats;

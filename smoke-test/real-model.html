@@ -365,6 +365,9 @@ async function loadAndTest() {
                     new Int32Array([pos]),
                     'greedy',
                 );
+                if (profileMode && inference.lastTrace) {
+                    window.__decodeTraces.push(inference.lastTrace);
+                }
                 sampledId = result.tokenId;
             } else {
                 const stepLogits = await inference.forward(

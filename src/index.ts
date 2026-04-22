@@ -16,6 +16,10 @@ export type {
 	CompletionChunk,
 	CompletionConfig,
 	CompletionStats,
+	StreamChunk,
+	StreamConfig,
+	StreamInput,
+	StreamStats,
 } from "./core/chat-types.js";
 export { WebLLM } from "./core/engine.js";
 export type { GameLoopCallback, GameLoopConfig } from "./core/game-loop.js";
@@ -51,7 +55,10 @@ export {
 } from "./inference/chat-template.js";
 export type {
 	GenerationConfig,
+	GenerationFinishReason,
 	GenerationResult,
+	GenerationStreamChunk,
+	GenerationStreamResult,
 } from "./inference/generation.js";
 export { Generator } from "./inference/generation.js";
 export { GgmlWasm } from "./inference/ggml-wasm.js";

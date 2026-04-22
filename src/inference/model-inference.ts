@@ -51,6 +51,7 @@ export interface DecodeResult {
 }
 
 export interface ForwardTrace {
+	mode: DecodeMode;
 	nTokens: number;
 	pastLen: number;
 	ctxCreateMs: number;
@@ -58,7 +59,7 @@ export interface ForwardTrace {
 	backendAllocMs: number;
 	uploadLeavesMs: number;
 	graphComputeMs: number;
-	downloadLogitsMs: number;
+	downloadResultMs: number;
 	teardownMs: number;
 	totalMs: number;
 }
@@ -500,18 +501,19 @@ export class ModelInference {
 		const t7 = trace ? performance.now() : 0;
 
 		if (trace) {
-			this.lastTrace = {
+			this.recordTrace(
+				"full",
 				nTokens,
 				pastLen,
-				ctxCreateMs: t1 - t0,
-				buildGraphMs: t2 - t1,
-				backendAllocMs: t3 - t2,
-				uploadLeavesMs: t4 - t3,
-				graphComputeMs: t5 - t4,
-				downloadLogitsMs: t6 - t5,
-				teardownMs: t7 - t6,
-				totalMs: t7 - t0,
-			};
+				t0,
+				t1,
+				t2,
+				t3,
+				t4,
+				t5,
+				t6,
+				t7,
+			);
 		}
 
 		return result;
@@ -540,8 +542,13 @@ export class ModelInference {
 		const pastLen = this.nCached;
 		const totalLen = pastLen + nTokens;
 
+		const trace = this.traceEnabled;
+		const t0 = trace ? performance.now() : 0;
+
 		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
 		wasm.ctxCreate(graphMem);
+
+		const t1 = trace ? performance.now() : 0;
 
 		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
@@ -688,11 +695,14 @@ export class ModelInference {
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
 
+		const t2 = trace ? performance.now() : 0;
+
 		if (mode === "greedy") {
 			const argmaxResult = wasm.opArgmax(logits);
 			wasm.graphBuildForwardExpand(graph, argmaxResult);
 
 			const graphBuf = wasm.backendAllocCtxTensors();
+			const t3 = trace ? performance.now() : 0;
 			this.uploadLeaves(
 				wasm,
 				tokenIds,
@@ -706,15 +716,34 @@ export class ModelInference {
 				tokenIdsTensor,
 				maskTensor,
 			);
+			const t4 = trace ? performance.now() : 0;
 
 			await wasm.graphCompute(graph);
+			const t5 = trace ? performance.now() : 0;
 
 			const buf = await wasm.downloadFromTensor(argmaxResult, 4, 0);
 			const tokenId = new Int32Array(buf.buffer, buf.byteOffset, 1)[0];
+			const t6 = trace ? performance.now() : 0;
 
 			wasm.backendBufferFree(graphBuf);
 			wasm.ctxFree();
 			this.nCached = totalLen;
+			const t7 = trace ? performance.now() : 0;
+			if (trace) {
+				this.recordTrace(
+					"greedy",
+					nTokens,
+					pastLen,
+					t0,
+					t1,
+					t2,
+					t3,
+					t4,
+					t5,
+					t6,
+					t7,
+				);
+			}
 			return { tokenId };
 		}
 
@@ -727,6 +756,7 @@ export class ModelInference {
 			wasm.graphBuildForwardExpand(graph, topKValues);
 
 			const graphBuf = wasm.backendAllocCtxTensors();
+			const t3 = trace ? performance.now() : 0;
 			this.uploadLeaves(
 				wasm,
 				tokenIds,
@@ -740,12 +770,15 @@ export class ModelInference {
 				tokenIdsTensor,
 				maskTensor,
 			);
+			const t4 = trace ? performance.now() : 0;
 
 			await wasm.graphCompute(graph);
+			const t5 = trace ? performance.now() : 0;
 
 			const kBytes = topK * 4;
 			const idxBuf = await wasm.downloadFromTensor(topKIndices, kBytes, 0);
 			const valBuf = await wasm.downloadFromTensor(topKValues, kBytes, 0);
+			const t6 = trace ? performance.now() : 0;
 
 			const indices = new Int32Array(
 				idxBuf.buffer,
@@ -761,12 +794,29 @@ export class ModelInference {
 			wasm.backendBufferFree(graphBuf);
 			wasm.ctxFree();
 			this.nCached = totalLen;
+			const t7 = trace ? performance.now() : 0;
+			if (trace) {
+				this.recordTrace(
+					"topk",
+					nTokens,
+					pastLen,
+					t0,
+					t1,
+					t2,
+					t3,
+					t4,
+					t5,
+					t6,
+					t7,
+				);
+			}
 			return { topKIndices: indices, topKValues: values };
 		}
 
 		// Fallback: full logits
 		wasm.graphBuildForwardExpand(graph, logits);
 		const graphBuf = wasm.backendAllocCtxTensors();
+		const t3 = trace ? performance.now() : 0;
 		this.uploadLeaves(
 			wasm,
 			tokenIds,
@@ -780,8 +830,10 @@ export class ModelInference {
 			tokenIdsTensor,
 			maskTensor,
 		);
+		const t4 = trace ? performance.now() : 0;
 
 		await wasm.graphCompute(graph);
+		const t5 = trace ? performance.now() : 0;
 
 		const logitsBytes = hp.vocabularySize * 4;
 		const offset = nTokens > 1 ? (nTokens - 1) * logitsBytes : 0;
@@ -790,6 +842,7 @@ export class ModelInference {
 			logitsBytes,
 			offset,
 		);
+		const t6 = trace ? performance.now() : 0;
 		const fullLogits = new Float32Array(
 			resultBuf.buffer,
 			resultBuf.byteOffset,
@@ -799,7 +852,51 @@ export class ModelInference {
 		wasm.backendBufferFree(graphBuf);
 		wasm.ctxFree();
 		this.nCached = totalLen;
+		const t7 = trace ? performance.now() : 0;
+		if (trace) {
+			this.recordTrace(
+				"full",
+				nTokens,
+				pastLen,
+				t0,
+				t1,
+				t2,
+				t3,
+				t4,
+				t5,
+				t6,
+				t7,
+			);
+		}
 		return { logits: fullLogits };
+	}
+
+	private recordTrace(
+		mode: DecodeMode,
+		nTokens: number,
+		pastLen: number,
+		t0: number,
+		t1: number,
+		t2: number,
+		t3: number,
+		t4: number,
+		t5: number,
+		t6: number,
+		t7: number,
+	): void {
+		this.lastTrace = {
+			mode,
+			nTokens,
+			pastLen,
+			ctxCreateMs: t1 - t0,
+			buildGraphMs: t2 - t1,
+			backendAllocMs: t3 - t2,
+			uploadLeavesMs: t4 - t3,
+			graphComputeMs: t5 - t4,
+			downloadResultMs: t6 - t5,
+			teardownMs: t7 - t6,
+			totalMs: t7 - t0,
+		};
 	}
 
 	/** Upload position, token ID, and mask data after backend alloc. */
