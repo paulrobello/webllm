@@ -45,8 +45,8 @@ h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
 <script type="module">
 const assetSuffix = window.location.search || "";
 const {
-    GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer, Generator, Sampler, StreamingDecoder,
-    detectChatTemplate, encodeChatPrompt, formatChatPrompt, formatChatDelta
+    GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer, Sampler,
+    detectChatTemplate, encodeChatPrompt
 } = await import(`./webllm-bundle.js${assetSuffix}`);
 
 const params = new URLSearchParams(window.location.search);
@@ -66,14 +66,6 @@ const chatOutput = document.getElementById('chat-output');
 const chatInput = document.getElementById('chat-input');
 const chatBtn = document.getElementById('chat-btn');
 
-let runtimeErrors = [];
-const origError = console.error.bind(console);
-console.error = (...args) => {
-    const text = args.map(a => a instanceof Error ? `${a.message}\n${a.stack || ''}` : String(a)).join(' ');
-    runtimeErrors.push(text);
-    origError(...args);
-};
-
 function log(cls, msg) {
     const el = document.createElement('div');
     el.className = `step ${cls}`;
@@ -89,10 +81,6 @@ function setProgress(pct) {
 
 function shouldAutoInsertBos(tokenizerConfig) {
     return tokenizerConfig?.addBosToken !== false;
-}
-
-function isThinkingTemplate(chatTemplate) {
-    return chatTemplate?.includes('enable_thinking') && chatTemplate.includes('<think>');
 }
 
 function getSmokeChatOptions(parsed, chatTemplate) {
@@ -113,24 +101,6 @@ function getSmokeSamplingConfig(parsed, chatTemplate, chatOptions = {}) {
             topK: 20,
             topP: 0.8,
             repetitionPenalty: 1.1,
-            seed: 12345,
-        };
-    }
-    if (parsed?.hyperparams?.architecture === 'qwen3' && detectChatTemplate(chatTemplate ?? '') === 'chatml') {
-        return {
-            temperature: 0.6,
-            topK: 20,
-            topP: 0.95,
-            repetitionPenalty: 1.05,
-            seed: 12345,
-        };
-    }
-    if (isThinkingTemplate(chatTemplate)) {
-        return {
-            temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            repetitionPenalty: 1.05,
             seed: 12345,
         };
     }
@@ -202,10 +172,6 @@ function getMaskedTokensAfterThinkingUntilAnswer(parsed) {
     ].filter((id) => id !== undefined);
 }
 
-function getMaskedTokensAfterAnswerStarts(parsed) {
-    return getMaskedTokensAfterThinkingUntilAnswer(parsed);
-}
-
 function maskTokenLogits(logits, tokenIds) {
     for (const tokenId of tokenIds) {
         if (tokenId >= 0 && tokenId < logits.length) {
@@ -228,53 +194,11 @@ function isWhitespaceOnlyTextToken(tokenId) {
     return tokenizer.decode([tokenId]).trim().length === 0;
 }
 
-function buildSmokeMessages(userMessage, chatOptions = {}) {
-    return [{ role: 'user', content: userMessage }];
-}
-
 function buildSmokePrompt(userMessage, chatOptions = {}) {
-    const messages = buildSmokeMessages(userMessage, chatOptions);
-    const promptText = formatChatPrompt(messages, tokenizer.options.chatTemplate, chatOptions);
     return {
         mode: 'chat',
-        promptText,
-        tokens: encodeChatPrompt(messages, tokenizer, chatOptions),
+        tokens: encodeChatPrompt([{ role: 'user', content: userMessage }], tokenizer, chatOptions),
     };
-}
-
-function buildQwenChatPromptVariants(userMessage) {
-    return [
-        {
-            label: 'chat-default-think-closed',
-            mode: 'chat',
-            tokens: tokenizer.encode(`<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`),
-        },
-        {
-            label: 'chat-system-/no_think',
-            mode: 'chat',
-            tokens: tokenizer.encode(`<|im_start|>system\nYou are a concise assistant. /no_think<|im_end|>\n<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n`),
-        },
-        {
-            label: 'chat-user-/no_think',
-            mode: 'chat',
-            tokens: tokenizer.encode(`<|im_start|>user\n${userMessage} /no_think<|im_end|>\n<|im_start|>assistant\n`),
-        },
-        {
-            label: 'chat-system-no-think-marker',
-            mode: 'chat',
-            tokens: tokenizer.encode(`<|im_start|>system\nYou are a concise assistant.<|im_end|>\n<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n`),
-        },
-        {
-            label: 'chat-system-/no_think-think-closed',
-            mode: 'chat',
-            tokens: tokenizer.encode(`<|im_start|>system\nYou are a concise assistant. /no_think<|im_end|>\n<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`),
-        },
-        {
-            label: 'chat-user-/no_think-think-closed',
-            mode: 'chat',
-            tokens: tokenizer.encode(`<|im_start|>user\n${userMessage} /no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`),
-        },
-    ];
 }
 
 function findSingleTokenProbe(tokenizer, candidates) {
@@ -610,17 +534,11 @@ async function loadAndTest() {
             const forbiddenReentryTokens = new Set(getForbiddenReentryTokens(parsed));
             const thinkingTokenIds = getThinkingTokenIds(parsed);
             const maskedTokensWhileThinking = getMaskedTokensWhileThinking(parsed);
-            const maskedTokensAfterThinkingUntilAnswer = getMaskedTokensAfterThinkingUntilAnswer(parsed, chatOptions);
-            const maskedTokensAfterAnswerStarts = getMaskedTokensAfterAnswerStarts(parsed);
+            const maskedTokensAfterThinkingUntilAnswer = getMaskedTokensAfterThinkingUntilAnswer(parsed);
             const requireVisibleAnswerAfterThinking = thinkingTokenIds !== null;
-            const requireVisibleAnswerBeforeStop =
-                parsed?.hyperparams?.architecture === 'qwen3' &&
-                false;
-            const suppressWhitespaceOnlyUntilAnswer = requireVisibleAnswerBeforeStop;
             let thinkDepth = 0;
-            let thinkClosed = false;
             let hasVisibleAnswerText = false;
-            let waitingForVisibleAnswer = requireVisibleAnswerBeforeStop;
+            let waitingForVisibleAnswer = false;
 
             log('running', `  ${label} prompt tokens: ${promptTokens.length}`);
             {
@@ -638,21 +556,7 @@ async function loadAndTest() {
             const recent = [...promptTokens];
             let finishReason = 'max-tokens';
             sampler.applyRepetitionPenalty(logits, recent.slice(-64));
-            if (waitingForVisibleAnswer) {
-                maskTokenLogits(logits, [eosId]);
-            }
             let sampledId = sampler.sample(logits);
-            if (waitingForVisibleAnswer) {
-                const maskedWhitespaceOnly = new Set();
-                while (
-                    isWhitespaceOnlyTextToken(sampledId) &&
-                    !maskedWhitespaceOnly.has(sampledId)
-                ) {
-                    maskedWhitespaceOnly.add(sampledId);
-                    maskTokenLogits(logits, [sampledId]);
-                    sampledId = sampler.sample(logits);
-                }
-            }
             if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkOpenId) {
                 thinkDepth = 1;
             } else if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkCloseId) {
@@ -699,11 +603,11 @@ async function loadAndTest() {
                         maskTokenLogits(stepLogits, maskedTokensWhileThinking);
                     } else if (waitingForVisibleAnswer) {
                         maskTokenLogits(stepLogits, maskedTokensAfterThinkingUntilAnswer);
-                        if (requireVisibleAnswerAfterThinking || requireVisibleAnswerBeforeStop) {
+                        if (requireVisibleAnswerAfterThinking) {
                             maskTokenLogits(stepLogits, [eosId]);
                         }
                     } else if (hasVisibleAnswerText) {
-                        maskTokenLogits(stepLogits, maskedTokensAfterAnswerStarts);
+                        maskTokenLogits(stepLogits, maskedTokensAfterThinkingUntilAnswer);
                     }
                     sampledId = sampler.sample(stepLogits);
                     if (waitingForVisibleAnswer) {
@@ -735,8 +639,7 @@ async function loadAndTest() {
                     }
                     thinkDepth = Math.max(0, thinkDepth - 1);
                     if (thinkDepth === 0) {
-                        thinkClosed = true;
-                        waitingForVisibleAnswer = true;
+                        waitingForVisibleAnswer = requireVisibleAnswerAfterThinking;
                     }
                 }
                 if (waitingForVisibleAnswer && !hasVisibleAnswerText && isVisibleTextToken(sampledId)) {
@@ -767,27 +670,8 @@ async function loadAndTest() {
         }
         interactiveRunCompletion = runCompletion;
 
-        const useSampledGeneration = isThinkingTemplate(chatTmpl);
         const smokeSampler = makeSmokeSampler(chatTmpl, smokeChatOptions);
         const smokeResult = await runCompletion(smokePrompt.mode, tokens, smokeSampler, 64, smokeChatOptions);
-
-        if (useSampledGeneration) {
-            inference.resetKVCache();
-            const plainTokens = tokenizer.encode(userMessage);
-            const comparisonResult = await runCompletion('plain', plainTokens, makeSmokeSampler(chatTmpl));
-            log('running', `  plain completion: ${comparisonResult.displayOutputText || comparisonResult.outputText}`);
-            inference.resetKVCache();
-
-            if (parsed.hyperparams.architecture === 'qwen3') {
-                const qwenVariants = buildQwenChatPromptVariants(userMessage);
-                for (const variant of qwenVariants) {
-                    const variantResult = await runCompletion(variant.label, variant.tokens, makeSmokeSampler(chatTmpl));
-                    log('running', `  ${variant.label}: ${variantResult.displayOutputText || variantResult.outputText}`);
-                    log('running', `  ${variant.label} raw: ${variantResult.rawOutputText}`);
-                    inference.resetKVCache();
-                }
-            }
-        }
 
         log('pass', `[7/7] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason})`);
         log('pass', `User: ${userMessage}`);
@@ -820,11 +704,9 @@ async function runChat() {
     chatOutput.textContent += `User: ${text}\nAssistant: `;
 
     try {
-        const eosId = parsedModel?.tokenizerConfig?.eosTokenId ?? 2;
         const chatTmpl = parsedModel?.tokenizerConfig?.chatTemplate;
         const chatOptions = getSmokeChatOptions(parsedModel, chatTmpl);
         const sampler = makeSmokeSampler(chatTmpl, chatOptions);
-        const samplingConfig = getSmokeSamplingConfig(parsedModel, chatTmpl, chatOptions);
 
         if (!window._chatSession) {
             window._chatSession = { position: 0, history: [], messages: [], prevCount: 0 };
