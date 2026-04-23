@@ -24,10 +24,17 @@
  */
 
 import { parseArgs } from "node:util";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { getModelById, type BenchmarkModel } from "./models.js";
+import {
+	agentchrome,
+	buildSmokeTestUrl,
+	ensureModelDownloaded,
+	extractSmokeTestPrompt,
+	resolveAgentchromeSession,
+	waitForSmokeTestResult,
+} from "./browser-smoke.js";
 
 interface PerfRun {
 	tokensGenerated: number;
@@ -46,10 +53,6 @@ interface PerfReport {
 	runs: PerfRun[];
 	median: PerfRun;
 	notes?: string;
-}
-
-interface SmokeTestResult extends Omit<PerfRun, "wallClockMs"> {
-	completionPageMs: number;
 }
 
 interface DecodeTrace {
@@ -74,7 +77,6 @@ interface DecodeTrace {
 
 const DEFAULT_MODEL_ID = "tinyllama-1.1b-chat-q4_0";
 const DEFAULT_RUNS = 3;
-const SMOKE_TEST_URL = "http://localhost:8031/real-model.html";
 const BASELINE_PATH = "eval/reports/perf-baseline.json";
 
 function main(): void {
@@ -138,8 +140,10 @@ async function run(
 	const allTraces: DecodeTrace[] = [];
 	for (let i = 0; i < nRuns; i++) {
 		process.stdout.write(`Run ${i + 1}/${nRuns}...`);
-		const base = `${SMOKE_TEST_URL}?model=${encodeURIComponent(model.id)}&ctx=${model.contextLength}&perf=${Date.now()}-${i}`;
-		const url = opts.profile ? `${base}&profile=1` : base;
+		const url = buildSmokeTestUrl(model.id, model.contextLength, {
+			perf: `${Date.now()}-${i}`,
+			...(opts.profile ? { profile: 1 } : {}),
+		});
 		agentchrome(port, tab, ["navigate", url]);
 		const result = await waitForSmokeTestResult(port, tab);
 		perfRuns.push({
@@ -229,164 +233,6 @@ function compareToBaseline(current: PerfReport, baselinePath: string): void {
 	} catch (err) {
 		console.log(`\nCouldn't read baseline ${baselinePath}: ${err instanceof Error ? err.message : err}`);
 	}
-}
-
-async function ensureModelDownloaded(model: BenchmarkModel): Promise<void> {
-	const destDir = "smoke-test/models";
-	const destPath = `${destDir}/${model.id}.gguf`;
-	if (existsSync(destPath)) {
-		return;
-	}
-
-	console.log(`\nModel ${model.id} not found locally. Preparing to download...`);
-	mkdirSync(destDir, { recursive: true });
-
-	const repoUrl = model.ggufUrl;
-	if (!repoUrl.startsWith("https://huggingface.co/")) {
-		throw new Error(`Unsupported model URL format: ${repoUrl}`);
-	}
-
-	const repoName = repoUrl.replace("https://huggingface.co/", "");
-	const apiUrl = `https://huggingface.co/api/models/${repoName}/tree/main`;
-	
-	const res = await fetch(apiUrl);
-	if (!res.ok) {
-		throw new Error(`Failed to fetch model tree from Hugging Face: HTTP ${res.status}`);
-	}
-	
-	const files = await res.json() as Array<{ path: string; size: number }>;
-	
-	const preferredQuants = [
-		model.defaultQuant.toLowerCase(),
-		"q4_k_m",
-		"q4_0",
-		"q4_1",
-		"q5_k_m"
-	];
-	
-	let chosenFile: { path: string; size: number } | undefined;
-	for (const quant of preferredQuants) {
-		chosenFile = files.find(f => f.path.toLowerCase().endsWith(".gguf") && f.path.toLowerCase().includes(quant));
-		if (chosenFile) break;
-	}
-	
-	if (!chosenFile) {
-		chosenFile = files.find(f => f.path.toLowerCase().endsWith(".gguf"));
-	}
-
-	if (!chosenFile) {
-		throw new Error(`Could not find any .gguf files in ${repoUrl}`);
-	}
-
-	const downloadUrl = `https://huggingface.co/${repoName}/resolve/main/${chosenFile.path}`;
-	console.log(`Downloading ${chosenFile.path} (${(chosenFile.size / 1024 / 1024).toFixed(1)} MB) to ${destPath}...`);
-	
-	execFileSync("curl", ["-L", "--progress-bar", "-o", destPath, downloadUrl], { stdio: "inherit" });
-	console.log(`Download complete.\n`);
-}
-
-// ── agentchrome helpers ────────────────────────────────────────────────────
-
-function agentchrome(port: string, tab: string | undefined, args: string[]): string {
-	const full = ["--port", port];
-	if (tab) full.push("--tab", tab);
-	full.push(...args);
-	return execFileSync("agentchrome", full, { encoding: "utf-8" });
-}
-
-async function resolveAgentchromeSession(
-	portArg?: string,
-	tabArg?: string,
-): Promise<{ port: string; tab: string }> {
-	let port = portArg;
-	if (!port) {
-		// Query agentchrome's connect status for the active session port.
-		const status = execFileSync("agentchrome", ["connect", "--status"], {
-			encoding: "utf-8",
-		});
-		const parsed = JSON.parse(status);
-		if (!parsed.port) {
-			throw new Error(
-				"No active agentchrome session. Start one with `agentchrome connect --launch` or pass --port.",
-			);
-		}
-		port = String(parsed.port);
-	}
-
-	if (tabArg) return { port, tab: tabArg };
-
-	const tabs = execFileSync("agentchrome", ["--port", port, "tabs", "list"], {
-		encoding: "utf-8",
-	});
-	const list = JSON.parse(tabs) as Array<{ id: string; url: string }>;
-	const smoke = list.find((t) => t.url.includes("real-model.html"));
-	if (!smoke) {
-		throw new Error(
-			`No tab currently loaded on real-model.html. Navigate one there first, or pass --tab <TAB_ID>.`,
-		);
-	}
-	return { port, tab: smoke.id };
-}
-
-async function waitForSmokeTestResult(
-	port: string,
-	tab: string,
-): Promise<SmokeTestResult> {
-	const out = agentchrome(port, tab, [
-		"js",
-		"exec",
-		`(async () => {
-			const pattern = /Generated (\\d+) tokens in ([0-9.]+)s \\(prefill: (\\d+)ms, decode: (\\d+)ms, ([0-9.]+) tok\\/s\\)/;
-			const parse = () => {
-				const t = document.getElementById("log")?.textContent ?? "";
-				const m = t.match(pattern);
-				if (!m) return null;
-				return JSON.stringify({
-					tokensGenerated: +m[1],
-					totalMs: +m[2] * 1000,
-					prefillMs: +m[3],
-					decodeMs: +m[4],
-					tokensPerSecond: +m[5],
-					completionPageMs: performance.now(),
-				});
-			};
-
-			const ready = parse();
-			if (ready) return ready;
-
-			return await new Promise((resolve, reject) => {
-				const log = document.getElementById("log");
-				if (!log) {
-					reject(new Error("Missing #log element on smoke-test page"));
-					return;
-				}
-
-				const timeout = setTimeout(() => {
-					observer.disconnect();
-					reject(new Error("Timed out waiting for smoke-test result line on the page"));
-				}, 180_000);
-
-				const observer = new MutationObserver(() => {
-					const result = parse();
-					if (!result) return;
-					clearTimeout(timeout);
-					observer.disconnect();
-					resolve(result);
-				});
-
-				observer.observe(log, { childList: true, characterData: true, subtree: true });
-			});
-		})()`,
-	]);
-	try {
-		const resp = JSON.parse(out) as { result?: string; type?: string };
-		if (resp.result && resp.type === "string") {
-			return JSON.parse(resp.result) as SmokeTestResult;
-		}
-	} catch {
-		// fall through to the shared error below
-	}
-	throw new Error("Timed out waiting for smoke-test result line on the page");
 }
 
 function fetchDecodeTraces(port: string, tab: string): DecodeTrace[] {
@@ -517,24 +363,6 @@ function summarizeNumbers(values: number[]): { mean: number; median: number; p90
 		median: sorted[Math.floor(sorted.length / 2)],
 		p90: sorted[Math.floor(sorted.length * 0.9)],
 	};
-}
-
-async function extractSmokeTestPrompt(port: string, tab: string): Promise<string> {
-	try {
-		const out = agentchrome(port, tab, [
-			"js",
-			"exec",
-			`(() => {
-				const t = document.getElementById("log")?.textContent ?? "";
-				const m = t.match(/User: (.+?)(?:Assistant:|\\n|$)/);
-				return m ? m[1].trim() : "";
-			})()`,
-		]);
-		const resp = JSON.parse(out);
-		return typeof resp.result === "string" ? resp.result : "";
-	} catch {
-		return "";
-	}
 }
 
 function printUsage(): void {

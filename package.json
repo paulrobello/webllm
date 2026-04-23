@@ -24,6 +24,7 @@
     "bench:eval": "bun run eval/cli.ts",
     "bench:eval:interactive": "bun run eval/cli.ts -i",
     "bench:inference": "bun run eval/perf.ts",
+    "bench:chat-smoke": "bun run eval/chat-smoke.ts",
     "checkall": "bun run fmt && bun run lint && bun run typecheck && bun run test"
   },
   "keywords": ["llm", "webgpu", "inference", "browser", "llama-cpp", "gguf"],

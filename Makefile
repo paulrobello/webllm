@@ -1,7 +1,7 @@
 .PHONY: build test lint lint-fix fmt typecheck checkall clean install deps \
         wasm-build wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
-        bench-eval-models bench-inference bench-inference-save bench-all \
+        bench-eval-models bench-inference bench-inference-save bench-chat-smoke bench-all \
         smoke-test smoke-serve smoke-stop smoke-open smoke-run smoke-bench \
         run-all help
 
@@ -161,6 +161,9 @@ bench-inference: ## Run end-to-end inference perf (needs smoke-serve + Chrome)
 
 bench-inference-save: ## Run inference perf and save baseline
 	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --save
+
+bench-chat-smoke: ## Run browser-driven interactive chat smoke regression
+	bun run eval/chat-smoke.ts --model $(PERF_MODEL)
 
 bench-all: bench-perf bench-eval ## Run all benchmarks
 
