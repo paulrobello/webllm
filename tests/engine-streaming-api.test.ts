@@ -61,6 +61,38 @@ function createThinkingTokenizer(): Tokenizer {
 	return new Tokenizer(config);
 }
 
+function createQwenChatTokenizer(): Tokenizer {
+	const tokens: TokenData[] = [
+		{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },
+		{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL },
+		{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL },
+		{ text: "<|im_start|>", score: 0, attr: TokenAttribute.CONTROL },
+		{ text: "<|im_end|>", score: 0, attr: TokenAttribute.CONTROL },
+		{ text: "<think>", score: 0, attr: TokenAttribute.USER_DEFINED },
+		{ text: "</think>", score: 0, attr: TokenAttribute.USER_DEFINED },
+		{ text: "Hello", score: -1, attr: TokenAttribute.NORMAL },
+		{ text: "!", score: -1, attr: TokenAttribute.NORMAL },
+	];
+	const config: TokenizerConfig = {
+		type: TokenizerType.BPE,
+		tokens,
+		bpeRanks: new Map(),
+		addedTokens: new Map([
+			["<|im_start|>", 3],
+			["<|im_end|>", 4],
+			["<think>", 5],
+			["</think>", 6],
+		]),
+		eosTokenId: 2,
+		bosTokenId: 1,
+		padTokenId: 0,
+		vocabSize: tokens.length,
+		addBosToken: false,
+		chatTemplate: QWEN_TMPL,
+	};
+	return new Tokenizer(config);
+}
+
 function createLogits(tokenId: number, vocabSize: number): Float32Array {
 	const logits = new Float32Array(vocabSize);
 	logits[tokenId] = 100;
@@ -77,6 +109,7 @@ function createTestEngine(sequence: number[]): WebLLM {
 function createTestEngineWithTokenizer(
 	tokenizer: Tokenizer,
 	sequence: number[],
+	architecture = "llama",
 ): WebLLM {
 	let step = 0;
 	const engine = Object.create(WebLLM.prototype) as WebLLM &
@@ -85,6 +118,9 @@ function createTestEngineWithTokenizer(
 		get: () => ({
 			loaded: true,
 			tokenizer,
+			hyperparams: {
+				architecture,
+			},
 		}),
 	};
 	engine.inferenceEngines = new Map([
@@ -473,6 +509,42 @@ describe("WebLLM.generateStream", () => {
 			topK: 20,
 			topP: 0.8,
 			repetitionPenalty: 1.1,
+		});
+	});
+
+	test("qwen chatCompletion yields visible assistant text through think tokens", async () => {
+		const engine = createTestEngineWithTokenizer(
+			createQwenChatTokenizer(),
+			[5, 6, 7, 8, 2],
+			"qwen3",
+		);
+		const chunks: Array<{ text: string; tokenId?: number; done: boolean }> = [];
+		let finalStats: Record<string, unknown> | undefined;
+
+		for await (const chunk of engine.chatCompletion(
+			"model",
+			[{ role: "user", content: "Hello" }],
+			{ maxTokens: 8, temperature: 0, enableThinking: false },
+		)) {
+			chunks.push({
+				text: chunk.text,
+				tokenId: chunk.tokenId,
+				done: chunk.done,
+			});
+			if (chunk.done) finalStats = chunk.stats as Record<string, unknown>;
+		}
+
+		expect(chunks).toEqual([
+			{ text: "", tokenId: 5, done: false },
+			{ text: "", tokenId: 6, done: false },
+			{ text: "Hello", tokenId: 7, done: false },
+			{ text: "!", tokenId: 8, done: false },
+			{ text: "", tokenId: undefined, done: true },
+		]);
+		expect(finalStats).toMatchObject({
+			text: "Hello!",
+			tokenCount: 4,
+			finishReason: "eos",
 		});
 	});
 });
