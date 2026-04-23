@@ -6,17 +6,20 @@ import {
 	runSmokeChatTurn,
 	waitForSmokeTestResult,
 	agentchrome,
+	type SmokeTestPage,
 } from "./browser-smoke.js";
 import { getModelById } from "./models.js";
 
 const DEFAULT_MODEL_ID = "qwen3-0.6b-q4f16";
 const DEFAULT_PROMPT = "hello";
+const DEFAULT_PAGE: SmokeTestPage = "smoke";
 
 function main(): void {
 	const { values } = parseArgs({
 		options: {
 			model: { type: "string", short: "m" },
 			prompt: { type: "string", short: "p" },
+			page: { type: "string" },
 			port: { type: "string" },
 			tab: { type: "string" },
 			help: { type: "boolean", short: "h" },
@@ -31,6 +34,7 @@ function main(): void {
 
 	const modelId = values.model ?? DEFAULT_MODEL_ID;
 	const prompt = values.prompt ?? DEFAULT_PROMPT;
+	const page = parsePage(values.page);
 	const model = getModelById(modelId);
 	if (!model) {
 		console.error(
@@ -39,7 +43,7 @@ function main(): void {
 		process.exit(1);
 	}
 
-	run(model, prompt, values.port, values.tab).catch(
+	run(model, prompt, page, values.port, values.tab).catch(
 		(err) => {
 			console.error(
 				`Fatal: ${err instanceof Error ? err.message : String(err)}`,
@@ -52,13 +56,17 @@ function main(): void {
 async function run(
 	model: NonNullable<ReturnType<typeof getModelById>>,
 	prompt: string,
+	page: SmokeTestPage,
 	portArg?: string,
 	tabArg?: string,
 ): Promise<void> {
 	await ensureModelDownloaded(model);
-	const { port, tab } = await resolveAgentchromeSession(portArg, tabArg);
+	const { port, tab } = await resolveAgentchromeSession(portArg, tabArg, page);
 	const url = buildSmokeTestUrl(model.id, model.contextLength, {
-		chatSmoke: Date.now(),
+		page,
+		extraParams: {
+			chatSmoke: Date.now(),
+		},
 	});
 
 	console.log(`Navigating to ${url}`);
@@ -76,9 +84,17 @@ async function run(
 
 	console.log("\nSmoke chat regression passed");
 	console.log(`Model:         ${model.id}`);
+	console.log(`Page:          ${page}`);
 	console.log(`Prompt:        ${JSON.stringify(prompt)}`);
 	console.log(`Finish reason: ${result.finishReason}`);
 	console.log(`Assistant:     ${result.assistantText}`);
+}
+
+function parsePage(value: string | undefined): SmokeTestPage {
+	if (!value) return DEFAULT_PAGE;
+	if (value === "smoke" || value === "debug") return value;
+	console.error(`Unknown page "${value}". Use --page smoke or --page debug.`);
+	process.exit(1);
 }
 
 function printUsage(): void {
@@ -87,6 +103,7 @@ function printUsage(): void {
 Options:
   -m, --model <id>      Model to test (default: ${DEFAULT_MODEL_ID})
   -p, --prompt <text>   Interactive chat prompt (default: ${JSON.stringify(DEFAULT_PROMPT)})
+      --page <name>     Page to test: smoke or debug (default: ${DEFAULT_PAGE})
       --port <cdp-port> Use this agentchrome CDP port instead of auto-detecting
       --tab <tab-id>    Use this specific Chrome tab ID
   -h, --help            Show this help

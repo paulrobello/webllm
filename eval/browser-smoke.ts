@@ -3,12 +3,22 @@ import { existsSync, mkdirSync } from "node:fs";
 import type { BenchmarkModel } from "./models.js";
 
 export const SMOKE_TEST_URL = "http://localhost:8031/real-model.html";
+export const DEBUG_SMOKE_TEST_URL = "http://localhost:8031/real-model-debug.html";
+export type SmokeTestPage = "smoke" | "debug";
+
+export function getSmokeTestBaseUrl(page: SmokeTestPage = "smoke"): string {
+	return page === "debug" ? DEBUG_SMOKE_TEST_URL : SMOKE_TEST_URL;
+}
 
 export function buildSmokeTestUrl(
 	modelId: string,
 	contextLength: number,
-	extraParams: Record<string, string | number | boolean> = {},
+	options: {
+		page?: SmokeTestPage;
+		extraParams?: Record<string, string | number | boolean>;
+	} = {},
 ): string {
+	const { page = "smoke", extraParams = {} } = options;
 	const params = new URLSearchParams({
 		model: modelId,
 		ctx: String(contextLength),
@@ -16,7 +26,7 @@ export function buildSmokeTestUrl(
 	for (const [key, value] of Object.entries(extraParams)) {
 		params.set(key, String(value));
 	}
-	return `${SMOKE_TEST_URL}?${params.toString()}`;
+	return `${getSmokeTestBaseUrl(page)}?${params.toString()}`;
 }
 
 export interface SmokeTestResult {
@@ -126,6 +136,7 @@ export async function ensureModelDownloaded(
 export async function resolveAgentchromeSession(
 	portArg?: string,
 	tabArg?: string,
+	page: SmokeTestPage = "smoke",
 ): Promise<{ port: string; tab: string }> {
 	let port = portArg;
 	if (!port) {
@@ -147,10 +158,18 @@ export async function resolveAgentchromeSession(
 		encoding: "utf-8",
 	});
 	const list = JSON.parse(tabs) as Array<{ id: string; url: string }>;
-	const smoke = list.find((entry) => entry.url.includes("real-model.html"));
+	const pagePath =
+		page === "debug" ? "real-model-debug.html" : "real-model.html";
+	const smoke =
+		list.find((entry) => entry.url.includes(pagePath)) ??
+		list.find(
+			(entry) =>
+				entry.url.includes("real-model.html") ||
+				entry.url.includes("real-model-debug.html"),
+		);
 	if (!smoke) {
 		throw new Error(
-			"No tab currently loaded on real-model.html. Navigate one there first, or pass --tab <TAB_ID>.",
+			`No tab currently loaded on ${pagePath} or another real-model page. Navigate one there first, or pass --tab <TAB_ID>.`,
 		);
 	}
 	return { port, tab: smoke.id };
