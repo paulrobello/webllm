@@ -6,6 +6,9 @@ const DEFAULT_MODELS = ["qwen3-0.6b-q4f16", "llama-3.2-1b-q4f16"];
 const DEFAULT_PAGES: SmokeTestPage[] = ["smoke", "debug"];
 const DEFAULT_PROMPT = "hello";
 const DEFAULT_PRESET = "fast";
+const PRESET_NAMES = ["fast", "full", "qwen-only", "smoke-only"] as const;
+
+type MatrixPresetName = (typeof PRESET_NAMES)[number];
 
 export interface MatrixCase {
 	model: string;
@@ -17,19 +20,31 @@ export function getMatrixPreset(name: string): {
 	models: string[];
 	pages: SmokeTestPage[];
 } {
-	switch (name) {
+	switch (name as MatrixPresetName) {
 		case "fast":
 			return {
-				models: ["qwen3-0.6b-q4f16", "llama-3.2-1b-q4f16"],
-				pages: ["smoke", "debug"],
+				models: [...DEFAULT_MODELS],
+				pages: [...DEFAULT_PAGES],
 			};
 		case "full":
 			return {
 				models: [...DEFAULT_MODELS],
 				pages: [...DEFAULT_PAGES],
 			};
+		case "qwen-only":
+			return {
+				models: ["qwen3-0.6b-q4f16"],
+				pages: [...DEFAULT_PAGES],
+			};
+		case "smoke-only":
+			return {
+				models: [...DEFAULT_MODELS],
+				pages: ["smoke"],
+			};
 		default:
-			console.error(`Unknown preset "${name}". Use fast or full.`);
+			console.error(
+				`Unknown preset "${name}". Use ${PRESET_NAMES.join(", ")}.`,
+			);
 			process.exit(1);
 	}
 }
@@ -159,7 +174,7 @@ function printUsage(): void {
 	console.log(`Usage: bun run eval/chat-smoke-matrix.ts [options]
 
 Options:
-      --preset <name>   Matrix preset: fast or full (default: ${DEFAULT_PRESET})
+      --preset <name>   Matrix preset: ${PRESET_NAMES.join(", ")} (default: ${DEFAULT_PRESET})
       --models <csv>    Comma-separated model IDs (default: ${DEFAULT_MODELS.join(",")})
       --pages <csv>     Comma-separated pages: smoke,debug (default: ${DEFAULT_PAGES.join(",")})
   -p, --prompt <text>   Interactive chat prompt (default: ${JSON.stringify(DEFAULT_PROMPT)})

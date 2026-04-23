@@ -16,7 +16,7 @@ test("buildMatrixPlan expands default smoke pages across models", () => {
 	]);
 });
 
-test("getMatrixPreset defines fast and full defaults", () => {
+test("getMatrixPreset defines named matrix presets", () => {
 	expect(getMatrixPreset("fast")).toEqual({
 		models: ["qwen3-0.6b-q4f16", "llama-3.2-1b-q4f16"],
 		pages: ["smoke", "debug"],
@@ -24,5 +24,13 @@ test("getMatrixPreset defines fast and full defaults", () => {
 	expect(getMatrixPreset("full")).toEqual({
 		models: ["qwen3-0.6b-q4f16", "llama-3.2-1b-q4f16"],
 		pages: ["smoke", "debug"],
+	});
+	expect(getMatrixPreset("qwen-only")).toEqual({
+		models: ["qwen3-0.6b-q4f16"],
+		pages: ["smoke", "debug"],
+	});
+	expect(getMatrixPreset("smoke-only")).toEqual({
+		models: ["qwen3-0.6b-q4f16", "llama-3.2-1b-q4f16"],
+		pages: ["smoke"],
 	});
 });
