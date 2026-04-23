@@ -53,6 +53,8 @@ export type ModelArchitecture =
 	| "phi"
 	| "gemma"
 	| "qwen"
+	| "qwen2"
+	| "qwen3"
 	| "mixtral"
 	| "deepseek";
 

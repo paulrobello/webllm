@@ -1,7 +1,11 @@
 import type { InferenceSession } from "../models/inference-session.js";
 import type { DecodeMode, DecodeResult } from "./model-inference.js";
 import type { Sampler } from "./sampler.js";
-import { StreamingDecoder, type Tokenizer } from "./tokenizer.js";
+import {
+	StreamingDecoder,
+	TokenAttribute,
+	type Tokenizer,
+} from "./tokenizer.js";
 
 /** Configuration for a single generation request. */
 export interface GenerationConfig {
@@ -19,6 +23,61 @@ export interface GenerationConfig {
 	repetitionPenalty: number;
 	/** Optional custom stop token IDs that halt generation. */
 	stopTokens?: number[];
+	/**
+	 * Optional token IDs that should terminate generation if produced after the
+	 * first generated token. Used to contain malformed chat-control reentry.
+	 */
+	forbiddenReentryTokens?: number[];
+	/** Optional token ID for opening a thinking block. */
+	thinkingOpenTokenId?: number;
+	/** Optional token ID for closing a thinking block. */
+	thinkingCloseTokenId?: number;
+	/**
+	 * When true, treat repeated `<think>` or a stray `</think>` as malformed and
+	 * stop generation.
+	 */
+	enforceSingleThinkBlock?: boolean;
+	/**
+	 * Optional token IDs to suppress from sampling while inside an open thinking
+	 * block. Used to steer malformed Qwen chat outputs toward `</think>` or
+	 * normal reasoning tokens instead of repeating control markers.
+	 */
+	maskedTokensWhileThinking?: number[];
+	/**
+	 * Optional tokenizer used for lightweight token classification during
+	 * generation-time steering.
+	 */
+	tokenizer?: Tokenizer;
+	/**
+	 * Optional token IDs to suppress after a think block closes and before any
+	 * visible assistant answer text has been emitted.
+	 */
+	maskedTokensAfterThinkingUntilAnswer?: number[];
+	/**
+	 * When true, suppress EOS and custom stop tokens after `</think>` until at
+	 * least one visible answer token has been emitted.
+	 */
+	requireVisibleAnswerAfterThinking?: boolean;
+	/**
+	 * When true, suppress EOS and custom stop tokens from the start of
+	 * generation until at least one visible answer token has been emitted.
+	 */
+	requireVisibleAnswerBeforeStop?: boolean;
+	/**
+	 * When true, suppress whitespace-only text tokens after `</think>` until a
+	 * visible answer token has been emitted.
+	 */
+	suppressWhitespaceOnlyAfterThinking?: boolean;
+	/**
+	 * When true, suppress whitespace-only text tokens from the start of
+	 * generation until a visible answer token has been emitted.
+	 */
+	suppressWhitespaceOnlyUntilAnswer?: boolean;
+	/**
+	 * Optional token IDs to suppress after visible assistant answer text has
+	 * started, preventing relapse into control-token scaffolding.
+	 */
+	maskedTokensAfterAnswerStarts?: number[];
 }
 
 export type GenerationFinishReason =
@@ -122,6 +181,26 @@ export class Generator {
 	): AsyncGenerator<number, GenerationResult> {
 		const startTime = performance.now();
 		let finishReason: GenerationFinishReason | undefined;
+		const forbiddenReentryTokens = new Set(config.forbiddenReentryTokens ?? []);
+		const thinkOpenTokenId = config.thinkingOpenTokenId;
+		const thinkCloseTokenId = config.thinkingCloseTokenId;
+		const maskedTokensWhileThinking = config.maskedTokensWhileThinking ?? [];
+		const maskedTokensAfterThinkingUntilAnswer =
+			config.maskedTokensAfterThinkingUntilAnswer ?? [];
+		const maskedTokensAfterAnswerStarts =
+			config.maskedTokensAfterAnswerStarts ?? [];
+		const requireVisibleAnswerAfterThinking =
+			config.requireVisibleAnswerAfterThinking === true;
+		const requireVisibleAnswerBeforeStop =
+			config.requireVisibleAnswerBeforeStop === true;
+		const suppressWhitespaceOnlyAfterThinking =
+			config.suppressWhitespaceOnlyAfterThinking === true;
+		const suppressWhitespaceOnlyUntilAnswer =
+			config.suppressWhitespaceOnlyUntilAnswer === true;
+		let thinkDepth = 0;
+		let thinkClosed = false;
+		let hasVisibleAnswerText = false;
+		let waitingForVisibleAnswer = requireVisibleAnswerBeforeStop;
 
 		// 1. Prefill: process all prompt tokens at once
 		const promptPositions = promptTokenIds.map(
@@ -147,15 +226,54 @@ export class Generator {
 		const firstTokenTime = performance.now();
 		const recentTokens = [...promptTokenIds];
 		sampler.applyRepetitionPenalty(logits, recentTokens.slice(-64));
-		let sampledId = sampler.sample(logits);
+		if (waitingForVisibleAnswer) {
+			maskTokenLogits(logits, [...(config.stopTokens ?? []), eosTokenId]);
+		}
+		let sampledId = sampleTokenWithPostThinkGuards(
+			logits,
+			sampler,
+			config.tokenizer,
+			waitingForVisibleAnswer,
+			suppressWhitespaceOnlyUntilAnswer,
+		);
+		if (sampledId === thinkOpenTokenId) {
+			thinkDepth = 1;
+		} else if (
+			config.enforceSingleThinkBlock &&
+			sampledId === thinkCloseTokenId
+		) {
+			return {
+				tokens: [...session.tokens],
+				text: "",
+				tokenCount: 0,
+				tokensPerSecond: 0,
+				timeToFirstTokenMs: firstTokenTime - startTime,
+				finishReason: "stop-token",
+			};
+		}
+		if (
+			waitingForVisibleAnswer &&
+			isVisibleTextToken(config.tokenizer, sampledId)
+		) {
+			hasVisibleAnswerText = true;
+			waitingForVisibleAnswer = false;
+		}
 		yield sampledId;
 		session.pushToken(sampledId);
 		recentTokens.push(sampledId);
 		let generatedCount = 1;
 
 		// Determine decode mode for subsequent steps
-		const gpuMode: DecodeMode =
-			sampler.isGreedy && sampler.noPenalty
+		const requiresFullLogitsSteering =
+			maskedTokensWhileThinking.length > 0 ||
+			maskedTokensAfterThinkingUntilAnswer.length > 0 ||
+			requireVisibleAnswerAfterThinking ||
+			requireVisibleAnswerBeforeStop ||
+			suppressWhitespaceOnlyAfterThinking ||
+			suppressWhitespaceOnlyUntilAnswer;
+		const gpuMode: DecodeMode = requiresFullLogitsSteering
+			? "full"
+			: sampler.isGreedy && sampler.noPenalty
 				? "greedy"
 				: sampler.topK > 0
 					? "topk"
@@ -221,7 +339,33 @@ export class Generator {
 				session.advance(1);
 				if (signal?.aborted) break;
 				sampler.applyRepetitionPenalty(result.logits, recentTokens.slice(-64));
-				sampledId = sampler.sample(result.logits);
+				if (thinkDepth > 0) {
+					maskTokenLogits(result.logits, maskedTokensWhileThinking);
+				} else if (waitingForVisibleAnswer) {
+					maskTokenLogits(result.logits, maskedTokensAfterThinkingUntilAnswer);
+					if (
+						requireVisibleAnswerAfterThinking ||
+						requireVisibleAnswerBeforeStop
+					) {
+						maskTokenLogits(result.logits, [
+							eosTokenId,
+							...(config.stopTokens ?? []),
+						]);
+					}
+				} else if (hasVisibleAnswerText) {
+					maskTokenLogits(result.logits, maskedTokensAfterAnswerStarts);
+				}
+				sampledId = sampleTokenWithPostThinkGuards(
+					result.logits,
+					sampler,
+					config.tokenizer,
+					waitingForVisibleAnswer,
+					waitingForVisibleAnswer
+						? thinkClosed
+							? suppressWhitespaceOnlyAfterThinking
+							: suppressWhitespaceOnlyUntilAnswer
+						: false,
+				);
 			} else {
 				// Fallback: original path (no forwardDecode provided)
 				const stepLogits = await forwardPass(
@@ -231,12 +375,67 @@ export class Generator {
 				session.advance(1);
 				if (signal?.aborted) break;
 				sampler.applyRepetitionPenalty(stepLogits, recentTokens.slice(-64));
-				sampledId = sampler.sample(stepLogits);
+				if (thinkDepth > 0) {
+					maskTokenLogits(stepLogits, maskedTokensWhileThinking);
+				} else if (waitingForVisibleAnswer) {
+					maskTokenLogits(stepLogits, maskedTokensAfterThinkingUntilAnswer);
+					if (
+						requireVisibleAnswerAfterThinking ||
+						requireVisibleAnswerBeforeStop
+					) {
+						maskTokenLogits(stepLogits, [
+							eosTokenId,
+							...(config.stopTokens ?? []),
+						]);
+					}
+				} else if (hasVisibleAnswerText) {
+					maskTokenLogits(stepLogits, maskedTokensAfterAnswerStarts);
+				}
+				sampledId = sampleTokenWithPostThinkGuards(
+					stepLogits,
+					sampler,
+					config.tokenizer,
+					waitingForVisibleAnswer,
+					waitingForVisibleAnswer
+						? thinkClosed
+							? suppressWhitespaceOnlyAfterThinking
+							: suppressWhitespaceOnlyUntilAnswer
+						: false,
+				);
 			}
 
 			generatedCount++;
 			recentTokens.push(sampledId);
 
+			if (sampledId === thinkOpenTokenId) {
+				if (config.enforceSingleThinkBlock && thinkDepth > 0) {
+					finishReason = "stop-token";
+					break;
+				}
+				thinkDepth++;
+			} else if (sampledId === thinkCloseTokenId) {
+				if (config.enforceSingleThinkBlock && thinkDepth === 0) {
+					finishReason = "stop-token";
+					break;
+				}
+				thinkDepth = Math.max(0, thinkDepth - 1);
+				if (thinkDepth === 0) {
+					thinkClosed = true;
+					waitingForVisibleAnswer = true;
+				}
+			}
+			if (
+				waitingForVisibleAnswer &&
+				!hasVisibleAnswerText &&
+				isVisibleTextToken(config.tokenizer, sampledId)
+			) {
+				hasVisibleAnswerText = true;
+				waitingForVisibleAnswer = false;
+			}
+			if (generatedCount > 1 && forbiddenReentryTokens.has(sampledId)) {
+				finishReason = "stop-token";
+				break;
+			}
 			if (config.stopTokens?.includes(sampledId)) {
 				finishReason = "stop-token";
 				break;
@@ -269,6 +468,76 @@ export class Generator {
 			finishReason,
 		};
 	}
+}
+
+function maskTokenLogits(logits: Float32Array, tokenIds: number[]): void {
+	for (const tokenId of tokenIds) {
+		if (tokenId >= 0 && tokenId < logits.length) {
+			logits[tokenId] = -Infinity;
+		}
+	}
+}
+
+function isVisibleTextToken(
+	tokenizer: Tokenizer | undefined,
+	tokenId: number,
+): boolean {
+	if (
+		!tokenizer ||
+		typeof tokenizer.getToken !== "function" ||
+		typeof tokenizer.decode !== "function"
+	) {
+		return false;
+	}
+	const token = tokenizer.getToken(tokenId);
+	if (!token) return false;
+	if (token.attr & (TokenAttribute.CONTROL | TokenAttribute.USER_DEFINED)) {
+		return false;
+	}
+	return tokenizer.decode([tokenId]).trim().length > 0;
+}
+
+function isWhitespaceOnlyTextToken(
+	tokenizer: Tokenizer | undefined,
+	tokenId: number,
+): boolean {
+	if (
+		!tokenizer ||
+		typeof tokenizer.getToken !== "function" ||
+		typeof tokenizer.decode !== "function"
+	) {
+		return false;
+	}
+	const token = tokenizer.getToken(tokenId);
+	if (!token) return false;
+	if (token.attr & (TokenAttribute.CONTROL | TokenAttribute.USER_DEFINED)) {
+		return false;
+	}
+	return tokenizer.decode([tokenId]).trim().length === 0;
+}
+
+function sampleTokenWithPostThinkGuards(
+	logits: Float32Array,
+	sampler: Sampler,
+	tokenizer: Tokenizer | undefined,
+	guardPostThinkAnswerStart: boolean,
+	suppressWhitespaceOnlyAfterThinking: boolean,
+): number {
+	let sampledId = sampler.sample(logits);
+	if (!(guardPostThinkAnswerStart && suppressWhitespaceOnlyAfterThinking)) {
+		return sampledId;
+	}
+
+	const maskedWhitespaceOnly = new Set<number>();
+	while (
+		isWhitespaceOnlyTextToken(tokenizer, sampledId) &&
+		!maskedWhitespaceOnly.has(sampledId)
+	) {
+		maskedWhitespaceOnly.add(sampledId);
+		maskTokenLogits(logits, [sampledId]);
+		sampledId = sampler.sample(logits);
+	}
+	return sampledId;
 }
 
 export async function* generateTextStream({

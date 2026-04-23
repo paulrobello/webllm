@@ -56,6 +56,15 @@ export interface TokenizerConfig {
 	precompiledCharsmap?: Uint8Array;
 	/** Raw chat template string from GGUF metadata (tokenizer.chat_template). */
 	chatTemplate?: string;
+	/** GGUF pre-tokenizer identifier such as qwen2 or llama-bpe. */
+	preTokenizer?: string;
+	/** Whether the model requests automatic BOS insertion. */
+	addBosToken?: boolean;
+}
+
+export interface DecodeOptions {
+	/** When true, preserve control and user-defined tokens in the decoded text. */
+	includeSpecialTokens?: boolean;
 }
 
 /** SentencePiece whitespace marker (U+2581). */
@@ -163,28 +172,77 @@ class MaxHeap {
 	}
 }
 
-/**
- * GPT-2 pre-tokenization regex pattern.
- * Splits text into words, contractions, individual letters, and whitespace groups.
- */
-const GPT2_PATTERNS = [
-	/(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu,
-];
+const BPE_REGEX_PATTERNS: Record<string, string[]> = {
+	default: [
+		"'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+",
+	],
+	"llama-bpe": [
+		"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+	],
+	qwen2: [
+		"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+	],
+	qwen35: [
+		"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+	],
+};
 
-/**
- * Pre-tokenize text using GPT-2 regex pattern for BPE tokenization.
- * Returns an array of word-level chunks.
- */
-function preTokenize(text: string): string[] {
+function preTokenize(text: string, preTokenizer?: string): string[] {
+	const patternStrings =
+		(preTokenizer && BPE_REGEX_PATTERNS[preTokenizer]) ??
+		BPE_REGEX_PATTERNS.default;
 	const results: string[] = [];
-	for (const pattern of GPT2_PATTERNS) {
-		let match = pattern.exec(text);
-		while (match !== null) {
+	for (const patternString of patternStrings) {
+		const pattern = new RegExp(patternString, "gu");
+		for (const match of text.matchAll(pattern)) {
 			results.push(match[0]);
-			match = pattern.exec(text);
 		}
 	}
 	return results;
+}
+
+function buildBytesToUnicode(): Map<number, string> {
+	const bs: number[] = [];
+	for (let i = 33; i <= 126; i++) bs.push(i);
+	for (let i = 161; i <= 172; i++) bs.push(i);
+	for (let i = 174; i <= 255; i++) bs.push(i);
+	const cs = [...bs];
+	let n = 0;
+	for (let b = 0; b < 256; b++) {
+		if (!bs.includes(b)) {
+			bs.push(b);
+			cs.push(256 + n);
+			n++;
+		}
+	}
+	return new Map(bs.map((b, i) => [b, String.fromCodePoint(cs[i])]));
+}
+
+const BYTES_TO_UNICODE = buildBytesToUnicode();
+const UNICODE_TO_BYTES = new Map(
+	Array.from(BYTES_TO_UNICODE.entries(), ([b, ch]) => [ch, b]),
+);
+
+function encodeBytesToUnicode(text: string): string {
+	const bytes = new TextEncoder().encode(text);
+	let out = "";
+	for (const b of bytes) {
+		out += BYTES_TO_UNICODE.get(b) ?? String.fromCharCode(b);
+	}
+	return out;
+}
+
+function decodeUnicodeToBytes(text: string): string {
+	const bytes: number[] = [];
+	for (const ch of [...text]) {
+		const b = UNICODE_TO_BYTES.get(ch);
+		if (b !== undefined) {
+			bytes.push(b);
+		} else {
+			bytes.push(...new TextEncoder().encode(ch));
+		}
+	}
+	return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
 export class Tokenizer {
@@ -225,8 +283,37 @@ export class Tokenizer {
 		}
 	}
 
-	/** Decode token IDs back to text, skipping CONTROL tokens. */
-	decode(ids: number[]): string {
+	/** Decode token IDs back to text, skipping CONTROL tokens by default. */
+	decode(ids: number[], options?: DecodeOptions): string {
+		const includeSpecialTokens = options?.includeSpecialTokens ?? false;
+		if (this.config.type === TokenizerType.BPE && this.bpeByteEncodeEnabled()) {
+			let encoded = "";
+			let decoded = "";
+			const flushEncoded = () => {
+				if (encoded.length === 0) return;
+				decoded += decodeUnicodeToBytes(encoded);
+				encoded = "";
+			};
+			for (const id of ids) {
+				const token = this.idToToken[id];
+				if (!token) continue;
+				if (
+					token.attr &
+					(TokenAttribute.CONTROL | TokenAttribute.USER_DEFINED)
+				) {
+					if (!includeSpecialTokens) {
+						continue;
+					}
+					flushEncoded();
+					decoded += token.text;
+					continue;
+				}
+				encoded += token.text;
+			}
+			flushEncoded();
+			return decoded;
+		}
+
 		// Convert byte-fallback tokens back to their raw bytes and decode as UTF-8.
 		// Mixed run of byte tokens (e.g. multi-byte ▁ or non-ASCII) must be buffered
 		// so TextDecoder sees a valid UTF-8 sequence.
@@ -241,8 +328,12 @@ export class Tokenizer {
 		for (const id of ids) {
 			const token = this.idToToken[id];
 			if (!token) continue;
-			if (token.attr & TokenAttribute.CONTROL) {
+			if (token.attr & (TokenAttribute.CONTROL | TokenAttribute.USER_DEFINED)) {
 				flushBytes(parts);
+				if (!includeSpecialTokens) {
+					continue;
+				}
+				parts.push(token.text);
 				continue;
 			}
 			if (token.attr & TokenAttribute.BYTE) {
@@ -375,21 +466,25 @@ export class Tokenizer {
 	 * 6. After queue drains, convert each symbol to a token ID
 	 */
 	private encodeBpe(text: string): number[] {
-		const words = preTokenize(text);
+		const words = preTokenize(text, this.config.preTokenizer);
 		const result: number[] = [];
 
-		for (const word of words) {
-			if (word.length === 0) continue;
+		for (const rawWord of words) {
+			if (rawWord.length === 0) continue;
+			const word = this.bpeByteEncodeEnabled()
+				? encodeBytesToUnicode(rawWord)
+				: rawWord;
+			const chars = [...word];
 
 			// Initialize symbol table as parallel arrays
-			const numSymbols = word.length;
+			const numSymbols = chars.length;
 			const symText: string[] = new Array(numSymbols);
 			const symPrev: Int32Array = new Int32Array(numSymbols);
 			const symNext: Int32Array = new Int32Array(numSymbols);
 			const symMerged: Uint8Array = new Uint8Array(numSymbols);
 
 			for (let i = 0; i < numSymbols; i++) {
-				symText[i] = word[i];
+				symText[i] = chars[i];
 				symPrev[i] = i - 1;
 				symNext[i] = i + 1 < numSymbols ? i + 1 : -1;
 			}
@@ -634,6 +729,10 @@ export class Tokenizer {
 	private spmPrefixEnabled(): boolean {
 		return this.config.addPrefixSpace === true;
 	}
+
+	private bpeByteEncodeEnabled(): boolean {
+		return this.config.type === TokenizerType.BPE;
+	}
 }
 
 /**
@@ -645,17 +744,43 @@ export class Tokenizer {
  */
 export class StreamingDecoder {
 	private tokenizer: Tokenizer;
+	private decodeOptions: DecodeOptions;
+	private emittedTokenIds: number[] = [];
+	private thinkDepth = 0;
+	private thinkOpenId: number | undefined;
+	private thinkCloseId: number | undefined;
 	private tokenIds: number[] = [];
 	private prevText = "";
 
-	constructor(tokenizer: Tokenizer) {
+	constructor(tokenizer: Tokenizer, decodeOptions: DecodeOptions = {}) {
 		this.tokenizer = tokenizer;
+		this.decodeOptions = decodeOptions;
+		this.thinkOpenId = tokenizer.getId("<think>");
+		this.thinkCloseId = tokenizer.getId("</think>");
 	}
 
 	/** Append a token and return the new text fragment. */
 	push(tokenId: number): string {
 		this.tokenIds.push(tokenId);
-		const fullText = this.tokenizer.decode(this.tokenIds);
+		if (!this.decodeOptions.includeSpecialTokens) {
+			if (tokenId === this.thinkOpenId) {
+				this.thinkDepth++;
+				return "";
+			}
+			if (tokenId === this.thinkCloseId) {
+				this.thinkDepth = Math.max(0, this.thinkDepth - 1);
+				return "";
+			}
+			if (this.thinkDepth > 0) {
+				return "";
+			}
+		}
+
+		this.emittedTokenIds.push(tokenId);
+		const fullText = this.tokenizer.decode(
+			this.emittedTokenIds,
+			this.decodeOptions,
+		);
 		const delta = fullText.slice(this.prevText.length);
 		this.prevText = fullText;
 		return delta;
@@ -673,6 +798,8 @@ export class StreamingDecoder {
 
 	/** Reset for a new generation. */
 	reset(): void {
+		this.emittedTokenIds = [];
+		this.thinkDepth = 0;
 		this.tokenIds = [];
 		this.prevText = "";
 	}

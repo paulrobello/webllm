@@ -52,3 +52,4 @@ smoke-test/models/
 .pi/extensions/discord-relay/state.json
 handoff.md
 .worktrees/
+.pi/extensions/discord-relay/state.json

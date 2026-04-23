@@ -10,6 +10,8 @@ export interface ChatMessage {
 export interface CompletionConfig {
 	/** Maximum number of tokens to generate. Default: 512 */
 	maxTokens?: number;
+	/** Qwen-style reasoning toggle for chat templates that support it. */
+	enableThinking?: boolean;
 	/** Sampling temperature. 0 = greedy. Default: 1.0 */
 	temperature?: number;
 	/** Top-K filtering. 0 = disabled. Default: 0 */

@@ -14,6 +14,8 @@ interface LayerWeights {
 	qProj: TensorPtr;
 	kProj: TensorPtr;
 	vProj: TensorPtr;
+	qNorm: TensorPtr | null;
+	kNorm: TensorPtr | null;
 	oProj: TensorPtr;
 	ffnNorm: TensorPtr;
 	gateProj: TensorPtr;
@@ -69,6 +71,14 @@ export interface ForwardTrace {
 	backendEncodeOverheadMs?: number;
 	backendDispatchCount?: number;
 	backendBreakdownAvailable?: boolean;
+}
+
+export function getRopeModeForArchitecture(
+	architecture: ModelHyperparams["architecture"],
+): number {
+	return String(architecture).startsWith("qwen")
+		? RopeMode.NEOX
+		: RopeMode.NORMAL;
 }
 
 /**
@@ -127,6 +137,12 @@ export class ModelInference {
 				qProj: this.makeTensor(tensorMap, p("attn_q.weight")),
 				kProj: this.makeTensor(tensorMap, p("attn_k.weight")),
 				vProj: this.makeTensor(tensorMap, p("attn_v.weight")),
+				qNorm: tensorMap.has(p("attn_q_norm.weight"))
+					? this.makeTensor(tensorMap, p("attn_q_norm.weight"))
+					: null,
+				kNorm: tensorMap.has(p("attn_k_norm.weight"))
+					? this.makeTensor(tensorMap, p("attn_k_norm.weight"))
+					: null,
 				oProj: this.makeTensor(tensorMap, p("attn_output.weight")),
 				ffnNorm: this.makeTensor(tensorMap, p("ffn_norm.weight")),
 				gateProj: this.makeTensor(tensorMap, p("ffn_gate.weight")),
@@ -219,6 +235,7 @@ export class ModelInference {
 
 		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
+		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 		// Leaf input tensors — data is uploaded below, AFTER backendAllocCtxTensors
 		// assigns real GPU buffers. ctxCreate uses no_alloc=true so tensor->data
@@ -271,12 +288,18 @@ export class ModelInference {
 			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
 			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
 			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
+			const qReady = lw.qNorm
+				? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
+				: q3;
+			const kReady = lw.kNorm
+				? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
+				: k3;
 
 			const qRope = wasm.opRope(
-				q3,
+				qReady,
 				posTensor,
 				headDim,
-				RopeMode.NORMAL,
+				ropeMode,
 				hp.contextLength,
 				hp.ropeFreqBase,
 				hp.ropeScale,
@@ -286,10 +309,10 @@ export class ModelInference {
 				0.0,
 			);
 			const kRope = wasm.opRope(
-				k3,
+				kReady,
 				posTensor,
 				headDim,
-				RopeMode.NORMAL,
+				ropeMode,
 				hp.contextLength,
 				hp.ropeFreqBase,
 				hp.ropeScale,
@@ -563,6 +586,7 @@ export class ModelInference {
 
 		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
+		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
@@ -594,12 +618,18 @@ export class ModelInference {
 			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
 			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
 			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
+			const qReady = lw.qNorm
+				? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
+				: q3;
+			const kReady = lw.kNorm
+				? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
+				: k3;
 
 			const qRope = wasm.opRope(
-				q3,
+				qReady,
 				posTensor,
 				headDim,
-				RopeMode.NORMAL,
+				ropeMode,
 				hp.contextLength,
 				hp.ropeFreqBase,
 				hp.ropeScale,
@@ -609,10 +639,10 @@ export class ModelInference {
 				0.0,
 			);
 			const kRope = wasm.opRope(
-				k3,
+				kReady,
 				posTensor,
 				headDim,
-				RopeMode.NORMAL,
+				ropeMode,
 				hp.contextLength,
 				hp.ropeFreqBase,
 				hp.ropeScale,
@@ -1124,6 +1154,7 @@ export class ModelInference {
 			const posTensor = wasm.tensorNew1d(GgmlType.I32, 1);
 			const idsTensor = wasm.tensorNew1d(GgmlType.I32, 1);
 			const maskTensor = wasm.tensorNew2d(GgmlType.F32, 1, 32);
+			const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 			let cur = wasm.opGetRows(weights.tokEmb, idsTensor);
 			const graph = wasm.graphNew(2048);
@@ -1177,7 +1208,7 @@ export class ModelInference {
 					q3,
 					posTensor,
 					hp.embeddingHeadLength,
-					RopeMode.NORMAL,
+					ropeMode,
 					hp.contextLength,
 					hp.ropeFreqBase,
 					hp.ropeScale,
@@ -1190,7 +1221,7 @@ export class ModelInference {
 					k3,
 					posTensor,
 					hp.embeddingHeadLength,
-					RopeMode.NORMAL,
+					ropeMode,
 					hp.contextLength,
 					hp.ropeFreqBase,
 					hp.ropeScale,

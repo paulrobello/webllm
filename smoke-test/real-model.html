@@ -46,12 +46,14 @@ h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
 const assetSuffix = window.location.search || "";
 const {
     GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer, Generator, Sampler, StreamingDecoder,
-    formatChatPrompt, formatChatDelta
+    detectChatTemplate, encodeChatPrompt, formatChatPrompt, formatChatDelta
 } = await import(`./webllm-bundle.js${assetSuffix}`);
 
 const params = new URLSearchParams(window.location.search);
-const modelId = params.get('model') || "tinyllama-1.1b-chat-q4_0";
-const requestedContextLength = Number(params.get('ctx') || 0);
+const DEFAULT_MODEL_ID = "qwen3-0.6b-q4f16";
+const DEFAULT_CONTEXT_LENGTH = 4096;
+const modelId = params.get('model') || DEFAULT_MODEL_ID;
+const requestedContextLength = Number(params.get('ctx') || DEFAULT_CONTEXT_LENGTH);
 const MODEL_URL = `./models/${modelId}.gguf`;
 
 const logEl = document.getElementById('log');
@@ -85,10 +87,209 @@ function setProgress(pct) {
     progressText.textContent = `${pct.toFixed(0)}%`;
 }
 
+function shouldAutoInsertBos(tokenizerConfig) {
+    return tokenizerConfig?.addBosToken !== false;
+}
+
+function isThinkingTemplate(chatTemplate) {
+    return chatTemplate?.includes('enable_thinking') && chatTemplate.includes('<think>');
+}
+
+function getSmokeChatOptions(parsed, chatTemplate) {
+    if (parsed?.hyperparams?.architecture === 'qwen3' && detectChatTemplate(chatTemplate ?? '') === 'chatml') {
+        return { enableThinking: false };
+    }
+    return {};
+}
+
+function getSmokeSamplingConfig(parsed, chatTemplate, chatOptions = {}) {
+    if (
+        parsed?.hyperparams?.architecture === 'qwen3' &&
+        detectChatTemplate(chatTemplate ?? '') === 'chatml' &&
+        chatOptions.enableThinking === false
+    ) {
+        return {
+            temperature: 0.7,
+            topK: 20,
+            topP: 0.8,
+            repetitionPenalty: 1.1,
+            seed: 12345,
+        };
+    }
+    if (parsed?.hyperparams?.architecture === 'qwen3' && detectChatTemplate(chatTemplate ?? '') === 'chatml') {
+        return {
+            temperature: 0.6,
+            topK: 20,
+            topP: 0.95,
+            repetitionPenalty: 1.05,
+            seed: 12345,
+        };
+    }
+    if (isThinkingTemplate(chatTemplate)) {
+        return {
+            temperature: 0.7,
+            topK: 40,
+            topP: 0.95,
+            repetitionPenalty: 1.05,
+            seed: 12345,
+        };
+    }
+    return {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        repetitionPenalty: 1.05,
+        seed: 12345,
+    };
+}
+
+function makeSmokeSampler(chatTemplate, chatOptions = {}) {
+    return new Sampler(getSmokeSamplingConfig(parsedModel, chatTemplate, chatOptions));
+}
+
+function sanitizeDisplayText(text) {
+    return text
+        .replace(/^\s+/, '')
+        .replace(/\n{4,}/g, '\n\n')
+        .trimStart();
+}
+
+function decodeForDebug(tokenIds, includeSpecialTokens = false) {
+    return tokenizer.decode(tokenIds, { includeSpecialTokens });
+}
+
+function getForbiddenReentryTokens(parsed) {
+    if (parsed?.hyperparams?.architecture !== 'qwen3') return [];
+    const chatTemplate = parsed?.tokenizerConfig?.chatTemplate ?? '';
+    if (!(detectChatTemplate(chatTemplate) === 'chatml')) return [];
+    const imStartId = tokenizer.getId('<|im_start|>');
+    return imStartId === undefined ? [] : [imStartId];
+}
+
+function getThinkingTokenIds(parsed) {
+    if (parsed?.hyperparams?.architecture !== 'qwen3') return null;
+    const thinkOpenId = tokenizer.getId('<think>');
+    const thinkCloseId = tokenizer.getId('</think>');
+    if (thinkOpenId === undefined || thinkCloseId === undefined) return null;
+    return { thinkOpenId, thinkCloseId };
+}
+
+function getMaskedTokensWhileThinking(parsed) {
+    const thinkingTokenIds = getThinkingTokenIds(parsed);
+    if (!thinkingTokenIds) return [];
+    const imStartId = tokenizer.getId('<|im_start|>');
+    const imEndId = tokenizer.getId('<|im_end|>');
+    return [thinkingTokenIds.thinkOpenId, imStartId, imEndId].filter((id) => id !== undefined);
+}
+
+function getMaskedTokensAfterThinkingUntilAnswer(parsed) {
+    const thinkingTokenIds = getThinkingTokenIds(parsed);
+    if (!thinkingTokenIds) return [];
+    const imStartId = tokenizer.getId('<|im_start|>');
+    const imEndId = tokenizer.getId('<|im_end|>');
+    const toolCallOpenId = tokenizer.getId('<tool_call>');
+    const toolCallCloseId = tokenizer.getId('</tool_call>');
+    const toolResponseOpenId = tokenizer.getId('<tool_response>');
+    const toolResponseCloseId = tokenizer.getId('</tool_response>');
+    return [
+        thinkingTokenIds.thinkOpenId,
+        imStartId,
+        imEndId,
+        toolCallOpenId,
+        toolCallCloseId,
+        toolResponseOpenId,
+        toolResponseCloseId,
+    ].filter((id) => id !== undefined);
+}
+
+function getMaskedTokensAfterAnswerStarts(parsed) {
+    return getMaskedTokensAfterThinkingUntilAnswer(parsed);
+}
+
+function maskTokenLogits(logits, tokenIds) {
+    for (const tokenId of tokenIds) {
+        if (tokenId >= 0 && tokenId < logits.length) {
+            logits[tokenId] = -Infinity;
+        }
+    }
+}
+
+function isVisibleTextToken(tokenId) {
+    const token = tokenizer.getToken(tokenId);
+    if (!token) return false;
+    if (token.attr & (4 | 8)) return false;
+    return tokenizer.decode([tokenId]).trim().length > 0;
+}
+
+function isWhitespaceOnlyTextToken(tokenId) {
+    const token = tokenizer.getToken(tokenId);
+    if (!token) return false;
+    if (token.attr & (4 | 8)) return false;
+    return tokenizer.decode([tokenId]).trim().length === 0;
+}
+
+function buildSmokeMessages(userMessage, chatOptions = {}) {
+    return [{ role: 'user', content: userMessage }];
+}
+
+function buildSmokePrompt(userMessage, chatOptions = {}) {
+    const messages = buildSmokeMessages(userMessage, chatOptions);
+    const promptText = formatChatPrompt(messages, tokenizer.options.chatTemplate, chatOptions);
+    return {
+        mode: 'chat',
+        promptText,
+        tokens: encodeChatPrompt(messages, tokenizer, chatOptions),
+    };
+}
+
+function buildQwenChatPromptVariants(userMessage) {
+    return [
+        {
+            label: 'chat-default-think-closed',
+            mode: 'chat',
+            tokens: tokenizer.encode(`<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`),
+        },
+        {
+            label: 'chat-system-/no_think',
+            mode: 'chat',
+            tokens: tokenizer.encode(`<|im_start|>system\nYou are a concise assistant. /no_think<|im_end|>\n<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n`),
+        },
+        {
+            label: 'chat-user-/no_think',
+            mode: 'chat',
+            tokens: tokenizer.encode(`<|im_start|>user\n${userMessage} /no_think<|im_end|>\n<|im_start|>assistant\n`),
+        },
+        {
+            label: 'chat-system-no-think-marker',
+            mode: 'chat',
+            tokens: tokenizer.encode(`<|im_start|>system\nYou are a concise assistant.<|im_end|>\n<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n`),
+        },
+        {
+            label: 'chat-system-/no_think-think-closed',
+            mode: 'chat',
+            tokens: tokenizer.encode(`<|im_start|>system\nYou are a concise assistant. /no_think<|im_end|>\n<|im_start|>user\n${userMessage}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`),
+        },
+        {
+            label: 'chat-user-/no_think-think-closed',
+            mode: 'chat',
+            tokens: tokenizer.encode(`<|im_start|>user\n${userMessage} /no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`),
+        },
+    ];
+}
+
+function findSingleTokenProbe(tokenizer, candidates) {
+    for (const text of candidates) {
+        const ids = tokenizer.encode(text);
+        if (ids.length === 1) return { text, ids };
+    }
+    return null;
+}
+
 let inference = null;
 let tokenizer = null;
 let wasm = null;
 let parsedModel = null;
+let interactiveRunCompletion = null;
 
 async function loadAndTest() {
     const t0 = performance.now();
@@ -238,23 +439,27 @@ async function loadAndTest() {
         log('fail', `[7-debug] KV probe failed: ${e.message}\n${e.stack || ''}`);
     }
 
-    // Step 7-sanity: single BOS token. A base LLaMA should predict common English
-    // continuations (the, I, A, ...) with modest confidence.
-    log('running', '[7-sanity] single BOS continuation...');
+    // Step 7-sanity: check a single-token continuation from the model's natural
+    // prompt start. Models that disable auto-BOS should not be forced through a BOS-only probe.
+    log('running', '[7-sanity] single-token continuation...');
     try {
         inference.resetKVCache();
+        const sanityText = shouldAutoInsertBos(parsed.tokenizerConfig) ? "The" : "Hello";
+        const sanityIds = tokenizer.encode(sanityText);
+        const sanityTokens = shouldAutoInsertBos(parsed.tokenizerConfig)
+            ? [tokenizer.bosId, ...sanityIds]
+            : sanityIds;
         const logits = await inference.forward(
-            new Int32Array([tokenizer.bosId]),
-            new Int32Array([0]),
+            new Int32Array(sanityTokens),
+            new Int32Array(sanityTokens.map((_, i) => i)),
         );
-        // Top 5 picks
         const arr = Array.from(logits).map((v, i) => [i, v]);
         arr.sort((a, b) => b[1] - a[1]);
         const top5 = arr.slice(0, 5).map(([id, v]) => {
             const t = tokenizer.getToken(id);
             return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
         });
-        log('running', `  BOS→top5: ${top5.join(", ")}`);
+        log('running', `  ${JSON.stringify(sanityText)} → ${top5.join(", ")}`);
     } catch (e) {
         log('fail', `[7-sanity] failed: ${e.message}`);
     }
@@ -264,11 +469,16 @@ async function loadAndTest() {
     // logits are (nearly) identical, attention is ignoring KV history.
     log('running', '[7a] KV history differential...');
     try {
-        const probe = tokenizer.encode("world");
-        if (probe.length !== 1) throw new Error(`probe not single-token: ${probe}`);
+        const probeInfo = findSingleTokenProbe(tokenizer, ['?', '.', '!', ' a', ' I']);
+        const prefixAInfo = findSingleTokenProbe(tokenizer, ['hello', 'Hello', 'The']);
+        const prefixBInfo = findSingleTokenProbe(tokenizer, ['world', 'time', 'story']);
+        if (!probeInfo || !prefixAInfo || !prefixBInfo) {
+            throw new Error('could not find single-token probes for this tokenizer');
+        }
 
-        const prefixA = tokenizer.encode("hello");
-        const prefixB = tokenizer.encode("Once upon a time");
+        const probe = probeInfo.ids;
+        const prefixA = prefixAInfo.ids;
+        const prefixB = prefixBInfo.ids;
 
         async function logitsAfterPrefix(prefix) {
             inference.resetKVCache();
@@ -292,11 +502,10 @@ async function loadAndTest() {
         const topA = Array.from(lA).reduce((m,v,i,a)=>a[m]>=v?m:i, 0);
         const topB = Array.from(lB).reduce((m,v,i,a)=>a[m]>=v?m:i, 0);
         const verdict = diffCount > 100 ? 'HISTORY MATTERS' : 'HISTORY IGNORED';
-        log('running', `  probe="world" [${probe}] prefixA=${prefixA.length} tokens, prefixB=${prefixB.length} tokens`);
+        log('running', `  probe=${JSON.stringify(probeInfo.text)} [${probe}] prefixA=${JSON.stringify(prefixAInfo.text)} prefixB=${JSON.stringify(prefixBInfo.text)}`);
         log('running', `  diff logits=${diffCount}/${lA.length}, maxAbsDiff=${maxAbsDiff.toExponential(3)}`);
         log('running', `  topA=${topA} (${lA[topA].toFixed(3)})  topB=${topB} (${lB[topB].toFixed(3)})  => ${verdict}`);
 
-        // Reset KV cache before the main generation block
         inference.resetKVCache();
     } catch (e) {
         log('fail', `[7a] KV diagnostic failed: ${e.message}\n${e.stack || ''}`);
@@ -310,7 +519,9 @@ async function loadAndTest() {
         // each, run a single prefill and log top-5.
         for (const p of ["The", "The quick brown", "Hello, how are you"]) {
             inference.resetKVCache();
-            const tks = [tokenizer.bosId, ...tokenizer.encode(p)];
+            const tks = shouldAutoInsertBos(parsed.tokenizerConfig)
+                ? [tokenizer.bosId, ...tokenizer.encode(p)]
+                : tokenizer.encode(p);
             const lgts = await inference.forward(
                 new Int32Array(tks),
                 new Int32Array(tks.map((_, i) => i)),
@@ -321,89 +532,266 @@ async function loadAndTest() {
                 const t = tokenizer.getToken(id);
                 return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
             });
-            log('running', `  "<s> ${p}" → ${top.join(", ")}`);
+            log('running', `  ${JSON.stringify(p)} → ${top.join(", ")}`);
         }
         inference.resetKVCache();
 
-        // Simplest possible test: chat-formatted prompt + greedy
-        const userMessage = "Hello! Can you tell me a short joke?";
+        const userMessage = "Tell one short joke.";
         const chatTmpl = parsed.tokenizerConfig.chatTemplate;
-        const messages = [{ role: 'user', content: userMessage }];
-        const prompt = formatChatPrompt(messages, chatTmpl);
-        const tokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
-        const positions = tokens.map((_, i) => i);
+        const smokeChatOptions = getSmokeChatOptions(parsed, chatTmpl);
+        const smokePrompt = buildSmokePrompt(userMessage, smokeChatOptions);
+        const tokens = smokePrompt.tokens;
 
-        // Prefill
-        const t1 = performance.now();
-        const logits = await inference.forward(
-            new Int32Array(tokens),
-            new Int32Array(positions),
-        );
-        const prefillMs = performance.now() - t1;
+        async function compareBatchVsSequentialPrefill(label, promptTokens) {
+            inference.resetKVCache();
+            const batchLogits = await inference.forward(
+                new Int32Array(promptTokens),
+                new Int32Array(promptTokens.map((_, i) => i)),
+            );
 
-        log('running', `  prompt tokens: ${tokens.length}`);
-        {
-            const arr = Array.from(logits).map((v, i) => [i, v]);
-            arr.sort((a, b) => b[1] - a[1]);
-            const top = arr.slice(0, 10).map(([id, v]) => {
-                const t = tokenizer.getToken(id);
-                return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
-            });
-            log('running', `  prefill top10: ${top.join(", ")}`);
+            inference.resetKVCache();
+            let seqLogits = null;
+            for (let i = 0; i < promptTokens.length; i++) {
+                seqLogits = await inference.forward(
+                    new Int32Array([promptTokens[i]]),
+                    new Int32Array([i]),
+                );
+            }
+
+            if (!seqLogits) {
+                throw new Error(`no sequential logits for ${label}`);
+            }
+
+            let diffCount = 0;
+            let maxAbsDiff = 0;
+            let sumAbsDiff = 0;
+            for (let i = 0; i < batchLogits.length; i++) {
+                const d = Math.abs(batchLogits[i] - seqLogits[i]);
+                if (d > 1e-5) diffCount++;
+                if (d > maxAbsDiff) maxAbsDiff = d;
+                sumAbsDiff += d;
+            }
+
+            const topBatch = Array.from(batchLogits)
+                .map((v, i) => [i, v])
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([id, v]) => {
+                    const t = tokenizer.getToken(id);
+                    return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
+                });
+            const topSeq = Array.from(seqLogits)
+                .map((v, i) => [i, v])
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([id, v]) => {
+                    const t = tokenizer.getToken(id);
+                    return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
+                });
+
+            log(
+                'running',
+                `  ${label} batch-vs-seq diff=${diffCount}/${batchLogits.length} maxAbs=${maxAbsDiff.toExponential(3)} meanAbs=${(sumAbsDiff / batchLogits.length).toExponential(3)}`,
+            );
+            log('running', `  ${label} batch top5: ${topBatch.join(", ")}`);
+            log('running', `  ${label} seq   top5: ${topSeq.join(", ")}`);
+            inference.resetKVCache();
         }
 
-        // Greedy sampler — no randomness, just argmax. This eliminates sampling
-        // as a variable when diagnosing pipeline output.
-        const sampler = new Sampler({ temperature: 0 });
+        await compareBatchVsSequentialPrefill(smokePrompt.mode, tokens);
 
-        const eosId = parsed.tokenizerConfig.eosTokenId;
-        const maxGen = 30;
-        const generated = [];
-        const recent = [...tokens];
+        async function runCompletion(label, promptTokens, sampler, maxGen = 64, chatOptions = {}) {
+            const tStart = performance.now();
+            const logits = await inference.forward(
+                new Int32Array(promptTokens),
+                new Int32Array(promptTokens.map((_, i) => i)),
+            );
+            const prefillMs = performance.now() - tStart;
+            const forbiddenReentryTokens = new Set(getForbiddenReentryTokens(parsed));
+            const thinkingTokenIds = getThinkingTokenIds(parsed);
+            const maskedTokensWhileThinking = getMaskedTokensWhileThinking(parsed);
+            const maskedTokensAfterThinkingUntilAnswer = getMaskedTokensAfterThinkingUntilAnswer(parsed, chatOptions);
+            const maskedTokensAfterAnswerStarts = getMaskedTokensAfterAnswerStarts(parsed);
+            const requireVisibleAnswerAfterThinking = thinkingTokenIds !== null;
+            const requireVisibleAnswerBeforeStop =
+                parsed?.hyperparams?.architecture === 'qwen3' &&
+                false;
+            const suppressWhitespaceOnlyUntilAnswer = requireVisibleAnswerBeforeStop;
+            let thinkDepth = 0;
+            let thinkClosed = false;
+            let hasVisibleAnswerText = false;
+            let waitingForVisibleAnswer = requireVisibleAnswerBeforeStop;
 
-        // Sample first token from prefill logits (with repetition penalty over the prompt)
-        sampler.applyRepetitionPenalty(logits, recent.slice(-64));
-        let sampledId = sampler.sample(logits);
-        generated.push(sampledId);
-        recent.push(sampledId);
-
-        for (let step = 0; step < maxGen; step++) {
-            if (sampledId === eosId) break;
-            const pos = tokens.length + step;
-            if (sampler.isGreedy && sampler.noPenalty) {
-                const result = await inference.forwardDecode(
-                    new Int32Array([sampledId]),
-                    new Int32Array([pos]),
-                    'greedy',
-                );
-                if (profileMode && inference.lastTrace) {
-                    window.__decodeTraces.push({ ...inference.lastTrace });
-                }
-                sampledId = result.tokenId;
-            } else {
-                const stepLogits = await inference.forward(
-                    new Int32Array([sampledId]),
-                    new Int32Array([pos]),
-                );
-                if (profileMode && inference.lastTrace) {
-                    window.__decodeTraces.push({ ...inference.lastTrace });
-                }
-                sampler.applyRepetitionPenalty(stepLogits, recent.slice(-64));
-                sampledId = sampler.sample(stepLogits);
+            log('running', `  ${label} prompt tokens: ${promptTokens.length}`);
+            {
+                const arr = Array.from(logits).map((v, i) => [i, v]);
+                arr.sort((a, b) => b[1] - a[1]);
+                const top = arr.slice(0, 10).map(([id, v]) => {
+                    const t = tokenizer.getToken(id);
+                    return `${id}:"${t ? t.text : "?"}"(${v.toFixed(2)})`;
+                });
+                log('running', `  ${label} prefill top10: ${top.join(", ")}`);
             }
-            if (sampledId === eosId) break;
+
+            const eosId = parsed.tokenizerConfig.eosTokenId;
+            const generated = [];
+            const recent = [...promptTokens];
+            let finishReason = 'max-tokens';
+            sampler.applyRepetitionPenalty(logits, recent.slice(-64));
+            if (waitingForVisibleAnswer) {
+                maskTokenLogits(logits, [eosId]);
+            }
+            let sampledId = sampler.sample(logits);
+            if (waitingForVisibleAnswer) {
+                const maskedWhitespaceOnly = new Set();
+                while (
+                    isWhitespaceOnlyTextToken(sampledId) &&
+                    !maskedWhitespaceOnly.has(sampledId)
+                ) {
+                    maskedWhitespaceOnly.add(sampledId);
+                    maskTokenLogits(logits, [sampledId]);
+                    sampledId = sampler.sample(logits);
+                }
+            }
+            if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkOpenId) {
+                thinkDepth = 1;
+            } else if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkCloseId) {
+                return {
+                    outputText: '',
+                    rawOutputText: '',
+                    displayOutputText: '',
+                    genTokens: 0,
+                    finishReason: 'stop-token',
+                    prefillMs,
+                    genTime: performance.now() - tStart - prefillMs,
+                    totalTime: performance.now() - tStart,
+                };
+            }
             generated.push(sampledId);
             recent.push(sampledId);
+
+            for (let step = 0; step < maxGen; step++) {
+                if (sampledId === eosId) {
+                    finishReason = 'eos';
+                    break;
+                }
+                const pos = promptTokens.length + step;
+                if (sampler.isGreedy && sampler.noPenalty) {
+                    const result = await inference.forwardDecode(
+                        new Int32Array([sampledId]),
+                        new Int32Array([pos]),
+                        'greedy',
+                    );
+                    if (profileMode && inference.lastTrace) {
+                        window.__decodeTraces.push({ ...inference.lastTrace });
+                    }
+                    sampledId = result.tokenId;
+                } else {
+                    const stepLogits = await inference.forward(
+                        new Int32Array([sampledId]),
+                        new Int32Array([pos]),
+                    );
+                    if (profileMode && inference.lastTrace) {
+                        window.__decodeTraces.push({ ...inference.lastTrace });
+                    }
+                    sampler.applyRepetitionPenalty(stepLogits, recent.slice(-64));
+                    if (thinkDepth > 0) {
+                        maskTokenLogits(stepLogits, maskedTokensWhileThinking);
+                    } else if (waitingForVisibleAnswer) {
+                        maskTokenLogits(stepLogits, maskedTokensAfterThinkingUntilAnswer);
+                        if (requireVisibleAnswerAfterThinking || requireVisibleAnswerBeforeStop) {
+                            maskTokenLogits(stepLogits, [eosId]);
+                        }
+                    } else if (hasVisibleAnswerText) {
+                        maskTokenLogits(stepLogits, maskedTokensAfterAnswerStarts);
+                    }
+                    sampledId = sampler.sample(stepLogits);
+                    if (waitingForVisibleAnswer) {
+                        const maskedWhitespaceOnly = new Set();
+                        while (
+                            isWhitespaceOnlyTextToken(sampledId) &&
+                            !maskedWhitespaceOnly.has(sampledId)
+                        ) {
+                            maskedWhitespaceOnly.add(sampledId);
+                            maskTokenLogits(stepLogits, [sampledId]);
+                            sampledId = sampler.sample(stepLogits);
+                        }
+                    }
+                }
+                if (sampledId === eosId) {
+                    finishReason = 'eos';
+                    break;
+                }
+                if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkOpenId) {
+                    if (thinkDepth > 0) {
+                        finishReason = 'stop-token';
+                        break;
+                    }
+                    thinkDepth++;
+                } else if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkCloseId) {
+                    if (thinkDepth === 0) {
+                        finishReason = 'stop-token';
+                        break;
+                    }
+                    thinkDepth = Math.max(0, thinkDepth - 1);
+                    if (thinkDepth === 0) {
+                        thinkClosed = true;
+                        waitingForVisibleAnswer = true;
+                    }
+                }
+                if (waitingForVisibleAnswer && !hasVisibleAnswerText && isVisibleTextToken(sampledId)) {
+                    hasVisibleAnswerText = true;
+                    waitingForVisibleAnswer = false;
+                }
+                if (generated.length >= 1 && forbiddenReentryTokens.has(sampledId)) {
+                    finishReason = 'stop-token';
+                    break;
+                }
+                generated.push(sampledId);
+                recent.push(sampledId);
+            }
+
+            const totalTime = performance.now() - tStart;
+            const outputText = decodeForDebug(generated);
+            const rawOutputText = decodeForDebug(generated, true);
+            return {
+                outputText,
+                rawOutputText,
+                displayOutputText: sanitizeDisplayText(outputText),
+                genTokens: generated.length,
+                finishReason,
+                prefillMs,
+                genTime: totalTime - prefillMs,
+                totalTime,
+            };
+        }
+        interactiveRunCompletion = runCompletion;
+
+        const useSampledGeneration = isThinkingTemplate(chatTmpl);
+        const smokeSampler = makeSmokeSampler(chatTmpl, smokeChatOptions);
+        const smokeResult = await runCompletion(smokePrompt.mode, tokens, smokeSampler, 64, smokeChatOptions);
+
+        if (useSampledGeneration) {
+            inference.resetKVCache();
+            const plainTokens = tokenizer.encode(userMessage);
+            const comparisonResult = await runCompletion('plain', plainTokens, makeSmokeSampler(chatTmpl));
+            log('running', `  plain completion: ${comparisonResult.displayOutputText || comparisonResult.outputText}`);
+            inference.resetKVCache();
+
+            if (parsed.hyperparams.architecture === 'qwen3') {
+                const qwenVariants = buildQwenChatPromptVariants(userMessage);
+                for (const variant of qwenVariants) {
+                    const variantResult = await runCompletion(variant.label, variant.tokens, makeSmokeSampler(chatTmpl));
+                    log('running', `  ${variant.label}: ${variantResult.displayOutputText || variantResult.outputText}`);
+                    log('running', `  ${variant.label} raw: ${variantResult.rawOutputText}`);
+                    inference.resetKVCache();
+                }
+            }
         }
 
-        const totalTime = performance.now() - t1;
-        const outputText = tokenizer.decode(generated);
-        const genTokens = generated.length;
-        const genTime = totalTime - prefillMs;
-
-        log('pass', `[7/7] Generated ${genTokens} tokens in ${(totalTime / 1000).toFixed(1)}s (prefill: ${prefillMs.toFixed(0)}ms, decode: ${genTime.toFixed(0)}ms, ${(genTokens / (genTime / 1000)).toFixed(1)} tok/s)`);
+        log('pass', `[7/7] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason})`);
         log('pass', `User: ${userMessage}`);
-        log('pass', `Assistant: ${outputText}`);
+        log('pass', `Assistant: ${smokeResult.displayOutputText || smokeResult.outputText}`);
 
         setProgress(100);
     } catch (e) {
@@ -432,69 +820,47 @@ async function runChat() {
     chatOutput.textContent += `User: ${text}\nAssistant: `;
 
     try {
-        const sampler = new Sampler({ temperature: 0 });
-        const decoder = new StreamingDecoder(tokenizer);
         const eosId = parsedModel?.tokenizerConfig?.eosTokenId ?? 2;
         const chatTmpl = parsedModel?.tokenizerConfig?.chatTemplate;
+        const chatOptions = getSmokeChatOptions(parsedModel, chatTmpl);
+        const sampler = makeSmokeSampler(chatTmpl, chatOptions);
+        const samplingConfig = getSmokeSamplingConfig(parsedModel, chatTmpl, chatOptions);
 
         if (!window._chatSession) {
             window._chatSession = { position: 0, history: [], messages: [], prevCount: 0 };
         }
         const sess = window._chatSession;
-
-        sess.messages.push({ role: 'user', content: text });
-        const promptText = formatChatPrompt(sess.messages, chatTmpl);
-        const promptTokens = [tokenizer.bosId, ...tokenizer.encode(promptText)];
+        const userContent =
+            text;
+        sess.messages.push({ role: 'user', content: userContent });
+        const promptTokens = encodeChatPrompt(sess.messages, tokenizer, chatOptions);
         inference.resetKVCache();
         sess.position = 0;
         sess.history = [];
         sess.prevCount = sess.messages.length;
-
-        const forwardPass = async (ids, positions) => {
-            return await inference.forward(new Int32Array(ids), new Int32Array(positions));
-        };
-
-        const forwardDecode = async (ids, positions, mode, topK) => {
-            return await inference.forwardDecode(new Int32Array(ids), new Int32Array(positions), mode, topK);
-        };
-
-        let fullText = '';
-        let tokenCount = 0;
-        const startTime = performance.now();
-
-        const mockSession = {
-            _pos: sess.position,
-            _history: [...sess.history],
-            get currentPosition() { return this._pos; },
-            get tokens() { return this._history; },
-            advance(n) { this._pos += n; },
-            pushToken(id) { this._history.push(id); },
-            shouldStop(tokenId, eosTokenId) {
-                return tokenId === eosTokenId || this._history.length >= 2048;
-            },
-            reset() { this._pos = 0; this._history = []; },
-        };
-
-        for await (const tokenId of Generator.generate(
-            promptTokens, sampler, mockSession, eosId, forwardPass,
-            { prompt: text, maxTokens: 100, temperature: 0, topK: 40, topP: 1, repetitionPenalty: 1 },
-            undefined, forwardDecode
-        )) {
-            tokenCount++;
-            const delta = decoder.push(tokenId);
-            fullText += delta;
-            chatOutput.textContent = chatOutput.textContent.replace(
-                /Assistant: [\s\S]*$/, 'Assistant: ' + fullText
-            );
+        if (typeof interactiveRunCompletion !== 'function') {
+            throw new Error('interactive completion helper not ready');
         }
 
-        sess.position = mockSession.currentPosition;
-        sess.history = [...mockSession.tokens];
+        const result = await interactiveRunCompletion(
+            'chat-interactive',
+            promptTokens,
+            sampler,
+            100,
+            chatOptions,
+        );
+        const fullText = result.displayOutputText || result.outputText;
+        chatOutput.textContent = chatOutput.textContent.replace(
+            /Assistant: [\s\S]*$/,
+            'Assistant: ' + fullText,
+        );
         sess.messages.push({ role: 'assistant', content: fullText });
 
-        const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-        const tps = (tokenCount / ((performance.now() - startTime) / 1000)).toFixed(1);
-        chatOutput.textContent += `\n(${tokenCount} tokens, ${tps} tok/s, ${elapsed}s)\n\n`;
+        const elapsed = (result.totalTime / 1000).toFixed(2);
+        const tps = result.genTime > 0
+            ? (result.genTokens / (result.genTime / 1000)).toFixed(1)
+            : '0.0';
+        chatOutput.textContent += `\n(${result.genTokens} tokens, ${tps} tok/s, ${elapsed}s, finish=${result.finishReason})\n\n`;
     } catch (e) {
         chatOutput.textContent += `[Error: ${e.message}]\n\n`;
     }

@@ -1,6 +1,6 @@
 import type { ModelHyperparams } from "../core/types.js";
 import {
-	type TokenAttribute,
+	TokenAttribute,
 	type TokenData,
 	type TokenizerConfig,
 	TokenizerType,
@@ -72,7 +72,10 @@ export class ModelLoader {
 				`${arch}.feed_forward_length`,
 				11008,
 			),
-			ropeFreqBase: getMetaNumber(ctx, `${arch}.rope_freq_base`, 10000),
+			ropeFreqBase:
+				getMetaNumberOptional(ctx, `${arch}.rope_freq_base`) ??
+				getMetaNumberOptional(ctx, `${arch}.rope.freq_base`) ??
+				10000,
 			ropeScale: getMetaNumber(ctx, `${arch}.rope_scale`, 1),
 			normEpsilon: getMetaFloat(
 				ctx,
@@ -96,21 +99,33 @@ export class ModelLoader {
 			"tokenizer.ggml.token_type",
 			[],
 		);
+		const rawMerges = getMetaStringArray(ctx, "tokenizer.ggml.merges", []);
 
 		const tokens: TokenData[] = rawTokens.map((text, i) => ({
 			text,
 			score: rawScores[i] ?? 0,
-			attr: (rawTokenTypes[i] ?? 0) as TokenAttribute,
+			attr: mapGgufTokenTypeToTokenizerAttr(rawTokenTypes[i] ?? 0),
 		}));
 
 		const eosTokenId = getMetaNumber(ctx, "tokenizer.ggml.eos_token_id", 2);
 		const bosTokenId = getMetaNumber(ctx, "tokenizer.ggml.bos_token_id", 1);
+		const padTokenId = getMetaNumberOptional(
+			ctx,
+			"tokenizer.ggml.padding_token_id",
+		);
+		const preTokenizer = getMetaStringOptional(ctx, "tokenizer.ggml.pre");
+		const addBosToken = getMetaBooleanOptional(
+			ctx,
+			"tokenizer.ggml.add_bos_token",
+		);
 
 		const addedTokens = new Map<string, number>();
 
-		// GGUF token_type 2 = CONTROL (special tokens like <s>, </s>, <unk>)
+		// GGUF tokenizer.ggml.token_type uses llama.cpp vocab types where
+		// CONTROL=3 and USER_DEFINED=4. Both should be treated as special tokens
+		// that bypass normal subword tokenization.
 		for (let i = 0; i < tokens.length && i < rawTokenTypes.length; i++) {
-			if (rawTokenTypes[i] === 2) {
+			if (rawTokenTypes[i] === 3 || rawTokenTypes[i] === 4) {
 				addedTokens.set(tokens[i].text, i);
 			}
 		}
@@ -123,16 +138,25 @@ export class ModelLoader {
 			addedTokens.set(tokens[bosTokenId].text, bosTokenId);
 		}
 
+		const bpeRanks = new Map<string, number>();
+		if (type === TokenizerType.BPE) {
+			for (let i = 0; i < rawMerges.length; i++) {
+				bpeRanks.set(rawMerges[i], i);
+			}
+		}
+
 		return {
 			type,
 			tokens,
-			bpeRanks: new Map(),
+			bpeRanks,
 			addedTokens,
 			eosTokenId,
 			bosTokenId,
-			padTokenId: -1,
+			padTokenId: padTokenId ?? -1,
 			vocabSize: tokens.length,
 			chatTemplate: getMetaString(ctx, "tokenizer.chat_template", ""),
+			preTokenizer,
+			addBosToken,
 		};
 	}
 
@@ -146,6 +170,23 @@ export class ModelLoader {
 			maxContextLength: hp.contextLength,
 			dataType: "f32",
 		};
+	}
+}
+
+function mapGgufTokenTypeToTokenizerAttr(rawType: number): TokenAttribute {
+	switch (rawType) {
+		case 1:
+			return TokenAttribute.NORMAL;
+		case 2:
+			return TokenAttribute.UNKNOWN;
+		case 3:
+			return TokenAttribute.CONTROL;
+		case 4:
+			return TokenAttribute.USER_DEFINED;
+		case 6:
+			return TokenAttribute.BYTE;
+		default:
+			return 0 as TokenAttribute;
 	}
 }
 
@@ -169,6 +210,34 @@ function getMetaNumber(
 	const kv = ctx.metadata.get(key);
 	if (kv && typeof kv.value === "number") return kv.value;
 	return defaultValue;
+}
+
+/** Get a numeric metadata value if present. */
+function getMetaNumberOptional(
+	ctx: GgufContext,
+	key: string,
+): number | undefined {
+	const kv = ctx.metadata.get(key);
+	if (kv && typeof kv.value === "number") return kv.value;
+	return undefined;
+}
+
+function getMetaStringOptional(
+	ctx: GgufContext,
+	key: string,
+): string | undefined {
+	const kv = ctx.metadata.get(key);
+	if (kv && typeof kv.value === "string") return kv.value;
+	return undefined;
+}
+
+function getMetaBooleanOptional(
+	ctx: GgufContext,
+	key: string,
+): boolean | undefined {
+	const kv = ctx.metadata.get(key);
+	if (kv && typeof kv.value === "boolean") return kv.value;
+	return undefined;
 }
 
 /** Get a float metadata value (covers both FLOAT32 and FLOAT64 stored values). */

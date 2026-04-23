@@ -26,6 +26,32 @@ function makeTokenizer(tokens: string[]): Tokenizer {
 	return new Tokenizer(config);
 }
 
+function makeThinkingTokenizer(): Tokenizer {
+	const tokens: TokenData[] = [
+		{ text: "<think>", score: 0, attr: TokenAttribute.USER_DEFINED },
+		{ text: "</think>", score: 0, attr: TokenAttribute.USER_DEFINED },
+		{ text: "▁plan", score: -1, attr: TokenAttribute.NORMAL },
+		{ text: "▁answer", score: -2, attr: TokenAttribute.NORMAL },
+		{ text: "</s>", score: -3, attr: TokenAttribute.CONTROL },
+	];
+	const config: TokenizerConfig = {
+		type: TokenizerType.SPM,
+		tokens,
+		bpeRanks: new Map(),
+		addedTokens: new Map([
+			["<think>", 0],
+			["</think>", 1],
+			["</s>", 4],
+		]),
+		eosTokenId: 4,
+		bosTokenId: 4,
+		padTokenId: 4,
+		vocabSize: tokens.length,
+		addPrefixSpace: false,
+	};
+	return new Tokenizer(config);
+}
+
 describe("StreamingDecoder", () => {
 	test("push returns incremental text for simple tokens", () => {
 		const tokenizer = makeTokenizer(["<s>", "▁Hello", "▁world", "▁!", "</s>"]);
@@ -69,5 +95,29 @@ describe("StreamingDecoder", () => {
 		decoder.push(2);
 
 		expect(decoder.tokens).toEqual([1, 2]);
+	});
+
+	test("can preserve special tokens while streaming", () => {
+		const tokenizer = makeTokenizer(["<s>", "▁thinking", "</s>"]);
+		const decoder = new StreamingDecoder(tokenizer, {
+			includeSpecialTokens: true,
+		});
+
+		expect(decoder.push(0)).toBe("<s>");
+		expect(decoder.push(1)).toBe(" thinking");
+		expect(decoder.push(2)).toBe("</s>");
+		expect(decoder.text).toBe("<s> thinking</s>");
+	});
+
+	test("requires </think> before continuing visible answer text", () => {
+		const tokenizer = makeThinkingTokenizer();
+		const decoder = new StreamingDecoder(tokenizer);
+
+		expect(decoder.push(0)).toBe("");
+		expect(decoder.push(2)).toBe("");
+		expect(decoder.text).toBe("");
+		expect(decoder.push(1)).toBe("");
+		expect(decoder.push(3)).toBe("answer");
+		expect(decoder.text).toBe("answer");
 	});
 });

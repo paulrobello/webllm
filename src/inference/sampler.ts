@@ -202,7 +202,10 @@ function argmax(arr: Float32Array): number {
 }
 
 function softmax(logits: Float32Array): Float32Array {
-	const max = Math.max(...logits);
+	let max = logits[0] ?? -Infinity;
+	for (let i = 1; i < logits.length; i++) {
+		if (logits[i] > max) max = logits[i];
+	}
 	const exps = new Float32Array(logits.length);
 	let sum = 0;
 	for (let i = 0; i < logits.length; i++) {

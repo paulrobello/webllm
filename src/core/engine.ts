@@ -1,8 +1,9 @@
 import type { Character, CharacterConfig } from "../characters/character.js";
 import { CharacterManager } from "../characters/character-manager.js";
 import {
+	detectChatTemplate,
+	encodeChatPrompt,
 	formatChatDelta,
-	formatChatPrompt,
 } from "../inference/chat-template.js";
 import {
 	type GenerationConfig,
@@ -51,6 +52,20 @@ interface ConversationSession {
 	session: InferenceSession;
 	messageCount: number;
 }
+
+const QWEN_THINKING_DEFAULTS = {
+	temperature: 0.6,
+	topK: 20,
+	topP: 0.95,
+	repetitionPenalty: 1.05,
+} as const;
+
+const QWEN_NON_THINKING_DEFAULTS = {
+	temperature: 0.7,
+	topK: 20,
+	topP: 0.8,
+	repetitionPenalty: 1.1,
+} as const;
 
 export class WebLLM {
 	private _config: WebLLMConfig;
@@ -213,24 +228,94 @@ export class WebLLM {
 		if (!inf) throw new Error(`No inference engine for model "${modelId}"`);
 
 		const tokenizer = entry.tokenizer;
+		const chatTemplate = tokenizer.options.chatTemplate;
+		const isQwenChatml =
+			Array.isArray(input) &&
+			String(entry.hyperparams.architecture).startsWith("qwen") &&
+			detectChatTemplate(chatTemplate ?? "") === "chatml";
+		const qwenDefaults =
+			isQwenChatml && config?.enableThinking === false
+				? QWEN_NON_THINKING_DEFAULTS
+				: QWEN_THINKING_DEFAULTS;
+		const effectiveTemperature = isQwenChatml
+			? (config?.temperature ?? qwenDefaults.temperature)
+			: (config?.temperature ?? 1.0);
+		const effectiveTopK = isQwenChatml
+			? (config?.topK ?? qwenDefaults.topK)
+			: (config?.topK ?? 0);
+		const effectiveTopP = isQwenChatml
+			? (config?.topP ?? qwenDefaults.topP)
+			: (config?.topP ?? 1.0);
+		const effectiveRepetitionPenalty = isQwenChatml
+			? (config?.repetitionPenalty ?? qwenDefaults.repetitionPenalty)
+			: (config?.repetitionPenalty ?? 1.0);
 		const sampler = new Sampler({
-			temperature: config?.temperature,
-			topK: config?.topK,
-			topP: config?.topP,
-			repetitionPenalty: config?.repetitionPenalty,
+			temperature: effectiveTemperature,
+			topK: effectiveTopK,
+			topP: effectiveTopP,
+			repetitionPenalty: effectiveRepetitionPenalty,
 		});
 		const genConfig: GenerationConfig = {
 			prompt: typeof input === "string" ? input : "",
 			maxTokens: config?.maxTokens ?? 512,
-			temperature: config?.temperature ?? 1.0,
-			topK: config?.topK ?? 0,
-			topP: config?.topP ?? 1.0,
-			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
+			temperature: effectiveTemperature,
+			topK: effectiveTopK,
+			topP: effectiveTopP,
+			repetitionPenalty: effectiveRepetitionPenalty,
 			stopTokens: config?.stopTokenIds,
 		};
+		if (Array.isArray(input)) {
+			if (isQwenChatml) {
+				const imStartId = tokenizer.getId("<|im_start|>");
+				const imEndId = tokenizer.getId("<|im_end|>");
+				const thinkOpenId = tokenizer.getId("<think>");
+				const thinkCloseId = tokenizer.getId("</think>");
+				const toolCallOpenId = tokenizer.getId("<tool_call>");
+				const toolCallCloseId = tokenizer.getId("</tool_call>");
+				const toolResponseOpenId = tokenizer.getId("<tool_response>");
+				const toolResponseCloseId = tokenizer.getId("</tool_response>");
+				if (imStartId !== undefined) {
+					genConfig.forbiddenReentryTokens = [imStartId];
+				}
+				if (config?.enableThinking === false) {
+					genConfig.tokenizer = tokenizer;
+				}
+				if (thinkOpenId !== undefined && thinkCloseId !== undefined) {
+					genConfig.tokenizer = tokenizer;
+					genConfig.thinkingOpenTokenId = thinkOpenId;
+					genConfig.thinkingCloseTokenId = thinkCloseId;
+					genConfig.enforceSingleThinkBlock = true;
+					genConfig.maskedTokensWhileThinking = [
+						thinkOpenId,
+						imStartId,
+						imEndId,
+					].filter((id): id is number => id !== undefined);
+					genConfig.maskedTokensAfterThinkingUntilAnswer = [
+						thinkOpenId,
+						imStartId,
+						imEndId,
+						toolCallOpenId,
+						toolCallCloseId,
+						toolResponseOpenId,
+						toolResponseCloseId,
+					].filter((id): id is number => id !== undefined);
+					genConfig.maskedTokensAfterAnswerStarts = [
+						thinkOpenId,
+						imStartId,
+						imEndId,
+						toolCallOpenId,
+						toolCallCloseId,
+						toolResponseOpenId,
+						toolResponseCloseId,
+					].filter((id): id is number => id !== undefined);
+					genConfig.requireVisibleAnswerAfterThinking = true;
+					genConfig.suppressWhitespaceOnlyAfterThinking = true;
+				}
+			}
+		}
 
 		const promptTokens = Array.isArray(input)
-			? this.prepareChatPrompt(modelId, input, tokenizer, inf)
+			? this.prepareChatPrompt(modelId, input, tokenizer, inf, config)
 			: tokenizer.encode(input);
 		const session = Array.isArray(input)
 			? this.getOrCreateSession(modelId).session
@@ -310,27 +395,38 @@ export class WebLLM {
 		messages: ChatMessage[],
 		tokenizer: Tokenizer,
 		inf: ModelInference,
+		config?: StreamConfig,
 	): number[] {
 		const sessionInfo = this.getOrCreateSession(modelId);
 		const session = sessionInfo.session;
 		const prevMsgCount = sessionInfo.messageCount;
 		const tmpl = tokenizer.options.chatTemplate;
+		const promptMessages = messages;
+		const templateOptions = { enableThinking: config?.enableThinking };
 
 		let promptTokens: number[];
 		if (
-			messages.length > prevMsgCount &&
+			promptMessages.length > prevMsgCount &&
 			prevMsgCount > 0 &&
 			session.currentPosition === inf.cachedTokenCount
 		) {
-			const delta = formatChatDelta(messages, prevMsgCount, tmpl);
+			const delta = formatChatDelta(
+				promptMessages,
+				prevMsgCount,
+				tmpl,
+				templateOptions,
+			);
 			promptTokens = tokenizer.encode(delta);
 		} else {
-			const prompt = formatChatPrompt(messages, tmpl);
-			promptTokens = [tokenizer.bosId, ...tokenizer.encode(prompt)];
+			promptTokens = encodeChatPrompt(
+				promptMessages,
+				tokenizer,
+				templateOptions,
+			);
 			session.reset();
 			inf.resetKVCache();
 		}
-		sessionInfo.messageCount = messages.length;
+		sessionInfo.messageCount = promptMessages.length;
 		return promptTokens;
 	}
 

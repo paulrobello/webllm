@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "../src/core/chat-types.js";
 import {
 	detectChatTemplate,
+	encodeChatPrompt,
 	formatChatDelta,
 	formatChatPrompt,
 } from "../src/inference/chat-template.js";
+
+const QWEN_TMPL = `{%- for message in messages %}{%- if (message.role == "user") or (message.role == "system" and not loop.first) %}{{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}{%- elif message.role == "assistant" %}{{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}{%- endif %}{%- endfor %}{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- if enable_thinking is defined and enable_thinking is false %}{{- '<think>\n\n</think>\n\n' }}{%- endif %}{%- endif %}`;
 
 const LLAMA2_TMPL =
 	"{% if message['role'] == 'user' %}[INST] {{ content }} [/INST]{% endif %}";
@@ -127,6 +130,45 @@ describe("formatChatPrompt mistral-v7", () => {
 		expect(formatChatPrompt(m, MISTRAL_TMPL)).toBe(
 			"[SYSTEM_PROMPT] You are a helpful assistant. Answer questions directly and concisely.[/SYSTEM_PROMPT][INST] Hi[/INST]",
 		);
+	});
+});
+
+describe("formatChatPrompt qwen", () => {
+	test("default qwen generation prompt does not inject a closed think block", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		expect(formatChatPrompt(m, QWEN_TMPL)).toBe(
+			"<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+		);
+	});
+
+	test("qwen disabled-thinking prompt injects a closed think block", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		expect(formatChatPrompt(m, QWEN_TMPL, { enableThinking: false })).toBe(
+			"<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+		);
+	});
+
+	test("encodeChatPrompt respects qwen no-BOS policy", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		const seenPrompts: string[] = [];
+		const tokenizer = {
+			options: {
+				chatTemplate: QWEN_TMPL,
+				addBosToken: false,
+			},
+			bosId: 1,
+			encode: (prompt: string): number[] => {
+				seenPrompts.push(prompt);
+				return [41, 42];
+			},
+		};
+
+		expect(
+			encodeChatPrompt(m, tokenizer as never, { enableThinking: false }),
+		).toEqual([41, 42]);
+		expect(seenPrompts).toEqual([
+			"<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+		]);
 	});
 });
 

@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../core/chat-types.js";
+import type { Tokenizer } from "./tokenizer.js";
 
 export type ChatTemplateType =
 	| "llama2"
@@ -74,9 +75,28 @@ function formatLlama2(
 	return prompt;
 }
 
+export interface ChatTemplateRenderOptions {
+	enableThinking?: boolean;
+}
+
+type ChatPromptTokenizer = Pick<Tokenizer, "bosId" | "encode" | "options">;
+
+function shouldCloseThinkBlock(
+	template?: string,
+	options?: ChatTemplateRenderOptions,
+): boolean {
+	return (
+		options?.enableThinking === false &&
+		(template?.includes("enable_thinking") ?? false) &&
+		(template?.includes("<think>") ?? false)
+	);
+}
+
 function formatChatml(
 	messages: ChatMessage[],
 	addGenerationPrompt: boolean,
+	template?: string,
+	options?: ChatTemplateRenderOptions,
 ): string {
 	let prompt = "";
 	for (const msg of messages) {
@@ -84,6 +104,9 @@ function formatChatml(
 	}
 	if (addGenerationPrompt) {
 		prompt += "<|im_start|>assistant\n";
+		if (shouldCloseThinkBlock(template, options)) {
+			prompt += "<think>\n\n</think>\n\n";
+		}
 	}
 	return prompt;
 }
@@ -180,7 +203,12 @@ function formatZephyr(
 
 const FORMATTERS: Record<
 	ChatTemplateType,
-	(messages: ChatMessage[], addGenerationPrompt: boolean) => string
+	(
+		messages: ChatMessage[],
+		addGenerationPrompt: boolean,
+		template?: string,
+		options?: ChatTemplateRenderOptions,
+	) => string
 > = {
 	llama2: formatLlama2,
 	chatml: formatChatml,
@@ -195,6 +223,12 @@ const FORMATTERS: Record<
 const DEFAULT_SYSTEM =
 	"You are a helpful assistant. Answer questions directly and concisely.";
 
+function shouldInjectDefaultSystem(template?: string): boolean {
+	return !(
+		template?.includes("enable_thinking") && template.includes("<think>")
+	);
+}
+
 /**
  * Format messages into a prompt string using the detected template type.
  * Falls back to zephyr format when the template is unknown or empty.
@@ -203,13 +237,33 @@ const DEFAULT_SYSTEM =
 export function formatChatPrompt(
 	messages: ChatMessage[],
 	template?: string,
+	options?: ChatTemplateRenderOptions,
 ): string {
 	const tmpl = detectChatTemplate(template ?? "");
 	const hasSystem = messages.length > 0 && messages[0].role === "system";
+	const injectDefaultSystem = shouldInjectDefaultSystem(template);
 	const msgs = hasSystem
 		? messages
-		: [{ role: "system" as const, content: DEFAULT_SYSTEM }, ...messages];
-	return FORMATTERS[tmpl](msgs, true);
+		: injectDefaultSystem
+			? [{ role: "system" as const, content: DEFAULT_SYSTEM }, ...messages]
+			: messages;
+	return FORMATTERS[tmpl](msgs, true, template, options);
+}
+
+export function encodeChatPrompt(
+	messages: ChatMessage[],
+	tokenizer: ChatPromptTokenizer,
+	options?: ChatTemplateRenderOptions,
+): number[] {
+	const prompt = formatChatPrompt(
+		messages,
+		tokenizer.options.chatTemplate,
+		options,
+	);
+	const encoded = tokenizer.encode(prompt);
+	return tokenizer.options.addBosToken === false
+		? encoded
+		: [tokenizer.bosId, ...encoded];
 }
 
 /** Return only the new portion given the number of previously formatted messages. */
@@ -217,24 +271,32 @@ export function formatChatDelta(
 	messages: ChatMessage[],
 	prevCount: number,
 	template?: string,
+	options?: ChatTemplateRenderOptions,
 ): string {
-	if (prevCount <= 0) return formatChatPrompt(messages, template);
+	if (prevCount <= 0) return formatChatPrompt(messages, template, options);
 	if (prevCount >= messages.length) return "";
 	const tmpl = detectChatTemplate(template ?? "");
 	const formatter = FORMATTERS[tmpl] ?? FORMATTERS.zephyr;
 	const hasSystem = messages.length > 0 && messages[0].role === "system";
+	const injectDefaultSystem = shouldInjectDefaultSystem(template);
 	const msgs = hasSystem
 		? messages
-		: [{ role: "system" as const, content: DEFAULT_SYSTEM }, ...messages];
-	const full = formatter(msgs, true);
+		: injectDefaultSystem
+			? [{ role: "system" as const, content: DEFAULT_SYSTEM }, ...messages]
+			: messages;
+	const full = formatter(msgs, true, template, options);
 	const prev = formatter(
 		hasSystem
 			? messages.slice(0, prevCount)
-			: [
-					{ role: "system" as const, content: DEFAULT_SYSTEM },
-					...messages.slice(0, prevCount),
-				],
+			: injectDefaultSystem
+				? [
+						{ role: "system" as const, content: DEFAULT_SYSTEM },
+						...messages.slice(0, prevCount),
+					]
+				: messages.slice(0, prevCount),
 		false,
+		template,
+		options,
 	);
 	return full.slice(prev.length);
 }

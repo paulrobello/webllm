@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Sampler } from "../src/inference/sampler.js";
 import {
 	TokenAttribute,
 	type TokenData,
@@ -10,6 +11,7 @@ import {
 function makeBpeConfig(
 	tokens: TokenData[],
 	bpeRanks: Map<string, number>,
+	overrides: Partial<TokenizerConfig> = {},
 ): TokenizerConfig {
 	return {
 		type: TokenizerType.BPE,
@@ -20,6 +22,7 @@ function makeBpeConfig(
 		bosTokenId: 1,
 		padTokenId: 0,
 		vocabSize: tokens.length,
+		...overrides,
 	};
 }
 
@@ -83,6 +86,12 @@ describe("Tokenizer", () => {
 		expect(text).toBe("a");
 	});
 
+	test("decode can preserve special tokens when requested", () => {
+		const tok = new Tokenizer(makeBpeConfig(BASIC_TOKENS, new Map()));
+		const text = tok.decode([1, 3, 2], { includeSpecialTokens: true });
+		expect(text).toBe("<s>a</s>");
+	});
+
 	test("vocabSize returns correct count", () => {
 		const tok = new Tokenizer(makeBpeConfig(BASIC_TOKENS, new Map()));
 		expect(tok.vocabSize).toBe(10);
@@ -104,6 +113,43 @@ describe("Tokenizer", () => {
 		const tok = new Tokenizer(makeBpeConfig(BASIC_TOKENS, new Map()));
 		const t = tok.getToken(3);
 		expect(t?.text).toBe("a");
+	});
+
+	test("BPE encode preserves GPT-2 byte-encoded whitespace and newlines for qwen-style tokenizers", () => {
+		const tokens: TokenData[] = [
+			{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "Ċ", score: 0, attr: TokenAttribute.NORMAL },
+			{ text: "Ġ", score: 0, attr: TokenAttribute.NORMAL },
+			{ text: "a", score: 0, attr: TokenAttribute.NORMAL },
+			{ text: "b", score: 0, attr: TokenAttribute.NORMAL },
+			{ text: "Ġa", score: 0, attr: TokenAttribute.NORMAL },
+			{ text: "Ġab", score: 0, attr: TokenAttribute.NORMAL },
+		];
+		const ranks = new Map<string, number>([
+			["Ġ a", 0],
+			["Ġa b", 1],
+		]);
+		const tok = new Tokenizer(
+			makeBpeConfig(tokens, ranks, { preTokenizer: "qwen2" }),
+		);
+		expect(tok.encode("\n a\n")).toEqual([3, 7, 3]);
+	});
+
+	test("BPE decode reverses GPT-2 byte encoding back to plain text", () => {
+		const tokens: TokenData[] = [
+			{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL },
+			{ text: "Hello", score: 0, attr: TokenAttribute.NORMAL },
+			{ text: "Ġworld", score: 0, attr: TokenAttribute.NORMAL },
+			{ text: "Ċ", score: 0, attr: TokenAttribute.NORMAL },
+		];
+		const tok = new Tokenizer(
+			makeBpeConfig(tokens, new Map(), { preTokenizer: "qwen2" }),
+		);
+		expect(tok.decode([3, 4, 5])).toBe("Hello world\n");
 	});
 
 	test("SPM encode prepends ▁ and replaces spaces (LLaMA-style)", () => {
@@ -218,5 +264,21 @@ describe("Tokenizer", () => {
 		};
 		const tok = new Tokenizer(cfg);
 		expect(tok.decode([3, 4])).toBe("hi world");
+	});
+});
+
+describe("Sampler", () => {
+	test("samples from large vocab without stack overflow", () => {
+		const sampler = new Sampler({
+			temperature: 0.7,
+			topK: 40,
+			topP: 0.95,
+			seed: 123,
+		});
+		const logits = new Float32Array(151_936);
+		logits[100] = 10;
+		logits[200] = 11;
+		logits[300] = 12;
+		expect(() => sampler.sample(logits)).not.toThrow();
 	});
 });

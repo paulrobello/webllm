@@ -50,6 +50,7 @@ export type {
 export type { ChatTemplateType } from "./inference/chat-template.js";
 export {
 	detectChatTemplate,
+	encodeChatPrompt,
 	formatChatDelta,
 	formatChatPrompt,
 } from "./inference/chat-template.js";

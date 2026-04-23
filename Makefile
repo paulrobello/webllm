@@ -121,14 +121,18 @@ smoke-bench: smoke-test ## End-to-end inference benchmark with agentchrome (head
 	PORT=$$(agentchrome connect --status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('port',''))" 2>/dev/null); \
 	if [ -z "$$PORT" ]; then echo "ERROR: agentchrome not running"; kill %1 2>/dev/null; exit 1; fi; \
 	echo "agentchrome on port $$PORT"; \
-	agentchrome --port $$PORT tabs create "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || \
-		agentchrome --port $$PORT navigate "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || true; \
-	sleep 2; \
 	TAB=$$(agentchrome --port $$PORT tabs list 2>/dev/null | python3 -c "import sys,json; tabs=json.load(sys.stdin); t=[t for t in tabs if 'real-model' in t.get('url','')]; print(t[0]['id'] if t else '')" 2>/dev/null); \
+	if [ -n "$$TAB" ]; then \
+		agentchrome --port $$PORT --tab $$TAB navigate "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || true; \
+	else \
+		agentchrome --port $$PORT tabs create "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || true; \
+		sleep 1; \
+		TAB=$$(agentchrome --port $$PORT tabs list 2>/dev/null | python3 -c "import sys,json; tabs=json.load(sys.stdin); t=[t for t in tabs if 'real-model' in t.get('url','')]; print(t[0]['id'] if t else '')" 2>/dev/null); \
+	fi; \
 	if [ -n "$$TAB" ]; then \
 		bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --port $$PORT --tab $$TAB --profile; \
 	else \
-		bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --port $$PORT --profile; \
+		echo "ERROR: could not find or create a real-model tab"; kill %1 2>/dev/null; exit 1; \
 	fi; \
 	kill %1 2>/dev/null || true
 

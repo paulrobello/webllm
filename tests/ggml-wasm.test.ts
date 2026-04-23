@@ -128,7 +128,16 @@ describe("GgmlWasm detailed graph profiling controls", () => {
 		let activeGraph: number | null = null;
 		const asyncify = {
 			currData: null as object | null,
-			whenDone: () => pending.get(activeGraph!)!.promise,
+			whenDone: () => {
+				if (activeGraph === null) {
+					throw new Error("no active graph");
+				}
+				const request = pending.get(activeGraph);
+				if (!request) {
+					throw new Error(`missing pending graph ${activeGraph}`);
+				}
+				return request.promise;
+			},
 		};
 		const { wasm } = createWasm({
 			Asyncify: asyncify,
