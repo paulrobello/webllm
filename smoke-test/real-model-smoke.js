@@ -2,6 +2,37 @@ export function shouldAutoInsertBos(tokenizerConfig) {
 	return tokenizerConfig?.addBosToken !== false;
 }
 
+export function shouldRunSmokeDiagnostics(params) {
+	return params.has("debug") || params.has("diag");
+}
+
+export function getSmokePageCopy(debugMode) {
+	return debugMode
+		? {
+				title: "WebLLM Real Model Debug",
+				subtitle: "Load model, generate text, and run deep diagnostics",
+			}
+		: {
+				title: "WebLLM Real Model Test",
+				subtitle: "Load model and generate text",
+			};
+}
+
+export function getSmokePageShellMarkup() {
+	return `
+<h1 id="title">WebLLM Real Model Test</h1>
+<p id="subtitle" class="subtitle">Load model and generate text</p>
+
+<div id="progress-bar"><div id="progress-fill"><span id="progress-text">0%</span></div></div>
+<div id="log"></div>
+
+<div id="chat-container">
+<div id="chat-output"></div>
+<input id="chat-input" type="text" placeholder="Type a message..." disabled>
+<button id="chat-btn" disabled>Generate</button>
+</div>`.trim();
+}
+
 export function getSmokeChatOptions(parsed, detectChatTemplate, chatTemplate) {
 	if (
 		parsed?.hyperparams?.architecture === "qwen3" &&

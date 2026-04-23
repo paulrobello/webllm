@@ -4,7 +4,10 @@ import {
 	createPrefillComparisonRunner,
 	createSmokeSamplerFactory,
 	getSmokeChatOptions,
+	getSmokePageCopy,
+	getSmokePageShellMarkup,
 	shouldAutoInsertBos,
+	shouldRunSmokeDiagnostics,
 } from "../smoke-test/real-model-smoke.js";
 
 test("qwen chatml smoke helpers disable thinking and use qwen sampling defaults", () => {
@@ -49,6 +52,20 @@ test("smoke prompt helpers respect BOS policy and build a chat prompt", () => {
 	expect(shouldAutoInsertBos({ addBosToken: false })).toBe(false);
 	expect(shouldAutoInsertBos({ addBosToken: true })).toBe(true);
 	expect(shouldAutoInsertBos(undefined)).toBe(true);
+	expect(shouldRunSmokeDiagnostics(new URLSearchParams(""))).toBe(false);
+	expect(shouldRunSmokeDiagnostics(new URLSearchParams("debug=1"))).toBe(true);
+	expect(shouldRunSmokeDiagnostics(new URLSearchParams("diag=1"))).toBe(true);
+	expect(getSmokePageCopy(false)).toEqual({
+		title: "WebLLM Real Model Test",
+		subtitle: "Load model and generate text",
+	});
+	expect(getSmokePageCopy(true)).toEqual({
+		title: "WebLLM Real Model Debug",
+		subtitle: "Load model, generate text, and run deep diagnostics",
+	});
+	expect(getSmokePageShellMarkup()).toContain('id="log"');
+	expect(getSmokePageShellMarkup()).toContain('id="chat-container"');
+	expect(getSmokePageShellMarkup()).toContain('id="chat-btn"');
 
 	const prompt = buildSmokePrompt(
 		"Tell one short joke.",
