@@ -290,10 +290,6 @@ export class Generator {
 				finishReason = "max-tokens";
 				break;
 			}
-			if (config.stopTokens?.includes(sampledId)) {
-				finishReason = "stop-token";
-				break;
-			}
 
 			if (decodeStep && gpuMode === "greedy") {
 				// GPU ARGMAX — no CPU sampling needed

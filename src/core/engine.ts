@@ -281,6 +281,15 @@ export class WebLLM {
 					genConfig.tokenizer = tokenizer;
 				}
 				if (thinkOpenId !== undefined && thinkCloseId !== undefined) {
+					const maskedPostThinkTokens = [
+						thinkOpenId,
+						imStartId,
+						imEndId,
+						toolCallOpenId,
+						toolCallCloseId,
+						toolResponseOpenId,
+						toolResponseCloseId,
+					].filter((id): id is number => id !== undefined);
 					genConfig.tokenizer = tokenizer;
 					genConfig.thinkingOpenTokenId = thinkOpenId;
 					genConfig.thinkingCloseTokenId = thinkCloseId;
@@ -290,24 +299,9 @@ export class WebLLM {
 						imStartId,
 						imEndId,
 					].filter((id): id is number => id !== undefined);
-					genConfig.maskedTokensAfterThinkingUntilAnswer = [
-						thinkOpenId,
-						imStartId,
-						imEndId,
-						toolCallOpenId,
-						toolCallCloseId,
-						toolResponseOpenId,
-						toolResponseCloseId,
-					].filter((id): id is number => id !== undefined);
-					genConfig.maskedTokensAfterAnswerStarts = [
-						thinkOpenId,
-						imStartId,
-						imEndId,
-						toolCallOpenId,
-						toolCallCloseId,
-						toolResponseOpenId,
-						toolResponseCloseId,
-					].filter((id): id is number => id !== undefined);
+					genConfig.maskedTokensAfterThinkingUntilAnswer =
+						maskedPostThinkTokens;
+					genConfig.maskedTokensAfterAnswerStarts = maskedPostThinkTokens;
 					genConfig.requireVisibleAnswerAfterThinking = true;
 					genConfig.suppressWhitespaceOnlyAfterThinking = true;
 				}
