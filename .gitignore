@@ -9,7 +9,7 @@ dist/
 src/wasm/build/
 
 # Evaluation reports (generated at runtime)
-eval/reports/*.json
+eval/reports/
 
 # OS files
 .DS_Store
