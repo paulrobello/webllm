@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { buildMatrixPlan } from "../eval/chat-smoke-matrix.js";
+import { buildMatrixPlan, getMatrixPreset } from "../eval/chat-smoke-matrix.js";
 
 test("buildMatrixPlan expands default smoke pages across models", () => {
 	expect(
@@ -14,4 +14,15 @@ test("buildMatrixPlan expands default smoke pages across models", () => {
 		{ model: "llama-3.2-1b-q4f16", page: "smoke", prompt: "hello" },
 		{ model: "llama-3.2-1b-q4f16", page: "debug", prompt: "hello" },
 	]);
+});
+
+test("getMatrixPreset defines fast and full defaults", () => {
+	expect(getMatrixPreset("fast")).toEqual({
+		models: ["qwen3-0.6b-q4f16", "llama-3.2-1b-q4f16"],
+		pages: ["smoke", "debug"],
+	});
+	expect(getMatrixPreset("full")).toEqual({
+		models: ["qwen3-0.6b-q4f16", "llama-3.2-1b-q4f16"],
+		pages: ["smoke", "debug"],
+	});
 });
