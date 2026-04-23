@@ -272,13 +272,47 @@ body::after {
   margin-bottom: 40px;
 }
 
+.dimensions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
 .dimensions-section .section-title {
   font-family: var(--font-display);
   font-size: 0.65rem;
   text-transform: uppercase;
   letter-spacing: 0.14em;
   color: var(--text-muted);
-  margin-bottom: 16px;
+}
+
+.dimension-reset {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.dimension-reset:hover {
+  border-color: var(--border-medium);
+  background: var(--bg-card-hover);
+}
+
+.dimension-reset:focus {
+  outline: none;
+  border-color: var(--accent-cyan-dim);
+}
+
+.dimension-reset:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .dimension-grid {
@@ -301,6 +335,17 @@ body::after {
 }
 
 .dimension-card:hover { border-color: var(--border-medium); }
+
+.dimension-card.active {
+  border-color: rgba(0, 212, 255, 0.45);
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.08), var(--bg-card));
+  box-shadow: var(--shadow-glow);
+}
+
+.dimension-card:focus {
+  outline: none;
+  border-color: var(--accent-cyan-dim);
+}
 
 .dimension-card .dim-header {
   grid-column: 1 / -1;
@@ -793,7 +838,10 @@ body::after {
   </section>
 
   <section class="dimensions-section">
-    <div class="section-title">Dimension Scores</div>
+    <div class="dimensions-header">
+      <div class="section-title">Dimension Scores</div>
+      <button class="dimension-reset" id="clear-dimension-filter" type="button">Show All</button>
+    </div>
     <div class="dimension-grid" id="dimension-grid"></div>
   </section>
 
@@ -903,8 +951,8 @@ function render(data, isCompare) {
   const avgLat = Object.values(data.dimensions).reduce((s, d) => s + d.avgLatencyMs, 0) / Math.max(Object.keys(data.dimensions).length, 1);
   document.getElementById('summary-latency').textContent = `${Math.round(avgLat)}ms`;
 
-  renderDimensions(data);
   renderFilters(data);
+  renderDimensions(data);
   renderTable(data);
 
   if (isCompare) return;
@@ -914,7 +962,10 @@ function renderDimensions(data) {
   const grid = document.getElementById('dimension-grid');
   grid.innerHTML = '';
   const sel = document.getElementById('filter-dimension');
+  const activeFilter = sel.value;
   const resultsSection = document.querySelector('.results-section');
+  const clearBtn = document.getElementById('clear-dimension-filter');
+  clearBtn.disabled = activeFilter === 'all';
 
   for (const [dim, info] of Object.entries(data.dimensions)) {
     const pct = (info.score * 100).toFixed(0);
@@ -923,9 +974,13 @@ function renderDimensions(data) {
 
     const card = document.createElement('div');
     card.className = 'dimension-card';
+    if (activeFilter === dim) {
+      card.classList.add('active');
+    }
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
     card.setAttribute('aria-label', `Show ${label} tasks`);
+    card.setAttribute('aria-pressed', activeFilter === dim ? 'true' : 'false');
     card.innerHTML = `
       <div class="dim-header">
         <span class="dim-name">${label}</span>
@@ -941,6 +996,7 @@ function renderDimensions(data) {
     `;
     card.addEventListener('click', () => {
       sel.value = dim;
+      renderDimensions(data);
       renderTable(data);
       resultsSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
@@ -1041,8 +1097,19 @@ function showDetail(taskId, data) {
 }
 
 function setupControls(data) {
-  document.getElementById('filter-dimension').addEventListener('change', () => renderTable(data));
+  const dimensionFilter = document.getElementById('filter-dimension');
+  const clearBtn = document.getElementById('clear-dimension-filter');
+  const rerenderResults = () => {
+    renderDimensions(data);
+    renderTable(data);
+  };
+
+  dimensionFilter.addEventListener('change', rerenderResults);
   document.getElementById('filter-difficulty').addEventListener('change', () => renderTable(data));
+  clearBtn.addEventListener('click', () => {
+    dimensionFilter.value = 'all';
+    rerenderResults();
+  });
 
   document.querySelectorAll('.results-controls button[data-sort]').forEach(btn => {
     btn.addEventListener('click', () => {
