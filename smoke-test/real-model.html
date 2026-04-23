@@ -48,6 +48,7 @@ const {
     GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer, Sampler,
     detectChatTemplate, encodeChatPrompt
 } = await import(`./webllm-bundle.js${assetSuffix}`);
+const { runInteractiveChatTurn } = await import(`./real-model-runtime.js${assetSuffix}`);
 
 const params = new URLSearchParams(window.location.search);
 const DEFAULT_MODEL_ID = "qwen3-0.6b-q4f16";
@@ -704,39 +705,26 @@ async function runChat() {
     chatOutput.textContent += `User: ${text}\nAssistant: `;
 
     try {
-        const chatTmpl = parsedModel?.tokenizerConfig?.chatTemplate;
-        const chatOptions = getSmokeChatOptions(parsedModel, chatTmpl);
-        const sampler = makeSmokeSampler(chatTmpl, chatOptions);
-
         if (!window._chatSession) {
             window._chatSession = { position: 0, history: [], messages: [], prevCount: 0 };
         }
-        const sess = window._chatSession;
-        const userContent =
-            text;
-        sess.messages.push({ role: 'user', content: userContent });
-        const promptTokens = encodeChatPrompt(sess.messages, tokenizer, chatOptions);
-        inference.resetKVCache();
-        sess.position = 0;
-        sess.history = [];
-        sess.prevCount = sess.messages.length;
-        if (typeof interactiveRunCompletion !== 'function') {
-            throw new Error('interactive completion helper not ready');
-        }
-
-        const result = await interactiveRunCompletion(
-            'chat-interactive',
-            promptTokens,
-            sampler,
-            100,
-            chatOptions,
-        );
-        const fullText = result.displayOutputText || result.outputText;
+        const { session, result } = await runInteractiveChatTurn({
+            text,
+            session: window._chatSession,
+            parsedModel,
+            tokenizer,
+            inference,
+            interactiveRunCompletion,
+            makeSmokeSampler,
+            getSmokeChatOptions,
+            encodeChatPrompt,
+        });
+        window._chatSession = session;
+        const fullText = result.fullText;
         chatOutput.textContent = chatOutput.textContent.replace(
             /Assistant: [\s\S]*$/,
             'Assistant: ' + fullText,
         );
-        sess.messages.push({ role: 'assistant', content: fullText });
 
         const elapsed = (result.totalTime / 1000).toFixed(2);
         const tps = result.genTime > 0
