@@ -297,6 +297,7 @@ body::after {
   grid-template-rows: auto auto;
   gap: 8px 16px;
   transition: border-color var(--transition-fast);
+  cursor: pointer;
 }
 
 .dimension-card:hover { border-color: var(--border-medium); }
@@ -912,6 +913,8 @@ function render(data, isCompare) {
 function renderDimensions(data) {
   const grid = document.getElementById('dimension-grid');
   grid.innerHTML = '';
+  const sel = document.getElementById('filter-dimension');
+  const resultsSection = document.querySelector('.results-section');
 
   for (const [dim, info] of Object.entries(data.dimensions)) {
     const pct = (info.score * 100).toFixed(0);
@@ -920,6 +923,9 @@ function renderDimensions(data) {
 
     const card = document.createElement('div');
     card.className = 'dimension-card';
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', `Show ${label} tasks`);
     card.innerHTML = `
       <div class="dim-header">
         <span class="dim-name">${label}</span>
@@ -933,6 +939,17 @@ function renderDimensions(data) {
       </div>
       <div class="dim-latency">${Math.round(info.avgLatencyMs)}ms avg</div>
     `;
+    card.addEventListener('click', () => {
+      sel.value = dim;
+      renderTable(data);
+      resultsSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    card.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        card.click();
+      }
+    });
     grid.appendChild(card);
   }
 }
