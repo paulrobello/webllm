@@ -41,6 +41,36 @@ function makeSpmConfig(tokens: TokenData[]): TokenizerConfig {
 	};
 }
 
+function makeWordPieceTokenizer(
+	extraTokens: string[] = [],
+	overrides: Partial<TokenizerConfig> = {},
+): Tokenizer {
+	const base = ["[PAD]", "[UNK]", "[CLS]", "[SEP]"];
+	const tokens: TokenData[] = [...base, ...extraTokens].map((t) => ({
+		text: t,
+		score: 0,
+		attr: base.includes(t) ? TokenAttribute.CONTROL : TokenAttribute.NORMAL,
+	}));
+	const addedTokens = new Map<string, number>();
+	base.forEach((t, i) => {
+		addedTokens.set(t, i);
+	});
+	return new Tokenizer({
+		type: TokenizerType.WORDPIECE,
+		tokens,
+		bpeRanks: new Map(),
+		addedTokens,
+		eosTokenId: 3,
+		bosTokenId: 2,
+		padTokenId: 0,
+		vocabSize: tokens.length,
+		clsTokenId: 2,
+		sepTokenId: 3,
+		unkTokenId: 1,
+		...overrides,
+	});
+}
+
 const BASIC_TOKENS: TokenData[] = [
 	{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },
 	{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL },
@@ -319,41 +349,14 @@ describe("Tokenizer WordPiece config", () => {
 });
 
 describe("WordPiece basic tokenize", () => {
-	// Helper to build a minimal WORDPIECE tokenizer for tests.
-	function makeWp(extraTokens: string[] = []): Tokenizer {
-		const base = ["[PAD]", "[UNK]", "[CLS]", "[SEP]"];
-		const tokens: TokenData[] = [...base, ...extraTokens].map((t) => ({
-			text: t,
-			score: 0,
-			attr: base.includes(t) ? TokenAttribute.CONTROL : TokenAttribute.NORMAL,
-		}));
-		const addedTokens = new Map<string, number>();
-		base.forEach((t, i) => {
-			addedTokens.set(t, i);
-		});
-		return new Tokenizer({
-			type: TokenizerType.WORDPIECE,
-			tokens,
-			bpeRanks: new Map(),
-			addedTokens,
-			eosTokenId: 3,
-			bosTokenId: 2,
-			padTokenId: 0,
-			vocabSize: tokens.length,
-			clsTokenId: 2,
-			sepTokenId: 3,
-			unkTokenId: 1,
-		});
-	}
-
 	test("lowercases and splits on whitespace", () => {
-		const tok = makeWp(["hello", "world"]);
+		const tok = makeWordPieceTokenizer(["hello", "world"]);
 		// [CLS] hello world [SEP] -> [2, 4, 5, 3]
 		expect(tok.encode("Hello World")).toEqual([2, 4, 5, 3]);
 	});
 
 	test("splits punctuation off tokens", () => {
-		const tok = makeWp(["hello", ".", ",", "world"]);
+		const tok = makeWordPieceTokenizer(["hello", ".", ",", "world"]);
 		// vocab: [CLS]=2 [SEP]=3 hello=4 .=5 ,=6 world=7
 		// [CLS] hello , world . [SEP]
 		expect(tok.encode("hello, world.")).toEqual([2, 4, 6, 7, 5, 3]);
@@ -361,12 +364,27 @@ describe("WordPiece basic tokenize", () => {
 	});
 
 	test("strips accents", () => {
-		const tok = makeWp(["cafe"]);
+		const tok = makeWordPieceTokenizer(["cafe"]);
 		expect(tok.encode("café")).toEqual([2, 4, 3]);
 	});
 
 	test("emits UNK for unknown words", () => {
-		const tok = makeWp([]);
+		const tok = makeWordPieceTokenizer([]);
 		expect(tok.encode("unknown")).toEqual([2, 1, 3]); // [CLS] [UNK] [SEP]
+	});
+
+	test("throws when cls/sep/unk IDs are missing from config", () => {
+		expect(() =>
+			new Tokenizer({
+				type: TokenizerType.WORDPIECE,
+				tokens: [{ text: "[PAD]", score: 0, attr: TokenAttribute.CONTROL }],
+				bpeRanks: new Map(),
+				addedTokens: new Map(),
+				eosTokenId: 0,
+				bosTokenId: 0,
+				padTokenId: 0,
+				vocabSize: 1,
+			}).encode("hello"),
+		).toThrow(/clsTokenId/);
 	});
 });

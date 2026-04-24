@@ -220,6 +220,10 @@ function wpIsCjk(cp: number): boolean {
 	);
 }
 
+// ASCII ranges mirror HF BertTokenizer's explicit punctuation set, which is a
+// superset of Unicode \p{P} (e.g. `$`, `^`, `` ` `` are \p{Sc}/\p{Sk} but HF
+// splits on them). Do not collapse to \p{P} alone — it changes tokenization on
+// common text.
 function wpIsPunctuation(cp: number): boolean {
 	if (
 		(cp >= 33 && cp <= 47) ||
@@ -529,22 +533,24 @@ export class Tokenizer {
 
 	private encodeWordPiece(text: string): number[] {
 		const cfg = this.config;
-		const unkId = cfg.unkTokenId ?? 0;
-		const clsId = cfg.clsTokenId ?? 2;
-		const sepId = cfg.sepTokenId ?? 3;
-
-		// Build a vocab-lookup Map once per call. (Subword fallback is added in Task 4;
-		// here a chunk only matches if the whole chunk is present in the vocab.)
-		const vocab = new Map<string, number>();
-		for (let i = 0; i < cfg.tokens.length; i++) {
-			vocab.set(cfg.tokens[i].text, i);
+		if (
+			cfg.clsTokenId === undefined ||
+			cfg.sepTokenId === undefined ||
+			cfg.unkTokenId === undefined
+		) {
+			throw new Error(
+				"WORDPIECE tokenizer requires clsTokenId, sepTokenId, and unkTokenId in config",
+			);
 		}
+		const clsId = cfg.clsTokenId;
+		const sepId = cfg.sepTokenId;
+		const unkId = cfg.unkTokenId;
 
 		const chunks = wpBasicTokenize(text);
 		const ids: number[] = [clsId];
 
 		for (const chunk of chunks) {
-			const whole = vocab.get(chunk);
+			const whole = this.tokenToId.get(chunk);
 			if (whole !== undefined) {
 				ids.push(whole);
 			} else {
