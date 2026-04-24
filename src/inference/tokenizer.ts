@@ -9,9 +9,7 @@
 export enum TokenizerType {
 	SPM = 0,
 	BPE = 1,
-	WPM = 2,
-	UGM = 3,
-	RWKV = 4,
+	WORDPIECE = 2,
 }
 
 /** Token attributes describing token semantics. */
@@ -60,6 +58,14 @@ export interface TokenizerConfig {
 	preTokenizer?: string;
 	/** Whether the model requests automatic BOS insertion. */
 	addBosToken?: boolean;
+	/** BERT WordPiece: id of [CLS]. */
+	clsTokenId?: number;
+	/** BERT WordPiece: id of [SEP]. */
+	sepTokenId?: number;
+	/** BERT WordPiece: id of [UNK]. */
+	unkTokenId?: number;
+	/** BERT WordPiece: id of [MASK] (kept for future; not used in encode/decode). */
+	maskTokenId?: number;
 }
 
 export interface DecodeOptions {

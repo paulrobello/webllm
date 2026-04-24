@@ -107,7 +107,12 @@ export class ModelLoader {
 	/** Build tokenizer configuration from GGUF metadata. */
 	private static buildTokenizerConfig(ctx: GgufContext): TokenizerConfig {
 		const modelStr = getMetaString(ctx, "tokenizer.ggml.model", "llama");
-		const type = modelStr === "gpt2" ? TokenizerType.BPE : TokenizerType.SPM;
+		const type =
+			modelStr === "gpt2"
+				? TokenizerType.BPE
+				: modelStr === "bert"
+					? TokenizerType.WORDPIECE
+					: TokenizerType.SPM;
 
 		const rawTokens = getMetaStringArray(ctx, "tokenizer.ggml.tokens", []);
 		const rawScores = getMetaNumberArray(ctx, "tokenizer.ggml.scores", []);
@@ -162,6 +167,23 @@ export class ModelLoader {
 			}
 		}
 
+		const clsTokenId = getMetaNumberOptional(
+			ctx,
+			"tokenizer.ggml.cls_token_id",
+		);
+		const sepTokenId = getMetaNumberOptional(
+			ctx,
+			"tokenizer.ggml.seperator_token_id",
+		);
+		const unkTokenId = getMetaNumberOptional(
+			ctx,
+			"tokenizer.ggml.unknown_token_id",
+		);
+		const maskTokenId = getMetaNumberOptional(
+			ctx,
+			"tokenizer.ggml.mask_token_id",
+		);
+
 		return {
 			type,
 			tokens,
@@ -174,6 +196,10 @@ export class ModelLoader {
 			chatTemplate: getMetaString(ctx, "tokenizer.chat_template", ""),
 			preTokenizer,
 			addBosToken,
+			clsTokenId,
+			sepTokenId,
+			unkTokenId,
+			maskTokenId,
 		};
 	}
 

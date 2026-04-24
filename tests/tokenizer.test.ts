@@ -282,3 +282,35 @@ describe("Sampler", () => {
 		expect(() => sampler.sample(logits)).not.toThrow();
 	});
 });
+
+describe("Tokenizer WordPiece config", () => {
+	test("accepts WORDPIECE type with bert-style special token ids", () => {
+		const tok = new Tokenizer({
+			type: TokenizerType.WORDPIECE,
+			tokens: [
+				{ text: "[PAD]", score: 0, attr: TokenAttribute.CONTROL },
+				{ text: "[UNK]", score: 0, attr: TokenAttribute.CONTROL },
+				{ text: "[CLS]", score: 0, attr: TokenAttribute.CONTROL },
+				{ text: "[SEP]", score: 0, attr: TokenAttribute.CONTROL },
+				{ text: "hello", score: -1, attr: TokenAttribute.NORMAL },
+			],
+			bpeRanks: new Map(),
+			addedTokens: new Map([
+				["[PAD]", 0],
+				["[UNK]", 1],
+				["[CLS]", 2],
+				["[SEP]", 3],
+			]),
+			eosTokenId: 3,
+			bosTokenId: 2,
+			padTokenId: 0,
+			vocabSize: 5,
+			clsTokenId: 2,
+			sepTokenId: 3,
+			unkTokenId: 1,
+			maskTokenId: undefined,
+		});
+		expect(tok.options.type).toBe(TokenizerType.WORDPIECE);
+		expect(tok.options.clsTokenId).toBe(2);
+	});
+});
