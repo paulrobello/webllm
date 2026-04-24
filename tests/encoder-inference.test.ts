@@ -207,3 +207,105 @@ describe("EncoderInference FFN block", () => {
 		expect(ops.filter((o) => o === "norm").length).toBe(1 + 2 * 3);
 	});
 });
+
+describe("EncoderInference pool + normalize", () => {
+	test("CLS pool picks column 0 and L2 normalizes", () => {
+		// Hidden state E=4, N=3, column 0 = [3, 4, 0, 0]
+		// → pooled [3, 4, 0, 0], norm=5, normalized [0.6, 0.8, 0, 0]
+		const E = 4;
+		const N = 3;
+		const hidden = new Float32Array([
+			3,
+			4,
+			0,
+			0, // col 0
+			9,
+			9,
+			9,
+			9, // col 1
+			7,
+			7,
+			7,
+			7, // col 2
+		]);
+		const out = EncoderInference.poolAndNormalize(hidden, E, N, "cls");
+		expect(out[0]).toBeCloseTo(0.6);
+		expect(out[1]).toBeCloseTo(0.8);
+		expect(out[2]).toBeCloseTo(0);
+		expect(out[3]).toBeCloseTo(0);
+	});
+
+	test("MEAN pool averages across N and L2 normalizes", () => {
+		const E = 2;
+		const N = 2;
+		const hidden = new Float32Array([1, 0, 3, 0]); // col0=[1,0], col1=[3,0]
+		// mean = [2, 0]; normalized = [1, 0]
+		const out = EncoderInference.poolAndNormalize(hidden, E, N, "mean");
+		expect(out[0]).toBeCloseTo(1);
+		expect(out[1]).toBeCloseTo(0);
+	});
+
+	test("handles zero-norm pooled vector by returning zeros", () => {
+		const E = 2;
+		const N = 1;
+		const hidden = new Float32Array([0, 0]);
+		const out = EncoderInference.poolAndNormalize(hidden, E, N, "cls");
+		expect(out[0]).toBe(0);
+		expect(out[1]).toBe(0);
+	});
+
+	test("output length always equals E", () => {
+		const out = EncoderInference.poolAndNormalize(
+			new Float32Array(8),
+			4,
+			2,
+			"mean",
+		);
+		expect(out.length).toBe(4);
+	});
+});
+
+describe("EncoderInference embed() validation", () => {
+	test("throws on empty token id array", async () => {
+		const { fake } = makeFakeWasm();
+		const hp = makeBertHp(2);
+		const enc = new EncoderInference(fake, hp);
+		// Set weights stub so the empty-input check fires before graph build.
+		const layerWeights = Array.from({ length: 2 }, () => ({
+			qProj: 1,
+			qBias: 1,
+			kProj: 1,
+			kBias: 1,
+			vProj: 1,
+			vBias: 1,
+			oProj: 1,
+			oBias: 1,
+			attnNormW: 1,
+			attnNormB: 1,
+			ffnUp: 1,
+			ffnUpBias: 1,
+			ffnDown: 1,
+			ffnDownBias: 1,
+			ffnNormW: 1,
+			ffnNormB: 1,
+		}));
+		(enc as unknown as { weights: object }).weights = {
+			tokEmb: 100,
+			positionEmb: 101,
+			tokenTypes: 102,
+			inputNormW: 103,
+			inputNormB: 104,
+			layers: layerWeights,
+		};
+		await expect(enc.embed(new Int32Array(0))).rejects.toThrow(/empty input/);
+	});
+
+	test("throws when weights not loaded", async () => {
+		const { fake } = makeFakeWasm();
+		const hp = makeBertHp(2);
+		const enc = new EncoderInference(fake, hp);
+		await expect(enc.embed(new Int32Array([1, 2, 3]))).rejects.toThrow(
+			/weights not loaded/,
+		);
+	});
+});

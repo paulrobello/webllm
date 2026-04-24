@@ -45,8 +45,6 @@ export class EncoderInference {
 	private weights: EncoderWeights | null = null;
 	private weightBuf: BufferPtr = 0;
 	private nameToTensor = new Map<string, TensorPtr>();
-	// @ts-expect-error TS6133: read by Tasks 8-10 forward dispatch
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: read in Tasks 8-10
 	private lastLeaves: {
 		tokenIdsTensor: TensorPtr;
 		posTensor: TensorPtr;
@@ -154,8 +152,6 @@ export class EncoderInference {
 		return this.wasm.opAdd(this.wasm.opMul(normed, gamma), beta);
 	}
 
-	// @ts-expect-error TS6133: invoked by Tasks 8-10 forward dispatch
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: invoked by Tasks 8-10
 	private buildGraph(nTokens: number): TensorPtr {
 		if (!this.weights) throw new Error("weights not loaded");
 		const { wasm, weights } = this;
@@ -220,6 +216,125 @@ export class EncoderInference {
 		}
 
 		return x;
+	}
+
+	/**
+	 * Pool a contiguous `[E, N]` row-major hidden-state buffer down to a
+	 * single L2-normalized embedding vector of length `E`. Pure function;
+	 * exposed for unit tests and for any caller that has its own forward
+	 * compute path.
+	 *
+	 * Layout matches ggml's row-major-reversed convention used elsewhere
+	 * in this codebase: column n occupies bytes `[n*E, (n+1)*E)`.
+	 */
+	static poolAndNormalize(
+		hidden: Float32Array,
+		E: number,
+		N: number,
+		poolingType: "cls" | "mean",
+	): Float32Array {
+		const pooled = new Float32Array(E);
+		if (poolingType === "cls") {
+			for (let i = 0; i < E; i++) pooled[i] = hidden[i]; // column 0
+		} else {
+			for (let n = 0; n < N; n++) {
+				const base = n * E;
+				for (let i = 0; i < E; i++) pooled[i] += hidden[base + i];
+			}
+			for (let i = 0; i < E; i++) pooled[i] /= N;
+		}
+		let sq = 0;
+		for (let i = 0; i < E; i++) sq += pooled[i] * pooled[i];
+		if (sq === 0) return pooled;
+		const invNorm = 1 / Math.sqrt(sq);
+		for (let i = 0; i < E; i++) pooled[i] *= invNorm;
+		return pooled;
+	}
+
+	/**
+	 * Run the encoder forward pass over the provided token ids and return
+	 * a single L2-normalized embedding. The token id array must already
+	 * include any model-specific framing (e.g. [CLS] ... [SEP] for BERT)
+	 * — typically produced by the model's WordPiece `Tokenizer.encode`.
+	 */
+	async embed(tokenIds: Int32Array): Promise<Float32Array> {
+		if (!this.weights) throw new Error("weights not loaded");
+		if (tokenIds.length === 0) {
+			throw new Error("embed() received empty input after tokenization");
+		}
+		const { hp, wasm } = this;
+		const N = tokenIds.length;
+
+		// Graph memory budget — sized off layer count + token count, similar
+		// to the causal-LM pattern in model-inference.ts but without KV cache
+		// allocations.
+		const graphMem = hp.layerCount * 32768 + N * hp.embeddingLength * 24;
+		wasm.ctxCreate(graphMem);
+
+		const finalHidden = this.buildGraph(N);
+		const graph = wasm.graphNew(hp.layerCount * 32 + 128);
+		wasm.graphBuildForwardExpand(graph, finalHidden);
+		const graphBuf = wasm.backendAllocCtxTensors();
+
+		try {
+			// Upload leaf inputs in one bundled FFI call. Mirrors the causal-LM
+			// pattern; mask slot is unused for the encoder, so segTensor takes
+			// its place.
+			const leaves = this.lastLeaves;
+			if (!leaves) throw new Error("buildGraph did not set leaves");
+
+			const idsBytes = N * 4;
+			const posBytes = N * 4;
+			const segBytes = 4;
+			const totalBytes = idsBytes + posBytes + segBytes;
+			const heap = wasm.malloc(totalBytes);
+			try {
+				const idsPtr = heap;
+				const posPtr = heap + idsBytes;
+				const segPtr = heap + idsBytes + posBytes;
+
+				const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
+				const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
+				const segView = new Int32Array(wasm.heapU8.buffer, segPtr, 1);
+				for (let i = 0; i < N; i++) {
+					idsView[i] = tokenIds[i];
+					posView[i] = i;
+				}
+				segView[0] = 0;
+
+				wasm.backendTensorSet3(
+					leaves.tokenIdsTensor,
+					idsPtr,
+					idsBytes,
+					leaves.posTensor,
+					posPtr,
+					posBytes,
+					leaves.segTensor,
+					segPtr,
+					segBytes,
+				);
+			} finally {
+				wasm.free(heap);
+			}
+
+			await wasm.graphCompute(graph);
+
+			// Download `[E, N]` row-major hidden state.
+			const E = hp.embeddingLength;
+			const totalFloats = E * N;
+			const bytes = await wasm.downloadFromTensor(finalHidden, totalFloats * 4);
+			const hidden = new Float32Array(
+				bytes.buffer,
+				bytes.byteOffset,
+				totalFloats,
+			);
+
+			const pooling = hp.poolingType ?? "cls";
+			return EncoderInference.poolAndNormalize(hidden, E, N, pooling);
+		} finally {
+			wasm.backendBufferFree(graphBuf);
+			wasm.ctxFree();
+		}
 	}
 
 	async dispose(): Promise<void> {
