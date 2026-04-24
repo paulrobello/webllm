@@ -109,7 +109,11 @@ export interface ModelHyperparams {
 	expertUsedCount: number;
 	/** For bidirectional encoders: pooling strategy for `embed()`. */
 	poolingType?: "cls" | "mean";
-	/** When false, attention is bidirectional (BERT-style encoders). */
+	/**
+	 * When false, attention is bidirectional (BERT-style encoders).
+	 * Only encoder architectures populate this field; `undefined` means causal
+	 * attention (the decoder default).
+	 */
 	causalAttention?: boolean;
 }
 

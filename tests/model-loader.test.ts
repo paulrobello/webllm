@@ -356,3 +356,238 @@ describe("ModelArchitecture union", () => {
 		expect(hp.poolingType).toBe("cls");
 	});
 });
+
+function writeKvBool(
+	buf: DataView,
+	offset: number,
+	key: string,
+	value: boolean,
+): number {
+	offset = writeString(buf, offset, key);
+	offset = writeUint32(buf, offset, GgufValueType.BOOL as number);
+	buf.setUint8(offset, value ? 1 : 0);
+	return offset + 1;
+}
+
+interface BertGgufOptions {
+	/** When provided, written as `bert.pooling_type` (UINT32). Omit to leave key absent. */
+	poolingType?: number;
+	/** When provided, written as `bert.attention.causal` (BOOL). Omit to leave key absent. */
+	causal?: boolean;
+	/** When provided, overrides the default `bert.attention.layer_norm_epsilon`. */
+	normEpsilon?: number;
+}
+
+/**
+ * Build a minimal GGUF buffer with `general.architecture = "bert"` plus the
+ * subset of bert.* hyperparam keys needed by ModelLoader.parseModel, with
+ * configurable pooling_type / attention.causal / layer_norm_epsilon entries.
+ */
+function buildBertGguf(options: BertGgufOptions = {}): ArrayBuffer {
+	const headerSize = 24;
+	const arch = "bert";
+	const tokens = ["[PAD]", "[CLS]", "[SEP]", "a", "b", "c"];
+	const scores = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+	const tokenTypes = [3, 3, 3, 1, 1, 1];
+
+	type KvEntry = { key: string; type: GgufValueType; value: unknown };
+	const kvEntries: KvEntry[] = [
+		{ key: "general.architecture", type: GgufValueType.STRING, value: arch },
+		{ key: `${arch}.context_length`, type: GgufValueType.UINT32, value: 512 },
+		{
+			key: `${arch}.embedding_length`,
+			type: GgufValueType.UINT32,
+			value: 384,
+		},
+		{
+			key: `${arch}.attention.head_count`,
+			type: GgufValueType.UINT32,
+			value: 12,
+		},
+		{
+			key: `${arch}.attention.head_count_kv`,
+			type: GgufValueType.UINT32,
+			value: 12,
+		},
+		{ key: `${arch}.block_count`, type: GgufValueType.UINT32, value: 12 },
+		{
+			key: `${arch}.attention.layer_norm_epsilon`,
+			type: GgufValueType.FLOAT32,
+			value: options.normEpsilon ?? 1e-12,
+		},
+		{
+			key: `${arch}.feed_forward_length`,
+			type: GgufValueType.UINT32,
+			value: 1536,
+		},
+		{
+			key: `${arch}.attention.key_length`,
+			type: GgufValueType.UINT32,
+			value: 32,
+		},
+		{
+			key: "tokenizer.ggml.model",
+			type: GgufValueType.STRING,
+			value: "bert",
+		},
+		{ key: "tokenizer.ggml.tokens", type: GgufValueType.ARRAY, value: tokens },
+		{ key: "tokenizer.ggml.scores", type: GgufValueType.ARRAY, value: scores },
+		{
+			key: "tokenizer.ggml.token_type",
+			type: GgufValueType.ARRAY,
+			value: tokenTypes,
+		},
+		{
+			key: "tokenizer.ggml.eos_token_id",
+			type: GgufValueType.UINT32,
+			value: 2,
+		},
+		{
+			key: "tokenizer.ggml.bos_token_id",
+			type: GgufValueType.UINT32,
+			value: 1,
+		},
+	];
+
+	if (options.poolingType !== undefined) {
+		kvEntries.push({
+			key: `${arch}.pooling_type`,
+			type: GgufValueType.UINT32,
+			value: options.poolingType,
+		});
+	}
+	if (options.causal !== undefined) {
+		kvEntries.push({
+			key: `${arch}.attention.causal`,
+			type: GgufValueType.BOOL,
+			value: options.causal,
+		});
+	}
+
+	let kvTotalSize = 0;
+	for (const entry of kvEntries) {
+		kvTotalSize += 8 + entry.key.length + 4;
+		if (entry.type === GgufValueType.STRING) {
+			kvTotalSize += 8 + (entry.value as string).length;
+		} else if (
+			entry.type === GgufValueType.UINT32 ||
+			entry.type === GgufValueType.FLOAT32
+		) {
+			kvTotalSize += 4;
+		} else if (entry.type === GgufValueType.BOOL) {
+			kvTotalSize += 1;
+		} else if (entry.type === GgufValueType.ARRAY) {
+			const arr = entry.value as unknown[];
+			const firstVal = arr[0];
+			if (typeof firstVal === "string") {
+				kvTotalSize += 4 + 8;
+				for (const v of arr as string[]) kvTotalSize += 8 + v.length;
+			} else if (typeof firstVal === "number") {
+				kvTotalSize += 4 + 8;
+				kvTotalSize += arr.length * 4;
+			}
+		}
+	}
+
+	const tensorName = "output.weight";
+	const tensorInfoSize = 8 + tensorName.length + 4 + 8 + 4 + 8;
+	const totalSize = headerSize + kvTotalSize + tensorInfoSize + 64;
+	const buf = new ArrayBuffer(totalSize);
+	const view = new DataView(buf);
+	let offset = 0;
+
+	view.setUint32(offset, GGUF_MAGIC, true);
+	offset += 4;
+	view.setUint32(offset, GGUF_VERSION, true);
+	offset += 4;
+	view.setBigUint64(offset, BigInt(1), true);
+	offset += 8;
+	view.setBigUint64(offset, BigInt(kvEntries.length), true);
+	offset += 8;
+
+	for (const entry of kvEntries) {
+		if (entry.type === GgufValueType.STRING) {
+			offset = writeKvString(view, offset, entry.key, entry.value as string);
+		} else if (entry.type === GgufValueType.UINT32) {
+			offset = writeKvUint32(view, offset, entry.key, entry.value as number);
+		} else if (entry.type === GgufValueType.FLOAT32) {
+			offset = writeKvFloat32(view, offset, entry.key, entry.value as number);
+		} else if (entry.type === GgufValueType.BOOL) {
+			offset = writeKvBool(view, offset, entry.key, entry.value as boolean);
+		} else if (entry.type === GgufValueType.ARRAY) {
+			const arr = entry.value as unknown[];
+			const firstVal = arr[0];
+			if (typeof firstVal === "string") {
+				offset = writeKvStringArray(view, offset, entry.key, arr as string[]);
+			} else if (typeof firstVal === "number") {
+				if (entry.key.includes("scores")) {
+					offset = writeKvFloatArray(view, offset, entry.key, arr as number[]);
+				} else {
+					offset = writeKvIntArray(view, offset, entry.key, arr as number[]);
+				}
+			}
+		}
+	}
+
+	offset = writeString(view, offset, tensorName);
+	offset = writeUint32(view, offset, 1);
+	view.setBigUint64(offset, BigInt(6), true);
+	offset += 8;
+	offset = writeUint32(view, offset, 0);
+	view.setBigUint64(offset, BigInt(0), true);
+	offset += 8;
+
+	return buf.slice(0, offset);
+}
+
+describe("ModelLoader bert metadata extraction", () => {
+	test("pooling_type=1 maps to mean", () => {
+		const parsed = ModelLoader.parseModel(buildBertGguf({ poolingType: 1 }));
+		expect(parsed.hyperparams.architecture).toBe("bert");
+		expect(parsed.hyperparams.poolingType).toBe("mean");
+	});
+
+	test("pooling_type=2 maps to cls", () => {
+		const parsed = ModelLoader.parseModel(buildBertGguf({ poolingType: 2 }));
+		expect(parsed.hyperparams.poolingType).toBe("cls");
+	});
+
+	test("pooling_type=0 (NONE) falls back to cls", () => {
+		const parsed = ModelLoader.parseModel(buildBertGguf({ poolingType: 0 }));
+		expect(parsed.hyperparams.poolingType).toBe("cls");
+	});
+
+	test("missing pooling_type defaults to cls", () => {
+		const parsed = ModelLoader.parseModel(buildBertGguf({}));
+		expect(parsed.hyperparams.poolingType).toBe("cls");
+	});
+
+	test("attention.causal=false yields causalAttention=false", () => {
+		const parsed = ModelLoader.parseModel(buildBertGguf({ causal: false }));
+		expect(parsed.hyperparams.causalAttention).toBe(false);
+	});
+
+	test("attention.causal=true yields causalAttention=true", () => {
+		const parsed = ModelLoader.parseModel(buildBertGguf({ causal: true }));
+		expect(parsed.hyperparams.causalAttention).toBe(true);
+	});
+
+	test("missing attention.causal defaults to false", () => {
+		const parsed = ModelLoader.parseModel(buildBertGguf({}));
+		expect(parsed.hyperparams.causalAttention).toBe(false);
+	});
+
+	test("attention.layer_norm_epsilon flows into normEpsilon", () => {
+		const parsed = ModelLoader.parseModel(
+			buildBertGguf({ normEpsilon: 1e-12 }),
+		);
+		expect(parsed.hyperparams.normEpsilon).toBeCloseTo(1e-12, 14);
+	});
+
+	test("non-bert arch leaves poolingType and causalAttention undefined", () => {
+		const parsed = ModelLoader.parseModel(buildModelLoaderGguf());
+		expect(parsed.hyperparams.architecture).toBe("llama");
+		expect(parsed.hyperparams.poolingType).toBeUndefined();
+		expect(parsed.hyperparams.causalAttention).toBeUndefined();
+	});
+});
