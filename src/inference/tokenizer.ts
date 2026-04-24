@@ -66,6 +66,8 @@ export interface TokenizerConfig {
 	unkTokenId?: number;
 	/** BERT WordPiece: id of [MASK] (kept for future; not used in encode/decode). */
 	maskTokenId?: number;
+	/** Maximum token count for encode truncation (BERT-style). */
+	contextLength?: number;
 }
 
 export interface DecodeOptions {
@@ -193,6 +195,65 @@ const BPE_REGEX_PATTERNS: Record<string, string[]> = {
 	],
 };
 
+function wpNormalize(text: string): string {
+	// NFKD decomposition then strip combining marks (U+0300..U+036F) then lowercase.
+	const nf = text.normalize("NFKD");
+	let out = "";
+	for (const ch of nf) {
+		const code = ch.codePointAt(0) ?? 0;
+		if (code >= 0x0300 && code <= 0x036f) continue;
+		out += ch;
+	}
+	return out.toLowerCase();
+}
+
+function wpIsCjk(cp: number): boolean {
+	return (
+		(cp >= 0x4e00 && cp <= 0x9fff) ||
+		(cp >= 0x3400 && cp <= 0x4dbf) ||
+		(cp >= 0x20000 && cp <= 0x2a6df) ||
+		(cp >= 0x2a700 && cp <= 0x2b73f) ||
+		(cp >= 0x2b740 && cp <= 0x2b81f) ||
+		(cp >= 0x2b820 && cp <= 0x2ceaf) ||
+		(cp >= 0xf900 && cp <= 0xfaff) ||
+		(cp >= 0x2f800 && cp <= 0x2fa1f)
+	);
+}
+
+function wpIsPunctuation(cp: number): boolean {
+	if (
+		(cp >= 33 && cp <= 47) ||
+		(cp >= 58 && cp <= 64) ||
+		(cp >= 91 && cp <= 96) ||
+		(cp >= 123 && cp <= 126)
+	) {
+		return true;
+	}
+	return /\p{P}/u.test(String.fromCodePoint(cp));
+}
+
+function wpIsWhitespace(cp: number): boolean {
+	if (cp === 32 || cp === 9 || cp === 10 || cp === 13) return true;
+	return /\s/.test(String.fromCodePoint(cp));
+}
+
+/** Basic tokenize: return whitespace-separated chunks with punctuation/CJK split. */
+export function wpBasicTokenize(text: string): string[] {
+	const norm = wpNormalize(text);
+	let out = "";
+	for (const ch of norm) {
+		const cp = ch.codePointAt(0) ?? 0;
+		if (wpIsWhitespace(cp)) {
+			out += " ";
+		} else if (wpIsCjk(cp) || wpIsPunctuation(cp)) {
+			out += ` ${ch} `;
+		} else {
+			out += ch;
+		}
+	}
+	return out.split(/\s+/).filter((s) => s.length > 0);
+}
+
 function preTokenize(text: string, preTokenizer?: string): string[] {
 	const patternStrings =
 		(preTokenizer && BPE_REGEX_PATTERNS[preTokenizer]) ??
@@ -284,6 +345,8 @@ export class Tokenizer {
 				return this.encodeBpe(text);
 			case TokenizerType.SPM:
 				return this.encodeSpm(text);
+			case TokenizerType.WORDPIECE:
+				return this.encodeWordPiece(text);
 			default:
 				return this.encodeBpe(text);
 		}
@@ -457,9 +520,42 @@ export class Tokenizer {
 				return this.encodeBpe(text);
 			case TokenizerType.SPM:
 				return this.encodeSpm(text);
+			case TokenizerType.WORDPIECE:
+				return this.encodeWordPiece(text);
 			default:
 				return this.encodeBpe(text);
 		}
+	}
+
+	private encodeWordPiece(text: string): number[] {
+		const cfg = this.config;
+		const unkId = cfg.unkTokenId ?? 0;
+		const clsId = cfg.clsTokenId ?? 2;
+		const sepId = cfg.sepTokenId ?? 3;
+
+		// Build a vocab-lookup Map once per call. (Subword fallback is added in Task 4;
+		// here a chunk only matches if the whole chunk is present in the vocab.)
+		const vocab = new Map<string, number>();
+		for (let i = 0; i < cfg.tokens.length; i++) {
+			vocab.set(cfg.tokens[i].text, i);
+		}
+
+		const chunks = wpBasicTokenize(text);
+		const ids: number[] = [clsId];
+
+		for (const chunk of chunks) {
+			const whole = vocab.get(chunk);
+			if (whole !== undefined) {
+				ids.push(whole);
+			} else {
+				// Subword fallback is implemented in Task 4. For now, any chunk
+				// not present as a whole token emits UNK.
+				ids.push(unkId);
+			}
+		}
+
+		ids.push(sepId);
+		return ids;
 	}
 
 	/**

@@ -31,6 +31,7 @@ export class ModelLoader {
 		const tokenizerConfig = ModelLoader.buildTokenizerConfig(ctx);
 		// Fill vocabularySize from tokenizer config now that we know it
 		hyperparams.vocabularySize = tokenizerConfig.vocabSize;
+		tokenizerConfig.contextLength = hyperparams.contextLength;
 		const kvCacheConfig = ModelLoader.buildKvCacheConfig(hyperparams);
 		return { hyperparams, tokenizerConfig, kvCacheConfig };
 	}
