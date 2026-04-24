@@ -19,6 +19,7 @@ import {
 } from "../src/evaluation/system-profile.ts";
 import { openLiveDb } from "./live-db.ts";
 import type { SmokeRunRecord } from "./smoke-runs.ts";
+import { loadEvalSeries } from "./live-db.ts";
 
 const DEFAULT_PORT = 8033;
 const DEFAULT_HOST = "0.0.0.0";
@@ -362,6 +363,11 @@ export function createLiveServer(options: ServerOptions) {
 
 			if (url.pathname === "/evals" && req.method === "GET") {
 				return jsonResponse({ evals: store.completedEvals() });
+			}
+
+			if (url.pathname === "/evals/series" && req.method === "GET") {
+				if (!db) return jsonResponse({ series: [] });
+				return jsonResponse({ series: loadEvalSeries(db) });
 			}
 
 			// ── System profile registry ────────────────────────────────

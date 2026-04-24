@@ -1,3 +1,5 @@
+import { buildTempSweepChartData, tempBucket } from "./dashboard-charts.js";
+
 // ── state ────────────────────────────────────────────────────────
 const state = {
 	runsByRunId: new Map(),
@@ -9,6 +11,8 @@ const state = {
 	textFilter: "",
 	selected: new Set(),
 	freshRunIds: new Set(),
+	freshEvalIds: new Set(),
+	freshBarKeys: new Set(),
 	// Evals
 	evalsByEvalId: new Map(),
 	runningEvalsByEvalId: new Map(),
@@ -16,6 +20,11 @@ const state = {
 	evalSortDir: "desc",
 	// System profiles
 	systemProfilesById: new Map(),
+	// Dim-card bar animation: remember which model cards we've already
+	// rendered so only freshly-added cards animate from 0 to value.
+	renderedDimModels: new Set(),
+	// Historical eval series for score-over-time chart (fetched from server).
+	evalSeries: [],
 };
 
 // ── SSE connection ────────────────────────────────────────────────
@@ -82,6 +91,9 @@ function handleEvent(ev) {
 				state.runningByRunId.clear();
 				state.runningEvalsByEvalId.clear();
 				state.failedByRunId.clear();
+				// Pre-seed "rendered" tracking so the initial snapshot paints
+				// without flashing/animating every existing card+row.
+				state.renderedDimModels.clear();
 				render();
 				return;
 			case "run_started":
@@ -95,6 +107,7 @@ function handleEvent(ev) {
 				state.failedByRunId.delete(evt.payload.runId);
 				state.runsByRunId.set(evt.payload.runId, evt.payload);
 				flashFresh(evt.payload.runId);
+				flashFreshBar(evt.payload.profile ?? evt.payload.model);
 				render();
 				break;
 			case "run_failed":
@@ -132,6 +145,7 @@ function handleEvent(ev) {
 				if (typeof evt.seq === "number") lastSeq = Math.max(lastSeq, evt.seq);
 				state.runningEvalsByEvalId.delete(evt.payload.evalId);
 				state.evalsByEvalId.set(evt.payload.evalId, evt.payload);
+				flashFreshEval(evt.payload.evalId);
 				renderRunning();
 				renderEvals();
 				break;
@@ -149,6 +163,9 @@ function handleEvent(ev) {
 				state.evalsByEvalId.clear();
 				state.runningEvalsByEvalId.clear();
 				state.selected.clear();
+				state.renderedDimModels.clear();
+				state.evalSeries = [];
+				seriesLoaded = false;
 				render();
 				break;
 		}
@@ -167,6 +184,12 @@ function animateBars(scope) {
 	const root = scope ?? document;
 	const bars = root.querySelectorAll("[data-width]");
 	if (bars.length === 0) return;
+	// For freshly-inserted bars, the "width:0%" starting state and the
+	// target width can coalesce into one paint — the browser never registers
+	// the 0% origin, so the CSS transition has no delta to animate. Force a
+	// layout read on each bar to commit the starting width, then flip to
+	// target on the next frame.
+	for (const el of bars) void el.offsetWidth;
 	requestAnimationFrame(() => {
 		for (const el of bars) {
 			const w = el.getAttribute("data-width");
@@ -200,11 +223,47 @@ function flashFresh(runId) {
 	}, 1800);
 }
 
+function flashFreshEval(evalId) {
+	state.freshEvalIds.add(evalId);
+	setTimeout(() => {
+		state.freshEvalIds.delete(evalId);
+		const tr = document.querySelector(`tr[data-eval-id="${evalId}"]`);
+		tr?.classList.remove("fresh");
+	}, 1800);
+}
+
+function flashFreshBar(key) {
+	if (!key) return;
+	state.freshBarKeys.add(key);
+	setTimeout(() => {
+		state.freshBarKeys.delete(key);
+		const el = document.querySelector(
+			`.bar-row[data-key="${cssEscape(key)}"]`,
+		);
+		el?.classList.remove("fresh");
+	}, 1800);
+}
+
+// Minimal CSS.escape fallback (older browsers/test envs lack it).
+function cssEscape(value) {
+	if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+		return CSS.escape(value);
+	}
+	return String(value).replace(/["\\]/g, "\\$&");
+}
+
 // ── rendering ────────────────────────────────────────────────────
 
 function render() {
 	renderRunning();
 	renderChart();
+	renderToolChart();
+	renderScatterChart();
+	renderDimGroupedChart();
+	renderTempSweepChart();
+	renderThinkingDeltaChart();
+	renderTtftChart();
+	renderFinishChart();
 	renderTable();
 	renderCompareButton();
 	renderEvals();
@@ -219,12 +278,31 @@ function renderRunning() {
 		host.textContent = "nothing running";
 		return;
 	}
+	if (host.classList.contains("empty")) {
+		host.textContent = "";
+	}
 	host.className = "running-list";
-	host.innerHTML = "";
+
+	// Diff existing items by key so we can mutate individual fields
+	// (progress bar width, label text) without tearing the DOM down —
+	// that's what makes the bar animate smoothly task-to-task.
+	const existing = new Map();
+	for (const el of host.querySelectorAll(".running-item[data-key]")) {
+		existing.set(el.dataset.key, el);
+	}
+	const seen = new Set();
+
 	for (const item of speedRuns) {
-		const el = document.createElement("div");
-		el.className = "running-item";
+		const key = `speed:${item.runId}`;
+		seen.add(key);
 		const label = item.profile ?? item.model;
+		let el = existing.get(key);
+		if (!el) {
+			el = document.createElement("div");
+			el.className = "running-item";
+			el.dataset.key = key;
+			host.appendChild(el);
+		}
 		el.innerHTML = `
 			<span class="spinner"></span>
 			<span class="pill phase">speed</span>
@@ -233,72 +311,887 @@ function renderRunning() {
 			<span class="pill ${item.thinking === "on" ? "think-on" : ""}">${item.thinking}</span>
 			<span class="dim">${escapeHtml(item.prompt)}</span>
 		`;
-		host.appendChild(el);
 	}
+
 	for (const item of evalRuns) {
-		const el = document.createElement("div");
-		el.className = "running-item";
+		const key = `eval:${item.evalId}`;
+		seen.add(key);
 		const label = item.label ?? item.modelId;
 		const completed = item.completedTasks ?? 0;
 		const total = item.totalTasks ?? 0;
 		const passed = item.passedTasks ?? 0;
-		el.innerHTML = `
-			<span class="spinner"></span>
-			<span class="pill phase accuracy">accuracy</span>
-			<strong>${escapeHtml(label)}</strong>
-			<span class="dim">${escapeHtml(item.modelId)}</span>
-			<span class="dim">${completed}/${total} tasks (${passed} passing)</span>
-		`;
-		host.appendChild(el);
+		const pct = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
+		let el = existing.get(key);
+		if (!el) {
+			el = document.createElement("div");
+			el.className = "running-item";
+			el.dataset.key = key;
+			el.innerHTML = `
+				<span class="spinner"></span>
+				<span class="pill phase accuracy">accuracy</span>
+				<strong class="eval-label"></strong>
+				<span class="dim eval-model"></span>
+				<div class="eval-progress" role="progressbar" aria-valuemin="0">
+					<div class="eval-progress-fill" style="width:0%"></div>
+					<div class="eval-progress-label"></div>
+				</div>
+				<span class="dim eval-passing"></span>
+			`;
+			host.appendChild(el);
+		}
+		el.querySelector(".eval-label").textContent = label;
+		el.querySelector(".eval-model").textContent = item.modelId;
+		const progress = el.querySelector(".eval-progress");
+		progress.setAttribute("aria-valuemax", String(total));
+		progress.setAttribute("aria-valuenow", String(completed));
+		el.querySelector(".eval-progress-fill").style.width = `${pct.toFixed(2)}%`;
+		el.querySelector(".eval-progress-label").textContent = `${completed}/${total}`;
+		el.querySelector(".eval-passing").textContent = `${passed} passing`;
+	}
+
+	// Drop items that have stopped running since last render.
+	for (const [key, el] of existing) {
+		if (!seen.has(key)) el.remove();
 	}
 }
 
+// ── Chart.js integration ─────────────────────────────────────────────
+// Chart instances are module-local so renders update in place (keeps
+// animations smooth and avoids leaking canvas listeners on refresh).
+let speedChartInstance = null;
+let toolChartInstance = null;
+let scatterChartInstance = null;
+let dimGroupedChartInstance = null;
+let tempSweepChartInstance = null;
+let thinkingDeltaChartInstance = null;
+let ttftChartInstance = null;
+let finishChartInstance = null;
+let seriesChartInstance = null;
+
+// Pulled from dashboard.css so Chart.js datasets match the legend chips.
+const CHART_COLORS = {
+	blue: "#58a6ff",
+	purple: "#bc8cff",
+	green: "#3fb950",
+	yellow: "#d29922",
+	red: "#f85149",
+	text: "#c9d1d9",
+	muted: "#8b949e",
+	grid: "rgba(139, 148, 158, 0.15)",
+};
+
+function baseChartOptions({ xTitle, tooltipLabel } = {}) {
+	return {
+		indexAxis: "y",
+		responsive: true,
+		maintainAspectRatio: false,
+		animation: { duration: 400 },
+		layout: { padding: { left: 6, right: 16, top: 4, bottom: 4 } },
+		scales: {
+			x: {
+				beginAtZero: true,
+				ticks: { color: CHART_COLORS.muted, font: { size: 11 } },
+				grid: { color: CHART_COLORS.grid, drawBorder: false },
+				title: xTitle
+					? { display: true, text: xTitle, color: CHART_COLORS.muted }
+					: undefined,
+			},
+			y: {
+				ticks: { color: CHART_COLORS.muted, font: { size: 11 } },
+				grid: { display: false, drawBorder: false },
+			},
+		},
+		plugins: {
+			legend: { display: false },
+			tooltip: {
+				backgroundColor: "#161b22",
+				titleColor: CHART_COLORS.text,
+				bodyColor: CHART_COLORS.text,
+				borderColor: "#30363d",
+				borderWidth: 1,
+				callbacks: tooltipLabel ? { label: tooltipLabel } : undefined,
+			},
+		},
+	};
+}
+
+// Each bar row needs vertical space; chart-host height scales with count
+// so 14-row charts don't cram rows together at a default 360px canvas.
+function sizeChartHost(canvas, rowCount) {
+	const host = canvas.parentElement;
+	if (!host) return;
+	const rowHeight = 30;
+	const padding = 60;
+	host.style.height = `${Math.max(180, rowCount * rowHeight + padding)}px`;
+}
+
 function renderChart() {
-	const host = document.getElementById("chart");
+	const canvas = document.getElementById("chart");
+	const empty = document.getElementById("chart-empty");
+	if (!canvas) return;
+
 	const runs = Array.from(state.runsByRunId.values());
 	if (runs.length === 0) {
-		host.innerHTML = `<div class="bar-empty">no runs yet</div>`;
+		if (empty) empty.hidden = false;
+		canvas.hidden = true;
+		if (speedChartInstance) {
+			speedChartInstance.destroy();
+			speedChartInstance = null;
+		}
 		return;
 	}
-	// latest per (profile || model) for oneShot and interactive
+	if (empty) empty.hidden = true;
+	canvas.hidden = false;
+
+	// Latest per (profile || model).
 	const latestByKey = new Map();
 	for (const run of runs) {
 		const key = run.profile ?? run.model;
 		const prev = latestByKey.get(key);
 		if (!prev || prev.timestamp < run.timestamp) latestByKey.set(key, run);
 	}
-	const rows = Array.from(latestByKey.entries());
-	const maxVal = Math.max(
-		1,
-		...rows.flatMap(([, r]) => [
-			r.oneShot?.tokensPerSecond ?? 0,
-			r.interactive?.tokensPerSecond ?? 0,
-		]),
-	);
-	rows.sort(
-		(a, b) =>
-			(b[1].oneShot?.tokensPerSecond ?? 0) -
-			(a[1].oneShot?.tokensPerSecond ?? 0),
-	);
-	host.innerHTML = "";
-	for (const [label, run] of rows) {
-		const row = document.createElement("div");
-		row.className = "bar-row";
-		const oneShot = run.oneShot?.tokensPerSecond ?? 0;
-		const interactive = run.interactive?.tokensPerSecond ?? 0;
-		const oneShotPct = (oneShot / maxVal) * 100;
-		const interactivePct = (interactive / maxVal) * 100;
-		row.innerHTML = `
-			<div class="bar-label" title="${escapeHtml(label)}">${escapeHtml(label)}</div>
-			<div class="bar-stack">
-				<div class="bar"><div class="bar-fill" style="width:0%" data-width="${oneShotPct}"></div></div>
-				<div class="bar interactive"><div class="bar-fill" style="width:0%" data-width="${interactivePct}"></div></div>
-			</div>
-			<div class="bar-value">${oneShot.toFixed(1)}/${interactive.toFixed(1)}</div>
-		`;
-		host.appendChild(row);
+	const rows = Array.from(latestByKey.entries()).map(([label, run]) => ({
+		label,
+		oneShot: run.oneShot?.tokensPerSecond ?? 0,
+		interactive: run.interactive?.tokensPerSecond ?? 0,
+	}));
+	rows.sort((a, b) => b.oneShot - a.oneShot);
+
+	const labels = rows.map((r) => r.label);
+	const oneShotData = rows.map((r) => r.oneShot);
+	const interactiveData = rows.map((r) => r.interactive);
+
+	if (!speedChartInstance) {
+		speedChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: {
+				labels,
+				datasets: [
+					{
+						label: "one-shot",
+						data: oneShotData,
+						backgroundColor: CHART_COLORS.blue,
+						borderRadius: 3,
+						barPercentage: 0.45,
+						categoryPercentage: 0.9,
+					},
+					{
+						label: "interactive",
+						data: interactiveData,
+						backgroundColor: CHART_COLORS.purple,
+						borderRadius: 3,
+						barPercentage: 0.45,
+						categoryPercentage: 0.9,
+					},
+				],
+			},
+			options: baseChartOptions({
+				xTitle: "tokens / sec",
+				tooltipLabel: (ctx) =>
+					`${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)} tok/s`,
+			}),
+		});
+	} else {
+		speedChartInstance.data.labels = labels;
+		speedChartInstance.data.datasets[0].data = oneShotData;
+		speedChartInstance.data.datasets[1].data = interactiveData;
+		speedChartInstance.update();
 	}
-	animateBars(host);
+	sizeChartHost(canvas, labels.length);
+}
+
+/**
+ * Tool-calling accuracy by profile. Two bars per profile (pass rate vs.
+ * mean score), sorted by pass rate, latest eval per (profile || model)
+ * wins. They diverge when partial-credit scoring kicks in.
+ */
+function renderToolChart() {
+	const canvas = document.getElementById("tool-chart");
+	const host = document.getElementById("tool-host");
+	const empty = document.getElementById("tool-empty");
+	if (!canvas) return;
+
+	// Collect latest eval per key that has a tool-calling dim.
+	const latestByKey = new Map();
+	for (const ev of state.evalsByEvalId.values()) {
+		const tc = ev.dimensions?.["tool-calling"];
+		if (!tc || !tc.total) continue;
+		const key = ev.profile ?? ev.modelId;
+		const prev = latestByKey.get(key);
+		if (!prev || prev.timestamp < ev.timestamp) latestByKey.set(key, ev);
+	}
+
+	if (latestByKey.size === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (toolChartInstance) {
+			toolChartInstance.destroy();
+			toolChartInstance = null;
+		}
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	const rows = Array.from(latestByKey.entries()).map(([key, ev]) => {
+		const tc = ev.dimensions["tool-calling"];
+		const passRate = tc.total > 0 ? tc.passed / tc.total : 0;
+		const meanScore = tc.score ?? 0;
+		return {
+			key,
+			passPct: Math.round(passRate * 100),
+			scorePct: Math.round(meanScore * 100),
+			passed: tc.passed,
+			total: tc.total,
+		};
+	});
+	rows.sort((a, b) => b.passPct - a.passPct || b.scorePct - a.scorePct);
+
+	const labels = rows.map((r) => r.key);
+	const passData = rows.map((r) => r.passPct);
+	const scoreData = rows.map((r) => r.scorePct);
+	const tooltipExtras = rows.map((r) => `${r.passed}/${r.total}`);
+
+	if (!toolChartInstance) {
+		toolChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: {
+				labels,
+				datasets: [
+					{
+						label: "pass rate",
+						data: passData,
+						backgroundColor: CHART_COLORS.green,
+						borderRadius: 3,
+						barPercentage: 0.45,
+						categoryPercentage: 0.9,
+					},
+					{
+						label: "mean score",
+						data: scoreData,
+						backgroundColor: CHART_COLORS.yellow,
+						borderRadius: 3,
+						barPercentage: 0.45,
+						categoryPercentage: 0.9,
+					},
+				],
+			},
+			options: baseChartOptions({
+				xTitle: "% (0–100)",
+				tooltipLabel: (ctx) => {
+					const extra =
+						ctx.dataset.label === "pass rate"
+							? ` (${ctx.chart.$toolExtras?.[ctx.dataIndex] ?? ""})`
+							: "";
+					return `${ctx.dataset.label}: ${ctx.parsed.x}%${extra}`;
+				},
+			}),
+		});
+	} else {
+		toolChartInstance.data.labels = labels;
+		toolChartInstance.data.datasets[0].data = passData;
+		toolChartInstance.data.datasets[1].data = scoreData;
+		toolChartInstance.update();
+	}
+	// Stash per-row pass count so the tooltip can show "6/12" alongside
+	// the percentage without re-looking-up the source eval.
+	toolChartInstance.$toolExtras = tooltipExtras;
+	// Force tooltip to see the same x axis (0–100 pct) even if the
+	// underlying scales config was inherited from baseChartOptions.
+	if (toolChartInstance.options.scales?.x) {
+		toolChartInstance.options.scales.x.max = 100;
+	}
+	sizeChartHost(canvas, labels.length);
+}
+
+// ── 13. Accuracy × Speed scatter ────────────────────────────────────
+
+function renderScatterChart() {
+	const canvas = document.getElementById("scatter-chart");
+	const host = document.getElementById("scatter-host");
+	const empty = document.getElementById("scatter-empty");
+	if (!canvas) return;
+
+	// Join speed runs (latest per key) with evals (latest per key).
+	const runByKey = new Map();
+	for (const run of state.runsByRunId.values()) {
+		const key = run.profile ?? run.model;
+		const prev = runByKey.get(key);
+		if (!prev || prev.timestamp < run.timestamp) runByKey.set(key, run);
+	}
+	const evalByKey = new Map();
+	for (const ev of state.evalsByEvalId.values()) {
+		const key = ev.profile ?? ev.modelId;
+		const prev = evalByKey.get(key);
+		if (!prev || prev.timestamp < ev.timestamp) evalByKey.set(key, ev);
+	}
+
+	const points = [];
+	for (const [key, run] of runByKey) {
+		const ev = evalByKey.get(key);
+		if (!ev) continue;
+		const avgTps = ((run.oneShot?.tokensPerSecond ?? 0) + (run.interactive?.tokensPerSecond ?? 0)) / 2;
+		if (avgTps === 0) continue;
+		points.push({
+			x: avgTps,
+			y: Math.round((ev.overall ?? 0) * 100),
+			label: key,
+			think: ev.thinking ?? "off",
+		});
+	}
+
+	if (points.length === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (scatterChartInstance) { scatterChartInstance.destroy(); scatterChartInstance = null; }
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	const data = {
+		datasets: [{
+			label: "profile",
+			data: points,
+			backgroundColor: CHART_COLORS.blue,
+			pointRadius: 6,
+			pointHoverRadius: 8,
+		}],
+	};
+
+	const options = {
+		responsive: true,
+		maintainAspectRatio: false,
+		animation: { duration: 400 },
+		scales: {
+			x: {
+				title: { display: true, text: "avg tokens/sec", color: CHART_COLORS.muted },
+				ticks: { color: CHART_COLORS.muted },
+				grid: { color: CHART_COLORS.grid },
+			},
+			y: {
+				title: { display: true, text: "overall accuracy %", color: CHART_COLORS.muted },
+				min: 0, max: 100,
+				ticks: { color: CHART_COLORS.muted },
+				grid: { color: CHART_COLORS.grid },
+			},
+		},
+		plugins: {
+			legend: { display: false },
+			tooltip: {
+				backgroundColor: "#161b22",
+				titleColor: CHART_COLORS.text,
+				bodyColor: CHART_COLORS.text,
+				borderColor: "#30363d",
+				borderWidth: 1,
+				callbacks: {
+					label: (ctx) => {
+						const p = ctx.raw;
+						return `${p.label}: ${p.x.toFixed(1)} tok/s · ${p.y}% accuracy (think ${p.think})`;
+					},
+				},
+			},
+		},
+	};
+
+	if (!scatterChartInstance) {
+		scatterChartInstance = new Chart(canvas.getContext("2d"), { type: "scatter", data, options });
+	} else {
+		scatterChartInstance.data = data;
+		scatterChartInstance.update();
+	}
+}
+
+// ── 14. Per-dimension grouped bars ──────────────────────────────────
+
+function renderDimGroupedChart() {
+	const canvas = document.getElementById("dim-grouped-chart");
+	const host = document.getElementById("dim-grouped-host");
+	const empty = document.getElementById("dim-grouped-empty");
+	if (!canvas) return;
+
+	// Latest cold eval per model.
+	const latestColdByModel = new Map();
+	for (const ev of state.evalsByEvalId.values()) {
+		const t = ev.params?.temperature;
+		const bucket = tempBucket(t);
+		// Use cold profiles only (or unspecified temp treated as cold).
+		if (bucket !== null && bucket !== "cold") continue;
+		const prev = latestColdByModel.get(ev.modelId);
+		if (!prev || prev.timestamp < ev.timestamp) latestColdByModel.set(ev.modelId, ev);
+	}
+
+	if (latestColdByModel.size === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (dimGroupedChartInstance) { dimGroupedChartInstance.destroy(); dimGroupedChartInstance = null; }
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	const dimNames = ["tool-calling", "reasoning", "instruction-following", "semantic-reasoning"];
+	const dimColors = [CHART_COLORS.green, CHART_COLORS.blue, CHART_COLORS.purple, CHART_COLORS.yellow];
+	const models = Array.from(latestColdByModel.keys());
+	const labels = models;
+
+	const datasets = dimNames.map((dim, i) => ({
+		label: dim,
+		data: models.map((m) => {
+			const ev = latestColdByModel.get(m);
+			const ds = ev?.dimensions?.[dim];
+			return ds ? Math.round((ds.score ?? 0) * 100) : 0;
+		}),
+		backgroundColor: dimColors[i],
+		borderRadius: 3,
+		barPercentage: 0.7,
+		categoryPercentage: 0.85,
+	}));
+
+	if (!dimGroupedChartInstance) {
+		dimGroupedChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: { labels, datasets },
+			options: {
+				...baseChartOptions({ xTitle: "% score" }),
+				plugins: {
+					legend: {
+						display: true,
+						position: "top",
+						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+					},
+					tooltip: {
+						backgroundColor: "#161b22",
+						titleColor: CHART_COLORS.text,
+						bodyColor: CHART_COLORS.text,
+						borderColor: "#30363d",
+						borderWidth: 1,
+					},
+				},
+			},
+		});
+	} else {
+		dimGroupedChartInstance.data.labels = labels;
+		dimGroupedChartInstance.data.datasets = datasets;
+		dimGroupedChartInstance.update();
+	}
+	sizeChartHost(canvas, labels.length);
+}
+
+function renderTempSweepChart() {
+	const canvas = document.getElementById("temp-sweep-chart");
+	const host = document.getElementById("temp-sweep-host");
+	const empty = document.getElementById("temp-sweep-empty");
+	if (!canvas) return;
+
+	const data = buildTempSweepChartData(state.evalsByEvalId.values());
+	if (data.labels.length === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (tempSweepChartInstance) { tempSweepChartInstance.destroy(); tempSweepChartInstance = null; }
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	if (!tempSweepChartInstance) {
+		tempSweepChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data,
+			options: {
+				...baseChartOptions({ xTitle: "% score" }),
+				plugins: {
+					legend: {
+						display: true,
+						position: "top",
+						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+					},
+					tooltip: {
+						backgroundColor: "#161b22",
+						titleColor: CHART_COLORS.text,
+						bodyColor: CHART_COLORS.text,
+						borderColor: "#30363d",
+						borderWidth: 1,
+					},
+				},
+			},
+		});
+	} else {
+		tempSweepChartInstance.data.labels = data.labels;
+		tempSweepChartInstance.data.datasets = data.datasets;
+		tempSweepChartInstance.update();
+	}
+	sizeChartHost(canvas, data.labels.length);
+}
+
+// ── 16. Thinking ON vs OFF delta (Qwen) ─────────────────────────────
+
+function renderThinkingDeltaChart() {
+	const canvas = document.getElementById("thinking-delta-chart");
+	const host = document.getElementById("thinking-delta-host");
+	const empty = document.getElementById("thinking-delta-empty");
+	if (!canvas) return;
+
+	// Group Qwen evals by (modelId, temperature) and split thinking on/off.
+	const pairs = new Map();
+	for (const ev of state.evalsByEvalId.values()) {
+		if (!ev.modelId.toLowerCase().includes("qwen")) continue;
+		const t = ev.params?.temperature ?? 0;
+		const roundedT = Math.round(t * 10) / 10;
+		const thinkKey = ev.thinking === "on" ? "on" : "off";
+		const k = `${ev.modelId}::${roundedT}`;
+		if (!pairs.has(k)) pairs.set(k, { model: ev.modelId, temp: roundedT, dims: {} });
+		const pair = pairs.get(k);
+		for (const [dim, ds] of Object.entries(ev.dimensions ?? {})) {
+			if (!pair.dims[dim]) pair.dims[dim] = {};
+			const prev = pair.dims[dim][thinkKey];
+			if (!prev || prev.ts < ev.timestamp) {
+				pair.dims[dim][thinkKey] = { score: Math.round((ds.score ?? 0) * 100), ts: ev.timestamp };
+			}
+		}
+	}
+
+	// Only include pairs that have both on and off.
+	const matched = Array.from(pairs.values()).filter((p) => {
+		return Object.values(p.dims).some((d) => d.on && d.off);
+	});
+	if (matched.length === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (thinkingDeltaChartInstance) { thinkingDeltaChartInstance.destroy(); thinkingDeltaChartInstance = null; }
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	// Flatten to one row per (model, temp, dimension).
+	const rows = [];
+	for (const p of matched) {
+		for (const [dim, d] of Object.entries(p.dims)) {
+			if (d.on && d.off) rows.push({ label: `${p.model} · t=${p.temp} · ${dim}`, off: d.off.score, on: d.on.score });
+		}
+	}
+	rows.sort((a, b) => b.on - a.on);
+
+	const labels = rows.map((r) => r.label);
+	const datasets = [
+		{
+			label: "thinking OFF",
+			data: rows.map((r) => r.off),
+			backgroundColor: CHART_COLORS.blue,
+			borderRadius: 3,
+			barPercentage: 0.45,
+			categoryPercentage: 0.9,
+		},
+		{
+			label: "thinking ON",
+			data: rows.map((r) => r.on),
+			backgroundColor: CHART_COLORS.purple,
+			borderRadius: 3,
+			barPercentage: 0.45,
+			categoryPercentage: 0.9,
+		},
+	];
+
+	if (!thinkingDeltaChartInstance) {
+		thinkingDeltaChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: { labels, datasets },
+			options: {
+				...baseChartOptions({ xTitle: "% score" }),
+				plugins: {
+					legend: {
+						display: true,
+						position: "top",
+						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+					},
+					tooltip: {
+						backgroundColor: "#161b22",
+						titleColor: CHART_COLORS.text,
+						bodyColor: CHART_COLORS.text,
+						borderColor: "#30363d",
+						borderWidth: 1,
+					},
+				},
+			},
+		});
+	} else {
+		thinkingDeltaChartInstance.data.labels = labels;
+		thinkingDeltaChartInstance.data.datasets = datasets;
+		thinkingDeltaChartInstance.update();
+	}
+	sizeChartHost(canvas, labels.length);
+}
+
+// ── 17. Time-to-first-token (prefill) ───────────────────────────────
+
+function renderTtftChart() {
+	const canvas = document.getElementById("ttft-chart");
+	const empty = document.getElementById("ttft-empty");
+	if (!canvas) return;
+
+	const runs = Array.from(state.runsByRunId.values());
+	const latestByKey = new Map();
+	for (const run of runs) {
+		const key = run.profile ?? run.model;
+		const prev = latestByKey.get(key);
+		if (!prev || prev.timestamp < run.timestamp) latestByKey.set(key, run);
+	}
+	const rows = Array.from(latestByKey.entries())
+		.map(([label, run]) => ({ label, ms: run.oneShot?.prefillMs }))
+		.filter((r) => typeof r.ms === "number" && r.ms > 0);
+
+	if (rows.length === 0) {
+		if (empty) empty.hidden = false;
+		canvas.hidden = true;
+		if (ttftChartInstance) { ttftChartInstance.destroy(); ttftChartInstance = null; }
+		return;
+	}
+	if (empty) empty.hidden = true;
+	canvas.hidden = false;
+
+	rows.sort((a, b) => a.ms - b.ms);
+	const labels = rows.map((r) => r.label);
+	const data = rows.map((r) => r.ms);
+
+	if (!ttftChartInstance) {
+		ttftChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: {
+				labels,
+				datasets: [{
+					label: "prefill ms",
+					data,
+					backgroundColor: CHART_COLORS.blue,
+					borderRadius: 3,
+					barPercentage: 0.6,
+					categoryPercentage: 0.9,
+				}],
+			},
+			options: baseChartOptions({
+				xTitle: "ms",
+				tooltipLabel: (ctx) => `${ctx.parsed.x.toFixed(0)} ms prefill`,
+			}),
+		});
+	} else {
+		ttftChartInstance.data.labels = labels;
+		ttftChartInstance.data.datasets[0].data = data;
+		ttftChartInstance.update();
+	}
+	sizeChartHost(canvas, labels.length);
+}
+
+// ── 18. Finish reason breakdown ─────────────────────────────────────
+
+function renderFinishChart() {
+	const canvas = document.getElementById("finish-chart");
+	const empty = document.getElementById("finish-empty");
+	if (!canvas) return;
+
+	const runs = Array.from(state.runsByRunId.values());
+	const latestByKey = new Map();
+	for (const run of runs) {
+		const key = run.profile ?? run.model;
+		const prev = latestByKey.get(key);
+		if (!prev || prev.timestamp < run.timestamp) latestByKey.set(key, run);
+	}
+
+	// For each profile, count finish reasons across all runs (not just latest).
+	const profileReasons = new Map();
+	for (const run of runs) {
+		const key = run.profile ?? run.model;
+		if (!profileReasons.has(key)) profileReasons.set(key, {});
+		const reasons = profileReasons.get(key);
+		const reason = run.oneShot?.finishReason ?? "unknown";
+		reasons[reason] = (reasons[reason] ?? 0) + 1;
+	}
+
+	const rows = Array.from(profileReasons.entries())
+		.filter(([, reasons]) => Object.keys(reasons).length > 0);
+
+	if (rows.length === 0) {
+		if (empty) empty.hidden = false;
+		canvas.hidden = true;
+		if (finishChartInstance) { finishChartInstance.destroy(); finishChartInstance = null; }
+		return;
+	}
+	if (empty) empty.hidden = true;
+	canvas.hidden = false;
+
+	// Collect all unique reason labels.
+	const allReasons = new Set();
+	for (const [, reasons] of rows) {
+		for (const r of Object.keys(reasons)) allReasons.add(r);
+	}
+	const reasonList = Array.from(allReasons).sort();
+
+	const reasonColors = {
+		eos: CHART_COLORS.green,
+		"stop-token": CHART_COLORS.blue,
+		"max-tokens": CHART_COLORS.yellow,
+		error: CHART_COLORS.red,
+		unknown: "#6e7681",
+	};
+
+	const labels = rows.map(([key]) => key);
+	const datasets = reasonList.map((reason) => ({
+		label: reason,
+		data: rows.map(([, reasons]) => reasons[reason] ?? 0),
+		backgroundColor: reasonColors[reason] ?? CHART_COLORS.muted,
+		borderRadius: 2,
+		barPercentage: 0.9,
+	}));
+
+	if (!finishChartInstance) {
+		finishChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: { labels, datasets },
+			options: {
+				...baseChartOptions({ xTitle: "count" }),
+				indexAxis: "y",
+				scales: {
+					x: {
+						stacked: true,
+						beginAtZero: true,
+						ticks: { color: CHART_COLORS.muted, stepSize: 1 },
+						grid: { color: CHART_COLORS.grid },
+						title: { display: true, text: "count", color: CHART_COLORS.muted },
+					},
+					y: {
+						stacked: true,
+						ticks: { color: CHART_COLORS.muted },
+						grid: { display: false },
+					},
+				},
+				plugins: {
+					legend: {
+						display: true,
+						position: "top",
+						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+					},
+					tooltip: {
+						backgroundColor: "#161b22",
+						titleColor: CHART_COLORS.text,
+						bodyColor: CHART_COLORS.text,
+						borderColor: "#30363d",
+						borderWidth: 1,
+					},
+				},
+			},
+		});
+	} else {
+		finishChartInstance.data.labels = labels;
+		finishChartInstance.data.datasets = datasets;
+		finishChartInstance.update();
+	}
+	sizeChartHost(canvas, labels.length);
+}
+
+// ── 19. Score over time (regression detection) ──────────────────────
+
+let seriesLoaded = false;
+
+function renderSeriesChart() {
+	const canvas = document.getElementById("series-chart");
+	const host = document.getElementById("series-host");
+	const empty = document.getElementById("series-empty");
+	if (!canvas) return;
+
+	if (!seriesLoaded) {
+		seriesLoaded = true;
+		fetch("/evals/series")
+			.then((res) => res.ok ? res.json() : { series: [] })
+			.then((json) => {
+				state.evalSeries = json.series ?? [];
+				renderSeriesChartImpl(canvas, host, empty);
+			})
+			.catch(() => {
+				state.evalSeries = [];
+				renderSeriesChartImpl(canvas, host, empty);
+			});
+	} else {
+		renderSeriesChartImpl(canvas, host, empty);
+	}
+}
+
+function renderSeriesChartImpl(canvas, host, empty) {
+	const series = state.evalSeries ?? [];
+	if (series.length < 2) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (seriesChartInstance) { seriesChartInstance.destroy(); seriesChartInstance = null; }
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	// Group by (profile || modelId).
+	const byProfile = new Map();
+	for (const pt of series) {
+		const key = pt.profile ?? pt.modelId;
+		if (!byProfile.has(key)) byProfile.set(key, []);
+		byProfile.get(key).push({ x: pt.timestamp, y: Math.round(pt.overall * 100) });
+	}
+
+	const palette = [
+		CHART_COLORS.blue, CHART_COLORS.purple, CHART_COLORS.green,
+		CHART_COLORS.yellow, "#f778ba", "#79c0ff", "#56d364",
+	];
+	const profiles = Array.from(byProfile.keys());
+
+	const datasets = profiles.map((profile, i) => ({
+		label: profile,
+		data: byProfile.get(profile),
+		borderColor: palette[i % palette.length],
+		backgroundColor: "transparent",
+		pointRadius: 3,
+		pointHoverRadius: 5,
+		borderWidth: 2,
+		tension: 0.15,
+	}));
+
+	if (!seriesChartInstance) {
+		seriesChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "line",
+			data: { datasets },
+			options: {
+				responsive: true,
+				maintainAspectRatio: false,
+				animation: { duration: 400 },
+				scales: {
+					x: {
+						type: "category",
+						ticks: { color: CHART_COLORS.muted, maxTicksLimit: 8, font: { size: 10 } },
+						grid: { color: CHART_COLORS.grid },
+					},
+					y: {
+						min: 0, max: 100,
+						ticks: { color: CHART_COLORS.muted },
+						grid: { color: CHART_COLORS.grid },
+						title: { display: true, text: "overall %", color: CHART_COLORS.muted },
+					},
+				},
+				plugins: {
+					legend: {
+						display: true,
+						position: "top",
+						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+					},
+					tooltip: {
+						backgroundColor: "#161b22",
+						titleColor: CHART_COLORS.text,
+						bodyColor: CHART_COLORS.text,
+						borderColor: "#30363d",
+						borderWidth: 1,
+					},
+				},
+			},
+		});
+	} else {
+		seriesChartInstance.data.datasets = datasets;
+		seriesChartInstance.update();
+	}
+	sizeChartHost(canvas, profiles.length * 2);
 }
 
 function passesFilter(run) {
@@ -442,7 +1335,6 @@ function renderEvals() {
 
 function renderEvalDimensions(evals) {
 	const host = document.getElementById("evals-dimensions");
-	host.innerHTML = "";
 	// Latest per model for dimension aggregation.
 	const latestByModel = new Map();
 	for (const rep of evals) {
@@ -451,27 +1343,47 @@ function renderEvalDimensions(evals) {
 	}
 	if (latestByModel.size === 0) {
 		host.innerHTML = `<div class="bar-empty">no completed evals yet</div>`;
+		state.renderedDimModels.clear();
 		return;
 	}
+
+	// Incremental update: create cards for new models (animate bars),
+	// refresh existing cards in place (no bar re-animation), remove obsolete.
+	const existing = new Map();
+	for (const el of host.querySelectorAll(".dim-card[data-model]")) {
+		existing.set(el.dataset.model, el);
+	}
+	// Drop empty-state placeholder if present.
+	const empty = host.querySelector(".bar-empty");
+	if (empty) empty.remove();
+
+	const newlyAdded = [];
 	for (const [model, rep] of latestByModel) {
-		const card = document.createElement("div");
-		card.className = "dim-card";
-		const dimRows = Object.entries(rep.dimensions ?? {})
+		const overallPct = Math.round((rep.overall ?? 0) * 100);
+		const thinkLabel = rep.thinking === "on" ? "ON" : "OFF";
+		const thinkClass = rep.thinking === "on" ? "think-on" : "off";
+		const dimEntries = Object.entries(rep.dimensions ?? {});
+		const isNew = !existing.has(model);
+
+		// Freshly-added cards get width:0 + data-width so animateBars() can
+		// transition them to target. Existing cards get their target width
+		// set directly so they do not replay the 0→value animation.
+		const dimRows = dimEntries
 			.map(([dim, score]) => {
 				const pct = Math.round((score.score ?? 0) * 100);
+				const widthAttr = isNew
+					? `style="width:0%" data-width="${pct}"`
+					: `style="width:${pct}%"`;
 				return `
 					<div class="dim-row">
 						<div class="dim-label">${escapeHtml(dim)}</div>
-						<div class="dim-bar"><div class="dim-fill" style="width:0%" data-width="${pct}"></div></div>
-						<div class="dim-value">${pct}% <span class="dim-sub">(${score.passed}/${score.total})</span></div>
+						<div class="dim-bar"><div class="dim-fill" ${widthAttr}></div></div>
+						<div class="dim-value" title="${pct}% = mean score across all ${score.total} tasks (partial-credit scorers allowed). ${score.passed}/${score.total} = tasks scoring ≥ 0.5.">${pct}% <span class="dim-sub">(${score.passed}/${score.total})</span></div>
 					</div>
 				`;
 			})
 			.join("");
-		const overallPct = Math.round((rep.overall ?? 0) * 100);
-		const thinkLabel = rep.thinking === "on" ? "ON" : "OFF";
-		const thinkClass = rep.thinking === "on" ? "think-on" : "off";
-		card.innerHTML = `
+		const headHTML = `
 			<div class="dim-card-head">
 				<strong>${escapeHtml(model)}</strong>
 				<span class="pill ${thinkClass}" title="thinking mode for the latest run">think ${thinkLabel}</span>
@@ -479,10 +1391,34 @@ function renderEvalDimensions(evals) {
 			</div>
 			${dimRows}
 		`;
-		host.appendChild(card);
+
+		let card = existing.get(model);
+		if (card) {
+			card.innerHTML = headHTML;
+			existing.delete(model);
+		} else {
+			card = document.createElement("div");
+			card.className = "dim-card fresh";
+			card.dataset.model = model;
+			card.innerHTML = headHTML;
+			host.appendChild(card);
+			newlyAdded.push(card);
+			state.renderedDimModels.add(model);
+		}
 	}
-	// After bars are in the DOM at width:0, animate them to their value.
-	animateBars(host);
+	// Remove cards for models that no longer appear.
+	for (const [model, el] of existing) {
+		el.remove();
+		state.renderedDimModels.delete(model);
+	}
+
+	// Animate only the bars inside freshly-added cards.
+	for (const card of newlyAdded) {
+		animateBars(card);
+		// Clear the fade-in class after the flash animation ends so a later
+		// re-layout does not re-trigger it.
+		setTimeout(() => card.classList.remove("fresh"), 1800);
+	}
 }
 
 function overallStrength(overall) {
@@ -498,10 +1434,11 @@ function renderEvalsTable(evals) {
 	for (const rep of sorted) {
 		const tr = document.createElement("tr");
 		tr.dataset.evalId = rep.evalId;
+		if (state.freshEvalIds.has(rep.evalId)) tr.classList.add("fresh");
 		const dimensionChips = Object.entries(rep.dimensions ?? {})
 			.map(([dim, s]) => {
 				const pct = Math.round((s.score ?? 0) * 100);
-				return `<span class="dim-chip" data-strength="${overallStrength(s.score)}">${escapeHtml(dim)}: ${s.passed}/${s.total} · ${pct}%</span>`;
+				return `<span class="dim-chip" data-strength="${overallStrength(s.score)}" title="${escapeHtml(dim)}: ${s.passed}/${s.total} tasks scored ≥ 0.5; ${pct}% is the mean score across all ${s.total} (partial-credit scorers allowed).">${escapeHtml(dim)}: ${s.passed}/${s.total} · ${pct}%</span>`;
 			})
 			.join(" ");
 		const thinkLabel = rep.thinking === "on" ? "on" : "off";
@@ -509,11 +1446,13 @@ function renderEvalsTable(evals) {
 		const profileCell = rep.profile
 			? escapeHtml(rep.profile)
 			: `<span class="dim">—</span>`;
+		const tempCell = renderTempCell(rep);
 		tr.innerHTML = `
 			<td>${formatTime(rep.timestamp)}</td>
 			<td>${escapeHtml(rep.modelId)}</td>
 			<td>${profileCell}</td>
 			<td><span class="pill ${thinkClass}">${thinkLabel}</span></td>
+			<td>${tempCell}</td>
 			<td class="num">${rep.totalTasks}</td>
 			<td class="num"><strong>${Math.round((rep.overall ?? 0) * 100)}%</strong></td>
 			<td>${dimensionChips}</td>
@@ -525,15 +1464,27 @@ function renderEvalsTable(evals) {
 	updateEvalSortHeaders();
 }
 
+function evalValueFor(rep, key) {
+	if (key === "temperature") return rep.params?.temperature;
+	return rep[key];
+}
+
 function evalComparator(a, b) {
 	const k = state.evalSortKey;
 	const dir = state.evalSortDir === "asc" ? 1 : -1;
-	const av = a[k];
-	const bv = b[k];
+	const av = evalValueFor(a, k);
+	const bv = evalValueFor(b, k);
 	if (av === bv) return 0;
 	if (av === undefined || av === null) return 1;
 	if (bv === undefined || bv === null) return -1;
 	return av < bv ? -1 * dir : 1 * dir;
+}
+
+function renderTempCell(rep) {
+	const t = rep.params?.temperature;
+	const bucket = tempBucket(t);
+	if (!bucket) return `<span class="dim">—</span>`;
+	return `<span class="pill temp-${bucket}" title="temperature = ${t}">${bucket} · ${t}</span>`;
 }
 
 function updateEvalSortHeaders() {
@@ -558,7 +1509,7 @@ function renderEvalModal(rep) {
 	const dimSummary = Object.entries(rep.dimensions ?? {})
 		.map(
 			([dim, s]) =>
-				`<div class="k">${escapeHtml(dim)}</div><div class="v">${s.passed}/${s.total} · ${Math.round((s.score ?? 0) * 100)}% · avg ${Math.round(s.avgLatencyMs ?? 0)}ms</div>`,
+				`<div class="k">${escapeHtml(dim)}</div><div class="v" title="${s.passed}/${s.total} tasks scored ≥ 0.5. ${Math.round((s.score ?? 0) * 100)}% is the mean score across all ${s.total} tasks (partial-credit scorers allowed).">${s.passed}/${s.total} · ${Math.round((s.score ?? 0) * 100)}% · avg ${Math.round(s.avgLatencyMs ?? 0)}ms</div>`,
 		)
 		.join("");
 	const taskRows = (rep.results ?? [])
@@ -581,12 +1532,30 @@ function renderEvalModal(rep) {
 				</tr>`;
 		})
 		.join("");
+	const p = rep.params ?? {};
+	const paramRows = [
+		["context length", p.contextLength],
+		["max tokens", p.maxTokens],
+		["temperature", p.temperature],
+		["top-k", p.topK],
+		["top-p", p.topP],
+		["rep. penalty", p.repetitionPenalty],
+		["seed", p.seed],
+	]
+		.filter(([, v]) => v !== undefined && v !== null)
+		.map(
+			([k, v]) =>
+				`<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`,
+		)
+		.join("");
+
 	return `
 		<h3>Eval · ${escapeHtml(rep.modelId)}</h3>
 		<div class="modal-kv">
 			<div class="k">timestamp</div><div class="v">${escapeHtml(rep.timestamp)}</div>
 			${rep.profile ? `<div class="k">profile</div><div class="v">${escapeHtml(rep.profile)}</div>` : ""}
 			<div class="k">thinking</div><div class="v">${escapeHtml(rep.thinking ?? "off")}</div>
+			${paramRows}
 			<div class="k">tasks</div><div class="v">${rep.totalTasks}</div>
 			<div class="k">overall</div><div class="v">${Math.round((rep.overall ?? 0) * 100)}%</div>
 			${dimSummary}

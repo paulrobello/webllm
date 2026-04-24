@@ -229,3 +229,31 @@ export function countEvals(db: Database): number {
 	};
 	return row.c;
 }
+
+export interface EvalSeriesPoint {
+	evalId: string;
+	timestamp: string;
+	profile: string | null;
+	modelId: string;
+	overall: number;
+	thinking: string | null;
+}
+
+export function loadEvalSeries(db: Database): EvalSeriesPoint[] {
+	const rows = db
+		.prepare(
+			`SELECT eval_id, timestamp, report_json FROM evals ORDER BY timestamp ASC`,
+		)
+		.all() as Array<{ eval_id: string; timestamp: string; report_json: string }>;
+	return rows.map((r) => {
+		const report = JSON.parse(r.report_json) as PersistedEvalReport;
+		return {
+			evalId: report.evalId,
+			timestamp: report.timestamp,
+			profile: report.profile ?? null,
+			modelId: report.modelId,
+			overall: report.overall,
+			thinking: report.thinking ?? null,
+		};
+	});
+}

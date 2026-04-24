@@ -517,6 +517,19 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					ingestUrl: benchIngestUrl,
 					log,
 					setProgress,
+					profileName,
+					thinking: thinkingEnabled,
+					params: {
+						contextLength: Number.isFinite(requestedContextLength)
+							? requestedContextLength
+							: undefined,
+						maxTokens: maxTokensOverride ?? undefined,
+						temperature: samplingOverrides.temperature,
+						topK: samplingOverrides.topK,
+						topP: samplingOverrides.topP,
+						repetitionPenalty: samplingOverrides.repetitionPenalty,
+						seed: samplingOverrides.seed,
+					},
 				});
 			} catch (e) {
 				log("fail", `[bench] failed: ${e.message}\n${e.stack || ""}`);

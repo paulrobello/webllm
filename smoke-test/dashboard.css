@@ -25,8 +25,8 @@ body {
 	font-size: 13px;
 	line-height: 1.5;
 	padding: 20px 24px 40px;
-	max-width: 1400px;
-	margin: 0 auto;
+	max-width: none;
+	margin: 0;
 }
 
 header {
@@ -138,6 +138,38 @@ header h1 {
 	animation: pulse 1s ease-in-out infinite;
 }
 
+.eval-progress {
+	position: relative;
+	flex: 0 0 200px;
+	height: 14px;
+	background: var(--surface-3);
+	border: 1px solid var(--border);
+	border-radius: 3px;
+	overflow: hidden;
+}
+
+.eval-progress-fill {
+	position: absolute;
+	left: 0; top: 0; bottom: 0;
+	background: linear-gradient(90deg, rgba(188, 140, 255, 0.65), var(--purple));
+	transition: width 300ms ease-out;
+}
+
+.eval-progress-label {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--text);
+	font-variant-numeric: tabular-nums;
+	letter-spacing: 0.02em;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+	pointer-events: none;
+}
+
 @keyframes pulse {
 	0%, 100% { opacity: 0.3; }
 	50% { opacity: 1; }
@@ -162,6 +194,14 @@ header h1 {
 
 .legend-chip.one-shot { background: var(--blue); }
 .legend-chip.interactive { background: var(--purple); }
+.legend-chip.tool-pass { background: var(--green); }
+.legend-chip.tool-score { background: var(--yellow); }
+.legend-chip.scatter-dot { background: var(--blue); border-radius: 50%; }
+.legend-chip.temp-cold-dot { background: var(--blue); }
+.legend-chip.temp-warm-dot { background: var(--yellow); }
+.legend-chip.temp-hot-dot { background: var(--red); }
+
+.scatter-host { height: 300px; }
 
 .bar-chart {
 	display: flex;
@@ -175,7 +215,12 @@ header h1 {
 	align-items: center;
 	gap: 10px;
 	font-size: 12px;
+	padding: 2px 4px;
+	border-radius: 4px;
+	will-change: transform;
 }
+
+.bar-row.fresh { animation: flash 1.8s ease-out; }
 
 .bar-label {
 	color: var(--muted);
@@ -205,6 +250,8 @@ header h1 {
 }
 
 .bar.interactive .bar-fill { background: var(--purple); }
+.bar.tool-pass .bar-fill { background: var(--green); }
+.bar.tool-score .bar-fill { background: var(--yellow); }
 
 .bar-value {
 	text-align: right;
@@ -215,6 +262,18 @@ header h1 {
 .bar-empty {
 	color: var(--dim);
 	font-style: italic;
+}
+
+.chart-host {
+	/* Explicit height controls Chart.js responsive sizing — scales
+	   with profile count via JS (10 rows → ~360px, 20 rows → ~560px). */
+	position: relative;
+	height: 360px;
+	width: 100%;
+}
+.chart-host canvas {
+	width: 100% !important;
+	height: 100% !important;
 }
 
 /* ── runs table ───────────────────────────────────── */
@@ -349,6 +408,24 @@ tbody td {
 	color: var(--red);
 }
 
+.pill.temp-hot {
+	background: rgba(248, 81, 73, 0.18);
+	color: var(--red);
+	border: 1px solid rgba(248, 81, 73, 0.35);
+}
+
+.pill.temp-warm {
+	background: rgba(210, 153, 34, 0.18);
+	color: var(--yellow);
+	border: 1px solid rgba(210, 153, 34, 0.35);
+}
+
+.pill.temp-cold {
+	background: rgba(88, 166, 255, 0.18);
+	color: var(--blue);
+	border: 1px solid rgba(88, 166, 255, 0.35);
+}
+
 .pill.system {
 	background: rgba(247, 120, 186, 0.15);
 	color: var(--pink);
@@ -382,6 +459,13 @@ tbody td {
 	border: 1px solid var(--border);
 	border-radius: 6px;
 	padding: 12px 14px;
+}
+
+.dim-card.fresh { animation: card-fade-in 0.9s ease-out; }
+
+@keyframes card-fade-in {
+	0% { opacity: 0; transform: translateY(-6px); }
+	100% { opacity: 1; transform: translateY(0); }
 }
 
 .dim-card-head {

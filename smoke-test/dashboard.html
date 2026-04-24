@@ -41,6 +41,7 @@
             <th data-sort="modelId" class="sortable">model</th>
             <th data-sort="profile" class="sortable">profile</th>
             <th data-sort="thinking" class="sortable">think</th>
+            <th data-sort="temperature" class="sortable">temp</th>
             <th data-sort="totalTasks" class="sortable num">tasks</th>
             <th data-sort="overall" class="sortable num">overall</th>
             <th>dimensions (passed/total)</th>
@@ -61,7 +62,84 @@
       <span class="legend-chip interactive"></span><span>interactive</span>
     </div>
   </div>
-  <div id="chart" class="bar-chart"></div>
+  <div id="chart-empty" class="bar-empty" hidden>no runs yet</div>
+  <div class="chart-host"><canvas id="chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Tool-calling accuracy by profile</h2>
+    <div class="legend">
+      <span class="legend-chip tool-pass"></span><span>pass rate</span>
+      <span class="legend-chip tool-score"></span><span>mean score</span>
+    </div>
+  </div>
+  <div id="tool-empty" class="bar-empty">no tool-calling evals yet — tool-calling only runs on cold profiles</div>
+  <div id="tool-host" class="chart-host" hidden><canvas id="tool-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Accuracy × Speed</h2>
+    <div class="legend">
+      <span class="legend-chip scatter-dot"></span><span>profile (dot = cold temp)</span>
+    </div>
+  </div>
+  <div id="scatter-empty" class="bar-empty">need both speed and accuracy data for at least one profile</div>
+  <div id="scatter-host" class="chart-host scatter-host" hidden><canvas id="scatter-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Per-dimension accuracy by model</h2>
+  </div>
+  <div id="dim-grouped-empty" class="bar-empty">no completed evals yet</div>
+  <div id="dim-grouped-host" class="chart-host" hidden><canvas id="dim-grouped-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Temperature sweep by dimension</h2>
+    <div class="legend">
+      <span class="legend-chip temp-cold-dot"></span><span>cold (≤0.4)</span>
+      <span class="legend-chip temp-warm-dot"></span><span>warm</span>
+      <span class="legend-chip temp-hot-dot"></span><span>hot (≥0.8)</span>
+    </div>
+  </div>
+  <div id="temp-sweep-empty" class="bar-empty">need evals at multiple temperatures for the same model</div>
+  <div id="temp-sweep-host" class="chart-host" hidden><canvas id="temp-sweep-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Thinking ON vs OFF (Qwen)</h2>
+  </div>
+  <div id="thinking-delta-empty" class="bar-empty">need Qwen evals with both thinking=on and thinking=off at matched temperature</div>
+  <div id="thinking-delta-host" class="chart-host" hidden><canvas id="thinking-delta-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Time to first token (prefill)</h2>
+  </div>
+  <div id="ttft-empty" class="bar-empty">no runs with prefill data yet</div>
+  <div id="ttft-host" class="chart-host"><canvas id="ttft-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Finish reason breakdown</h2>
+  </div>
+  <div id="finish-empty" class="bar-empty">no runs with finish reason data yet</div>
+  <div id="finish-host" class="chart-host"><canvas id="finish-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Score over time</h2>
+  </div>
+  <div id="series-empty" class="bar-empty">no historical eval data available (requires SQLite persistence)</div>
+  <div id="series-host" class="chart-host" hidden><canvas id="series-chart"></canvas></div>
 </section>
 
 <section class="panel">
@@ -112,6 +190,7 @@
   </div>
 </div>
 
+<script src="./vendor/chart.umd.min.js"></script>
 <script type="module" src="./dashboard.js"></script>
 </body>
 </html>

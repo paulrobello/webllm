@@ -21,6 +21,9 @@ export async function runBenchMode({
 	ingestUrl,
 	log,
 	setProgress,
+	profileName,
+	thinking,
+	params,
 }) {
 	// Load the custom-scorer registrations before any task is scored.
 	// Side-effect import; safe to call multiple times.
@@ -162,6 +165,15 @@ export async function runBenchMode({
 	// Build the final report (matches EvalReport shape).
 	const report = buildReport(modelId, results, evalId);
 	if (systemId) report.systemId = systemId;
+	if (profileName) report.profile = profileName;
+	report.thinking = thinking ? "on" : "off";
+	if (params) {
+		const prunedParams = {};
+		for (const [k, v] of Object.entries(params)) {
+			if (v !== undefined && v !== null) prunedParams[k] = v;
+		}
+		if (Object.keys(prunedParams).length > 0) report.params = prunedParams;
+	}
 	await postIngest(ingestUrl, "eval_complete", report);
 
 	window.__benchStatus.done = true;
