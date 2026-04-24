@@ -60,18 +60,20 @@ export function score(output: string, task: EvalTask): number {
 }
 
 /**
- * Map a cosine similarity ∈ [-1, 1] to a score ∈ [0, 1]. The bench
- * harness uses the resulting score the same way as any other task score
- * (pass threshold 0.5 for dashboard counts, continuous value for
- * per-dim averaging).
+ * Compute the raw cosine similarity ∈ [-1, 1] alongside the [0, 1]-mapped
+ * score. The dashboard wants the raw cosine for embedding tasks (so users
+ * see real similarity, not just pass/fail), while the bench harness wants
+ * the mapped score so embedding results compose with chat scores. Both
+ * fall out of the same dot-product, so we return them together and let
+ * `scoreCosineSimilarity` delegate.
  */
-export function scoreCosineSimilarity(
+export function scoreCosineSimilarityDetails(
 	a: Float32Array,
 	b: Float32Array,
-): number {
+): { cosine: number; score: number } {
 	if (a.length !== b.length) {
 		throw new Error(
-			`scoreCosineSimilarity: vector length mismatch (${a.length} vs ${b.length})`,
+			`scoreCosineSimilarityDetails: vector length mismatch (${a.length} vs ${b.length})`,
 		);
 	}
 	let dot = 0;
@@ -82,12 +84,27 @@ export function scoreCosineSimilarity(
 		normA += a[i] * a[i];
 		normB += b[i] * b[i];
 	}
-	if (normA === 0 || normB === 0) return 0;
-	const cos = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+	if (normA === 0 || normB === 0) return { cosine: 0, score: 0 };
 	// Clamp to guard against floating-point overrun on near-identical
 	// vectors, then map [-1, 1] → [0, 1].
-	const clamped = Math.max(-1, Math.min(1, cos));
-	return (clamped + 1) / 2;
+	const cosine = Math.max(
+		-1,
+		Math.min(1, dot / (Math.sqrt(normA) * Math.sqrt(normB))),
+	);
+	return { cosine, score: (cosine + 1) / 2 };
+}
+
+/**
+ * Map a cosine similarity ∈ [-1, 1] to a score ∈ [0, 1]. The bench
+ * harness uses the resulting score the same way as any other task score
+ * (pass threshold 0.5 for dashboard counts, continuous value for
+ * per-dim averaging).
+ */
+export function scoreCosineSimilarity(
+	a: Float32Array,
+	b: Float32Array,
+): number {
+	return scoreCosineSimilarityDetails(a, b).score;
 }
 
 function scoreExact(output: string, expected: string): number {

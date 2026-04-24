@@ -20,7 +20,7 @@ import type {
 import { Character as CharacterClass } from "../characters/character.js";
 import type { ToolDefinition } from "../characters/tool-system.js";
 import { ToolSystem } from "../characters/tool-system.js";
-import { score } from "./scorer.js";
+import { score, scoreCosineSimilarityDetails } from "./scorer.js";
 import type { EvalResult, EvalTask, EvalToolDef } from "./types.js";
 
 export interface RunTaskOptions {
@@ -72,6 +72,52 @@ export async function runTask(
 	options: RunTaskOptions = {},
 ): Promise<EvalResult> {
 	const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT;
+
+	// Embedding-dimension tasks bypass chat entirely: there is no prompt
+	// to stream, no tools to wire, no scorer to invoke on text. We embed
+	// the input + reference and score by cosine. Throws explicitly if the
+	// engine has no `embed` — this is a configuration bug, not a soft
+	// fallback case.
+	if (task.dimension === "embedding") {
+		if (typeof engine.embed !== "function") {
+			throw new Error(
+				`runTask: embedding dimension requires engine.embed (model "${modelId}")`,
+			);
+		}
+		if (task.scoring.type !== "cosine_similarity") {
+			throw new Error(
+				`runTask: embedding-dimension task "${task.id}" must use cosine_similarity scoring`,
+			);
+		}
+		engine.resetConversation?.(modelId);
+		const start = Date.now();
+		let error: string | undefined;
+		let cosine = 0;
+		let score = 0;
+		try {
+			const a = await engine.embed(modelId, task.input);
+			const b = await engine.embed(modelId, task.scoring.reference);
+			const r = scoreCosineSimilarityDetails(a, b);
+			cosine = r.cosine;
+			score = r.score;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+		const latencyMs = Date.now() - start;
+		return {
+			taskId: task.id,
+			dimension: task.dimension,
+			difficulty: task.difficulty,
+			score,
+			modelOutput: "",
+			toolCalls: [],
+			latencyMs,
+			tokensPerSecond: 0,
+			error,
+			embeddingCosine: cosine,
+		};
+	}
+
 	const tools = task.tools ? evalToolsToToolDefs(task.tools) : undefined;
 
 	// Each task has its own system prompt and tools — there's no shared

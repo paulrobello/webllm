@@ -95,6 +95,8 @@ export interface EvalResult {
 	latencyMs: number;
 	tokensPerSecond: number;
 	error?: string;
+	/** Raw cosine ∈ [-1, 1] for embedding-dimension tasks only. */
+	embeddingCosine?: number;
 }
 
 export interface DimensionScore {

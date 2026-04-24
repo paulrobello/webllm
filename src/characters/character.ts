@@ -24,6 +24,12 @@ export interface ChatEngine {
 	 * eval runners can isolate one task from the next.
 	 */
 	resetConversation?(modelId: string): void;
+	/**
+	 * Optional: bidirectional encoder embedding. Required for
+	 * embedding-dimension eval tasks. Returns an L2-normalized sentence
+	 * embedding vector for the given text.
+	 */
+	embed?(modelId: string, text: string): Promise<Float32Array>;
 }
 
 /** Configuration for creating a Character instance. */

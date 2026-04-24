@@ -1,5 +1,8 @@
-import { expect, test } from "bun:test";
-import { scoreCosineSimilarity } from "../src/evaluation/scorer.js";
+import { describe, expect, test } from "bun:test";
+import {
+	scoreCosineSimilarity,
+	scoreCosineSimilarityDetails,
+} from "../src/evaluation/scorer.js";
 
 test("identical vectors score 1.0", () => {
 	const v = new Float32Array([1, 2, 3, 4]);
@@ -47,4 +50,47 @@ test("score stays within [0, 1] for floating-point noise", () => {
 	const s = scoreCosineSimilarity(a, b);
 	expect(s).toBeGreaterThanOrEqual(0);
 	expect(s).toBeLessThanOrEqual(1);
+});
+
+describe("scoreCosineSimilarityDetails", () => {
+	test("returns raw cosine + remapped score", () => {
+		const a = new Float32Array([1, 0, 0]);
+		const b = new Float32Array([0, 1, 0]);
+		const r = scoreCosineSimilarityDetails(a, b);
+		expect(r.cosine).toBeCloseTo(0);
+		expect(r.score).toBeCloseTo(0.5);
+	});
+
+	test("identical vectors return cosine=1, score=1", () => {
+		const a = new Float32Array([0.6, 0.8]);
+		const b = new Float32Array([0.6, 0.8]);
+		const r = scoreCosineSimilarityDetails(a, b);
+		expect(r.cosine).toBeCloseTo(1);
+		expect(r.score).toBeCloseTo(1);
+	});
+
+	test("opposite vectors return cosine=-1, score=0", () => {
+		const a = new Float32Array([1, 0]);
+		const b = new Float32Array([-1, 0]);
+		const r = scoreCosineSimilarityDetails(a, b);
+		expect(r.cosine).toBeCloseTo(-1);
+		expect(r.score).toBeCloseTo(0);
+	});
+
+	test("zero-norm vectors return cosine=0, score=0", () => {
+		const a = new Float32Array([0, 0]);
+		const b = new Float32Array([1, 1]);
+		const r = scoreCosineSimilarityDetails(a, b);
+		expect(r.cosine).toBe(0);
+		expect(r.score).toBe(0);
+	});
+
+	test("throws on length mismatch", () => {
+		expect(() =>
+			scoreCosineSimilarityDetails(
+				new Float32Array([1]),
+				new Float32Array([1, 2]),
+			),
+		).toThrow(/length mismatch/);
+	});
 });
