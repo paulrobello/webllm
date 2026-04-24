@@ -21,16 +21,7 @@ export const instructionTasks: EvalTask[] = [
 			"You are a helpful assistant. Follow the user's formatting instructions exactly.",
 		input: "What is water? Answer in exactly one sentence.",
 		expected: "A single sentence defining water",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const sentences = output.match(/[.!?]+/g);
-				const count = sentences ? sentences.length : 0;
-				if (count === 1) return 1;
-				if (count === 2) return 0.5;
-				return 0;
-			},
-		},
+		scoring: { type: "custom", name: "in-002-one-sentence" },
 		difficulty: "easy",
 	},
 	{
@@ -81,21 +72,7 @@ export const instructionTasks: EvalTask[] = [
 		input: "Name the first 5 planets from the sun as a numbered list.",
 		expected:
 			"A numbered list with 5 planets: Mercury, Venus, Earth, Mars, Jupiter",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const lines = output.split("\n");
-				let numberedCount = 0;
-				for (const line of lines) {
-					if (/^\s*\d+[.)]\s/.test(line)) {
-						numberedCount++;
-					}
-				}
-				if (numberedCount === 5) return 1;
-				if (numberedCount >= 4) return 0.5;
-				return 0;
-			},
-		},
+		scoring: { type: "custom", name: "in-006-numbered-5-items" },
 		difficulty: "medium",
 	},
 	{
@@ -119,19 +96,7 @@ export const instructionTasks: EvalTask[] = [
 		input: "Describe a sunset without using the words 'beautiful', 'pretty', or 'nice'.",
 		expected:
 			"A sunset description that avoids the forbidden words",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const lower = output.toLowerCase();
-				const forbidden = ["beautiful", "pretty", "nice"];
-				const usedForbidden = forbidden.filter((w) =>
-					lower.includes(w),
-				);
-				if (usedForbidden.length === 0) return 1;
-				if (usedForbidden.length === 1) return 0.5;
-				return 0;
-			},
-		},
+		scoring: { type: "custom", name: "in-008-avoid-forbidden-words" },
 		difficulty: "medium",
 	},
 
@@ -147,24 +112,7 @@ export const instructionTasks: EvalTask[] = [
 			"Explain photosynthesis in exactly 3 bullet points, each starting with a capital letter, and include the word 'chlorophyll' somewhere.",
 		expected:
 			"3 bullet points, each capitalized, containing 'chlorophyll'",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				let score = 0;
-				const lines = output.split("\n").filter((l) => l.trim());
-				const bullets = lines.filter((l) =>
-					/^\s*[-*•]\s/.test(l),
-				);
-				if (bullets.length === 3) score += 0.34;
-				const allCapitalized = bullets.every((b) =>
-					/^\s*[-*•]\s*[A-Z]/.test(b),
-				);
-				if (allCapitalized) score += 0.33;
-				if (output.toLowerCase().includes("chlorophyll"))
-					score += 0.33;
-				return Math.min(score, 1);
-			},
-		},
+		scoring: { type: "custom", name: "in-009-photosynthesis-3-bullets" },
 		difficulty: "hard",
 	},
 	{
@@ -189,36 +137,7 @@ export const instructionTasks: EvalTask[] = [
 			"Respond with a JSON object with fields: name (string), age (number), hobbies (array). Use these values: name is Alice, age is 30, hobbies are reading and hiking.",
 		expected:
 			'{"name":"Alice","age":30,"hobbies":["reading","hiking"]}',
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				try {
-					const json = JSON.parse(output);
-					let score = 0;
-					if (
-						typeof json.name === "string" &&
-						json.name.toLowerCase() === "alice"
-					)
-						score += 0.25;
-					if (typeof json.age === "number" && json.age === 30)
-						score += 0.25;
-					if (Array.isArray(json.hobbies)) score += 0.25;
-					if (
-						Array.isArray(json.hobbies) &&
-						json.hobbies.some((h: unknown) =>
-							String(h).toLowerCase().includes("reading"),
-						) &&
-						json.hobbies.some((h: unknown) =>
-							String(h).toLowerCase().includes("hiking"),
-						)
-					)
-						score += 0.25;
-					return score;
-				} catch {
-					return 0;
-				}
-			},
-		},
+		scoring: { type: "custom", name: "in-011-alice-json" },
 		difficulty: "hard",
 	},
 	{
@@ -231,25 +150,7 @@ export const instructionTasks: EvalTask[] = [
 			"First, tell me what 3+4 equals. Then tell me what color the sky is. Then tell me the capital of Japan. Do them in this exact order.",
 		expected:
 			"7 appears first, then blue, then Tokyo — in that order",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const idx7 = output.indexOf("7");
-				const idxBlue = output.toLowerCase().indexOf("blue");
-				const idxTokyo = output.toLowerCase().indexOf("tokyo");
-				if (
-					idx7 !== -1 &&
-					idxBlue !== -1 &&
-					idxTokyo !== -1 &&
-					idx7 < idxBlue &&
-					idxBlue < idxTokyo
-				)
-					return 1;
-				const found = [idx7 !== -1, idxBlue !== -1, idxTokyo !== -1]
-					.filter(Boolean).length;
-				return found / 3;
-			},
-		},
+		scoring: { type: "custom", name: "in-012-three-questions-order" },
 		difficulty: "hard",
 	},
 ];

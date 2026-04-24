@@ -1,5 +1,36 @@
 import { describe, expect, test } from "bun:test";
-import { Character } from "../src/characters/character.js";
+import { Character, type ChatEngine } from "../src/characters/character.js";
+import type {
+	ChatMessage,
+	CompletionChunk,
+	CompletionConfig,
+} from "../src/core/chat-types.js";
+
+/**
+ * Minimal stub engine: echoes a fixed completion so Character.chat() exercises
+ * the real streaming + history + tool-parse paths without needing a loaded
+ * model. The echo includes the user's last message so tests can assert on
+ * both the request and the yielded stream.
+ */
+function createStubEngine(
+	reply = "stub-reply",
+): ChatEngine & { calls: Array<{ modelId: string; messages: ChatMessage[] }> } {
+	const calls: Array<{ modelId: string; messages: ChatMessage[] }> = [];
+	return {
+		calls,
+		async *chatCompletion(
+			modelId: string,
+			messages: ChatMessage[],
+			_config?: CompletionConfig,
+		): AsyncGenerator<CompletionChunk, void> {
+			calls.push({ modelId, messages: [...messages] });
+			for (const ch of reply) {
+				yield { text: ch, done: false };
+			}
+			yield { text: "", done: true };
+		},
+	};
+}
 
 describe("Character", () => {
 	test("construction sets config", () => {
@@ -16,20 +47,46 @@ describe("Character", () => {
 		expect(char.id).toBeTruthy();
 	});
 
-	test("chat adds user message to history", async () => {
+	test("chat adds user message to history and streams engine tokens", async () => {
+		const engine = createStubEngine("hello there");
 		const char = new Character({
 			modelId: "test-model",
 			systemPrompt: "Test",
+			engine,
 		});
 		const tokens: string[] = [];
 		for await (const token of char.chat("Hello")) {
 			tokens.push(token);
 		}
+		expect(tokens.join("")).toBe("hello there");
 		const history = char.getHistory();
 		expect(
 			history.some((m) => m.role === "user" && m.content === "Hello"),
 		).toBe(true);
-		expect(history.some((m) => m.role === "assistant")).toBe(true);
+		expect(
+			history.some(
+				(m) => m.role === "assistant" && m.content === "hello there",
+			),
+		).toBe(true);
+		expect(engine.calls).toHaveLength(1);
+		expect(engine.calls[0].modelId).toBe("test-model");
+	});
+
+	test("chat without an engine throws a helpful error", async () => {
+		const char = new Character({
+			modelId: "test-model",
+			systemPrompt: "Test",
+		});
+		let threw = false;
+		try {
+			for await (const _ of char.chat("Hello")) {
+				/* never reached */
+			}
+		} catch (err) {
+			threw = true;
+			expect(String(err)).toContain("no engine attached");
+		}
+		expect(threw).toBe(true);
 	});
 
 	test("clearHistory keeps system prompt", () => {
@@ -48,6 +105,7 @@ describe("Character", () => {
 		const char = new Character({
 			modelId: "test-model",
 			systemPrompt: "Test",
+			engine: createStubEngine("hi back"),
 		});
 		expect(char.messageCount).toBe(1);
 		for await (const _ of char.chat("Hi")) {
@@ -69,6 +127,7 @@ describe("Character", () => {
 		const char = new Character({
 			modelId: "test-model",
 			systemPrompt: "Test",
+			engine: createStubEngine("abcdef"),
 		});
 		const gen = char.chat("Hello");
 		char.stop();

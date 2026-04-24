@@ -7,8 +7,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		ModelLoader,
 		Sampler,
 		Tokenizer,
+		WebLLM,
+		collectBrowserSystemProfile,
 		detectChatTemplate,
 		encodeChatPrompt,
+		runTasks,
+		score,
 	} = await import(`./webllm-bundle.js${assetSuffix}`);
 	const { runInteractiveChatTurn } = await import(
 		`./real-model-runtime.js${assetSuffix}`
@@ -22,10 +26,23 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		getSmokeChatOptions,
 		getSmokePageCopy,
 		getSmokePageShellMarkup,
+		getSmokeSamplingOverridesFromParams,
+		getThinkingModeFromParams,
 		shouldAutoInsertBos,
 	} = await import(`./real-model-smoke.js${assetSuffix}`);
 
 	const params = new URLSearchParams(window.location.search);
+	const thinkingEnabled = getThinkingModeFromParams(params);
+	const maxTokensParam = Number(params.get("max"));
+	const maxTokensOverride =
+		Number.isFinite(maxTokensParam) && maxTokensParam > 0
+			? Math.floor(maxTokensParam)
+			: null;
+	const samplingOverrides = getSmokeSamplingOverridesFromParams(params);
+	const promptOverride = params.get("prompt");
+	const profileName = params.get("profile");
+	const benchTaskListId = params.get("bench");
+	const benchIngestUrl = params.get("ingest") || "";
 	const DEFAULT_MODEL_ID = "qwen3-0.6b-q4f16";
 	const DEFAULT_CONTEXT_LENGTH = 4096;
 	const modelId = params.get("model") || DEFAULT_MODEL_ID;
@@ -51,6 +68,29 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	titleEl.textContent = pageCopy.title;
 	subtitleEl.textContent = pageCopy.subtitle;
 
+	const modeBar = document.createElement("div");
+	modeBar.id = "mode-bar";
+	const modePill = document.createElement("span");
+	modePill.className = `mode-pill ${thinkingEnabled ? "on" : "off"}`;
+	modePill.textContent = `Thinking: ${thinkingEnabled ? "ON" : "OFF"}`;
+	const modeToggle = document.createElement("a");
+	const toggleParams = new URLSearchParams(window.location.search);
+	if (thinkingEnabled) toggleParams.delete("thinking");
+	else toggleParams.set("thinking", "1");
+	toggleParams.set("v", String(Date.now()));
+	modeToggle.href = `?${toggleParams.toString()}`;
+	modeToggle.className = "mode-toggle";
+	modeToggle.textContent = thinkingEnabled ? "switch off" : "switch on";
+	modeBar.appendChild(modePill);
+	modeBar.appendChild(modeToggle);
+	if (profileName) {
+		const profilePill = document.createElement("span");
+		profilePill.className = "mode-pill profile";
+		profilePill.textContent = `Profile: ${profileName}`;
+		modeBar.appendChild(profilePill);
+	}
+	subtitleEl.insertAdjacentElement("afterend", modeBar);
+
 	function log(cls, msg) {
 		const el = document.createElement("div");
 		el.className = `step ${cls}`;
@@ -67,6 +107,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	let inference = null;
 	let tokenizer = null;
 	let parsedModel = null;
+	let wasmInstance = null;
 	let interactiveRunCompletion = null;
 	let makeSmokeSampler = null;
 
@@ -133,6 +174,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		log("running", "[3/7] Initializing WebGPU backend...");
 		try {
 			const wasm = new GgmlWasm();
+			wasmInstance = wasm;
 			await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
 			log("pass", "[3/7] WebGPU backend initialized");
 
@@ -350,17 +392,19 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				inference.resetKVCache();
 			}
 
-			const userMessage = "Tell one short joke.";
+			const userMessage = promptOverride || "Tell one short joke.";
 			const chatTmpl = parsed.tokenizerConfig.chatTemplate;
 			makeSmokeSampler = createSmokeSamplerFactory({
 				Sampler,
 				parsedModel: parsed,
 				detectChatTemplate,
+				samplingOverrides,
 			});
 			const smokeChatOptions = getSmokeChatOptions(
 				parsed,
 				detectChatTemplate,
 				chatTmpl,
+				{ enableThinking: thinkingEnabled },
 			);
 			const smokePrompt = buildSmokePrompt(
 				userMessage,
@@ -389,11 +433,13 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			interactiveRunCompletion = runCompletion;
 
 			const smokeSampler = makeSmokeSampler(chatTmpl, smokeChatOptions);
+			const smokeMaxTokens =
+				maxTokensOverride ?? (thinkingEnabled ? 1024 : 64);
 			const smokeResult = await runCompletion(
 				smokePrompt.mode,
 				smokePrompt.tokens,
 				smokeSampler,
-				64,
+				smokeMaxTokens,
 			);
 
 			log(
@@ -401,13 +447,86 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				`[7/7] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason})`,
 			);
 			log("pass", `User: ${userMessage}`);
-			log(
-				"pass",
-				`Assistant: ${smokeResult.displayOutputText || smokeResult.outputText}`,
-			);
+			const assistantText = thinkingEnabled
+				? smokeResult.rawOutputText ||
+					smokeResult.displayOutputText ||
+					smokeResult.outputText
+				: smokeResult.displayOutputText || smokeResult.outputText;
+			log("pass", `Assistant: ${assistantText}`);
 			setProgress(100);
 		} catch (e) {
 			log("fail", `[7/7] Generation failed: ${e.message}\n${e.stack || ""}`);
+			return;
+		}
+
+		// Best-effort: collect + register the system profile whenever an
+		// ingest URL is known. Speed runs (chat-smoke) read the resulting
+		// window.__webllmSystemId via agentchrome scrape; bench mode reads
+		// it directly. Failure here never blocks the run — it's metadata.
+		if (benchIngestUrl && !window.__webllmSystemId) {
+			try {
+				if (navigator.gpu) {
+					const sysAdapter = await navigator.gpu.requestAdapter();
+					if (sysAdapter) {
+						const profile = await collectBrowserSystemProfile(sysAdapter);
+						window.__webllmSystemId = profile.systemId;
+						await fetch(`${benchIngestUrl}/system-profiles`, {
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body: JSON.stringify(profile),
+						});
+						log(
+							"pass",
+							`[sys] ${profile.gpuVendor ?? "?"} · ${profile.gpuArchitecture ?? "?"} · Chrome ${profile.chromeVersion ?? "?"} (id ${profile.systemId})`,
+						);
+					}
+				}
+			} catch (err) {
+				console.warn(`system-profile collection failed: ${err}`);
+			}
+		}
+
+		if (benchTaskListId) {
+			if (!benchIngestUrl) {
+				log(
+					"fail",
+					"[bench] ?bench=<id> requires ?ingest=<live-server-url> too",
+				);
+				window.__benchStatus = { done: true, error: "missing ingest url" };
+				return;
+			}
+			try {
+				if (!wasmInstance || !inference || !parsedModel) {
+					throw new Error(
+						"bench mode reached after [7/7] but wasm/inference/parsed are unset — did the smoke steps fail silently?",
+					);
+				}
+				const { runBenchMode } = await import(
+					`./real-model-bench.js${assetSuffix}`
+				);
+				await runBenchMode({
+					WebLLM,
+					runTasks,
+					score,
+					collectBrowserSystemProfile,
+					wasm: wasmInstance,
+					inference,
+					parsed: parsedModel,
+					modelId,
+					taskListId: benchTaskListId,
+					ingestUrl: benchIngestUrl,
+					log,
+					setProgress,
+				});
+			} catch (e) {
+				log("fail", `[bench] failed: ${e.message}\n${e.stack || ""}`);
+				window.__benchStatus = {
+					...(window.__benchStatus ?? {}),
+					done: true,
+					error: e.message,
+				};
+			}
+			// Bench mode replaces interactive chat — don't reveal the chat input.
 			return;
 		}
 
@@ -442,13 +561,18 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				interactiveRunCompletion,
 				makeSmokeSampler,
 				getSmokeChatOptions: (nextParsedModel, chatTemplate) =>
-					getSmokeChatOptions(nextParsedModel, detectChatTemplate, chatTemplate),
+					getSmokeChatOptions(nextParsedModel, detectChatTemplate, chatTemplate, {
+						enableThinking: thinkingEnabled,
+					}),
 				encodeChatPrompt,
 			});
 			window._chatSession = session;
+			const renderedText = thinkingEnabled
+				? result.rawText || result.fullText
+				: result.fullText;
 			chatOutput.textContent = chatOutput.textContent.replace(
 				/Assistant: [\s\S]*$/,
-				`Assistant: ${result.fullText}`,
+				`Assistant: ${renderedText}`,
 			);
 
 			const elapsed = (result.totalTime / 1000).toFixed(2);

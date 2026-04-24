@@ -33,14 +33,24 @@ export function getSmokePageShellMarkup() {
 </div>`.trim();
 }
 
-export function getSmokeChatOptions(parsed, detectChatTemplate, chatTemplate) {
+export function getSmokeChatOptions(
+	parsed,
+	detectChatTemplate,
+	chatTemplate,
+	overrides = {},
+) {
 	if (
 		parsed?.hyperparams?.architecture === "qwen3" &&
 		detectChatTemplate(chatTemplate ?? "") === "chatml"
 	) {
-		return { enableThinking: false };
+		return overrides.enableThinking === true ? {} : { enableThinking: false };
 	}
 	return {};
+}
+
+export function getThinkingModeFromParams(params) {
+	const v = params?.get?.("thinking");
+	return v === "1" || v === "on" || v === "true";
 }
 
 export function getSmokeSamplingConfig(
@@ -49,16 +59,24 @@ export function getSmokeSamplingConfig(
 	chatTemplate,
 	chatOptions = {},
 ) {
-	if (
+	const isQwen3Chatml =
 		parsed?.hyperparams?.architecture === "qwen3" &&
-		detectChatTemplate(chatTemplate ?? "") === "chatml" &&
-		chatOptions.enableThinking === false
-	) {
+		detectChatTemplate(chatTemplate ?? "") === "chatml";
+	if (isQwen3Chatml && chatOptions.enableThinking === false) {
 		return {
 			temperature: 0.7,
 			topK: 20,
 			topP: 0.8,
 			repetitionPenalty: 1.1,
+			seed: 12345,
+		};
+	}
+	if (isQwen3Chatml) {
+		return {
+			temperature: 0.6,
+			topK: 20,
+			topP: 0.95,
+			repetitionPenalty: 1.05,
 			seed: 12345,
 		};
 	}
@@ -75,17 +93,39 @@ export function createSmokeSamplerFactory({
 	Sampler,
 	parsedModel,
 	detectChatTemplate,
+	samplingOverrides = {},
 }) {
 	return function makeSmokeSampler(chatTemplate, chatOptions = {}) {
-		return new Sampler(
-			getSmokeSamplingConfig(
-				parsedModel,
-				detectChatTemplate,
-				chatTemplate,
-				chatOptions,
-			),
+		const base = getSmokeSamplingConfig(
+			parsedModel,
+			detectChatTemplate,
+			chatTemplate,
+			chatOptions,
 		);
+		return new Sampler({ ...base, ...samplingOverrides });
 	};
+}
+
+export function getSmokeSamplingOverridesFromParams(params) {
+	const overrides = {};
+	const num = (key) => {
+		const raw = params?.get?.(key);
+		if (raw === null || raw === undefined || raw === "") return undefined;
+		const v = Number(raw);
+		return Number.isFinite(v) ? v : undefined;
+	};
+	const temperature = num("temp");
+	if (temperature !== undefined) overrides.temperature = temperature;
+	const topK = num("topK");
+	if (topK !== undefined) overrides.topK = Math.floor(topK);
+	const topP = num("topP");
+	if (topP !== undefined) overrides.topP = topP;
+	const repetitionPenalty = num("rep");
+	if (repetitionPenalty !== undefined)
+		overrides.repetitionPenalty = repetitionPenalty;
+	const seed = num("seed");
+	if (seed !== undefined) overrides.seed = Math.floor(seed);
+	return overrides;
 }
 
 export function sanitizeDisplayText(text) {
@@ -140,15 +180,20 @@ function getMaskedTokensWhileThinking(thinkingTokenIds, tokenizer) {
 	if (!thinkingTokenIds) return [];
 	const imStartId = tokenizer.getId("<|im_start|>");
 	const imEndId = tokenizer.getId("<|im_end|>");
-	return [thinkingTokenIds.thinkOpenId, imStartId, imEndId].filter(
-		(id) => id !== undefined,
-	);
+	const endoftextId = tokenizer.getId("<|endoftext|>");
+	return [
+		thinkingTokenIds.thinkOpenId,
+		imStartId,
+		imEndId,
+		endoftextId,
+	].filter((id) => id !== undefined);
 }
 
 function getMaskedTokensAfterThinkingUntilAnswer(thinkingTokenIds, tokenizer) {
 	if (!thinkingTokenIds) return [];
 	const imStartId = tokenizer.getId("<|im_start|>");
 	const imEndId = tokenizer.getId("<|im_end|>");
+	const endoftextId = tokenizer.getId("<|endoftext|>");
 	const toolCallOpenId = tokenizer.getId("<tool_call>");
 	const toolCallCloseId = tokenizer.getId("</tool_call>");
 	const toolResponseOpenId = tokenizer.getId("<tool_response>");
@@ -157,11 +202,37 @@ function getMaskedTokensAfterThinkingUntilAnswer(thinkingTokenIds, tokenizer) {
 		thinkingTokenIds.thinkOpenId,
 		imStartId,
 		imEndId,
+		endoftextId,
 		toolCallOpenId,
 		toolCallCloseId,
 		toolResponseOpenId,
 		toolResponseCloseId,
 	].filter((id) => id !== undefined);
+}
+
+function getMaskedTokensDuringAnswer(thinkingTokenIds, tokenizer) {
+	if (!thinkingTokenIds) return [];
+	const imStartId = tokenizer.getId("<|im_start|>");
+	const toolCallOpenId = tokenizer.getId("<tool_call>");
+	const toolCallCloseId = tokenizer.getId("</tool_call>");
+	const toolResponseOpenId = tokenizer.getId("<tool_response>");
+	const toolResponseCloseId = tokenizer.getId("</tool_response>");
+	return [
+		thinkingTokenIds.thinkOpenId,
+		imStartId,
+		toolCallOpenId,
+		toolCallCloseId,
+		toolResponseOpenId,
+		toolResponseCloseId,
+	].filter((id) => id !== undefined);
+}
+
+function getExtraStopTokenIds(parsed, detectChatTemplate, tokenizer) {
+	if (parsed?.hyperparams?.architecture !== "qwen3") return [];
+	const chatTemplate = parsed?.tokenizerConfig?.chatTemplate ?? "";
+	if (detectChatTemplate(chatTemplate) !== "chatml") return [];
+	const endoftextId = tokenizer.getId("<|endoftext|>");
+	return endoftextId === undefined ? [] : [endoftextId];
 }
 
 function maskTokenLogits(logits, tokenIds) {
@@ -186,6 +257,15 @@ function isWhitespaceOnlyTextToken(tokenizer, tokenId) {
 	return tokenizer.decode([tokenId]).trim().length === 0;
 }
 
+function tokenStartsWithWhitespace(tokenizer, tokenId) {
+	const token = tokenizer.getToken(tokenId);
+	if (!token) return false;
+	if (token.attr & (4 | 8)) return false;
+	const text = tokenizer.decode([tokenId]);
+	if (text.length === 0) return false;
+	return /^\s/.test(text);
+}
+
 export function createSmokeCompletionRunner({
 	parsed,
 	tokenizer,
@@ -204,6 +284,9 @@ export function createSmokeCompletionRunner({
 		const forbiddenReentryTokens = new Set(
 			getForbiddenReentryTokens(parsed, detectChatTemplate, tokenizer),
 		);
+		const extraStopTokens = new Set(
+			getExtraStopTokenIds(parsed, detectChatTemplate, tokenizer),
+		);
 		const thinkingTokenIds = getThinkingTokenIds(parsed, tokenizer);
 		const maskedTokensWhileThinking = getMaskedTokensWhileThinking(
 			thinkingTokenIds,
@@ -211,10 +294,15 @@ export function createSmokeCompletionRunner({
 		);
 		const maskedTokensAfterThinkingUntilAnswer =
 			getMaskedTokensAfterThinkingUntilAnswer(thinkingTokenIds, tokenizer);
+		const maskedTokensDuringAnswer = getMaskedTokensDuringAnswer(
+			thinkingTokenIds,
+			tokenizer,
+		);
 		const requireVisibleAnswerAfterThinking = thinkingTokenIds !== null;
 		let thinkDepth = 0;
 		let hasVisibleAnswerText = false;
 		let waitingForVisibleAnswer = false;
+		let requireLeadingWhitespaceAfterThink = false;
 
 		log("running", `  ${label} prompt tokens: ${promptTokens.length}`);
 		{
@@ -258,6 +346,10 @@ export function createSmokeCompletionRunner({
 				finishReason = "eos";
 				break;
 			}
+			if (extraStopTokens.has(sampledId)) {
+				finishReason = "stop-token";
+				break;
+			}
 			const pos = promptTokens.length + step;
 			if (sampler.isGreedy && sampler.noPenalty) {
 				const result = await inference.forwardDecode(
@@ -286,10 +378,21 @@ export function createSmokeCompletionRunner({
 						maskTokenLogits(stepLogits, [eosId]);
 					}
 				} else if (hasVisibleAnswerText) {
-					maskTokenLogits(stepLogits, maskedTokensAfterThinkingUntilAnswer);
+					maskTokenLogits(stepLogits, maskedTokensDuringAnswer);
 				}
 				sampledId = sampler.sample(stepLogits);
-				if (waitingForVisibleAnswer) {
+				if (waitingForVisibleAnswer && requireLeadingWhitespaceAfterThink) {
+					const maskedAttempts = new Set();
+					while (
+						!tokenStartsWithWhitespace(tokenizer, sampledId) &&
+						!maskedAttempts.has(sampledId)
+					) {
+						maskedAttempts.add(sampledId);
+						maskTokenLogits(stepLogits, [sampledId]);
+						sampledId = sampler.sample(stepLogits);
+					}
+					requireLeadingWhitespaceAfterThink = false;
+				} else if (waitingForVisibleAnswer) {
 					const maskedWhitespaceOnly = new Set();
 					while (
 						isWhitespaceOnlyTextToken(tokenizer, sampledId) &&
@@ -303,6 +406,10 @@ export function createSmokeCompletionRunner({
 			}
 			if (sampledId === eosId) {
 				finishReason = "eos";
+				break;
+			}
+			if (extraStopTokens.has(sampledId)) {
+				finishReason = "stop-token";
 				break;
 			}
 			if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkOpenId) {
@@ -322,6 +429,8 @@ export function createSmokeCompletionRunner({
 				thinkDepth = Math.max(0, thinkDepth - 1);
 				if (thinkDepth === 0) {
 					waitingForVisibleAnswer = requireVisibleAnswerAfterThinking;
+					requireLeadingWhitespaceAfterThink =
+						requireVisibleAnswerAfterThinking;
 				}
 			}
 			if (

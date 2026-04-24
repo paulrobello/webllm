@@ -137,27 +137,7 @@ export const reasoningTasks: EvalTask[] = [
 		input: "I have a 5-gallon jug and a 3-gallon jug. How can I measure exactly 4 gallons?",
 		expected:
 			"Fill the 5-gallon jug, pour into the 3-gallon jug (leaving 2 in the 5), empty the 3, pour the 2 into the 3, fill the 5 again, pour into the 3 (which has 2, so takes 1 more), leaving exactly 4 in the 5-gallon jug.",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const lower = output.toLowerCase();
-				const mentionsFill5 =
-					lower.includes("fill") && lower.includes("5");
-				const mentionsPour =
-					lower.includes("pour") || lower.includes("transfer");
-				const mentionsEmpty =
-					lower.includes("empty") ||
-					lower.includes("dump") ||
-					lower.includes("discard");
-				const mentions4 = lower.includes("4");
-				let score = 0;
-				if (mentionsFill5) score += 0.25;
-				if (mentionsPour) score += 0.25;
-				if (mentionsEmpty) score += 0.25;
-				if (mentions4) score += 0.25;
-				return score;
-			},
-		},
+		scoring: { type: "custom", name: "rs-012-water-jug" },
 		difficulty: "hard",
 	},
 ];

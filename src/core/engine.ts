@@ -26,6 +26,7 @@ import { GgufParser } from "../models/gguf-parser.js";
 import type { GgufContext } from "../models/gguf-types.js";
 import { InferenceSession } from "../models/inference-session.js";
 import { KVCache } from "../models/kv-cache.js";
+import type { ParsedModel } from "../models/model-loader.js";
 import { ModelLoader } from "../models/model-loader.js";
 import type {
 	ChatMessage,
@@ -396,7 +397,10 @@ export class WebLLM {
 		const prevMsgCount = sessionInfo.messageCount;
 		const tmpl = tokenizer.options.chatTemplate;
 		const promptMessages = messages;
-		const templateOptions = { enableThinking: config?.enableThinking };
+		const templateOptions = {
+			enableThinking: config?.enableThinking,
+			tools: config?.tools,
+		};
 
 		let promptTokens: number[];
 		if (
@@ -444,6 +448,48 @@ export class WebLLM {
 			this.sessions.set(modelId, entry);
 		}
 		return entry;
+	}
+
+	/**
+	 * Promote a manually-assembled inference pipeline into this engine. Useful
+	 * for consumers (the smoke-test page, notebooks, custom loaders) that
+	 * already built `wasm` + `ModelInference` + `ParsedModel` by hand and want
+	 * to drive them through the library primitives (`Character.chat`,
+	 * `runTask`, `runTasks`) without re-loading the model.
+	 *
+	 * After this returns, the returned handle is ready for `engine.chatCompletion`
+	 * and everything built on top of it.
+	 */
+	async adoptPreloadedModel(
+		name: string,
+		pipeline: {
+			wasm: GgmlWasm;
+			inference: ModelInference;
+			parsed: ParsedModel;
+		},
+	): Promise<ModelHandle> {
+		// The pipeline may have been used before (e.g. the smoke page's
+		// [7/7] one-shot writes to the KV cache). The engine's session
+		// tracker would treat this as a fresh model and try to write at
+		// position 0, colliding with the existing cache and aborting the
+		// WASM module. Reset the cache here so the engine's view matches
+		// reality.
+		pipeline.inference.resetKVCache();
+
+		const handle = await this.loadModel(name, { priority: 0 });
+		const entry = this.modelManager.get(handle.id);
+		if (!entry) {
+			throw new Error(
+				`adoptPreloadedModel: model manager entry missing for ${handle.id}`,
+			);
+		}
+		entry.hyperparams = pipeline.parsed.hyperparams;
+		entry.tokenizer = new Tokenizer(pipeline.parsed.tokenizerConfig);
+		entry.kvCache = new KVCache(pipeline.parsed.kvCacheConfig);
+		entry.loaded = true;
+		this.wasmModules.set(handle.id, pipeline.wasm);
+		this.inferenceEngines.set(handle.id, pipeline.inference);
+		return handle;
 	}
 
 	static async loadModelFromBuffer(
@@ -501,7 +547,9 @@ export class WebLLM {
 	}
 
 	createCharacter(config: CharacterConfig): Character {
-		return this.characterManager.create(config);
+		// Inject ourselves as the engine unless the caller passed one
+		// explicitly (e.g. a mock for testing).
+		return this.characterManager.create({ engine: this, ...config });
 	}
 
 	getCharacter(id: string): Character | undefined {

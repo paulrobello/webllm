@@ -40,15 +40,27 @@ export interface ToolResult {
 	error?: string;
 }
 
-const XML_TOOL_CALL_RE = /<tool_call=(\{.*?\})>/;
+// Qwen3 / Hermes / Llama-3.x common convention:
+//   <tool_call>
+//   {"name": "...", "arguments": {...}}
+//   </tool_call>
+// The JSON body may span newlines and nest braces, so we match the
+// balanced content between the tags non-greedily with the `s` flag to
+// let `.` cross line breaks.
+const XML_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/;
+// Legacy one-liner form we used to produce internally: `<tool_call={...}>`.
+// Keep parsing for back-compat with any stored outputs.
+const XML_LEGACY_TOOL_CALL_RE = /<tool_call=(\{.*?\})>/;
 const JSON_OBJECT_RE =
 	/\{[^{}]*"name"\s*:\s*"[^"]+?"[^{}]*"arguments"\s*:\s*\{[^{}]*\}[^{}]*\}/;
 
 /**
  * Registers, parses, and executes tool/function calls from model output.
  *
- * Supports two formats: XML-wrapped JSON (`<tool_call={...}>`) and bare JSON objects
- * with "name" and "arguments" fields.
+ * Supports three formats:
+ *   1. `<tool_call>\n{"name":...,"arguments":...}\n</tool_call>` — Qwen3/Hermes style.
+ *   2. `<tool_call={...}>` — legacy internal form (kept for back-compat).
+ *   3. A bare JSON object with "name" and "arguments" fields.
  */
 export class ToolSystem {
 	private tools: Map<string, ToolDefinition> = new Map();
@@ -71,7 +83,14 @@ export class ToolSystem {
 	parseToolCall(text: string): ToolCall | null {
 		const xmlMatch = text.match(XML_TOOL_CALL_RE);
 		if (xmlMatch?.[1]) {
-			return this.parseJson(xmlMatch[1]);
+			const parsed = this.parseJson(xmlMatch[1].trim());
+			if (parsed) return parsed;
+		}
+
+		const legacyMatch = text.match(XML_LEGACY_TOOL_CALL_RE);
+		if (legacyMatch?.[1]) {
+			const parsed = this.parseJson(legacyMatch[1]);
+			if (parsed) return parsed;
 		}
 
 		const jsonMatch = text.match(JSON_OBJECT_RE);

@@ -1,17 +1,21 @@
 .PHONY: build test lint lint-fix fmt typecheck checkall clean install deps \
         wasm-build wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
-        bench-eval-models bench-inference bench-inference-save bench-chat-smoke bench-chat-smoke-matrix bench-all \
-        smoke-test smoke-serve smoke-stop smoke-open smoke-run smoke-bench \
+        bench-eval-models bench-inference bench-inference-save bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full bench-all \
+        smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench \
+        dashboard-serve dashboard-stop dashboard-db-reset agentchrome-stop stop-all \
         run-all help
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MODEL       ?= hermes-3-llama-3.2-3b-q4f16
-PERF_MODEL  ?= tinyllama-1.1b-chat-q4_0
-PERF_RUNS   ?= 3
-SMOKE_PORT  ?= 8031
+MODEL          ?= hermes-3-llama-3.2-3b-q4f16
+PERF_MODEL     ?= tinyllama-1.1b-chat-q4_0
+PERF_RUNS      ?= 3
+SMOKE_PORT     ?= 8031
+DASHBOARD_PORT ?= 8033
+DASHBOARD_HOST ?= 0.0.0.0
+DASHBOARD_DB   ?= eval/reports/smoke-runs.db
 
 # ---------------------------------------------------------------------------
 # help — list all targets with descriptions
@@ -95,10 +99,16 @@ smoke-test: wasm-build ## Bundle + copy WASM artifacts into smoke-test/
 	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
 
 smoke-serve: smoke-test ## Serve smoke-test/ on http://localhost:$(SMOKE_PORT)
-	cd smoke-test && python3 -m http.server $(SMOKE_PORT)
+	bun run eval/smoke-serve.ts --port $(SMOKE_PORT)
 
 smoke-stop: ## Kill the smoke-test HTTP server
 	lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
+
+smoke-restart: smoke-test ## Kill any server on SMOKE_PORT and start a fresh one in background
+	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
+	@bun run eval/smoke-serve.ts --port $(SMOKE_PORT) >/dev/null 2>&1 &
+	@sleep 1
+	@echo "smoke server running on http://localhost:$(SMOKE_PORT)"
 
 smoke-open: smoke-test ## Build + open smoke-test in default browser
 	open http://localhost:$(SMOKE_PORT)/real-model.html
@@ -106,35 +116,41 @@ smoke-open: smoke-test ## Build + open smoke-test in default browser
 smoke-run: smoke-test ## Build, serve in background, open browser (Ctrl-C to stop)
 	@echo "Serving smoke-test on http://localhost:$(SMOKE_PORT) ..."
 	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
-	@cd smoke-test && python3 -m http.server $(SMOKE_PORT) &
+	@bun run eval/smoke-serve.ts --port $(SMOKE_PORT) &
 	@sleep 1 && open http://localhost:$(SMOKE_PORT)/real-model.html
 	@echo "Press Ctrl-C to stop the server."
 	@wait
 
-smoke-bench: smoke-test ## End-to-end inference benchmark with agentchrome (headed)
-	@echo "=== smoke-bench: $(PERF_MODEL), $(PERF_RUNS) runs ==="
-	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
-	@cd smoke-test && python3 -m http.server $(SMOKE_PORT) &
+dashboard-serve: ## Run live benchmark dashboard (SSE backend, SQLite-persisted, LAN-bound)
+	@lsof -ti:$(DASHBOARD_PORT) | xargs kill -9 2>/dev/null || true
+	@echo "dashboard → http://localhost:$(DASHBOARD_PORT)/ (bound to $(DASHBOARD_HOST), db=$(DASHBOARD_DB))"
+	bun run eval/live-server.ts --port $(DASHBOARD_PORT) --host $(DASHBOARD_HOST) --db $(DASHBOARD_DB)
+
+dashboard-stop: ## Kill the dashboard server
+	lsof -ti:$(DASHBOARD_PORT) | xargs kill -9 2>/dev/null || true
+
+dashboard-db-reset: ## Stop the dashboard, delete its SQLite file (+WAL/SHM), next start is empty
+	@lsof -ti:$(DASHBOARD_PORT) | xargs kill 2>/dev/null || true
 	@sleep 1
-	@agentchrome connect --launch --headed 2>/dev/null || true; \
-	sleep 2; \
-	PORT=$$(agentchrome connect --status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('port',''))" 2>/dev/null); \
-	if [ -z "$$PORT" ]; then echo "ERROR: agentchrome not running"; kill %1 2>/dev/null; exit 1; fi; \
-	echo "agentchrome on port $$PORT"; \
-	TAB=$$(agentchrome --port $$PORT tabs list 2>/dev/null | python3 -c "import sys,json; tabs=json.load(sys.stdin); t=[t for t in tabs if 'real-model' in t.get('url','')]; print(t[0]['id'] if t else '')" 2>/dev/null); \
-	if [ -n "$$TAB" ]; then \
-		agentchrome --port $$PORT --tab $$TAB navigate "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || true; \
+	@rm -f $(DASHBOARD_DB) $(DASHBOARD_DB)-wal $(DASHBOARD_DB)-shm
+	@echo "removed $(DASHBOARD_DB) (and -wal/-shm sidecars if any)"
+
+stop-all: smoke-stop dashboard-stop agentchrome-stop ## Stop smoke server, dashboard server, and agentchrome session
+
+agentchrome-stop: ## Stop all agentchrome sessions (kill launched Chrome + clear session file)
+	@PORT=$$(agentchrome connect --status 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('port','')) if d.get('active') else print('')" 2>/dev/null); \
+	if [ -n "$$PORT" ]; then \
+		lsof -ti:$$PORT | xargs kill 2>/dev/null || true; \
+		echo "stopped Chrome on CDP port $$PORT"; \
 	else \
-		agentchrome --port $$PORT tabs create "http://localhost:$(SMOKE_PORT)/real-model.html?v=$$(date +%s)" 2>/dev/null || true; \
-		sleep 1; \
-		TAB=$$(agentchrome --port $$PORT tabs list 2>/dev/null | python3 -c "import sys,json; tabs=json.load(sys.stdin); t=[t for t in tabs if 'real-model' in t.get('url','')]; print(t[0]['id'] if t else '')" 2>/dev/null); \
-	fi; \
-	if [ -n "$$TAB" ]; then \
-		bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --port $$PORT --tab $$TAB --profile; \
-	else \
-		echo "ERROR: could not find or create a real-model tab"; kill %1 2>/dev/null; exit 1; \
-	fi; \
-	kill %1 2>/dev/null || true
+		echo "no active agentchrome session"; \
+	fi
+	@agentchrome connect --disconnect >/dev/null 2>&1 || true
+	@echo "agentchrome session cleared"
+
+smoke-bench: smoke-restart ## End-to-end inference benchmark (auto-launches agentchrome if needed)
+	@echo "=== smoke-bench: $(PERF_MODEL), $(PERF_RUNS) runs ==="
+	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --profile
 
 # ---------------------------------------------------------------------------
 # Benchmarks
@@ -156,17 +172,35 @@ bench-eval-list: ## List available eval tasks
 bench-eval-models: ## List available eval models
 	bun run bench:eval --models
 
-bench-inference: ## Run end-to-end inference perf (needs smoke-serve + Chrome)
+bench-inference: smoke-restart ## Run end-to-end inference perf (needs Chrome)
 	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS)
 
-bench-inference-save: ## Run inference perf and save baseline
+bench-inference-save: smoke-restart ## Run inference perf and save baseline
 	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --save
 
-bench-chat-smoke: ## Run browser-driven interactive chat smoke regression
+bench-chat-smoke: smoke-restart ## Run browser-driven interactive chat smoke regression
 	bun run eval/chat-smoke.ts --model $(PERF_MODEL)
 
-bench-chat-smoke-matrix: ## Run browser-driven chat smoke matrix across default pages/models
+bench-chat-smoke-matrix: smoke-restart ## Run browser-driven chat smoke matrix across default pages/models
 	bun run eval/chat-smoke-matrix.ts
+
+bench-chat-smoke-matrix-full: smoke-restart ## Run full chat smoke matrix (adds thinking-on for Qwen3 models)
+	bun run eval/chat-smoke-matrix.ts --preset full
+
+bench-profile: smoke-restart ## Combined speed + accuracy bench for a profile (PROFILES=<names or set>)
+	@test -n "$(PROFILES)" || (echo "ERROR: set PROFILES=<profile-or-set>. e.g. make bench-profile PROFILES=llama-vs-qwen"; exit 1)
+	bun run eval/bench.ts --profiles "$(PROFILES)"
+
+bench-browser-eval: smoke-restart ## Browser-only accuracy eval (real WebGPU per task) — needs dashboard running
+	@test -n "$(PROFILE)" || (echo "ERROR: set PROFILE=<profile>. e.g. make bench-browser-eval PROFILE=qwen3-0.6b-off-warm"; exit 1)
+	@test -n "$(WEBLLM_LIVE_BENCH_URL)" || (echo "ERROR: set WEBLLM_LIVE_BENCH_URL=http://localhost:$(DASHBOARD_PORT). Dashboard must be running (make dashboard-serve)."; exit 1)
+	bun run eval/browser-eval.ts --profile $(PROFILE) --live-bench-url $(WEBLLM_LIVE_BENCH_URL)
+
+bench-full: smoke-restart ## Speed + accuracy for every configured profile, streamed to the dashboard
+	@curl -sf http://localhost:$(DASHBOARD_PORT)/health >/dev/null 2>&1 || \
+		(echo "ERROR: dashboard not reachable on port $(DASHBOARD_PORT). Run 'make dashboard-serve' in another terminal first."; exit 1)
+	@WEBLLM_LIVE_BENCH_URL=http://localhost:$(DASHBOARD_PORT) \
+		bun run eval/bench.ts --profiles full --fail-fast
 
 bench-all: bench-perf bench-eval ## Run all benchmarks
 

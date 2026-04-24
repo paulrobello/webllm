@@ -31,6 +31,7 @@ import {
 	agentchrome,
 	buildSmokeTestUrl,
 	ensureModelDownloaded,
+	ensureSmokeServerReachable,
 	extractSmokeTestPrompt,
 	resolveAgentchromeSession,
 	waitForSmokeTestResult,
@@ -131,6 +132,7 @@ async function run(
 		profile: boolean;
 	},
 ): Promise<void> {
+	await ensureSmokeServerReachable();
 	await ensureModelDownloaded(model);
 
 	const { port, tab } = await resolveAgentchromeSession(opts.port, opts.tab);

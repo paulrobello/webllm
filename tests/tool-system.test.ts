@@ -44,7 +44,7 @@ describe("ToolSystem", () => {
 		expect(result?.arguments).toEqual({ item: "sword" });
 	});
 
-	test("parseToolCall extracts XML-tagged tool call", () => {
+	test("parseToolCall extracts legacy <tool_call={...}> form", () => {
 		const system = new ToolSystem([]);
 		const result = system.parseToolCall(
 			'<tool_call={"name": "check_stock", "arguments": {"item": "sword"}}>',
@@ -52,6 +52,29 @@ describe("ToolSystem", () => {
 		expect(result).not.toBeNull();
 		expect(result?.name).toBe("check_stock");
 		expect(result?.arguments).toEqual({ item: "sword" });
+	});
+
+	test("parseToolCall extracts Qwen3/Hermes <tool_call>...</tool_call> form", () => {
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			'I will help.\n<tool_call>\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n</tool_call>',
+		);
+		expect(result).not.toBeNull();
+		expect(result?.name).toBe("get_weather");
+		expect(result?.arguments).toEqual({ city: "Tokyo" });
+	});
+
+	test("parseToolCall handles nested arguments across newlines", () => {
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			'<tool_call>\n{\n  "name": "search",\n  "arguments": {\n    "query": "pizza",\n    "filters": {"min_stars": 4}\n  }\n}\n</tool_call>',
+		);
+		expect(result).not.toBeNull();
+		expect(result?.name).toBe("search");
+		expect(result?.arguments).toEqual({
+			query: "pizza",
+			filters: { min_stars: 4 },
+		});
 	});
 
 	test("parseToolCall returns null for non-tool text", () => {

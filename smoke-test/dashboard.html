@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebLLM Live Benchmark Dashboard</title>
+<link rel="stylesheet" href="./dashboard.css">
+</head>
+<body>
+<header>
+  <h1>WebLLM Live Benchmark</h1>
+  <div class="status">
+    <span class="status-dot" id="status-dot"></span>
+    <span id="status-text">connecting…</span>
+    <span class="status-meta" id="status-meta"></span>
+  </div>
+</header>
+
+<section class="panel" id="running-panel">
+  <h2>In flight</h2>
+  <div id="running-list" class="running-list empty">nothing running</div>
+</section>
+
+<section class="panel" id="evals-panel">
+  <div class="panel-head">
+    <h2>Accuracy &amp; tool-calling <span id="eval-count" class="dim">0</span></h2>
+    <div class="legend" id="eval-progress-wrap" hidden>
+      <span id="eval-progress-label" class="dim"></span>
+    </div>
+  </div>
+  <div id="evals-empty" class="bar-empty">no eval runs yet — try <code>bun run eval/cli.ts --model &lt;id&gt; --live-bench-url http://localhost:8033</code></div>
+  <div id="evals-body" hidden>
+    <h3 class="section-title">latest by model</h3>
+    <div id="evals-dimensions" class="dim-grid"></div>
+    <h3 class="section-title">runs</h3>
+    <div class="table-wrap">
+      <table id="evals-table">
+        <thead>
+          <tr>
+            <th data-sort="timestamp" class="sortable">time</th>
+            <th data-sort="modelId" class="sortable">model</th>
+            <th data-sort="profile" class="sortable">profile</th>
+            <th data-sort="thinking" class="sortable">think</th>
+            <th data-sort="totalTasks" class="sortable num">tasks</th>
+            <th data-sort="overall" class="sortable num">overall</th>
+            <th>dimensions (passed/total)</th>
+            <th>system</th>
+          </tr>
+        </thead>
+        <tbody id="evals-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Tokens / sec by profile</h2>
+    <div class="legend">
+      <span class="legend-chip one-shot"></span><span>one-shot</span>
+      <span class="legend-chip interactive"></span><span>interactive</span>
+    </div>
+  </div>
+  <div id="chart" class="bar-chart"></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Runs <span id="run-count" class="dim">0</span></h2>
+    <div class="controls">
+      <label class="filter">
+        thinking
+        <select id="filter-thinking">
+          <option value="all">all</option>
+          <option value="off">off</option>
+          <option value="on">on</option>
+        </select>
+      </label>
+      <label class="filter">
+        search
+        <input id="filter-text" type="search" placeholder="model or profile" />
+      </label>
+      <button id="compare-btn" disabled>Compare selected (0)</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table id="runs-table">
+      <thead>
+        <tr>
+          <th class="col-pick"></th>
+          <th data-sort="timestamp" class="sortable">time</th>
+          <th data-sort="profile" class="sortable">profile</th>
+          <th data-sort="model" class="sortable">model</th>
+          <th data-sort="thinking" class="sortable">think</th>
+          <th data-sort="oneShotTokensPerSec" class="sortable num">one-shot tok/s</th>
+          <th data-sort="oneShotPrefillMs" class="sortable num">prefill ms</th>
+          <th data-sort="oneShotTotalMs" class="sortable num">total ms</th>
+          <th data-sort="oneShotFinishReason" class="sortable">finish</th>
+          <th data-sort="oneShotGenTokens" class="sortable num">tokens</th>
+          <th>system</th>
+        </tr>
+      </thead>
+      <tbody id="runs-tbody"></tbody>
+    </table>
+  </div>
+</section>
+
+<div class="modal-backdrop" id="modal-backdrop" hidden>
+  <div class="modal">
+    <button class="modal-close" id="modal-close">×</button>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script type="module" src="./dashboard.js"></script>
+</body>
+</html>

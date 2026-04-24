@@ -148,6 +148,55 @@ describe("formatChatPrompt qwen", () => {
 		);
 	});
 
+	test("qwen prompt injects <tools> block when tools are provided", () => {
+		const m: ChatMessage[] = [
+			{ role: "system", content: "You are a weather bot." },
+			{ role: "user", content: "Tokyo?" },
+		];
+		const prompt = formatChatPrompt(m, QWEN_TMPL, {
+			tools: [
+				{
+					name: "get_weather",
+					description: "Get weather for a city.",
+					parameters: {
+						city: {
+							type: "string",
+							description: "The city",
+							required: true,
+						},
+					},
+				},
+			],
+		});
+		expect(prompt).toContain("<tools>");
+		expect(prompt).toContain("</tools>");
+		expect(prompt).toContain('"name":"get_weather"');
+		expect(prompt).toContain("You are a weather bot.");
+		expect(prompt).toContain("<tool_call>");
+		// Tools live INSIDE the system turn, not as a separate message.
+		expect(prompt).toMatch(
+			/<\|im_start\|>system\nYou are a weather bot\.\n\n# Tools/,
+		);
+	});
+
+	test("qwen prompt without tools omits the block entirely", () => {
+		const m: ChatMessage[] = [
+			{ role: "system", content: "s" },
+			{ role: "user", content: "hi" },
+		];
+		const prompt = formatChatPrompt(m, QWEN_TMPL);
+		expect(prompt).not.toContain("<tools>");
+		expect(prompt).not.toContain("# Tools");
+	});
+
+	test("qwen prompt with tools but no explicit system creates one", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "hi" }];
+		const prompt = formatChatPrompt(m, QWEN_TMPL, {
+			tools: [{ name: "noop", description: "", parameters: {} }],
+		});
+		expect(prompt.startsWith("<|im_start|>system\n# Tools")).toBe(true);
+	});
+
 	test("encodeChatPrompt respects qwen no-BOS policy", () => {
 		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
 		const seenPrompts: string[] = [];

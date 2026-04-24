@@ -34,22 +34,7 @@ export const embeddingTasks: EvalTask[] = [
 			"You are a vocabulary assistant. Provide a single-word synonym for the given word. Do not add explanation or punctuation.",
 		input: "What is a synonym for 'fast'?",
 		expected: "quick",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const synonyms = [
-					"quick",
-					"rapid",
-					"swift",
-					"speedy",
-					"brisk",
-					"hasty",
-				];
-				const lower = output.toLowerCase().trim();
-				if (synonyms.some((s) => lower.includes(s))) return 1;
-				return 0;
-			},
-		},
+		scoring: { type: "custom", name: "emb-003-fast-synonyms" },
 		difficulty: "easy",
 	},
 	{
@@ -60,22 +45,7 @@ export const embeddingTasks: EvalTask[] = [
 			"You are a vocabulary assistant. Provide a single-word antonym for the given word. Do not add explanation or punctuation.",
 		input: "What is the opposite of 'hot'?",
 		expected: "cold",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const antonyms = [
-					"cold",
-					"cool",
-					"freezing",
-					"frigid",
-					"icy",
-					"chilly",
-				];
-				const lower = output.toLowerCase().trim();
-				if (antonyms.some((a) => lower.includes(a))) return 1;
-				return 0;
-			},
-		},
+		scoring: { type: "custom", name: "emb-004-hot-antonyms" },
 		difficulty: "easy",
 	},
 
@@ -88,15 +58,7 @@ export const embeddingTasks: EvalTask[] = [
 			"You are an analogy assistant. Complete the analogy by responding with exactly one word. Do not add explanation or punctuation.",
 		input: "Hand is to glove as foot is to what?",
 		expected: "sock",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const validAnswers = ["sock", "shoe", "boot"];
-				const lower = output.toLowerCase().trim();
-				if (validAnswers.some((a) => lower.includes(a))) return 1;
-				return 0;
-			},
-		},
+		scoring: { type: "custom", name: "emb-005-foot-analogy" },
 		difficulty: "medium",
 	},
 	{
@@ -109,55 +71,7 @@ export const embeddingTasks: EvalTask[] = [
 			"Group these items by category: salmon, carrot, trout, broccoli, tuna",
 		expected:
 			"Fish: salmon, trout, tuna | Vegetable: carrot, broccoli",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const lower = output.toLowerCase();
-				const fish = ["salmon", "trout", "tuna"];
-				const vegetables = ["carrot", "broccoli"];
-				let groupedCorrectly = 0;
-
-				// Check that fish are grouped together (appear on the same line)
-				for (const f of fish) {
-					if (lower.includes(f)) groupedCorrectly++;
-				}
-				// Check that vegetables are grouped together
-				for (const v of vegetables) {
-					if (lower.includes(v)) groupedCorrectly++;
-				}
-
-				// All 5 items must appear
-				if (groupedCorrectly < 5) return 0;
-
-				// Check that fish appear on the same line and vegetables on the same line
-				const lines = output.split("\n");
-				const fishLine = lines.find(
-					(l) =>
-						l.toLowerCase().includes("salmon") ||
-						l.toLowerCase().includes("trout") ||
-						l.toLowerCase().includes("tuna"),
-				);
-				const vegLine = lines.find(
-					(l) =>
-						l.toLowerCase().includes("carrot") ||
-						l.toLowerCase().includes("broccoli"),
-				);
-
-				if (!fishLine || !vegLine) return 0.5;
-
-				const fishTogether =
-					fishLine.toLowerCase().includes("salmon") &&
-					fishLine.toLowerCase().includes("trout") &&
-					fishLine.toLowerCase().includes("tuna");
-				const vegTogether =
-					vegLine.toLowerCase().includes("carrot") &&
-					vegLine.toLowerCase().includes("broccoli");
-
-				if (fishTogether && vegTogether) return 1;
-				if (fishTogether || vegTogether) return 0.75;
-				return 0.5;
-			},
-		},
+		scoring: { type: "custom", name: "emb-006-fish-vegetables-grouping" },
 		difficulty: "medium",
 	},
 	{
@@ -201,17 +115,7 @@ export const embeddingTasks: EvalTask[] = [
 		input:
 			"If 'puppy' is related to 'dog', and 'dog' is related to 'canine', then what is 'puppy' related to through both 'dog' and the young of cats?",
 		expected: "kitten",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const lower = output.toLowerCase().trim();
-				if (lower.includes("kitten")) return 1;
-				if (lower.includes("cub")) return 0.75;
-				if (lower.includes("cat") && !lower.includes("category"))
-					return 0.5;
-				return 0;
-			},
-		},
+		scoring: { type: "custom", name: "emb-009-puppy-kitten" },
 		difficulty: "hard",
 	},
 	{
@@ -251,39 +155,7 @@ export const embeddingTasks: EvalTask[] = [
 			"2. 'Turn on the light' vs 'The light was blinding'\n" +
 			"3. 'She wore a light jacket' vs 'The feather is light'",
 		expected: "different\nsame\nsame",
-		scoring: {
-			type: "custom",
-			scorer: (output: string, _expected: string): number => {
-				const expectedAnswers = ["different", "same", "same"];
-				const lines = output
-					.split("\n")
-					.map((l) => l.toLowerCase().trim())
-					.filter((l) => l.length > 0);
-
-				let correct = 0;
-				for (let i = 0; i < expectedAnswers.length; i++) {
-					const target = expectedAnswers[i];
-					if (lines[i] && lines[i].includes(target)) {
-						correct++;
-					} else {
-						// Also check if the answer appears anywhere in output near the right context
-						const allAnswers = lines.join(" ");
-						// Count occurrences of each expected answer
-						const sameCount = (
-							allAnswers.match(/\bsame\b/g) || []
-						).length;
-						const diffCount = (
-							allAnswers.match(/\bdifferent\b/g) || []
-						).length;
-						// If we have 2 "same" and 1 "different" total, give partial credit
-						if (sameCount === 2 && diffCount === 1) {
-							return 0.75;
-						}
-					}
-				}
-				return correct / 3;
-			},
-		},
+		scoring: { type: "custom", name: "emb-012-light-sense-disambiguation" },
 		difficulty: "hard",
 	},
 ];

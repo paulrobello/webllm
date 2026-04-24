@@ -10,6 +10,43 @@ export function getSmokeTestBaseUrl(page: SmokeTestPage = "smoke"): string {
 	return page === "debug" ? DEBUG_SMOKE_TEST_URL : SMOKE_TEST_URL;
 }
 
+/**
+ * Probe the smoke-test static server. Returns true iff /real-model.html
+ * responds 200 within the timeout. Used by bench drivers as a fast-fail
+ * preflight when the user runs them directly (Make targets that depend
+ * on `smoke-restart` would have already started the server, but direct
+ * `bun run eval/...` invocations skip Make entirely).
+ */
+export async function checkSmokeServer(
+	url: string = SMOKE_TEST_URL,
+	timeoutMs = 2000,
+): Promise<boolean> {
+	const controller = new AbortController();
+	const t = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const res = await fetch(url, { signal: controller.signal });
+		return res.ok;
+	} catch {
+		return false;
+	} finally {
+		clearTimeout(t);
+	}
+}
+
+export async function ensureSmokeServerReachable(
+	page: SmokeTestPage = "smoke",
+): Promise<void> {
+	const probeUrl = getSmokeTestBaseUrl(page);
+	const ok = await checkSmokeServer(probeUrl);
+	if (ok) return;
+	throw new Error(
+		[
+			`smoke-test server not reachable at ${probeUrl}.`,
+			"Start it with `make smoke-serve` (or `make smoke-restart`) in another terminal.",
+		].join(" "),
+	);
+}
+
 export function buildSmokeTestUrl(
 	modelId: string,
 	contextLength: number,
@@ -36,6 +73,7 @@ export interface SmokeTestResult {
 	decodeMs: number;
 	tokensPerSecond: number;
 	completionPageMs: number;
+	finishReason?: string;
 }
 
 export function agentchrome(
@@ -133,46 +171,236 @@ export async function ensureModelDownloaded(
 	console.log("Download complete.\n");
 }
 
+function readAgentchromePort(): string | null {
+	try {
+		const out = execFileSync("agentchrome", ["connect", "--status"], {
+			encoding: "utf-8",
+		});
+		const parsed = JSON.parse(out) as {
+			port?: string | number;
+			active?: boolean;
+			reachable?: boolean;
+		};
+		if (parsed.port && parsed.reachable !== false) return String(parsed.port);
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+async function ensureAgentchromePort(): Promise<{
+	port: string;
+	launched: boolean;
+}> {
+	const existing = readAgentchromePort();
+	if (existing) return { port: existing, launched: false };
+
+	console.log("agentchrome: no active session — launching a headed Chrome…");
+	try {
+		// agentchrome defaults to headed; `--headless` would opt out. We need
+		// headed because WebGPU doesn't work reliably in headless.
+		execFileSync("agentchrome", ["connect", "--launch"], {
+			stdio: ["ignore", "inherit", "inherit"],
+		});
+	} catch {
+		// `connect --launch` can exit non-zero if another connect is racing us;
+		// the poll below is authoritative.
+	}
+
+	const deadline = Date.now() + 15_000;
+	while (Date.now() < deadline) {
+		const port = readAgentchromePort();
+		if (port) return { port, launched: true };
+		await sleep(500);
+	}
+	throw new Error(
+		"agentchrome: failed to establish a session within 15s. Try `agentchrome connect --launch` manually, then re-run.",
+	);
+}
+
+/**
+ * Probe an existing Chrome tab for WebGPU support. Returns true if
+ * `navigator.gpu.requestAdapter()` resolves to an adapter, false otherwise.
+ * Used only on the session-reuse path — when we launched Chrome ourselves
+ * we use agentchrome's default (headed) and trust it.
+ */
+async function tabHasWebGpu(port: string, tab: string): Promise<boolean> {
+	const script = `(async () => {
+		if (!navigator.gpu || typeof navigator.gpu.requestAdapter !== "function") {
+			return JSON.stringify({ ok: false, reason: "no-navigator-gpu" });
+		}
+		try {
+			const adapter = await navigator.gpu.requestAdapter();
+			return JSON.stringify({ ok: !!adapter, reason: adapter ? "ok" : "no-adapter" });
+		} catch (err) {
+			return JSON.stringify({ ok: false, reason: String(err?.message ?? err) });
+		}
+	})()`;
+	try {
+		const out = agentchrome(port, tab, ["js", "exec", script]);
+		const resp = JSON.parse(out) as { result?: string };
+		if (typeof resp.result !== "string") return false;
+		const parsed = JSON.parse(resp.result) as { ok: boolean; reason: string };
+		if (!parsed.ok) {
+			console.warn(`agentchrome: tab WebGPU probe failed — ${parsed.reason}`);
+		}
+		return parsed.ok;
+	} catch (err) {
+		console.warn(
+			`agentchrome: WebGPU probe threw (${err instanceof Error ? err.message : String(err)}); assuming no GPU`,
+		);
+		return false;
+	}
+}
+
+function listAgentchromeTabs(
+	port: string,
+): Array<{ id: string; url: string }> {
+	const raw = execFileSync("agentchrome", ["--port", port, "tabs", "list"], {
+		encoding: "utf-8",
+	});
+	return JSON.parse(raw) as Array<{ id: string; url: string }>;
+}
+
+function findSmokeTab(
+	tabs: Array<{ id: string; url: string }>,
+	page: SmokeTestPage,
+): string | null {
+	const pagePath =
+		page === "debug" ? "real-model-debug.html" : "real-model.html";
+	const exact = tabs.find((entry) => entry.url.includes(pagePath));
+	if (exact) return exact.id;
+	const any = tabs.find(
+		(entry) =>
+			entry.url.includes("real-model.html") ||
+			entry.url.includes("real-model-debug.html"),
+	);
+	return any?.id ?? null;
+}
+
+async function createSmokeTab(
+	port: string,
+	page: SmokeTestPage,
+): Promise<string> {
+	const pagePath =
+		page === "debug" ? "real-model-debug.html" : "real-model.html";
+	const bootUrl = `http://localhost:8031/${pagePath}`;
+	let createdId: string | null = null;
+	try {
+		const raw = execFileSync(
+			"agentchrome",
+			["--port", port, "tabs", "create", bootUrl],
+			{ encoding: "utf-8" },
+		);
+		try {
+			const parsed = JSON.parse(raw) as { id?: string };
+			if (typeof parsed.id === "string") createdId = parsed.id;
+		} catch {
+			// Not every agentchrome build returns JSON; fall back to re-listing.
+		}
+	} catch (err) {
+		throw new Error(
+			`agentchrome: failed to create a smoke tab on port ${port}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+	if (createdId) return createdId;
+
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		const tabs = listAgentchromeTabs(port);
+		const match = findSmokeTab(tabs, page);
+		if (match) return match;
+		await sleep(250);
+	}
+	throw new Error(
+		`agentchrome: created a tab but could not locate it by URL match on port ${port}`,
+	);
+}
+
 export async function resolveAgentchromeSession(
 	portArg?: string,
 	tabArg?: string,
 	page: SmokeTestPage = "smoke",
 ): Promise<{ port: string; tab: string }> {
-	let port = portArg;
-	if (!port) {
-		const status = execFileSync("agentchrome", ["connect", "--status"], {
-			encoding: "utf-8",
-		});
-		const parsed = JSON.parse(status) as { port?: string | number };
-		if (!parsed.port) {
-			throw new Error(
-				"No active agentchrome session. Start one with `agentchrome connect --launch` or pass --port.",
+	let port: string;
+	let launchedByUs: boolean;
+	if (portArg) {
+		port = portArg;
+		launchedByUs = false;
+	} else {
+		const resolved = await ensureAgentchromePort();
+		port = resolved.port;
+		launchedByUs = resolved.launched;
+	}
+
+	let tab = await resolveTab(port, tabArg, page);
+
+	// WebGPU requires headed Chrome. Our own launches use agentchrome's
+	// default (headed) so we trust them. On reuse, probe — and if the
+	// probe fails (almost always a headless or CDP-frozen leftover),
+	// recycle the session once with a fresh launch before giving up. If
+	// the user pinned --port/--tab explicitly, don't second-guess them.
+	if (!launchedByUs && !portArg) {
+		const gpu = await tabHasWebGpu(port, tab);
+		if (!gpu) {
+			console.warn(
+				"agentchrome: reused Chrome session has no WebGPU adapter — recycling and relaunching once…",
 			);
+			stopAgentchromeSession(port);
+			const fresh = await ensureAgentchromePort();
+			if (!fresh.launched) {
+				throw new Error(
+					"agentchrome: failed to launch a fresh session after recycling. Run `make agentchrome-stop` and try again.",
+				);
+			}
+			port = fresh.port;
+			tab = await resolveTab(port, undefined, page);
+			const gpu2 = await tabHasWebGpu(port, tab);
+			if (!gpu2) {
+				throw new Error(
+					[
+						"agentchrome: fresh Chrome session still has no WebGPU adapter.",
+						"This Chrome build / profile cannot run WebGPU. Run `make agentchrome-stop`,",
+						"then verify your Chrome supports WebGPU (chrome://gpu) and re-run.",
+					].join("\n  "),
+				);
+			}
 		}
-		port = String(parsed.port);
 	}
 
-	if (tabArg) return { port, tab: tabArg };
+	return { port, tab };
+}
 
-	const tabs = execFileSync("agentchrome", ["--port", port, "tabs", "list"], {
-		encoding: "utf-8",
-	});
-	const list = JSON.parse(tabs) as Array<{ id: string; url: string }>;
-	const pagePath =
-		page === "debug" ? "real-model-debug.html" : "real-model.html";
-	const smoke =
-		list.find((entry) => entry.url.includes(pagePath)) ??
-		list.find(
-			(entry) =>
-				entry.url.includes("real-model.html") ||
-				entry.url.includes("real-model-debug.html"),
-		);
-	if (!smoke) {
-		throw new Error(
-			`No tab currently loaded on ${pagePath} or another real-model page. Navigate one there first, or pass --tab <TAB_ID>.`,
-		);
+async function resolveTab(
+	port: string,
+	tabArg: string | undefined,
+	page: SmokeTestPage,
+): Promise<string> {
+	if (tabArg) return tabArg;
+	const existing = findSmokeTab(listAgentchromeTabs(port), page);
+	if (existing) return existing;
+	console.log(
+		`agentchrome: no smoke tab on port ${port} — creating one on the smoke-test page…`,
+	);
+	return await createSmokeTab(port, page);
+}
+
+function stopAgentchromeSession(port: string): void {
+	try {
+		execFileSync("agentchrome", ["connect", "--disconnect"], {
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+	} catch {
+		// best-effort
 	}
-	return { port, tab: smoke.id };
+	try {
+		// Kill anything still listening on the CDP port (the launched Chrome).
+		execFileSync("sh", ["-c", `lsof -ti:${port} | xargs kill 2>/dev/null`], {
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+	} catch {
+		// best-effort
+	}
 }
 
 export async function waitForSmokeTestResult(
@@ -181,7 +409,7 @@ export async function waitForSmokeTestResult(
 ): Promise<SmokeTestResult> {
 	const deadline = Date.now() + 180_000;
 	const script = `(() => {
-		const pattern = new RegExp("Generated (\\\\d+) tokens in ([0-9.]+)s \\\\(prefill: (\\\\d+)ms, decode: (\\\\d+)ms, ([0-9.]+) tok\\\\/s(?:, finish=[^)]+)?\\\\)");
+		const pattern = new RegExp("Generated (\\\\d+) tokens in ([0-9.]+)s \\\\(prefill: (\\\\d+)ms, decode: (\\\\d+)ms, ([0-9.]+) tok\\\\/s(?:, finish=([^)]+))?\\\\)");
 		const t = document.getElementById("log")?.textContent ?? "";
 		const m = t.match(pattern);
 		if (!m) return "";
@@ -191,6 +419,7 @@ export async function waitForSmokeTestResult(
 			prefillMs: +m[3],
 			decodeMs: +m[4],
 			tokensPerSecond: +m[5],
+			finishReason: m[6] ? m[6].trim() : undefined,
 			completionPageMs: performance.now(),
 		});
 	})()`;
@@ -232,10 +461,42 @@ export async function extractSmokeTestPrompt(
 	}
 }
 
+export async function extractSmokeTestAssistant(
+	port: string,
+	tab: string,
+): Promise<string> {
+	try {
+		const out = agentchrome(port, tab, [
+			"js",
+			"exec",
+			`(() => {
+				const steps = document.querySelectorAll("#log .step");
+				for (let i = steps.length - 1; i >= 0; i--) {
+					const text = steps[i].textContent ?? "";
+					const m = text.match(/^Assistant:\\s*([\\s\\S]*)$/);
+					if (m) return m[1].trim();
+				}
+				return "";
+			})()`,
+		]);
+		const resp = JSON.parse(out) as { result?: string };
+		return typeof resp.result === "string" ? resp.result : "";
+	} catch {
+		return "";
+	}
+}
+
+export interface ChatSmokeMetrics {
+	genTokens?: number;
+	tokensPerSecond?: number;
+	totalMs?: number;
+}
+
 export interface ChatSmokeResult {
 	assistantText: string;
 	finishReason: string;
 	chatOutput: string;
+	metrics: ChatSmokeMetrics;
 }
 
 export async function runSmokeChatTurn(
@@ -280,15 +541,25 @@ export async function runSmokeChatTurn(
 		}
 		const assistantPattern = new RegExp("Assistant: ([\\\\s\\\\S]*?)(?:\\\\n\\\\(|$)");
 		const finishPattern = new RegExp("finish=([^)\\\\n]+)");
+		const metricsPattern = new RegExp("\\\\((\\\\d+) tokens, ([0-9.]+) tok/s, ([0-9.]+)s, finish=");
 		const assistantMatch = delta.match(assistantPattern);
 		const finishMatch = delta.match(finishPattern);
+		const metricsMatch = delta.match(metricsPattern);
 		const assistantText = assistantMatch?.[1]?.trim() ?? "";
 		if (!assistantText || !finishMatch) return "";
+		const metrics = metricsMatch
+			? {
+				genTokens: +metricsMatch[1],
+				tokensPerSecond: +metricsMatch[2],
+				totalMs: +metricsMatch[3] * 1000,
+			}
+			: {};
 		return JSON.stringify({
 			ok: true,
 			assistantText,
 			finishReason: finishMatch[1].trim(),
 			chatOutput: currentText,
+			metrics,
 		});
 	})()`;
 	let lastError: unknown;
@@ -309,6 +580,7 @@ export async function runSmokeChatTurn(
 					assistantText: string;
 					finishReason: string;
 					chatOutput: string;
+					metrics: ChatSmokeMetrics;
 			  }
 			| { ok: false; error: string; chatOutput: string };
 		if (!parsed.ok) {

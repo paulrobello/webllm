@@ -1,48 +1,27 @@
+import type { ChatEngine } from "../src/characters/character.js";
+import { runTask as libRunTask } from "../src/evaluation/runner.js";
 import type {
-	EvalTask,
-	EvalResult,
-	EvalReport,
-	EvalDimension,
 	DimensionScore,
-	EvalToolDef,
+	EvalDimension,
+	EvalReport,
+	EvalResult,
+	EvalTask,
 } from "./types.js";
-import { score } from "./scorer.js";
-import { Character } from "../src/characters/character.js";
-import type { ToolDefinition } from "../src/characters/tool-system.js";
-import { ToolSystem } from "../src/characters/tool-system.js";
 
 export interface EvalOptions {
 	maxTokens?: number;
 	temperature?: number;
 	timeout?: number;
+	/**
+	 * Engine that drives real model inference. Without one, every task
+	 * returns `error: "Character has no engine attached..."` — expected
+	 * when the harness runs from Bun without a loaded model; real runs
+	 * happen via the browser bench mode.
+	 */
+	engine?: ChatEngine;
+	enableThinking?: boolean;
 	onTaskStart?: (task: EvalTask) => void;
 	onTaskComplete?: (result: EvalResult) => void;
-}
-
-const DEFAULT_TIMEOUT = 30_000;
-
-/** Convert eval tool definitions to real ToolDefinitions with canned handlers. */
-function evalToolsToToolDefs(tools: EvalToolDef[]): ToolDefinition[] {
-	return tools.map((t) => ({
-		name: t.name,
-		description: t.description,
-		parameters: Object.fromEntries(
-			Object.entries(t.parameters).map(([k, v]) => [
-				k,
-				{
-					type: v.type as
-						| "string"
-						| "number"
-						| "boolean"
-						| "array"
-						| "object",
-					description: v.description,
-					required: v.required,
-				},
-			]),
-		),
-		handler: async () => t.response ?? "ok",
-	}));
 }
 
 /** Build an EvalReport from a model ID and an array of results. */
@@ -100,85 +79,14 @@ export class EvalRunner {
 		this.tasks = tasks;
 	}
 
-	/** Run a single task and return its result. */
+	/**
+	 * Run a single task and return its result. Requires an engine in
+	 * `options.engine` — without one, every task short-circuits with
+	 * `error: "Character has no engine attached..."`. This is intentional:
+	 * the harness is thin, the execution is the library's primitive.
+	 */
 	async runTask(task: EvalTask, options?: EvalOptions): Promise<EvalResult> {
-		const timeout = options?.timeout ?? DEFAULT_TIMEOUT;
-
-		try {
-			const tools = task.tools ? evalToolsToToolDefs(task.tools) : undefined;
-			const character = new Character({
-				modelId: "eval",
-				systemPrompt: task.systemPrompt,
-				maxTokens: task.maxTokens ?? options?.maxTokens,
-				temperature: options?.temperature,
-				tools,
-			});
-
-			const start = Date.now();
-			let output = "";
-
-			const gen = character.chat(task.input);
-			const iterator = gen[Symbol.asyncIterator]();
-
-			// Collect response with timeout
-			const timer = setTimeout(() => {
-				character.stop();
-			}, timeout);
-
-			try {
-				while (true) {
-					const result = await Promise.race([
-						iterator.next(),
-						new Promise<IteratorResult<string>>((_, reject) =>
-							setTimeout(
-								() => reject(new Error(`Task timed out after ${timeout}ms`)),
-								timeout,
-							),
-						),
-					]);
-					if (result.done) break;
-					output += result.value;
-				}
-			} finally {
-				clearTimeout(timer);
-			}
-
-			const end = Date.now();
-			const latencyMs = end - start;
-
-			// Parse tool calls from output
-			const toolCalls: EvalResult["toolCalls"] = [];
-			if (tools && tools.length > 0) {
-				const toolSystem = new ToolSystem(tools);
-				const call = toolSystem.parseToolCall(output);
-				if (call) {
-					const toolResult = await toolSystem.execute(call);
-					toolCalls.push({
-						name: call.name,
-						arguments: call.arguments,
-						result: toolResult.error ? toolResult.error : toolResult.result,
-					});
-				}
-			}
-
-			// Score the output
-			const taskScore = score(output, task);
-
-			// Estimate tokens/second using character length as a rough proxy
-			const tokensPerSecond =
-				latencyMs > 0 ? Math.round((output.length / latencyMs) * 1000) : 0;
-
-			return {
-				taskId: task.id,
-				dimension: task.dimension,
-				difficulty: task.difficulty,
-				score: taskScore,
-				modelOutput: output,
-				toolCalls,
-				latencyMs,
-				tokensPerSecond,
-			};
-		} catch (err) {
+		if (!options?.engine) {
 			return {
 				taskId: task.id,
 				dimension: task.dimension,
@@ -188,9 +96,16 @@ export class EvalRunner {
 				toolCalls: [],
 				latencyMs: 0,
 				tokensPerSecond: 0,
-				error: err instanceof Error ? err.message : String(err),
+				error:
+					"no engine provided — accuracy benches must run through the browser bench mode against a loaded model",
 			};
 		}
+		return libRunTask(options.engine, "eval", task, {
+			timeoutMs: options.timeout,
+			maxTokens: options.maxTokens,
+			temperature: options.temperature,
+			enableThinking: options.enableThinking,
+		});
 	}
 
 	/** Run all tasks (optionally filtered) and return a full report. */

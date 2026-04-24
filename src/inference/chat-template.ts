@@ -75,8 +75,27 @@ function formatLlama2(
 	return prompt;
 }
 
+/**
+ * Minimal tool schema for prompt injection — mirrors `ChatToolSchema` from
+ * `core/chat-types.ts` without the import cycle.
+ */
+export interface ChatTemplateToolSchema {
+	name: string;
+	description: string;
+	parameters: Record<
+		string,
+		{ type: string; description?: string; required?: boolean }
+	>;
+}
+
 export interface ChatTemplateRenderOptions {
 	enableThinking?: boolean;
+	/**
+	 * Tool schemas to inject into the system message for templates that
+	 * support tool calling (ChatML-family: Qwen3, Hermes, etc.). Ignored
+	 * by templates without tool support.
+	 */
+	tools?: ChatTemplateToolSchema[];
 }
 
 type ChatPromptTokenizer = Pick<Tokenizer, "bosId" | "encode" | "options">;
@@ -98,8 +117,12 @@ function formatChatml(
 	template?: string,
 	options?: ChatTemplateRenderOptions,
 ): string {
+	const tools = options?.tools ?? [];
+	const messagesToEmit =
+		tools.length > 0 ? injectToolsIntoSystem(messages, tools) : messages;
+
 	let prompt = "";
-	for (const msg of messages) {
+	for (const msg of messagesToEmit) {
 		prompt += `<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n`;
 	}
 	if (addGenerationPrompt) {
@@ -109,6 +132,77 @@ function formatChatml(
 		}
 	}
 	return prompt;
+}
+
+/**
+ * Qwen3 / Hermes tool-calling convention: tools are described in the
+ * system message with a `<tools>…</tools>` JSON-lines block plus
+ * tool-call instructions. If the caller already has a system message we
+ * append to it; otherwise we prepend a new one.
+ */
+function injectToolsIntoSystem(
+	messages: ChatMessage[],
+	tools: ChatTemplateToolSchema[],
+): ChatMessage[] {
+	const toolBlock = buildToolsBlock(tools);
+	const out: ChatMessage[] = [];
+	let injected = false;
+	for (const m of messages) {
+		if (!injected && m.role === "system") {
+			out.push({ role: "system", content: `${m.content}\n\n${toolBlock}` });
+			injected = true;
+		} else {
+			out.push(m);
+		}
+	}
+	if (!injected) {
+		out.unshift({ role: "system", content: toolBlock });
+	}
+	return out;
+}
+
+function buildToolsBlock(tools: ChatTemplateToolSchema[]): string {
+	const lines = tools.map((t) =>
+		JSON.stringify({
+			type: "function",
+			function: {
+				name: t.name,
+				description: t.description,
+				parameters: toJsonSchema(t.parameters),
+			},
+		}),
+	);
+	return [
+		"# Tools",
+		"",
+		"You may call one or more functions to assist with the user query.",
+		"",
+		"You are provided with function signatures within <tools></tools> XML tags:",
+		"<tools>",
+		...lines,
+		"</tools>",
+		"",
+		"For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:",
+		"<tool_call>",
+		'{"name": "<function-name>", "arguments": <args-json-object>}',
+		"</tool_call>",
+	].join("\n");
+}
+
+function toJsonSchema(
+	params: Record<
+		string,
+		{ type: string; description?: string; required?: boolean }
+	>,
+): Record<string, unknown> {
+	const properties: Record<string, { type: string; description?: string }> = {};
+	const required: string[] = [];
+	for (const [key, spec] of Object.entries(params)) {
+		properties[key] = { type: spec.type };
+		if (spec.description) properties[key].description = spec.description;
+		if (spec.required) required.push(key);
+	}
+	return { type: "object", properties, required };
 }
 
 function formatGemma(

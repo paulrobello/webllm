@@ -6,6 +6,20 @@ export interface ChatMessage {
 	content: string;
 }
 
+/**
+ * Tool / function schema passed into the chat template. Just the shape the
+ * model needs in the prompt — handlers, responses, etc. live on the
+ * Character/ToolSystem side and aren't serialised here.
+ */
+export interface ChatToolSchema {
+	name: string;
+	description: string;
+	parameters: Record<
+		string,
+		{ type: string; description?: string; required?: boolean }
+	>;
+}
+
 /** Configuration for a chat completion request. */
 export interface CompletionConfig {
 	/** Maximum number of tokens to generate. Default: 512 */
@@ -24,6 +38,13 @@ export interface CompletionConfig {
 	signal?: AbortSignal;
 	/** Custom stop token IDs that halt generation. */
 	stopTokenIds?: number[];
+	/**
+	 * Tool schemas to surface to the model via the chat template. For ChatML
+	 * templates (Qwen3, Hermes) this injects a `<tools>...</tools>` block
+	 * and tool-call instructions before the user's system message.
+	 * Templates that don't support tool blocks ignore this.
+	 */
+	tools?: ChatToolSchema[];
 }
 
 /** Input accepted by the public streaming API. */

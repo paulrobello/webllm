@@ -1,5 +1,30 @@
+import type {
+	ChatMessage,
+	CompletionChunk,
+	CompletionConfig,
+} from "../core/chat-types.js";
 import type { ToolDefinition, ToolResult } from "./tool-system.js";
 import { ToolSystem } from "./tool-system.js";
+
+/**
+ * The slice of the engine that Character needs to drive real inference.
+ * Declared as a minimal interface (rather than importing `WebLLM`) so
+ * tests can provide a stub and external consumers can plug in any
+ * engine that matches this shape.
+ */
+export interface ChatEngine {
+	chatCompletion(
+		modelId: string,
+		messages: ChatMessage[],
+		config?: CompletionConfig,
+	): AsyncGenerator<CompletionChunk, void, unknown>;
+	/**
+	 * Optional: clear conversation state + KV cache for a model. Engines
+	 * that maintain per-conversation cache state should implement this so
+	 * eval runners can isolate one task from the next.
+	 */
+	resetConversation?(modelId: string): void;
+}
 
 /** Configuration for creating a Character instance. */
 export interface CharacterConfig {
@@ -23,6 +48,14 @@ export interface CharacterConfig {
 	stopTokens?: string[];
 	/** Tools the character can invoke from its output. */
 	tools?: ToolDefinition[];
+	/** Qwen3-style thinking mode; ignored by templates that don't support it. */
+	enableThinking?: boolean;
+	/**
+	 * Engine that fulfills chat() generation. Normally injected by
+	 * `WebLLM.createCharacter()`. Omit only in tests — calling `.chat()`
+	 * without an engine throws.
+	 */
+	engine?: ChatEngine;
 }
 
 /** A single message in the character's conversation history. */
@@ -46,9 +79,12 @@ export class Character {
 	readonly id: string;
 	readonly modelId: string;
 	readonly systemPrompt: string;
-	readonly config: Required<Omit<CharacterConfig, "id" | "tools">> & {
+	readonly config: Required<
+		Omit<CharacterConfig, "id" | "tools" | "engine">
+	> & {
 		tools: ToolDefinition[];
 	};
+	private engine: ChatEngine | null;
 
 	private messages: CharacterMessage[];
 	private toolSystem: ToolSystem | null;
@@ -56,7 +92,7 @@ export class Character {
 	private stopped: boolean;
 
 	/**
-	 * @param config - Character configuration including model, prompt, and sampling params.
+	 * @param config - Character configuration including model, prompt, sampling params, and engine.
 	 */
 	constructor(config: CharacterConfig) {
 		this.id =
@@ -74,13 +110,24 @@ export class Character {
 			repetitionPenalty: config.repetitionPenalty ?? 1.0,
 			stopTokens: config.stopTokens ?? [],
 			tools: config.tools ?? [],
+			enableThinking: config.enableThinking ?? false,
 		};
 		this.toolSystem = config.tools?.length
 			? new ToolSystem(config.tools)
 			: null;
+		this.engine = config.engine ?? null;
 		this.messages = [{ role: "system", content: this.systemPrompt }];
 		this.active = false;
 		this.stopped = false;
+	}
+
+	/**
+	 * Attach (or replace) the engine this character drives. Normally called
+	 * once by `WebLLM.createCharacter`; exposed so tests and consumers can
+	 * construct a Character first and bind the engine later.
+	 */
+	attachEngine(engine: ChatEngine): void {
+		this.engine = engine;
 	}
 
 	/**
@@ -94,36 +141,82 @@ export class Character {
 		if (this.stopped) {
 			return;
 		}
+		if (!this.engine) {
+			throw new Error(
+				"Character has no engine attached. Use `WebLLM.createCharacter(...)` or pass `engine` in CharacterConfig.",
+			);
+		}
 		this.active = true;
 
-		const fullResponse = `[Character ${this.id}]: Response to "${input}"`;
+		// ChatMessage doesn't include a "tool" role; tool-result turns live
+		// in Character's history only for bookkeeping and are stripped when
+		// we replay the conversation to the engine. The preceding assistant
+		// turn (which contained the tool call itself) carries the intent.
+		const chatMessages: ChatMessage[] = this.messages
+			.filter((m) => m.role !== "tool")
+			.map((m) => ({
+				role: m.role as "system" | "user" | "assistant",
+				content: m.content,
+			}));
+		const completionConfig: CompletionConfig = {
+			temperature: this.config.temperature,
+			topP: this.config.topP,
+			topK: this.config.topK,
+			repetitionPenalty: this.config.repetitionPenalty,
+			maxTokens: this.config.maxTokens,
+			enableThinking: this.config.enableThinking,
+			// Surface tools to the chat template so the model is actually told
+			// they exist. Handlers/results stay on the Character side; only
+			// the schema crosses into the prompt.
+			tools:
+				this.config.tools.length > 0
+					? this.config.tools.map((t) => ({
+							name: t.name,
+							description: t.description,
+							parameters: t.parameters,
+						}))
+					: undefined,
+		};
 
+		let fullResponse = "";
+		try {
+			for await (const chunk of this.engine.chatCompletion(
+				this.modelId,
+				chatMessages,
+				completionConfig,
+			)) {
+				if (!this.active) {
+					this.stopped = false;
+					return;
+				}
+				if (chunk.text) {
+					fullResponse += chunk.text;
+					yield chunk.text;
+				}
+			}
+		} finally {
+			this.active = false;
+		}
+
+		// Check for tool calls in the assembled response. If present, execute
+		// and record; otherwise just archive the assistant turn.
 		const toolCall = this.toolSystem?.parseToolCall(fullResponse);
 		if (toolCall && this.toolSystem) {
 			const toolResult = await this.toolSystem.execute(toolCall);
 			const formatted = this.toolSystem.formatResult(toolResult);
 			this.messages.push({
+				role: "assistant",
+				content: fullResponse,
+			});
+			this.messages.push({
 				role: "tool",
 				content: formatted,
 				toolResult,
 			});
-			this.stopped = false;
-			this.active = false;
-			yield formatted;
 			return;
 		}
 
-		for (const char of fullResponse) {
-			if (!this.active) {
-				this.stopped = false;
-				return;
-			}
-			yield char;
-		}
-
 		this.messages.push({ role: "assistant", content: fullResponse });
-		this.stopped = false;
-		this.active = false;
 	}
 
 	/**

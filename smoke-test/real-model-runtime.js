@@ -39,14 +39,17 @@ export async function runInteractiveChatTurn({
 	nextSession.history = [];
 	nextSession.prevCount = nextSession.messages.length;
 
+	const thinkingOn = chatOptions.enableThinking !== false;
+	const maxTokens = thinkingOn ? 1024 : 100;
 	const result = await interactiveRunCompletion(
 		"chat-interactive",
 		promptTokens,
 		sampler,
-		100,
+		maxTokens,
 		chatOptions,
 	);
 	const fullText = result.displayOutputText || result.outputText;
+	const rawText = result.rawOutputText || fullText;
 	nextSession.messages.push({ role: "assistant", content: fullText });
 
 	return {
@@ -54,6 +57,7 @@ export async function runInteractiveChatTurn({
 		result: {
 			...result,
 			fullText,
+			rawText,
 		},
 	};
 }

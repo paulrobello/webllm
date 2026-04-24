@@ -1,6 +1,7 @@
 export type {
 	CharacterConfig,
 	CharacterMessage,
+	ChatEngine,
 } from "./characters/character.js";
 export { Character } from "./characters/character.js";
 export { CharacterManager } from "./characters/character-manager.js";
@@ -47,6 +48,38 @@ export type {
 	TensorInfo,
 	WebLLMConfig,
 } from "./core/types.js";
+export type { CustomScorer } from "./evaluation/custom-scorers.js";
+export {
+	getCustomScorer,
+	hasCustomScorer,
+	listCustomScorers,
+	registerCustomScorer,
+} from "./evaluation/custom-scorers.js";
+export type {
+	RunTaskOptions,
+	RunTasksOptions,
+} from "./evaluation/runner.js";
+export { runTask, runTasks } from "./evaluation/runner.js";
+export { score } from "./evaluation/scorer.js";
+export type {
+	SystemProfile,
+	SystemProfileInput,
+} from "./evaluation/system-profile.js";
+export {
+	collectBrowserSystemProfile,
+	computeSystemId,
+} from "./evaluation/system-profile.js";
+// ── Evaluation (public library primitives) ────────────────────
+export type {
+	DimensionScore,
+	EvalDimension,
+	EvalReport,
+	EvalResult,
+	EvalTask,
+	EvalToolDef,
+	ScoringMethod,
+	ToolCallRecord,
+} from "./evaluation/types.js";
 export type { ChatTemplateType } from "./inference/chat-template.js";
 export {
 	detectChatTemplate,

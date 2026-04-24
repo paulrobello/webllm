@@ -1,105 +1,74 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+`@paulrobello/webllm` — browser-side LLM inference over WebGPU. TypeScript
+orchestration over two interchangeable inference backends: a patched
+`llama.cpp` `ggml-webgpu` compiled to WASM (quantized production path),
+and a pure-WGSL path for tiny models. Bun for tooling and tests; Chrome
+for browser regressions; a Bun-backed SSE + SQLite dashboard
+(`eval/live-server.ts`) aggregates runs in real time.
+
+For architecture, the public API, and the full benchmark surface, see
+[`README.md`](README.md). For eval methodology, see
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+## Workflows
+
+**Ship gate:** `make checkall` (fmt + lint + typecheck + test) must pass
+before a change is "done". `make help` lists every target.
+
+**Single test:** `bun test tests/<file>.test.ts` or `bun test -t "<pattern>"`.
+
+**Browser regression workflow:**
+
+1. Start the static server: `make smoke-serve` (or `bun run eval/smoke-serve.ts --port 8031`).
+2. Reuse the existing agentchrome session and tab (see rules below).
+3. Navigate the same tab to a cache-busted URL like `http://localhost:8031/?v=<N>`.
+4. Check **both** the page `#log` text and the browser console.
+5. The smoke test passes only when visible steps succeed AND no relevant runtime console errors are emitted. `adapter_info:` from the WebGPU backend is benign informational output and is not a failure.
+
+**Live dashboard:** `make dashboard-serve` on port 8033, then stream
+browser benches into it with `WEBLLM_LIVE_BENCH_URL=http://localhost:8033`.
+
+## Ports
+
+- **8031** — smoke-test static site (`make smoke-serve`; override `SMOKE_PORT`).
+- **8033** — live dashboard + SSE backend (`make dashboard-serve`; override `DASHBOARD_PORT`).
+
+Both are reserved in `~/.claude/used_ports.md`.
+
 ## agentchrome usage
 
-When using `agentchrome` in this repository:
+1. **Reuse the existing browser session first.** Run `agentchrome connect --status` and prefer that port over launching a new browser.
+2. **Reuse the existing tab when possible.** `agentchrome --port <PORT> tabs list`, then navigate the existing smoke-test tab to a cache-busted URL with `--tab <TAB_ID>` rather than opening a new tab.
+3. **Do not launch a new Chrome window** unless there is no reachable session or the user explicitly requests one.
+4. **Preserve debugging continuity** — reusing the same session/tab keeps console history, page state, and reproducibility intact.
 
-1. **Reuse the existing browser session first.**
-   - Run `agentchrome connect --status` to find the current live session.
-   - Prefer the existing connected port/session over launching a new browser.
+## Regression lessons — do not repeat these bugs
 
-2. **Reuse the existing tab when possible.**
-   - Run `agentchrome --port <PORT> tabs list`.
-   - If the needed page is already open, reuse that tab with `--tab <TAB_ID>`.
-   - Prefer navigating the existing smoke-test tab to a cache-busted URL such as `http://localhost:8031/?v=<N>` instead of opening a new tab/window.
+These issues caused real regressions here. The fixes are load-bearing:
 
-3. **Do not launch a new Chrome window unless necessary.**
-   - Only use `agentchrome connect --launch ...` if:
-     - there is no reachable existing session, or
-     - the user explicitly requests a new browser/window/session.
-
-4. **Preserve debugging continuity.**
-   - Reusing the same session/tab keeps console history, page state, and reproducibility intact.
-   - Avoid creating multiple parallel browser sessions during a single debugging task.
-
-5. **Preferred workflow for this project.**
-   - Check current session: `agentchrome connect --status`
-   - List tabs: `agentchrome --port <PORT> tabs list`
-   - Reuse the smoke-test tab: `agentchrome --port <PORT> --tab <TAB_ID> navigate 'http://localhost:8031/?v=<N>'`
-   - Inspect page text / console on that same tab.
-
-## smoke test policy
-
-The browser smoke test should only be considered passing when:
-
-- all visible smoke-test steps pass, and
-- no relevant backend/runtime console errors are emitted.
-
-### Browser regression workflow
-
-When validating browser fixes in this repo:
-
-1. Start the static server from `smoke-test/`:
-   - `cd smoke-test && python3 -m http.server 8031`
-2. Reuse the existing `agentchrome` session and the existing smoke-test tab.
-3. Navigate the same tab to a cache-busted URL:
-   - `http://localhost:8031/?v=<N>`
-4. Check both:
-   - page text/results
-   - console errors on that same tab
-5. Do not call the smoke test fixed unless both the page and console are clean under the policy above.
-
-### Important implementation notes
-
-These issues already caused real regressions here and should be preserved as project guidance:
-
-- `graphCompute()` must be treated as async-capable in the browser integration and must be awaited before tensor readback.
+- `graphCompute()` must be treated as async-capable in the browser integration and awaited before tensor readback.
 - Async tensor readback must not use `stackAlloc` across `await` boundaries; use heap allocation for async readback buffers.
-- The smoke test page must cache-bust imported assets too, not just the HTML URL. `webllm-bundle.js` and `webllm-wasm.js` should inherit the page query suffix.
-- Browser-side smoke-test success requires checking for runtime/backend console failures, not just visible step output.
-- The WebGPU backend currently logs `adapter_info:` during startup; in this repo that message is treated as benign informational output and should not be counted as a smoke-test failure.
+- The smoke-test page must cache-bust imported assets too, not just the HTML URL — `webllm-bundle.js` and `webllm-wasm.js` inherit the page query suffix.
+- Smoke-test success requires checking for runtime/backend console failures, not just visible step output.
 - Keep `-sASYNCIFY_STACK_SIZE=1048576` in the WASM build unless there is a verified replacement strategy.
+- Qwen3 chat has **two** valid end-of-turn tokens: `<|im_end|>` (151645) and `<|endoftext|>` (151643). Both must be masked during the post-`</think>` "waiting for visible answer" window and treated as stop tokens. Canonical masking logic lives in `smoke-test/real-model-smoke.js`.
+- **Custom-scorer registrations must be mirrored on both sides.** `eval/tasks/scorer-registrations.ts` (Bun) and `smoke-test/scorer-registrations.js` (browser) carry the same 13 scorer functions registered under the same names. The browser file intentionally imports `registerCustomScorer` from `./webllm-bundle.js` so both sides share the same registry instance — do not let a separate bundling step re-inline the `custom-scorers` module, or browser registrations become invisible to `score()`. When adding or editing a scorer, edit both files.
 
-### Local dependency note
+## Local llama.cpp dependency
 
-This repo depends on a local patched llama.cpp at `~/Repos/llama.cpp/`. The
-patches live on branch **`webllm-browser-patches`**, which must be checked out
-for builds to work:
+`make wasm-build` compiles against a **local patched** `llama.cpp` at
+`~/Repos/llama.cpp/` on branch **`webllm-browser-patches`**:
 
 ```bash
 cd ~/Repos/llama.cpp && git checkout webllm-browser-patches
 ```
 
-The branch currently contains four commits on top of upstream `master`:
-
-1. `ggml: iterative ggml_visit_parents_graph for WASM stack safety` —
-   the recursive graph visitor overflows the JS/WASM stack on deep
-   transformer graphs. Rewritten as an explicit heap-allocated stack.
-2. `ggml-webgpu: browser + ASYNCIFY support bundle` — ASYNCIFY-safe
-   wait/map paths, non-aborting device error handler, per-dispatch
-   compute-pass fallback with overlap-only conflict detection,
-   `GGML_OP_DIAG_MASK_INF` shader.
-3. `ggml-webgpu: add request-based browser readback API` — adds a real
-   request-based async GPU readback API for browser callers:
-   begin / poll / finish / cancel around queue completion + buffer map.
-4. `ggml-webgpu: harden async readback request cleanup` — fixes async
-   request cleanup and cancellation lifecycle so pending callbacks do not
-   race buffer teardown during browser readback.
-
-If browser regressions reappear, inspect that local branch before assuming
-the bug is entirely in this repo. The main files to check are `ggml.c`,
-`ggml/include/ggml-webgpu.h`, and `ggml/src/ggml-webgpu/ggml-webgpu.cpp`.
-To rebase onto a newer llama.cpp master: fetch, `git rebase master`,
-resolve any upstream changes in those files, rebuild via `make wasm-build`,
-and re-run `make bench-inference` plus the browser smoke test to confirm no
-perf or runtime regression.
-
-### llama.cpp local status note
-
-The local `~/Repos/llama.cpp` checkout may show an untracked path at:
-
-- `ggml/src/ggml-kompute/kompute/`
-
-Treat that path as a separate upstream/sub-repo artifact, not part of this
-project's WebLLM patch work. It can be ignored when checking whether the local
-`llama.cpp` dependency is clean for WebLLM-related changes.
+See [`docs/LLAMA_CPP_PATCHES.md`](docs/LLAMA_CPP_PATCHES.md) for the patch
+inventory, rebase procedure, and troubleshooting. If a browser regression
+reappears after a rebase, inspect that local branch before assuming the
+bug is in this repo.
