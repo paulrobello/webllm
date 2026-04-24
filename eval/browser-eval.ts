@@ -35,6 +35,7 @@ import { reasoningTasks } from "./tasks/reasoning.js";
 // Side-effect import so the Bun driver is aware of the same scorer names
 // the browser will register — useful for future Bun-side scoring.
 import "./tasks/scorer-registrations.js";
+import { semanticReasoningTasks } from "./tasks/semantic-reasoning.js";
 import { toolCallingTasks } from "./tasks/tool-calling.js";
 import type { EvalDimension, EvalTask } from "./types.js";
 
@@ -42,6 +43,7 @@ const ALL_TASKS: EvalTask[] = [
 	...toolCallingTasks,
 	...reasoningTasks,
 	...instructionTasks,
+	...semanticReasoningTasks,
 	...embeddingTasks,
 ];
 
@@ -49,11 +51,21 @@ const DIMS: EvalDimension[] = [
 	"tool-calling",
 	"reasoning",
 	"instruction-following",
+	"semantic-reasoning",
 	"embedding",
 ];
 
 const POLL_INTERVAL_MS = 5000;
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — accuracy run on a 1B+ model is slow
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min hard ceiling — accuracy run on a 1B+ model is slow
+// Bail this much sooner if the page stops making progress. Covers two modes:
+//   (a) `__benchStatus` is never published (model-load hang, CDP wedged, page
+//       crashed before bench entry); pollBenchStatus keeps returning null.
+//   (b) `__benchStatus` is published but `completedTasks` stops advancing —
+//       a WASM abort leaves the module dead and subsequent tasks hang.
+// The clock starts at loop entry and resets on (first non-null status) or
+// (advance in `completedTasks`). 180s is generous enough for a cold 1–3B
+// model download + weight load, yet still far below the hard ceiling.
+const STALL_TIMEOUT_MS = 180_000;
 
 function main(): void {
 	const { values } = parseArgs({
@@ -111,9 +123,45 @@ function main(): void {
 		process.exit(1);
 	}
 
-	const tasks = dimension
-		? ALL_TASKS.filter((t) => t.dimension === dimension)
-		: ALL_TASKS;
+	// Tool-calling tasks demand rigid JSON output. Sampling above ~0.2
+	// makes names and arg keys drift off-schema, which is noise rather
+	// than signal when comparing models. When the whole suite is being
+	// run (no explicit --dimension), restrict tool-calling to cold
+	// profiles so warm/hot runs focus on dimensions where sampling
+	// diversity actually matters. An explicit --dimension tool-calling
+	// always runs, on the assumption the caller knows what they want.
+	const COLD_TEMP_CEILING = 0.4;
+	const isCold =
+		typeof profile?.temperature === "number" &&
+		profile.temperature <= COLD_TEMP_CEILING;
+
+	let tasks: EvalTask[];
+	if (dimension) {
+		tasks = ALL_TASKS.filter((t) => t.dimension === dimension);
+	} else if (isCold) {
+		tasks = ALL_TASKS;
+	} else {
+		tasks = ALL_TASKS.filter((t) => t.dimension !== "tool-calling");
+		console.log(
+			`Skipping tool-calling tasks (profile temperature ${profile?.temperature ?? "default"} > ${COLD_TEMP_CEILING}; rerun with --dimension tool-calling to force).`,
+		);
+	}
+
+	// Embedding-track tasks need a working encoder (`engine.embed`). No
+	// generative model has that wired up yet. Auto-skip unless the model
+	// declares the capability and the caller didn't explicitly request
+	// the dimension. Explicit `--dimension embedding` runs it regardless
+	// so the "not yet implemented" error surfaces for debugging.
+	if (dimension !== "embedding" && !model.capabilities?.embedding) {
+		const before = tasks.length;
+		tasks = tasks.filter((t) => t.dimension !== "embedding");
+		if (before !== tasks.length) {
+			console.log(
+				`Skipping embedding tasks (model "${model.id}" has capabilities.embedding=false; rerun with --dimension embedding to force).`,
+			);
+		}
+	}
+
 	if (tasks.length === 0) {
 		console.error("Error: no tasks to run");
 		process.exit(1);
@@ -190,26 +238,43 @@ async function run(
 
 	const deadline = Date.now() + opts.timeoutMs;
 	let lastCompleted = -1;
+	let seenStatus = false;
+	// Clock starts immediately. Any signal from the page — first observation
+	// of `__benchStatus`, or an advance in `completedTasks` — resets it.
+	let lastProgressAt = Date.now();
 	while (Date.now() < deadline) {
 		await sleep(POLL_INTERVAL_MS);
 		const status = pollBenchStatus(port, tab);
-		if (!status) continue;
-		if (status.completedTasks !== lastCompleted) {
-			lastCompleted = status.completedTasks;
-			console.log(
-				`  ${status.completedTasks}/${status.totalTasks} tasks (${status.passedTasks} passing)`,
-			);
+		if (status) {
+			if (!seenStatus) {
+				seenStatus = true;
+				lastProgressAt = Date.now();
+			}
+			if (status.completedTasks !== lastCompleted) {
+				lastCompleted = status.completedTasks;
+				lastProgressAt = Date.now();
+				console.log(
+					`  ${status.completedTasks}/${status.totalTasks} tasks (${status.passedTasks} passing)`,
+				);
+			}
+			if (status.done) {
+				if (status.error) throw new Error(`browser bench failed: ${status.error}`);
+				console.log(
+					`\nDone: ${status.passedTasks}/${status.totalTasks} passing · overall ${status.overall !== undefined ? `${Math.round(status.overall * 100)}%` : "?"}`,
+				);
+				return;
+			}
 		}
-		if (status.done) {
-			if (status.error) throw new Error(`browser bench failed: ${status.error}`);
-			console.log(
-				`\nDone: ${status.passedTasks}/${status.totalTasks} passing · overall ${status.overall !== undefined ? `${Math.round(status.overall * 100)}%` : "?"}`,
-			);
-			return;
+		if (Date.now() - lastProgressAt > STALL_TIMEOUT_MS) {
+			const stalledSecs = Math.round((Date.now() - lastProgressAt) / 1000);
+			const phase = seenStatus
+				? `no task progress for ${stalledSecs}s — last seen ${Math.max(lastCompleted, 0)}/${tasks.length} tasks (likely WASM/page abort; check browser console)`
+				: `no signal from page for ${stalledSecs}s — __benchStatus never published (model-load hang, CDP wedged, or page crashed before bench entry)`;
+			throw new Error(`browser bench stalled: ${phase}`);
 		}
 	}
 	throw new Error(
-		`browser bench timed out after ${Math.round(opts.timeoutMs / 1000)}s — last seen ${lastCompleted + 1}/${tasks.length} tasks`,
+		`browser bench timed out after ${Math.round(opts.timeoutMs / 1000)}s — last seen ${Math.max(lastCompleted, 0)}/${tasks.length} tasks`,
 	);
 }
 

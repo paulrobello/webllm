@@ -44,9 +44,50 @@ export function score(output: string, task: EvalTask): number {
 			}
 			return fn(output, task.expected);
 		}
+		case "cosine_similarity":
+			// Cosine tasks require vectors, not text. The embedding-track
+			// runner computes the cosine score directly via
+			// `scoreCosineSimilarity` and bypasses this function. Reaching
+			// this branch means a cosine task was fed into the text-score
+			// path by mistake — return 0 rather than silently succeed.
+			console.warn(
+				`[scorer] cosine_similarity task "${task.id}" reached text score() — use engine.embed() + scoreCosineSimilarity() instead.`,
+			);
+			return 0;
 		default:
 			return 0;
 	}
+}
+
+/**
+ * Map a cosine similarity ∈ [-1, 1] to a score ∈ [0, 1]. The bench
+ * harness uses the resulting score the same way as any other task score
+ * (pass threshold 0.5 for dashboard counts, continuous value for
+ * per-dim averaging).
+ */
+export function scoreCosineSimilarity(
+	a: Float32Array,
+	b: Float32Array,
+): number {
+	if (a.length !== b.length) {
+		throw new Error(
+			`scoreCosineSimilarity: vector length mismatch (${a.length} vs ${b.length})`,
+		);
+	}
+	let dot = 0;
+	let normA = 0;
+	let normB = 0;
+	for (let i = 0; i < a.length; i++) {
+		dot += a[i] * b[i];
+		normA += a[i] * a[i];
+		normB += b[i] * b[i];
+	}
+	if (normA === 0 || normB === 0) return 0;
+	const cos = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+	// Clamp to guard against floating-point overrun on near-identical
+	// vectors, then map [-1, 1] → [0, 1].
+	const clamped = Math.max(-1, Math.min(1, cos));
+	return (clamped + 1) / 2;
 }
 
 function scoreExact(output: string, expected: string): number {

@@ -1,161 +1,146 @@
 import type { EvalTask } from "../types.js";
 
+/**
+ * True embedding-track tasks. Unlike the chat-driven `semantic-reasoning`
+ * dimension, these are scored by cosine similarity between two vectors
+ * produced by `engine.embed(modelId, text)` — no generation, no chat
+ * template. They are only run against models whose
+ * `capabilities.embedding` is `true` (see `eval/browser-eval.ts` for the
+ * auto-skip). Running them requires a working encoder forward pass in
+ * `ModelInference` for the model's architecture; until that lands the
+ * runner surfaces a clear "embedding not implemented" error.
+ *
+ * The `expected` field is only used for logging. The scoring compares
+ * `input` (or the model's generated text, for chat-capable models that
+ * reuse this suite) against `scoring.reference`.
+ *
+ * Pass threshold is tuned per task — pairs that should be near-synonyms
+ * require higher similarity than loosely related pairs.
+ */
 export const embeddingTasks: EvalTask[] = [
-	// ── Easy ──────────────────────────────────────────────────────────────
+	// ── Synonym / near-synonym pairs (high cosine expected) ──────────────
 	{
-		id: "emb-001",
+		id: "emb-sim-001",
 		dimension: "embedding",
-		description: "Semantic similarity — pick the most similar word",
-		systemPrompt:
-			"You are a semantic similarity assistant. Answer with exactly one word from the given choices. Do not add explanation or punctuation.",
-		input:
-			"Which word is most similar in meaning to 'happy': sad, joyful, tired, heavy?",
+		description: "Near-synonym pair: happy / joyful",
+		systemPrompt: "",
+		input: "happy",
 		expected: "joyful",
-		scoring: { type: "contains", value: "joyful" },
-		difficulty: "easy",
-	},
-	{
-		id: "emb-002",
-		dimension: "embedding",
-		description: "Basic categorization — assign item to a category",
-		systemPrompt:
-			"You are a categorization assistant. Respond with exactly one of the provided category names. Do not add explanation or punctuation.",
-		input:
-			"Which category does 'apple' belong to: animals, vehicles, food, furniture?",
-		expected: "food",
-		scoring: { type: "contains", value: "food" },
-		difficulty: "easy",
-	},
-	{
-		id: "emb-003",
-		dimension: "embedding",
-		description: "Synonym detection — identify a synonym",
-		systemPrompt:
-			"You are a vocabulary assistant. Provide a single-word synonym for the given word. Do not add explanation or punctuation.",
-		input: "What is a synonym for 'fast'?",
-		expected: "quick",
-		scoring: { type: "custom", name: "emb-003-fast-synonyms" },
-		difficulty: "easy",
-	},
-	{
-		id: "emb-004",
-		dimension: "embedding",
-		description: "Antonym detection — identify an opposite",
-		systemPrompt:
-			"You are a vocabulary assistant. Provide a single-word antonym for the given word. Do not add explanation or punctuation.",
-		input: "What is the opposite of 'hot'?",
-		expected: "cold",
-		scoring: { type: "custom", name: "emb-004-hot-antonyms" },
-		difficulty: "easy",
-	},
-
-	// ── Medium ───────────────────────────────────────────────────────────
-	{
-		id: "emb-005",
-		dimension: "embedding",
-		description: "Analogy completion — A is to B as C is to ?",
-		systemPrompt:
-			"You are an analogy assistant. Complete the analogy by responding with exactly one word. Do not add explanation or punctuation.",
-		input: "Hand is to glove as foot is to what?",
-		expected: "sock",
-		scoring: { type: "custom", name: "emb-005-foot-analogy" },
-		difficulty: "medium",
-	},
-	{
-		id: "emb-006",
-		dimension: "embedding",
-		description: "Semantic grouping — categorize items into groups",
-		systemPrompt:
-			"You are a categorization assistant. Group the provided items by category. Output each group on a separate line in the format 'Category: item1, item2'. Use only the items given.",
-		input:
-			"Group these items by category: salmon, carrot, trout, broccoli, tuna",
-		expected:
-			"Fish: salmon, trout, tuna | Vegetable: carrot, broccoli",
-		scoring: { type: "custom", name: "emb-006-fish-vegetables-grouping" },
-		difficulty: "medium",
-	},
-	{
-		id: "emb-007",
-		dimension: "embedding",
-		description:
-			"Contextual similarity — determine if a word means the same thing in context",
-		systemPrompt:
-			"You are a semantic analysis assistant. Answer with exactly 'yes' or 'no'. Do not add explanation.",
-		input:
-			"In the sentence 'The bank was steep and muddy', does the word 'bank' mean the same as in 'She deposited money at the bank'?",
-		expected: "no",
 		scoring: {
-			type: "regex",
-			pattern: "(?i)^\\s*no\\b",
+			type: "cosine_similarity",
+			reference: "joyful",
+			threshold: 0.75,
+		},
+		difficulty: "easy",
+	},
+	{
+		id: "emb-sim-002",
+		dimension: "embedding",
+		description: "Near-synonym pair: car / automobile",
+		systemPrompt: "",
+		input: "car",
+		expected: "automobile",
+		scoring: {
+			type: "cosine_similarity",
+			reference: "automobile",
+			threshold: 0.75,
+		},
+		difficulty: "easy",
+	},
+	{
+		id: "emb-sim-003",
+		dimension: "embedding",
+		description: "Near-synonym pair: big / large",
+		systemPrompt: "",
+		input: "big",
+		expected: "large",
+		scoring: {
+			type: "cosine_similarity",
+			reference: "large",
+			threshold: 0.75,
+		},
+		difficulty: "easy",
+	},
+	// ── Same-topic sentence pairs (mid–high cosine expected) ─────────────
+	{
+		id: "emb-sent-001",
+		dimension: "embedding",
+		description: "Same-topic sentences about dogs",
+		systemPrompt: "",
+		input: "The dog chased the ball across the park.",
+		expected: "A puppy ran after a tennis ball in the backyard.",
+		scoring: {
+			type: "cosine_similarity",
+			reference: "A puppy ran after a tennis ball in the backyard.",
+			threshold: 0.6,
 		},
 		difficulty: "medium",
 	},
 	{
-		id: "emb-008",
+		id: "emb-sent-002",
 		dimension: "embedding",
-		description:
-			"Cross-domain mapping — find analogous concepts across domains",
-		systemPrompt:
-			"You are an analogy assistant. Identify the concept that best matches. Respond with exactly one of the given choices. Do not add explanation.",
-		input:
-			"In a computer, a 'firewall' blocks unauthorized network traffic. Which everyday object is most analogous: umbrella, security guard, flashlight, thermostat?",
-		expected: "security guard",
-		scoring: { type: "contains", value: "security guard" },
+		description: "Same-topic sentences about cooking",
+		systemPrompt: "",
+		input: "She seasoned the steak with salt and pepper before grilling.",
+		expected: "He added black pepper and sea salt to the meat before cooking it over a flame.",
+		scoring: {
+			type: "cosine_similarity",
+			reference:
+				"He added black pepper and sea salt to the meat before cooking it over a flame.",
+			threshold: 0.6,
+		},
 		difficulty: "medium",
 	},
-
-	// ── Hard ─────────────────────────────────────────────────────────────
+	// ── Paraphrase pairs (high cosine expected) ──────────────────────────
 	{
-		id: "emb-009",
+		id: "emb-para-001",
 		dimension: "embedding",
-		description:
-			"Multi-hop reasoning about semantic relationships",
-		systemPrompt:
-			"You are a semantic reasoning assistant. Answer with exactly one word. Do not add explanation or punctuation.",
-		input:
-			"If 'puppy' is related to 'dog', and 'dog' is related to 'canine', then what is 'puppy' related to through both 'dog' and the young of cats?",
-		expected: "kitten",
-		scoring: { type: "custom", name: "emb-009-puppy-kitten" },
-		difficulty: "hard",
+		description: "Paraphrase: passive vs. active voice",
+		systemPrompt: "",
+		input: "The cat was chased by the dog.",
+		expected: "The dog chased the cat.",
+		scoring: {
+			type: "cosine_similarity",
+			reference: "The dog chased the cat.",
+			threshold: 0.7,
+		},
+		difficulty: "medium",
 	},
 	{
-		id: "emb-010",
+		id: "emb-para-002",
 		dimension: "embedding",
-		description:
-			"Fine-grained semantic distinction between near-synonyms",
-		systemPrompt:
-			"You are a precise language assistant. Choose the word that best fits the described nuance. Respond with exactly one of the given choices. Do not add explanation.",
-		input:
-			"Which word best describes a low, continuous sound made by a person expressing dissatisfaction: 'murmur', 'grumble', 'whisper', 'shout'?",
-		expected: "grumble",
-		scoring: { type: "contains", value: "grumble" },
-		difficulty: "hard",
+		description: "Paraphrase: reordered clauses",
+		systemPrompt: "",
+		input: "Because it was raining, we stayed inside.",
+		expected: "We stayed inside because it was raining.",
+		scoring: {
+			type: "cosine_similarity",
+			reference: "We stayed inside because it was raining.",
+			threshold: 0.8,
+		},
+		difficulty: "easy",
 	},
+	// ── Unrelated pairs (low cosine expected — pass by being LOW) ────────
+	// For these, threshold is the max acceptable similarity — we invert
+	// in the scorer when the task description demands "should be different".
+	// Kept minimal for now; can grow as the encoder lands.
 	{
-		id: "emb-011",
+		id: "emb-neg-001",
 		dimension: "embedding",
-		description: "Embedding space arithmetic — word analogy via vector math",
-		systemPrompt:
-			"You are a word embedding assistant. Given a word equation, solve for the missing word. Respond with exactly one word. Do not add explanation or punctuation.",
-		input: "king - man + woman = ?",
-		expected: "queen",
-		scoring: { type: "contains", value: "queen" },
-		difficulty: "hard",
-	},
-	{
-		id: "emb-012",
-		dimension: "embedding",
-		description:
-			"Context-dependent similarity across multiple word senses",
-		systemPrompt:
-			"You are a word-sense disambiguation assistant. For each given sentence, identify whether the target word is used in the same sense. Respond with only 'same' or 'different' for each pair, one per line.",
-		input:
-			"Compare the word 'light' in these pairs:\n" +
-			"1. 'The room has good light' vs 'This box is very light'\n" +
-			"2. 'Turn on the light' vs 'The light was blinding'\n" +
-			"3. 'She wore a light jacket' vs 'The feather is light'",
-		expected: "different\nsame\nsame",
-		scoring: { type: "custom", name: "emb-012-light-sense-disambiguation" },
-		difficulty: "hard",
+		description: "Unrelated topic sanity check: weather vs. cooking",
+		systemPrompt: "",
+		input: "The forecast predicts thunderstorms this afternoon.",
+		expected: "I boiled the pasta for nine minutes.",
+		scoring: {
+			type: "cosine_similarity",
+			reference: "I boiled the pasta for nine minutes.",
+			// Low threshold — we expect low similarity. The score maps
+			// cosine to [0, 1]; a pass at 0.4 means the encoder
+			// correctly kept these apart. If cosine >= 0.4 the encoder
+			// is probably collapsing sentences to a shared "some topic"
+			// region, which is a bug worth flagging.
+			threshold: 0.4,
+		},
+		difficulty: "easy",
 	},
 ];

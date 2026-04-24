@@ -120,28 +120,28 @@ registerCustomScorer("in-012-three-questions-order", (output) => {
 	return found / 3;
 });
 
-// ── embedding/emb-003 — "fast" synonyms ─────────────────────────────────
+// ── semantic-reasoning/emb-003 — "fast" synonyms ─────────────────────────────────
 registerCustomScorer("emb-003-fast-synonyms", (output) => {
 	const synonyms = ["quick", "rapid", "swift", "speedy", "brisk", "hasty"];
 	const lower = output.toLowerCase().trim();
 	return synonyms.some((s) => lower.includes(s)) ? 1 : 0;
 });
 
-// ── embedding/emb-004 — "hot" antonyms ─────────────────────────────────
+// ── semantic-reasoning/emb-004 — "hot" antonyms ─────────────────────────────────
 registerCustomScorer("emb-004-hot-antonyms", (output) => {
 	const antonyms = ["cold", "cool", "freezing", "frigid", "icy", "chilly"];
 	const lower = output.toLowerCase().trim();
 	return antonyms.some((a) => lower.includes(a)) ? 1 : 0;
 });
 
-// ── embedding/emb-005 — "foot → sock" analogy ──────────────────────────
+// ── semantic-reasoning/emb-005 — "foot → sock" analogy ──────────────────────────
 registerCustomScorer("emb-005-foot-analogy", (output) => {
 	const valid = ["sock", "shoe", "boot"];
 	const lower = output.toLowerCase().trim();
 	return valid.some((v) => lower.includes(v)) ? 1 : 0;
 });
 
-// ── embedding/emb-006 — fish/vegetable grouping ────────────────────────
+// ── semantic-reasoning/emb-006 — fish/vegetable grouping ────────────────────────
 registerCustomScorer("emb-006-fish-vegetables-grouping", (output) => {
 	const lower = output.toLowerCase();
 	const fish = ["salmon", "trout", "tuna"];
@@ -176,7 +176,7 @@ registerCustomScorer("emb-006-fish-vegetables-grouping", (output) => {
 	return 0.5;
 });
 
-// ── embedding/emb-009 — puppy/kitten analogy ───────────────────────────
+// ── semantic-reasoning/emb-009 — puppy/kitten analogy ───────────────────────────
 registerCustomScorer("emb-009-puppy-kitten", (output) => {
 	const lower = output.toLowerCase().trim();
 	if (lower.includes("kitten")) return 1;
@@ -185,7 +185,7 @@ registerCustomScorer("emb-009-puppy-kitten", (output) => {
 	return 0;
 });
 
-// ── embedding/emb-012 — multi-line word-sense disambiguation ───────────
+// ── semantic-reasoning/emb-012 — multi-line word-sense disambiguation ───────────
 registerCustomScorer("emb-012-light-sense-disambiguation", (output) => {
 	const expectedAnswers = ["different", "same", "same"];
 	const lines = output

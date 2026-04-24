@@ -237,9 +237,15 @@ function formatPhi3(
 function formatLlama3(
 	messages: ChatMessage[],
 	addGenerationPrompt: boolean,
+	_template?: string,
+	options?: ChatTemplateRenderOptions,
 ): string {
+	const tools = options?.tools ?? [];
+	const messagesToEmit =
+		tools.length > 0 ? injectToolsIntoSystem(messages, tools) : messages;
+
 	let prompt = "<|begin_of_text|>";
-	for (const msg of messages) {
+	for (const msg of messagesToEmit) {
 		prompt += `<|start_header_id|>${msg.role}<|end_header_id|>\n\n${msg.content}<|eot_id|>`;
 	}
 	if (addGenerationPrompt) {

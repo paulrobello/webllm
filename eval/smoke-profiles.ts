@@ -27,9 +27,12 @@ const DEFAULT_PROMPT = "Tell one short joke.";
 
 /**
  * Profile set for dashboard-style comparison. Naming convention:
- *   <model-short>-<mode>-<temp>   where <temp> is hot (~0.9), warm (default),
- *                                 or cold (~0.3). Thinking variants are
+ *   <model-short>-<mode>-<temp>   where <temp> is hot (0.9), warm (0.6),
+ *                                 or cold (0.1). Thinking variants are
  *                                 qwen3-only since llama has no think tags.
+ *
+ * Tool-calling tasks are restricted to cold profiles (see browser-eval.ts) —
+ * rigid JSON output degrades quickly above ~0.2.
  */
 export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 	// ── Qwen3 0.6B — non-thinking ──────────────────────────────
@@ -37,13 +40,14 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		name: "qwen3-0.6b-off-cold",
 		model: "qwen3-0.6b-q4f16",
 		thinking: "off",
-		temperature: 0.3,
+		temperature: 0.1,
 		prompt: DEFAULT_PROMPT,
 	},
 	{
 		name: "qwen3-0.6b-off-warm",
 		model: "qwen3-0.6b-q4f16",
 		thinking: "off",
+		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
 	{
@@ -58,7 +62,7 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		name: "qwen3-0.6b-thinking-cold",
 		model: "qwen3-0.6b-q4f16",
 		thinking: "on",
-		temperature: 0.3,
+		temperature: 0.1,
 		maxTokens: 1024,
 		prompt: DEFAULT_PROMPT,
 	},
@@ -66,6 +70,7 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		name: "qwen3-0.6b-thinking-warm",
 		model: "qwen3-0.6b-q4f16",
 		thinking: "on",
+		temperature: 0.6,
 		maxTokens: 1024,
 		prompt: DEFAULT_PROMPT,
 	},
@@ -81,12 +86,13 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 	{
 		name: "llama-3.2-1b-cold",
 		model: "llama-3.2-1b-q4f16",
-		temperature: 0.3,
+		temperature: 0.1,
 		prompt: DEFAULT_PROMPT,
 	},
 	{
 		name: "llama-3.2-1b-warm",
 		model: "llama-3.2-1b-q4f16",
+		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
 	{
@@ -99,6 +105,7 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 	{
 		name: "tinyllama-warm",
 		model: "tinyllama-1.1b-chat-q4_0",
+		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
 ];

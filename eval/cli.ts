@@ -38,6 +38,7 @@ const VALID_DIMENSIONS: string[] = [
 	"tool-calling",
 	"reasoning",
 	"instruction-following",
+	"semantic-reasoning",
 	"embedding",
 ];
 
@@ -204,6 +205,15 @@ function main(): void {
 				...report,
 				thinking: (profile?.thinking ?? "off") as "off" | "on",
 				profile: profile?.name,
+				params: pruneUndefined({
+					contextLength: profile?.contextLength,
+					maxTokens: options.maxTokens,
+					temperature: options.temperature,
+					topK: profile?.topK,
+					topP: profile?.topP,
+					repetitionPenalty: profile?.repetitionPenalty,
+					seed: profile?.seed,
+				}),
 			};
 			writeReport(annotated, values.output);
 			if (values.html) {
@@ -246,6 +256,12 @@ Options:
   --list                     List all tasks and exit
       --live-bench-url <url> Stream progress + final report to live dashboard backend (env: WEBLLM_LIVE_BENCH_URL)
   -h, --help                 Show this help`);
+}
+
+function pruneUndefined<T extends Record<string, unknown>>(obj: T): T {
+	return Object.fromEntries(
+		Object.entries(obj).filter(([, v]) => v !== undefined),
+	) as T;
 }
 
 function writeHtmlReport(report: EvalReport, outputDir?: string): string {
