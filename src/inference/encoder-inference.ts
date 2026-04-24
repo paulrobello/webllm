@@ -1,6 +1,11 @@
 import type { ModelHyperparams } from "../core/types.js";
 import type { GgufContext, GgufTensorInfo } from "../models/gguf-types.js";
-import type { BufferPtr, GgmlWasm, TensorPtr } from "./ggml-wasm.js";
+import {
+	type BufferPtr,
+	GgmlType,
+	type GgmlWasm,
+	type TensorPtr,
+} from "./ggml-wasm.js";
 
 interface EncoderLayerWeights {
 	qProj: TensorPtr;
@@ -36,11 +41,17 @@ interface EncoderWeights {
  */
 export class EncoderInference {
 	private wasm: GgmlWasm;
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: accessed via destructuring in methods
 	private hp: ModelHyperparams;
 	private weights: EncoderWeights | null = null;
 	private weightBuf: BufferPtr = 0;
 	private nameToTensor = new Map<string, TensorPtr>();
+	// @ts-expect-error TS6133: read by Tasks 8-10 forward dispatch
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: read in Tasks 8-10
+	private lastLeaves: {
+		tokenIdsTensor: TensorPtr;
+		posTensor: TensorPtr;
+		segTensor: TensorPtr;
+	} | null = null;
 
 	constructor(wasm: GgmlWasm, hyperparams: ModelHyperparams) {
 		if (hyperparams.architecture !== "bert") {
@@ -132,6 +143,41 @@ export class EncoderInference {
 		this.wasm.tensorSetName(tensor, name);
 		this.nameToTensor.set(name, tensor);
 		return tensor;
+	}
+
+	private layerNorm(
+		x: TensorPtr,
+		gamma: TensorPtr,
+		beta: TensorPtr,
+	): TensorPtr {
+		const normed = this.wasm.opNorm(x, this.hp.normEpsilon);
+		return this.wasm.opAdd(this.wasm.opMul(normed, gamma), beta);
+	}
+
+	// @ts-expect-error TS6133: invoked by Tasks 8-10 forward dispatch
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: invoked by Tasks 8-10
+	private buildGraph(nTokens: number): TensorPtr {
+		if (!this.weights) throw new Error("weights not loaded");
+		const { wasm, weights } = this;
+
+		// Leaf inputs — uploaded after backendAllocCtxTensors. Mirrors the
+		// causal-LM pattern in model-inference.ts.
+		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
+		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
+		const segTensor = wasm.tensorNew1d(GgmlType.I32, 1);
+		this.lastLeaves = { tokenIdsTensor, posTensor, segTensor };
+
+		// Token + position + segment embeddings. Position and segment are added
+		// to the per-token embedding before the input LayerNorm. Single-text
+		// usage hard-codes segment 0.
+		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		x = wasm.opAdd(x, wasm.opGetRows(weights.positionEmb, posTensor));
+		x = wasm.opAdd(x, wasm.opGetRows(weights.tokenTypes, segTensor));
+		x = this.layerNorm(x, weights.inputNormW, weights.inputNormB);
+
+		// Per-layer blocks land in Tasks 8-9. For now just return the
+		// post-input-LN tensor so the test can verify shape contributions.
+		return x;
 	}
 
 	async dispose(): Promise<void> {
