@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ModelArchitecture, ModelHyperparams } from "../src/core/types.js";
 import {
 	GGUF_MAGIC,
 	GGUF_VERSION,
@@ -325,5 +326,33 @@ describe("ModelLoader", () => {
 		expect(parsed.kvCacheConfig.nEmbdHeadK).toBe(128);
 		expect(parsed.kvCacheConfig.nEmbdHeadV).toBe(128);
 		expect(parsed.kvCacheConfig.dataType).toBe("f32");
+	});
+});
+
+describe("ModelArchitecture union", () => {
+	test("includes bert", () => {
+		const arch: ModelArchitecture = "bert";
+		expect(arch).toBe("bert");
+	});
+	test("ModelHyperparams exposes poolingType", () => {
+		const hp: ModelHyperparams = {
+			architecture: "bert",
+			contextLength: 512,
+			embeddingLength: 384,
+			headCount: 12,
+			headCountKv: 12,
+			layerCount: 12,
+			vocabularySize: 30522,
+			embeddingHeadLength: 32,
+			feedForwardLength: 1536,
+			ropeFreqBase: 10000,
+			ropeScale: 1,
+			normEpsilon: 1e-12,
+			expertCount: 0,
+			expertUsedCount: 0,
+			poolingType: "cls",
+			causalAttention: false,
+		};
+		expect(hp.poolingType).toBe("cls");
 	});
 });

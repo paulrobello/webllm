@@ -56,7 +56,8 @@ export type ModelArchitecture =
 	| "qwen2"
 	| "qwen3"
 	| "mixtral"
-	| "deepseek";
+	| "deepseek"
+	| "bert";
 
 /** Metadata for a single tensor within a GGUF model file. */
 export interface TensorInfo {
@@ -106,6 +107,10 @@ export interface ModelHyperparams {
 	normEpsilon: number;
 	expertCount: number;
 	expertUsedCount: number;
+	/** For bidirectional encoders: pooling strategy for `embed()`. */
+	poolingType?: "cls" | "mean";
+	/** When false, attention is bidirectional (BERT-style encoders). */
+	causalAttention?: boolean;
 }
 
 /** GPU buffer mappings and tensor metadata for a loaded model's weights. */
