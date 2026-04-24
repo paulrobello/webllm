@@ -5,6 +5,7 @@ import {
 	encodeChatPrompt,
 	formatChatDelta,
 } from "../inference/chat-template.js";
+import { EncoderInference } from "../inference/encoder-inference.js";
 import {
 	type GenerationConfig,
 	Generator,
@@ -78,6 +79,7 @@ export class WebLLM {
 	private eventHandlers = new Map<string, Set<EventHandler>>();
 	private wasmModules = new Map<string, GgmlWasm>();
 	private inferenceEngines = new Map<string, ModelInference>();
+	private encoderEngines = new Map<string, EncoderInference>();
 	private sessions = new Map<string, ConversationSession>();
 
 	private constructor(config: WebLLMConfig) {
@@ -129,6 +131,11 @@ export class WebLLM {
 		if (inf) {
 			await inf.dispose();
 			this.inferenceEngines.delete(id);
+		}
+		const enc = this.encoderEngines.get(id);
+		if (enc) {
+			await enc.dispose();
+			this.encoderEngines.delete(id);
 		}
 		const wasm = this.wasmModules.get(id);
 		if (wasm) {
@@ -378,6 +385,28 @@ export class WebLLM {
 		yield* this.generateStream(modelId, messages, config);
 	}
 
+	/**
+	 * Compute an L2-normalized sentence embedding for the given text using
+	 * a registered bidirectional-encoder model (e.g. Arctic-Embed). The
+	 * model must be loaded with a bert-architecture GGUF; non-encoder
+	 * models throw with a descriptive error.
+	 */
+	async embed(modelId: string, text: string): Promise<Float32Array> {
+		const entry = this.modelManager.get(modelId);
+		if (!entry) throw new Error(`Model "${modelId}" not found`);
+		if (!entry.loaded || !entry.tokenizer) {
+			throw new Error(`Model "${modelId}" not fully loaded`);
+		}
+		const enc = this.encoderEngines.get(modelId);
+		if (!enc) {
+			throw new Error(
+				`embed() requires a bidirectional encoder model; "${modelId}" is architecture "${entry.hyperparams.architecture}"`,
+			);
+		}
+		const ids = entry.tokenizer.encode(text);
+		return enc.embed(new Int32Array(ids));
+	}
+
 	/** Clear conversation history and KV cache for a model. */
 	resetConversation(modelId: string): void {
 		this.sessions.delete(modelId);
@@ -500,7 +529,7 @@ export class WebLLM {
 	): Promise<{
 		handle: ModelHandle;
 		engine: WebLLM;
-		inference: ModelInference;
+		inference: ModelInference | EncoderInference;
 	}> {
 		const engine = await WebLLM.init(config);
 
@@ -510,9 +539,18 @@ export class WebLLM {
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl });
 
-		const inference = new ModelInference(wasm, parsed.hyperparams);
-		inference.loadWeights(ggufCtx, data);
-		inference.initKVCache(parsed.kvCacheConfig.maxContextLength);
+		const isEncoder = parsed.hyperparams.architecture === "bert";
+		let inference: ModelInference | EncoderInference;
+		if (isEncoder) {
+			const enc = new EncoderInference(wasm, parsed.hyperparams);
+			enc.loadWeights(ggufCtx, data);
+			inference = enc;
+		} else {
+			const inf = new ModelInference(wasm, parsed.hyperparams);
+			inf.loadWeights(ggufCtx, data);
+			inf.initKVCache(parsed.kvCacheConfig.maxContextLength);
+			inference = inf;
+		}
 
 		const handle = await engine.loadModel(name, { priority: 0 });
 
@@ -525,7 +563,11 @@ export class WebLLM {
 		}
 
 		engine.wasmModules.set(handle.id, wasm);
-		engine.inferenceEngines.set(handle.id, inference);
+		if (inference instanceof EncoderInference) {
+			engine.encoderEngines.set(handle.id, inference);
+		} else {
+			engine.inferenceEngines.set(handle.id, inference);
+		}
 
 		return { handle, engine, inference };
 	}
@@ -584,6 +626,10 @@ export class WebLLM {
 			await inf.dispose();
 		}
 		this.inferenceEngines.clear();
+		for (const [, enc] of this.encoderEngines) {
+			await enc.dispose();
+		}
+		this.encoderEngines.clear();
 		this.modelManager.clear();
 		this.scheduler.clear();
 		this.eventHandlers.clear();
