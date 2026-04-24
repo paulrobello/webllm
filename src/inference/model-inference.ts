@@ -794,8 +794,16 @@ export class ModelInference {
 
 		if (mode === "topk" && topK && topK > 0) {
 			const topKIndices = wasm.opTopK(logits, topK);
-			const logitsCol = wasm.opReshape2d(logits, hp.vocabularySize, 1);
-			const topKValues2D = wasm.opGetRows(logitsCol, topKIndices);
+			// `ggml_get_rows(a, b)` produces `[a.ne[0], b.ne[0], ...]` and
+			// gathers along `a.ne[1]` (rows). `logits` is `[vocab, 1]` so
+			// naively reshaping to `[vocab, 1]` leaves vocab on the inner
+			// dim where get_rows can't reach it — the result would be
+			// `[vocab, topK]` and the subsequent reshape to `[topK, 1]`
+			// trips `GGML_ASSERT(nelements == ne0*ne1)`. Flip so vocab is
+			// the row dim: each "row" holds one logit, and get_rows picks
+			// the top-K rows.
+			const logitsRow = wasm.opReshape2d(logits, 1, hp.vocabularySize);
+			const topKValues2D = wasm.opGetRows(logitsRow, topKIndices);
 			const topKValues = wasm.opReshape2d(topKValues2D, topK, 1);
 
 			wasm.graphBuildForwardExpand(graph, topKValues);

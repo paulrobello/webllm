@@ -193,6 +193,26 @@ export class GgmlWasm {
 					return;
 				}
 				console.error(message);
+				// Debug: surface WASM stderr (ggml_abort writes here) to
+				// channels that survive a wedged CDP session. Title reads
+				// work even when `js exec` / `console read` time out during
+				// a hung main thread.
+				if (typeof globalThis !== "undefined") {
+					const g = globalThis as unknown as {
+						__wasmStderr?: string[];
+						document?: { title: string };
+					};
+					g.__wasmStderr ??= [];
+					g.__wasmStderr.push(message);
+					if (g.__wasmStderr.length > 32) g.__wasmStderr.shift();
+					// Latch the FIRST non-adapter-info stderr line into the
+					// title. Later lines (stack frames, Emscripten's
+					// "Aborted()" wrapper) would otherwise overwrite the
+					// GGML assertion that names the failure site.
+					if (g.document && !g.document.title.startsWith("[wasm]")) {
+						g.document.title = `[wasm] ${message}`.slice(0, 300);
+					}
+				}
 			},
 		});
 		this.installAsyncTensorGetNotifier();

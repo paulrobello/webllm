@@ -10,6 +10,12 @@ project(webllm-wasm C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Debug build toggle. With assertions on, Emscripten includes runtime
+# checks and GGML_ASSERT messages are preserved with file:line context —
+# invaluable for diagnosing WASM aborts. Assertions off is the shipping
+# configuration; it's significantly faster (often 2×+ for decode).
+option(WEBLLM_ASSERTIONS "Enable Emscripten -sASSERTIONS=1 in the WASM build" OFF)
+
 # Disable everything we don't need
 set(GGML_WEBGPU ON CACHE BOOL "" FORCE)
 set(GGML_WEBGPU_JSPI OFF CACHE BOOL "" FORCE)
@@ -78,7 +84,7 @@ if(EMSCRIPTEN)
         "-sENVIRONMENT='web'"
         "-sASYNCIFY_STACK_SIZE=1048576"
         "-O3"
-        "-sASSERTIONS=0"
+        "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
     )
     set_target_properties(webllm-wasm PROPERTIES
         PREFIX ""

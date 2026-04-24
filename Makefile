@@ -67,7 +67,12 @@ checkall: fmt lint typecheck test ## Format, lint, typecheck, and test
 # ---------------------------------------------------------------------------
 # WASM Build (Emscripten / ggml-webgpu)
 # ---------------------------------------------------------------------------
-wasm-build: ## Build ggml-webgpu WASM via Emscripten
+# Set WEBLLM_ASSERTIONS=1 on the make invocation to build the WASM with
+# Emscripten -sASSERTIONS=1, preserving GGML_ASSERT messages in the browser
+# console (useful while chasing WASM aborts). Default is off (production speed).
+WEBLLM_ASSERTIONS ?= 0
+
+wasm-build: ## Build ggml-webgpu WASM via Emscripten (pass WEBLLM_ASSERTIONS=1 for diagnostic build)
 	cd src/wasm && mkdir -p build && cd build && \
 	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
 	emcmake cmake .. \
@@ -85,11 +90,23 @@ wasm-build: ## Build ggml-webgpu WASM via Emscripten
 		-DGGML_BUILD_TESTS=OFF \
 		-DGGML_BUILD_EXAMPLES=OFF \
 		-DBUILD_SHARED_LIBS=OFF \
-		-DGGML_BACKEND_DL=OFF && \
+		-DGGML_BACKEND_DL=OFF \
+		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --config Release -j
+
+wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
+wasm-build-debug: wasm-clean wasm-build
 
 wasm-clean: ## Remove WASM build artifacts
 	rm -rf src/wasm/build
+
+# ---------------------------------------------------------------------------
+# Vendored browser libraries
+# ---------------------------------------------------------------------------
+vendor-refresh: ## Refresh smoke-test/vendor/ from node_modules after bumping chart.js
+	@mkdir -p smoke-test/vendor
+	@cp node_modules/chart.js/dist/chart.umd.min.js smoke-test/vendor/
+	@echo "smoke-test/vendor/chart.umd.min.js ← node_modules/chart.js"
 
 # ---------------------------------------------------------------------------
 # Smoke Test (browser end-to-end)
