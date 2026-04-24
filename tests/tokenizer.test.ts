@@ -426,4 +426,22 @@ describe("WordPiece subword + decode", () => {
 		expect(decoded).toContain("[CLS]");
 		expect(decoded).toContain("[SEP]");
 	});
+
+	test("emits UNK for chunks longer than max_input_chars_per_word (100)", () => {
+		const tok = makeWordPieceTokenizer(["a", "##a"]);
+		const longChunk = "a".repeat(101);
+		expect(tok.encode(longChunk)).toEqual([2, 1, 3]); // [CLS] [UNK] [SEP]
+	});
+
+	test("does NOT trigger UNK fallback for chunks exactly at max_input_chars (100)", () => {
+		const tok = makeWordPieceTokenizer(["a", "##a"]);
+		const exactChunk = "a".repeat(100);
+		const ids = tok.encode(exactChunk);
+		// 1 [CLS] + 1 ("a") + 99 ("##a") + 1 [SEP] = 102 ids
+		expect(ids[0]).toBe(2);
+		expect(ids[ids.length - 1]).toBe(3);
+		expect(ids.length).toBe(102);
+		// All middle ids are non-UNK
+		for (let i = 1; i < ids.length - 1; i++) expect(ids[i]).not.toBe(1);
+	});
 });

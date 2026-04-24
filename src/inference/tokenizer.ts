@@ -570,9 +570,13 @@ export class Tokenizer {
 		const whole = this.tokenToId.get(chunk);
 		if (whole !== undefined) return [whole];
 
+		const chars = [...chunk]; // code-point array
+		// HF parity: BertWordpieceTokenizer treats any chunk longer than
+		// max_input_chars_per_word (default 100) as [UNK] without subword splitting.
+		if (chars.length > 100) return [unkId];
+
 		const out: number[] = [];
 		let start = 0;
-		const chars = [...chunk]; // code-point array
 		while (start < chars.length) {
 			let matched: { id: number; end: number } | null = null;
 			for (let end = chars.length; end > start; end--) {
