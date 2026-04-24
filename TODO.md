@@ -1,8 +1,11 @@
 # WebLLM Project Status & Roadmap
 
-> **Date:** 2026-04-22
-> **Status:** End-to-end working. TinyLlama 1.1B Q4_0 produces coherent,
-> factually correct output in the browser with multi-turn chat.
+> **Date:** 2026-04-24
+> **Status:** End-to-end browser inference remains working. The live benchmark
+> dashboard now has richer Chart.js visualizations for speed, accuracy,
+> per-dimension performance, temperature sweeps, thinking-mode deltas,
+> TTFT, finish reasons, and score-over-time. The eval suite now separates
+> chat-style semantic reasoning from true embedding-vector tasks.
 > Current Task 5 profiled investigation baseline: 93.5 tok/s decode on
 > `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0`.
 > Use this for hotspot attribution, not as the new steady-state shipping
@@ -28,6 +31,9 @@
 - [x] Performance optimizations (items 2, 3, 5, 7, 8, 9, 11 below)
 - [x] GPU-side ARGMAX/TOP_K logits reduction (item 11)
 - [x] `make smoke-bench` end-to-end benchmark target with agentchrome
+- [x] Semantic-reasoning eval dimension split from true embedding-vector tasks
+- [x] Live benchmark dashboard migrated to Chart.js with richer comparison charts
+- [x] Model support roadmap documented in `docs/MODEL_SUPPORT.md`
 
 ---
 
@@ -45,6 +51,8 @@
 10. Sampling wired in via `Sampler` class (temp / top-k / top-p / repetition penalty).
 11. `ggml_soft_max_ext` + `op_get_rows` WASM bindings added.
 12. Multi-turn chat garbled output — TinyLlama without a system message interprets Zephyr markers as comparison operators. Fixed by auto-prepending DEFAULT_SYSTEM in `formatChatPrompt`.
+13. GPU TOP_K decode path reshaped logits as `[vocab, 1]` before `ggml_get_rows`; ggml gathers along row dimension, so the graph produced `[vocab, topK]` and later failed reshape assertions. Fixed by reshaping logits to `[1, vocab]` before `opGetRows`.
+14. Dashboard Temperature sweep hot series produced data but could render invisibly because `CHART_COLORS.red` was missing. Fixed by extracting shared temperature-sweep data construction and defining the hot color as `#f85149`.
 
 ---
 
@@ -270,101 +278,63 @@ Live bench dashboard at `smoke-test/dashboard.*` (served by
 shippable on top of the existing eval/run data — no new bench metadata
 needs to be collected.
 
-### 12. Convert existing charts to a proper charting library
-- **Where**: `smoke-test/dashboard.js` (`renderChart`, `renderToolChart`,
-  `animateBars`, `flipBarRows`), `smoke-test/dashboard.html` (chart
-  containers), `smoke-test/dashboard.css` (`.bar-*`).
-- **Today**: charts are hand-rolled CSS bars with FLIP reorder animation.
-  Adding a scatter or line chart would require re-implementing axes,
-  tooltips, hit-testing, and animation from scratch each time.
-- **Change**: introduce Chart.js 4 (UMD, self-hosted under
-  `smoke-test/vendor/` so the dashboard still works offline). Replace the
-  two existing bar charts with Chart.js horizontal-bar instances that
-  preserve the current look — sorted desc, dark-theme fills, two bars per
-  row, hover tooltips matching the current `title` attribute text.
-- **Expected**: 4 new chart types (scatter, line, grouped bars, stacked
-  bars) land in a few LOC each instead of hundreds. Shared tooltip, legend,
-  and animation machinery.
-- **Risk**: loses the exact FLIP-on-reorder feel; Chart.js animation is
-  slightly different. Acceptable.
+### 12. Convert existing charts to a proper charting library ✅ DONE
+- **Where**: `smoke-test/dashboard.js`, `smoke-test/dashboard.html`,
+  `smoke-test/dashboard.css`, `smoke-test/vendor/chart.umd.min.js`.
+- **Done**: introduced self-hosted Chart.js 4 UMD and converted the main
+  dashboard charts to managed Chart.js instances with dark-theme colors,
+  legends, tooltips, and dynamic chart-host sizing.
+- **Follow-up**: use `make vendor-refresh` after bumping `chart.js` to refresh
+  the vendored browser bundle.
 
-### 13. Accuracy × Speed scatter chart
-- **Where**: new `renderAccuracySpeedChart` in `smoke-test/dashboard.js`,
-  new panel in `smoke-test/dashboard.html`.
-- **What**: one dot per profile. X = mean tok/s (average of `oneShot` and
-  `interactive` from the matching run), Y = eval `overall`. Top-right is
-  fast + accurate; bottom-left is "why are we running this".
+### 13. Accuracy × Speed scatter chart ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderScatterChart`,
+  `smoke-test/dashboard.html`.
+- **What**: one dot per profile. X = mean tok/s, Y = eval `overall`.
 - **Answers**: "which profile should we actually ship?"
-- **Data source**: join `state.runsByKey` with `state.evalsByEvalId` by
-  `profile ?? modelId`, take the latest of each.
 
-### 14. Per-dimension grouped bars per model
-- **Where**: new `renderDimensionHeatmap` (name TBD) in
-  `smoke-test/dashboard.js`, new panel in `smoke-test/dashboard.html`.
-- **What**: one row per model (cold profile only); four grouped bars for
+### 14. Per-dimension grouped bars per model ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderDimGroupedChart`,
+  `smoke-test/dashboard.html`.
+- **What**: one row per model (cold profile only); grouped bars for
   `tool-calling / reasoning / instruction-following / semantic-reasoning`.
-  Shows specialization — where each model is strong or weak — at a glance.
 - **Answers**: "which model do I pick for workload X?"
-- **Data source**: `state.evalsByEvalId` filtered to `isCold` profiles,
-  grouped by `modelId`, take the latest.
 
-### 15. Temperature sweep per dimension
-- **Where**: new panel + renderer in `smoke-test/dashboard.*`.
-- **What**: per (model, dimension), three points — cold / warm / hot —
-  connected with a line. Makes the tool-calling degradation with
-  temperature visible (and validates the cold-only policy in
-  `eval/browser-eval.ts`). Also reveals which dimensions actually tolerate
-  temperature.
+### 15. Temperature sweep per dimension ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderTempSweepChart`,
+  `smoke-test/dashboard-charts.js`, `tests/dashboard-charts.test.ts`.
+- **What**: per (model, dimension), cold / warm / hot grouped bars.
 - **Answers**: "is temperature hurting me on dimension X?"
-- **Data source**: `state.evalsByEvalId` grouped by `(modelId,
-  dimension, tempBucket)`.
-- **Gotcha**: tool-calling dim is auto-skipped on warm/hot profiles, so
-  those series will have cold-only points. Flag this visually (fade or
-  "cold only" pill) instead of hiding the dim entirely.
+- **Regression covered**: the hot bucket now has explicit data + color coverage
+  so it cannot disappear silently.
 
-### 16. Thinking on vs off delta (Qwen)
-- **Where**: new panel + renderer.
-- **What**: two-bar pairs per dimension comparing `qwen3-*-off-<temp>`
-  against `qwen3-*-thinking-<temp>` at matched temperature. Also show
-  wall-clock latency delta — thinking buys accuracy at the cost of tokens.
+### 16. Thinking on vs off delta (Qwen) ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderThinkingDeltaChart`,
+  `smoke-test/dashboard.html`.
+- **What**: two-bar pairs per dimension comparing Qwen thinking off/on at
+  matched temperature.
 - **Answers**: "is thinking worth the extra decode time, and on which
   dimensions?"
-- **Data source**: filter to Qwen profiles where `thinking in {on, off}`
-  at matched temperatures; pair them up.
 
-### 17. Time-to-first-token (prefill latency) chart
-- **Where**: new panel + renderer.
+### 17. Time-to-first-token (prefill latency) chart ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderTtftChart`,
+  `smoke-test/dashboard.html`.
 - **What**: horizontal bar chart of `oneShot.prefillMs` per profile.
-  Today's tok/s chart bakes prefill into the totals; this surfaces the
-  fixed cost separately, which is the relevant metric for interactive
-  apps (chat, completion).
 - **Answers**: "how long until the first token for each profile?"
-- **Data source**: `state.runsByKey`; already collected.
 
-### 18. Finish reason breakdown
-- **Where**: new panel + renderer (likely Chart.js stacked horizontal
-  bar).
-- **What**: per profile, a stacked bar showing what fraction of
-  generations ended in `eos / max-tokens / stop-token / error`. Hitting
-  `max-tokens` consistently is a tuning signal (prompt too long, model
-  rambling, maxTokens too tight).
+### 18. Finish reason breakdown ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderFinishChart`,
+  `smoke-test/dashboard.html`.
+- **What**: stacked horizontal bars showing `eos / max-tokens / stop-token /
+  error / unknown` counts by profile.
 - **Answers**: "is this profile producing clean completions, or is it
   running off the end?"
-- **Data source**: `state.runsByKey` + per-task results from
-  `state.evalsByEvalId` (each task result has a finish reason-ish via
-  error + latency profile; may need a minor ingest extension to also
-  capture `finishReason` on the task level).
 
-### 19. Score over time (regression detection)
-- **Where**: new panel + renderer (line chart).
-- **What**: for each profile, plot `overall` across successive runs over
-  the last N days. Surfaces drift — did an upstream llama.cpp rebase
-  silently drop accuracy?
+### 19. Score over time (regression detection) ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderSeriesChart`,
+  `eval/live-db.ts::loadEvalSeries`, `eval/live-server.ts` `/evals/series`.
+- **What**: line chart of `overall` across successive eval runs by profile.
 - **Answers**: "did a code change regress anything?"
-- **Data source**: `live-db.ts` already stores all evals with timestamps;
-  group by profile, order by timestamp. Needs a `/evals/series` server
-  endpoint that returns more than the latest snapshot.
-- **Priority**: lower until we have enough cadence to see signal.
 
 ### 20. Quantization comparison (future — requires multi-quant models)
 - **Where**: new panel.
@@ -404,6 +374,25 @@ needs to be collected.
   targeting matmul first, with encode overhead as the secondary decode-compute
   suspect.
 - **Update (2026-04-22):** Matmul follow-up attempt (increase legacy Q outputs per wg) showed no meaningful retained gain and was reverted.
+
+### Completed on 2026-04-24
+
+- Fixed GPU TOP_K row gathering by reshaping logits to `[1, vocab]` before
+  `opGetRows`.
+- Added `WEBLLM_ASSERTIONS` / `wasm-build-debug` for preserving WASM abort
+  diagnostics when needed.
+- Added the `semantic-reasoning` eval dimension and moved chat-style semantic
+  tasks out of the true embedding-vector track.
+- Added cosine-similarity scoring helpers and regression tests for embedding
+  vector scoring.
+- Captured eval sampler/context params so the dashboard can bucket temperature
+  and show run details.
+- Migrated live dashboard charts to self-hosted Chart.js and implemented
+  accuracy × speed, per-dimension grouped bars, temperature sweep, Qwen
+  thinking deltas, TTFT, finish reasons, and score-over-time.
+- Fixed the Temperature sweep hot bucket rendering regression with shared
+  chart-data tests.
+- Documented model support and follow-up roadmap in `docs/MODEL_SUPPORT.md`.
 
 1. **If perf work resumes, keep it on narrow decode-compute tuning.**
    The current profiled traces still point to `graphCompute`, not readback, as
