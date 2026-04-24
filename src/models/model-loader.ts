@@ -171,6 +171,8 @@ export class ModelLoader {
 			ctx,
 			"tokenizer.ggml.cls_token_id",
 		);
+		// GGUF key is misspelled "seperator" upstream (llama.cpp + Arctic-Embed
+		// GGUFs); do NOT correct to "separator" or bert metadata reads will fail.
 		const sepTokenId = getMetaNumberOptional(
 			ctx,
 			"tokenizer.ggml.seperator_token_id",

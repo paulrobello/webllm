@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelArchitecture, ModelHyperparams } from "../src/core/types.js";
+import { TokenizerType } from "../src/inference/tokenizer.js";
 import {
 	GGUF_MAGIC,
 	GGUF_VERSION,
@@ -376,6 +377,12 @@ interface BertGgufOptions {
 	causal?: boolean;
 	/** When provided, overrides the default `bert.attention.layer_norm_epsilon`. */
 	normEpsilon?: number;
+	/**
+	 * When true, emits a bert-style tokenizer vocab with CLS/SEP/UNK/BOS/EOS
+	 * token-id metadata keys. `mask_token_id` is intentionally omitted so the
+	 * loader's `undefined` fallback can be exercised.
+	 */
+	withBertTokenizer?: boolean;
 }
 
 /**
@@ -386,9 +393,17 @@ interface BertGgufOptions {
 function buildBertGguf(options: BertGgufOptions = {}): ArrayBuffer {
 	const headerSize = 24;
 	const arch = "bert";
-	const tokens = ["[PAD]", "[CLS]", "[SEP]", "a", "b", "c"];
-	const scores = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-	const tokenTypes = [3, 3, 3, 1, 1, 1];
+	const tokens = options.withBertTokenizer
+		? ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "hello"]
+		: ["[PAD]", "[CLS]", "[SEP]", "a", "b", "c"];
+	const scores = options.withBertTokenizer
+		? [0.0, 0.0, 0.0, 0.0, -1.0]
+		: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+	const tokenTypes = options.withBertTokenizer
+		? [3, 3, 3, 3, 1]
+		: [3, 3, 3, 1, 1, 1];
+	const bosTokenId = options.withBertTokenizer ? 2 : 1;
+	const eosTokenId = options.withBertTokenizer ? 3 : 2;
 
 	type KvEntry = { key: string; type: GgufValueType; value: unknown };
 	const kvEntries: KvEntry[] = [
@@ -440,14 +455,34 @@ function buildBertGguf(options: BertGgufOptions = {}): ArrayBuffer {
 		{
 			key: "tokenizer.ggml.eos_token_id",
 			type: GgufValueType.UINT32,
-			value: 2,
+			value: eosTokenId,
 		},
 		{
 			key: "tokenizer.ggml.bos_token_id",
 			type: GgufValueType.UINT32,
-			value: 1,
+			value: bosTokenId,
 		},
 	];
+
+	if (options.withBertTokenizer) {
+		kvEntries.push(
+			{
+				key: "tokenizer.ggml.cls_token_id",
+				type: GgufValueType.UINT32,
+				value: 2,
+			},
+			{
+				key: "tokenizer.ggml.seperator_token_id",
+				type: GgufValueType.UINT32,
+				value: 3,
+			},
+			{
+				key: "tokenizer.ggml.unknown_token_id",
+				type: GgufValueType.UINT32,
+				value: 1,
+			},
+		);
+	}
 
 	if (options.poolingType !== undefined) {
 		kvEntries.push({
@@ -589,5 +624,16 @@ describe("ModelLoader bert metadata extraction", () => {
 		expect(parsed.hyperparams.architecture).toBe("llama");
 		expect(parsed.hyperparams.poolingType).toBeUndefined();
 		expect(parsed.hyperparams.causalAttention).toBeUndefined();
+	});
+
+	test("bert tokenizer metadata populates WORDPIECE config with cls/sep/unk ids and undefined mask", () => {
+		const parsed = ModelLoader.parseModel(
+			buildBertGguf({ withBertTokenizer: true }),
+		);
+		expect(parsed.tokenizerConfig.type).toBe(TokenizerType.WORDPIECE);
+		expect(parsed.tokenizerConfig.clsTokenId).toBe(2);
+		expect(parsed.tokenizerConfig.sepTokenId).toBe(3);
+		expect(parsed.tokenizerConfig.unkTokenId).toBe(1);
+		expect(parsed.tokenizerConfig.maskTokenId).toBeUndefined();
 	});
 });

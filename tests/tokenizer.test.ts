@@ -312,5 +312,8 @@ describe("Tokenizer WordPiece config", () => {
 		});
 		expect(tok.options.type).toBe(TokenizerType.WORDPIECE);
 		expect(tok.options.clsTokenId).toBe(2);
+		expect(tok.options.sepTokenId).toBe(3);
+		expect(tok.options.unkTokenId).toBe(1);
+		expect(tok.options.maskTokenId).toBeUndefined();
 	});
 });
