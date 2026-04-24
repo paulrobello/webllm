@@ -168,3 +168,42 @@ describe("EncoderInference attention block", () => {
 		expect(ops.filter((o) => o === "softmax-mask").length).toBe(0);
 	});
 });
+
+describe("EncoderInference FFN block", () => {
+	test("each layer runs one GeLU and applies biases on up/down", () => {
+		const { fake, ops } = makeFakeWasm();
+		const hp = makeBertHp(3);
+		const enc = new EncoderInference(fake, hp);
+		const layerWeights = Array.from({ length: 3 }, () => ({
+			qProj: 1,
+			qBias: 1,
+			kProj: 1,
+			kBias: 1,
+			vProj: 1,
+			vBias: 1,
+			oProj: 1,
+			oBias: 1,
+			attnNormW: 1,
+			attnNormB: 1,
+			ffnUp: 1,
+			ffnUpBias: 1,
+			ffnDown: 1,
+			ffnDownBias: 1,
+			ffnNormW: 1,
+			ffnNormB: 1,
+		}));
+		(enc as unknown as { weights: object }).weights = {
+			tokEmb: 100,
+			positionEmb: 101,
+			tokenTypes: 102,
+			inputNormW: 103,
+			inputNormB: 104,
+			layers: layerWeights,
+		};
+		(enc as unknown as { buildGraph: (n: number) => number }).buildGraph(4);
+		// One GeLU per layer.
+		expect(ops.filter((o) => o === "gelu").length).toBe(3);
+		// Total LayerNorms: 1 (input) + 2 per layer (post-attn + post-FFN) = 1 + 2*3 = 7.
+		expect(ops.filter((o) => o === "norm").length).toBe(1 + 2 * 3);
+	});
+});

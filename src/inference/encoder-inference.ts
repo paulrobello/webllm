@@ -210,7 +210,13 @@ export class EncoderInference {
 			// Post-attention LayerNorm (BERT post-norm: residual then LN).
 			x = this.layerNorm(wasm.opAdd(x, attnProj), lw.attnNormW, lw.attnNormB);
 
-			// FFN block: added in Task 9.
+			// FFN: up-project + bias, GeLU, down-project + bias.
+			let h = wasm.opAdd(wasm.opMulMat(lw.ffnUp, x), lw.ffnUpBias);
+			h = wasm.opGelu(h);
+			const ffnProj = wasm.opAdd(wasm.opMulMat(lw.ffnDown, h), lw.ffnDownBias);
+
+			// Post-FFN LayerNorm (BERT post-norm: residual then LN).
+			x = this.layerNorm(wasm.opAdd(x, ffnProj), lw.ffnNormW, lw.ffnNormB);
 		}
 
 		return x;
