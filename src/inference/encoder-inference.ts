@@ -175,8 +175,44 @@ export class EncoderInference {
 		x = wasm.opAdd(x, wasm.opGetRows(weights.tokenTypes, segTensor));
 		x = this.layerNorm(x, weights.inputNormW, weights.inputNormB);
 
-		// Per-layer blocks land in Tasks 8-9. For now just return the
-		// post-input-LN tensor so the test can verify shape contributions.
+		const { hp } = this;
+		const headDim = hp.embeddingHeadLength;
+		const nHeads = hp.headCount;
+		const E = hp.embeddingLength;
+		const invSqrtHd = 1.0 / Math.sqrt(headDim);
+
+		for (let il = 0; il < hp.layerCount; il++) {
+			const lw = weights.layers[il];
+
+			// Self-attention with biases, bidirectional (null mask).
+			const q = wasm.opAdd(wasm.opMulMat(lw.qProj, x), lw.qBias);
+			const k = wasm.opAdd(wasm.opMulMat(lw.kProj, x), lw.kBias);
+			const v = wasm.opAdd(wasm.opMulMat(lw.vProj, x), lw.vBias);
+
+			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
+			const k3 = wasm.opReshape3d(k, headDim, nHeads, nTokens);
+			const v3 = wasm.opReshape3d(v, headDim, nHeads, nTokens);
+
+			const qp = wasm.opPermute(q3, 0, 2, 1, 3);
+			const kp = wasm.opPermute(k3, 0, 2, 1, 3);
+			const vp = wasm.opPermute(v3, 1, 2, 0, 3);
+
+			const qk = wasm.opMulMat(kp, qp);
+			const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, 0.0);
+			const out = wasm.opMulMat(vp, aw);
+			const merged = wasm.opReshape2d(
+				wasm.opCont(wasm.opPermute(out, 0, 2, 1, 3)),
+				E,
+				nTokens,
+			);
+			const attnProj = wasm.opAdd(wasm.opMulMat(lw.oProj, merged), lw.oBias);
+
+			// Post-attention LayerNorm (BERT post-norm: residual then LN).
+			x = this.layerNorm(wasm.opAdd(x, attnProj), lw.attnNormW, lw.attnNormB);
+
+			// FFN block: added in Task 9.
+		}
+
 		return x;
 	}
 

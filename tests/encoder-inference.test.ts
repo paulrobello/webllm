@@ -129,3 +129,42 @@ describe("EncoderInference input embedding graph", () => {
 		expect(ops.filter((o) => o === "mul").length).toBe(1);
 	});
 });
+
+describe("EncoderInference attention block", () => {
+	test("each layer uses null-mask softmax + bias on QKV + O", () => {
+		const { fake, ops } = makeFakeWasm();
+		const hp = makeBertHp(2);
+		const enc = new EncoderInference(fake, hp);
+		// Stub weights with 2 layers of dummy pointers.
+		const layerWeights = Array.from({ length: 2 }, () => ({
+			qProj: 1,
+			qBias: 1,
+			kProj: 1,
+			kBias: 1,
+			vProj: 1,
+			vBias: 1,
+			oProj: 1,
+			oBias: 1,
+			attnNormW: 1,
+			attnNormB: 1,
+			ffnUp: 1,
+			ffnUpBias: 1,
+			ffnDown: 1,
+			ffnDownBias: 1,
+			ffnNormW: 1,
+			ffnNormB: 1,
+		}));
+		(enc as unknown as { weights: object }).weights = {
+			tokEmb: 100,
+			positionEmb: 101,
+			tokenTypes: 102,
+			inputNormW: 103,
+			inputNormB: 104,
+			layers: layerWeights,
+		};
+		(enc as unknown as { buildGraph: (n: number) => number }).buildGraph(8);
+		// 2 layers × null-mask softmax = 2 null-mask, 0 causal-mask.
+		expect(ops.filter((o) => o === "softmax-nullmask").length).toBe(2);
+		expect(ops.filter((o) => o === "softmax-mask").length).toBe(0);
+	});
+});
