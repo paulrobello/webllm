@@ -358,6 +358,9 @@ export class Tokenizer {
 
 	/** Decode token IDs back to text, skipping CONTROL tokens by default. */
 	decode(ids: number[], options?: DecodeOptions): string {
+		if (this.config.type === TokenizerType.WORDPIECE) {
+			return this.decodeWordPiece(ids, options);
+		}
 		const includeSpecialTokens = options?.includeSpecialTokens ?? false;
 		if (this.config.type === TokenizerType.BPE && this.bpeByteEncodeEnabled()) {
 			let encoded = "";
@@ -548,20 +551,71 @@ export class Tokenizer {
 
 		const chunks = wpBasicTokenize(text);
 		const ids: number[] = [clsId];
-
 		for (const chunk of chunks) {
-			const whole = this.tokenToId.get(chunk);
-			if (whole !== undefined) {
-				ids.push(whole);
+			ids.push(...this.wpSubword(chunk, unkId));
+		}
+		ids.push(sepId);
+
+		// Truncate to contextLength, keeping [CLS] at front and [SEP] at end.
+		const maxLen = cfg.contextLength ?? 512;
+		if (ids.length > maxLen) {
+			const trimmed = ids.slice(0, maxLen - 1);
+			trimmed.push(sepId);
+			return trimmed;
+		}
+		return ids;
+	}
+
+	private wpSubword(chunk: string, unkId: number): number[] {
+		const whole = this.tokenToId.get(chunk);
+		if (whole !== undefined) return [whole];
+
+		const out: number[] = [];
+		let start = 0;
+		const chars = [...chunk]; // code-point array
+		while (start < chars.length) {
+			let matched: { id: number; end: number } | null = null;
+			for (let end = chars.length; end > start; end--) {
+				let sub = chars.slice(start, end).join("");
+				if (start > 0) sub = `##${sub}`;
+				const id = this.tokenToId.get(sub);
+				if (id !== undefined) {
+					matched = { id, end };
+					break;
+				}
+			}
+			if (!matched) return [unkId];
+			out.push(matched.id);
+			start = matched.end;
+		}
+		return out;
+	}
+
+	private decodeWordPiece(ids: number[], options?: DecodeOptions): string {
+		const cfg = this.config;
+		const preserve = options?.includeSpecialTokens === true;
+		const specialIds = new Set<number>(
+			[cfg.clsTokenId, cfg.sepTokenId, cfg.padTokenId].filter(
+				(v): v is number => typeof v === "number",
+			),
+		);
+		const parts: string[] = [];
+		for (const id of ids) {
+			if (id < 0 || id >= cfg.tokens.length) continue;
+			const tok = cfg.tokens[id];
+			if (!preserve && specialIds.has(id)) continue;
+			parts.push(tok.text);
+		}
+		let out = "";
+		for (const p of parts) {
+			if (p.startsWith("##")) {
+				out += p.slice(2);
 			} else {
-				// Subword fallback is implemented in Task 4. For now, any chunk
-				// not present as a whole token emits UNK.
-				ids.push(unkId);
+				if (out.length > 0) out += " ";
+				out += p;
 			}
 		}
-
-		ids.push(sepId);
-		return ids;
+		return out;
 	}
 
 	/**
