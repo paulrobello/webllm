@@ -16,10 +16,13 @@
 > per-step (greedy / topk / full) so steps without active steering state
 > stay on the topk fast path even when the config configures steering.
 > Current smoke-bench baselines (browser, TinyLlama Q4_0 + Qwen3 0.6B Q4f16,
-> realistic sampling, single run on 2026-04-25 after the consolidation):
-> - tinyllama-1.1b-chat-q4_0: **~107 tok/s decode** (≈ canonical 110)
-> - qwen3-0.6b-q4f16, thinking-off: **~83 tok/s decode** (was ~76 pre-consolidation)
-> - qwen3-0.6b-q4f16, thinking-on: **~17 tok/s decode** (matches prior baseline; routes through full path while steering state is active — see Next Steps §2)
+> realistic sampling, 3-trial median on 2026-04-25 after the qwen3 steering
+> topk path landed):
+> - tinyllama-1.1b-chat-q4_0: **~105 tok/s decode**
+> - qwen3-0.6b-q4f16, thinking-off: **~85 tok/s decode**
+> - qwen3-0.6b-q4f16, thinking-on: **~93 tok/s decode** (was ~17 — see
+>   `3e5be59`: CPU post-filter top-K replaced the full-vocab readback +
+>   JS sampling pipeline that was costing ~76 tok/s on Qwen3's 152K vocab)
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -159,13 +162,15 @@ Headlines:
 - **Matmul leads on TinyLlama (33%) but encode/dispatch overhead leads
   on Qwen3-off (29.2%).** Qwen3 dispatches ~40% more ops per token (629
   vs 450) — graph-shape reduction has more leverage there than on TinyLlama.
-- **Qwen3 thinking-on routes through `mode=full` while steering state
-  is active**, costing ~8.7 ms/step extra graph compute vs the topk
-  path the same model runs at thinking-off. Best-case lift if §2 lands
-  is ~17 → ~24 tok/s (see "Active Next Steps §2"). The matmul jump
-  (4.05 → 6.31 ms) between the two qwen3 modes is unexplained — full
-  vs topk should not change matmul cost — and is flagged for the §2
-  implementation pass to surface.
+- **Qwen3 thinking-on previously routed through `mode=full` while
+  steering state was active**, costing ~8.7 ms/step extra graph
+  compute and a 152K-float JS sampling pipeline. The full-path
+  numbers above are now historical — Active Step §2 landed
+  (commit `3e5be59`) and thinking-on now runs through topk + CPU
+  mask filter at ~93 tok/s steady-state (5.4× lift over the 17 tok/s
+  full path). The matmul jump (4.05 → 6.31 ms) between the old qwen3
+  modes is unexplained but no longer load-bearing now that thinking-on
+  doesn't hit the full path; flagged for any future graph-shape work.
 - **Consolidation tightened TinyLlama dispatches and matmul share**
   vs the stale 2026-04-22 numbers (489 → 450 dispatches/token, matmul
   share 40.4% → 33.0%). Treat that as a quiet consolidation win, not
@@ -608,12 +613,14 @@ needs to be collected.
 
 1. `make checkall` — confirm 390 pass / 5 skip / 0 fail.
 2. Read the "Inference Performance Optimizations" preamble for the
-   2026-04-25 profile-mode hotspot ranking (TinyLlama / Qwen3-off /
-   Qwen3-on per-step + backend attribution tables).
-3. Start **Active Step §2** (GPU-side masking for qwen3 thinking-on)
-   — that's the largest remaining single decode lever. Begin with
-   the §2 pre-implementation verification step (count masked-token
-   top-K hit rate while thinking is active) before scoping the fix.
+   2026-04-25 profile-mode hotspot ranking. The qwen3 thinking-on
+   numbers there are historical — that path now runs at ~93 tok/s
+   via `3e5be59`.
+3. Pick the next entry point from "Active next steps" §3 onward.
+   The largest single remaining lever is gone (§2 done). Likely
+   next candidates: re-profile to see what bucket is now dominant
+   on Qwen3 thinking-on (suspect: matmul + encode overhead, the
+   same as thinking-off), or move to §4 (test on a larger model).
 
 ### Historical context (for archive — do not action again)
 
@@ -711,38 +718,22 @@ needs to be collected.
    while matmul leads on TinyLlama (33%)**. The biggest single lever
    is still §2 below: getting qwen3 thinking-on off the full path.
 
-2. **GPU-side masking for qwen3 thinking-on.** Today the topk branch
-   is gated off when steering state is active (`thinkDepth > 0` ||
-   `waitingForVisibleAnswer` || `hasVisibleAnswerText`) because the
-   GPU picks top-K from raw logits before we can mask. Result:
-   qwen3 thinking-on stays on the slow full path (~17 tok/s,
-   profile-mode 14.6 tok/s, `mode=full` for all 705 captured decode
-   steps). Best-case lift if thinking-on can route through topk
-   ≈ +35% throughput (`graphComputeMs` 22.62 → 13.91 ms; would lift
-   ~17 → ~24 tok/s steady-state). Two recovery paths, both viable:
-   - **CPU post-filter top-K** (smaller change). Ask GPU for `K + N`
-     candidates, drop masked indices on the CPU side, sample from
-     remaining. Re-fetch full logits if the post-filter pool is
-     exhausted. Lives inside `Generator.generate`'s topk branch.
-   - **GPU-side mask in TOP_K** (bigger change). Thread a mask buffer
-     into `forwardDecode("topk", topK, maskBuffer)`. Touches
-     `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`, the
-     WASM bridge, and the TS bindings, but no extra GPU→CPU round
-     trip and no fallback fast-path needed.
-   **Pre-implementation verification step.** Before committing to
-   either path, instrument `Generator.generate`'s steering window to
-   count how often the masked tokens (`<|endoftext|>` 151643,
-   `<|im_end|>` 151645, the qwen3 thinking-window mask sets) land in
-   the top-`K + N` of full-vocab logits while thinking is active.
-   Concrete: bolt a temporary counter onto the existing full-path
-   step that records `tokenId in top(K+N) ? steered : tail`. If
-   masks routinely fall into the top-K, the CPU post-filter path
-   will keep refetching full logits and the savings collapse — push
-   straight to GPU-side masking instead. If they're tail tokens, CPU
-   post-filter is the simpler win. Run on one qwen3 thinking-on
-   trace from `make smoke-bench --thinking`. Decision recorded in
-   §1's now-completed profile preamble; this verification is the
-   last unknown.
+2. **DONE (2026-04-25): qwen3 steering routes through topk + CPU mask
+   filter** (commit `3e5be59`). Replaced the full-vocab readback /
+   JS sampling pipeline with a `K + STEERING_TOPK_BUFFER` GPU TOP_K
+   request followed by CPU-side mask filtering inside
+   `Generator.generate`. Decision driven by the diagnostic capture
+   on 2026-04-25: masked tokens land in top-K of full-vocab logits
+   0.31% of the time, top-(K+10) 0.41% — the masks live deep in
+   the tail, so CPU post-filter virtually never exhausts the pool
+   and GPU-side WGSL masking would be over-engineering. Measured
+   impact: **17.3 → 93.0 tok/s, 5.4×** — much larger than the
+   ~24 tok/s prediction because the hot bucket was the JS sampler
+   over Qwen3's 152K vocab, not the readback. `waitingForVisibleAnswer`
+   stays on the full path because its whitespace-guard resampling
+   needs full-vocab access (~2 of 236 captured steps). Output
+   coherent on smoke step [8/8]; no regression on TinyLlama or
+   Qwen3 thinking-off.
 
 3. **Decode graph reuse** (item 1 in "Inference Performance
    Optimizations" preamble) remains deferred. The 2026-04-21 profile
