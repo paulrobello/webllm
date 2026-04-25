@@ -6,17 +6,21 @@
 > generative profiles plus the embedding profiles end-to-end into the live
 > SQLite-backed dashboard. The dashboard has a dedicated Embeddings section
 > (cosine, latency, throughput) and the per-dimension / temperature-sweep /
-> Accuracy×Speed charts now split Qwen thinking-on vs thinking-off into
-> distinct series so latest-wins logic doesn't silently overwrite one mode
-> with the other. The eval suite separates chat-style semantic reasoning
-> from true embedding-vector tasks, and the public streaming APIs route
-> through `Generator` + `InferenceSession`.
-> Current smoke-bench baseline (canonical): **~110 tok/s decode** on
-> `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0` with
-> realistic sampling (temp 0.7, topK 40, topP 0.95, repPenalty 1.05) after
-> wiring the smoke decode loop through the GPU TOP_K path on 2026-04-25.
-> Was ~59 tok/s when the loop only branched greedy/full and skipped the
-> existing `forwardDecode("topk")` middle path. See Next Steps §1.
+> Accuracy×Speed charts split Qwen thinking-on vs thinking-off into
+> distinct series. The eval suite separates chat-style semantic reasoning
+> from true embedding-vector tasks. **The library is now the single source
+> of truth for decode**: `engine.chatCompletion` drives [7/8], the
+> interactive chat box, and bench mode through the same `Generator.generate`
+> that public consumers hit. The parallel decode loop in
+> `createSmokeCompletionRunner` is gone. Decode-mode selection is now
+> per-step (greedy / topk / full) so steps without active steering state
+> stay on the topk fast path even when the config configures steering.
+> Current smoke-bench baselines (browser, TinyLlama Q4_0 + Qwen3 0.6B Q4f16,
+> realistic sampling, single run on 2026-04-25 after the consolidation):
+> - tinyllama-1.1b-chat-q4_0: **~107 tok/s decode** (≈ canonical 110)
+> - qwen3-0.6b-q4f16, thinking-off: **~83 tok/s decode** (was ~76 pre-consolidation)
+> - qwen3-0.6b-q4f16, thinking-on: **~17 tok/s decode** (matches prior baseline; routes through full path while steering state is active — see Next Steps §2)
+>
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -73,6 +77,8 @@
 20. **Tokenizer.encode("") returned `[]` for WORDPIECE** — bypassed the `[CLS] ... [SEP]` framing via an unconditional empty-string short-circuit in `encode()`. WORDPIECE now always frames; other tokenizer types keep returning `[]`.
 21. **Score-over-time chart was blank despite a populated DB** — `renderSeriesChart` was defined but never invoked from the `render()` loop, so the panel always showed the bar-empty placeholder. Adding the call to the render loop (between `renderFinishChart` and `renderTable`) fixed it. Also fixed: `seriesLoaded` was sticky after the first fetch, so SSE-delivered evals were invisible to the chart; now reset on every `eval_complete` event. The category x-axis was missing its `labels` array, so even when called the points had nowhere to plot — now built from the sorted union of timestamps.
 22. **Dashboard charts keyed on `modelId` collapsed Qwen thinking-on/off** — Temperature sweep, per-dimension grouped, and Accuracy×Speed scatter all shared a key for both Qwen modes; latest-wins silently overwrote one with the other. Group keys now include `thinking`; series labels gain a `" (think)"` suffix when thinking is on so non-thinking-capable models keep their existing labels.
+23. **`engine.generateStream` qwen3-chatml wiring diverged from the smoke loop in 4 places** discovered while consolidating onto the library. Effects: (a) `maskedTokensWhileThinking` and `maskedTokensAfterThinkingUntilAnswer` were missing `<|endoftext|>`, so the model could emit it mid-think and either get a stray stop or pollute the chain-of-thought; (b) `maskedTokensAfterAnswerStarts` mistakenly included `<|im_end|>`, which is the chat EOS — the model could not terminate normally during the visible answer and qwen3 thinking-on always ran to `max-tokens`; (c) `<|endoftext|>` wasn't auto-added as a stop token; (d) the smoke loop's first-post-`</think>` leading-whitespace guard (forces `</think>` to be followed by a token starting with whitespace) had no library counterpart. Fixed all four; added `requireLeadingWhitespaceAfterThinking` to `GenerationConfig` for parity, and threaded the seed through `engine.generateStream`'s internal `Sampler` (added `CompletionConfig.seed`) so smoke runs are reproducible through the public API.
+24. **`Generator.generate` computed `gpuMode` once, statically, before the decode loop** — `requiresFullLogitsSteering = (any qwen3 mask set configured)` forced `gpuMode = "full"` for the entire run. Once the smoke loop migrated onto the library, qwen3 thinking-off ran at ~17 tok/s on the full path instead of ~83 tok/s on the topk path, even on steps where no steering state was active. Replaced with per-step dynamic selection: `greedy` if sampler is greedy + no penalty; `topk` if `sampler.topK > 0` AND no current steering state (`thinkDepth === 0 && !waitingForVisibleAnswer && !hasVisibleAnswerText`); else `full`. The smoke loop's old code had this dynamic check inline; the library now matches.
 
 ---
 
@@ -419,9 +425,13 @@ needs to be collected.
   suspect.
 - **Update (2026-04-22):** Matmul follow-up attempt (increase legacy Q outputs per wg) showed no meaningful retained gain and was reverted.
 - **Update (2026-04-25):** baseline moved to ~110 tok/s after the GPU TOP_K
-  smoke-loop wiring (commit `9156deb`). Numbers in this section pre-date
-  that change — re-profile before relying on the bucket percentages. See
-  Next Steps §2 for the action.
+  smoke-loop wiring (commit `9156deb`).
+- **Update (2026-04-25, library-as-source-of-truth consolidation):** the
+  smoke loop has been deleted and replaced with a thin
+  `engine.chatCompletion` adapter; `Generator.generate` now picks the
+  decode mode dynamically per step. Numbers in this section pre-date
+  both 2026-04-25 changes — **all bucket percentages here are stale**.
+  Re-profile first; see "Active next steps §1" below.
 
 ### Completed on 2026-04-24
 
@@ -509,6 +519,57 @@ needs to be collected.
   recovers 96% of the way to the greedy upper bound (114.8 tok/s).
   Qwen3 thinking-off also benefits (~76 tok/s); thinking-on routes
   through the unchanged full path (~16.6 tok/s).
+- **TODO §2 done — library is now the single source of truth for
+  decode** (this session's work, uncommitted). The smoke decode loop
+  in `createSmokeCompletionRunner` was a 200-line duplicate of
+  `Generator.generate` that silently dropped throughput when the topk
+  fast path landed on one side but not the other. Consolidation steps:
+  - **Library fixes (Phase 1):** `engine.generateStream` qwen3 wiring
+    parity (bug-fix #23 above); `requireLeadingWhitespaceAfterThinking`
+    added to `GenerationConfig` and wired through
+    `Generator.generate`'s post-`</think>` sampling guard.
+  - **Library extension (Phase 2A):** `CompletionConfig.seed` added to
+    `src/core/chat-types.ts`; `engine.generateStream` threads it into
+    the internal `Sampler({ ... seed })` construction.
+  - **Library refactor (Phase 3):** dynamic per-step decode-mode
+    selection in `Generator.generate` (bug-fix #24 above).
+  - **Smoke-side rewrite (Phase 2B):**
+    `smoke-test/real-model-smoke.js::createSmokeCompletionRunner` now
+    a ~50-line adapter over `engine.chatCompletion`. Deleted 11 dead
+    helpers (`getForbiddenReentryTokens`, `getThinkingTokenIds`, the 3
+    qwen `getMaskedTokens*`, `getExtraStopTokenIds`, `maskTokenLogits`,
+    `isVisibleTextToken`, `isWhitespaceOnlyTextToken`,
+    `tokenStartsWithWhitespace`, `decodeForDebug`).
+    `smoke-test/real-model-page.js` constructs the WebLLM engine +
+    `adoptPreloadedModel` once after [6/8] (covers both causal-LM and
+    encoder paths); reused by [7/8], the interactive chat box, and
+    bench mode. `smoke-test/real-model-bench.js` accepts engine +
+    handleId from caller (no longer creates its own GPU adapter +
+    engine). `smoke-test/real-model-runtime.js` drops manual prompt
+    tokenization + KV reset; passes the full message array through.
+    `tests/real-model-runtime.test.ts` rewritten for the new signature.
+  - **Browser smoke verification (this session, single-run on tab
+    `52C698CC3FF17A7A9B85EC5CB5EC67E2`, port 50840):** tinyllama
+    106.9 tok/s · 64 tokens · finish=max-tokens; qwen3 thinking-off
+    83.4 tok/s · 25 tokens · finish=eos; qwen3 thinking-on 17.3 tok/s
+    · 236 tokens · finish=eos; embed cosine=0.76 on all three. Output
+    text byte-identical across two tinyllama re-runs (seed=12345).
+    Console: no errors. `make checkall`: 390 pass / 5 skip / 0 fail
+    across 43 files. **Note: not committed yet.**
+
+### Resumption checklist (start a fresh session here)
+
+1. `make checkall` — confirm 390 pass / 5 skip / 0 fail. The library
+   consolidation in this session is uncommitted; verify it's still
+   green on the working tree before doing anything else.
+2. `make smoke-test` then `bun run eval/smoke-serve.ts --port 8031`
+   (or `make smoke-restart`). Smoke a quick `?model=tinyllama-1.1b-chat-q4_0`
+   page load to make sure the bundle works in the browser.
+3. Commit the consolidation work (uncommitted as of 2026-04-25 — see
+   "Completed on 2026-04-25 (cont.)" above for the 8-file change list).
+4. Then start **§1** below.
+
+### Historical context (for archive — do not action again)
 
 1. **RESOLVED (2026-04-25): Apr-23 smoke-bench "regression" is a benchmark
    methodology change, not an engine regression.** Bisect (TS bundle only;
@@ -585,94 +646,91 @@ needs to be collected.
    (~76 tok/s with coherent output); thinking-on routes through the
    full path unchanged.
 
-2. **Make the library the single source of truth for decode; delete the
-   parallel pipeline in smoke/bench. DO THIS BEFORE the next perf
-   re-profile (§3).** The topk-fix exercise made the cost of duplication
-   explicit: `Generator.generate` (`src/inference/generation.ts`) had the
-   correct three-way greedy/topk/full branch, but
-   `smoke-test/real-model-smoke.js::createSmokeCompletionRunner` had its
-   own decode loop that branched only greedy/full and silently dropped
-   ~50% of throughput. Any future perf win — GPU-side masking, decode
-   graph reuse, dispatch batching, sampler vectorization — that lands
-   only in one of the two pipelines will have the same problem.
+2. **DONE (2026-04-25): library is now the single source of truth for
+   decode.** See "Completed on 2026-04-25 (cont.)" above and bug-fix
+   entries #23 and #24 for the full landed change set.
 
-   **Plan**:
-   - Audit what the smoke loop has that `Generator.generate` doesn't:
-     qwen `thinkDepth` / `waitingForVisibleAnswer` /
-     `hasVisibleAnswerText` state machine, masked-token sets
-     (`getMaskedTokensWhileThinking`, `…AfterThinkingUntilAnswer`,
-     `…DuringAnswer`), `forbiddenReentryTokens`, `extraStopTokens`,
-     whitespace dedup loop (`tokenStartsWithWhitespace`,
-     `isWhitespaceOnlyTextToken`), and the `requireVisibleAnswer*`
-     guards. Cross-reference against the `requiresFullLogitsSteering`
-     state already inside `Generator.generate` — much of this likely
-     already exists in the library and just isn't reachable via the
-     smoke loop's call signature.
-   - For anything missing, port it into the library as opt-in
-     `GenerationConfig` fields (or an `InferenceSession` extension),
-     keeping the API stable for non-qwen consumers.
-   - Switch `createSmokeCompletionRunner` (and any duplicated decode
-     glue in `eval/chat-smoke*.ts` / `eval/browser-eval.ts` /
-     `smoke-test/real-model-bench.js`) to call
-     `engine.chatCompletion()` / `Generator.generate()` directly.
-     Sampler config selection (`getSmokeSamplingConfig`) and prompt
-     building (`buildSmokePrompt`) stay in smoke since they are
-     bench-policy, not decode-policy.
-   - Delete the smoke-side decode loop and helpers that are now dead.
-   - Verify with the existing tests + a tinyllama and qwen3 smoke run
-     (both thinking modes). Same prompt should yield the same output
-     bytes before and after (seeded sampler, deterministic).
+---
 
-   **Why before the perf re-profile**: the next perf measurement
-   should be against the canonical pipeline, otherwise we waste effort
-   tuning a path that isn't what the public API uses, and any
-   optimization we land would have to be re-applied in the smoke
-   loop separately. Same logic applies to the `bench-full` path.
+### Active next steps
 
-3. **Re-profile decode after §2 lands and the topk fix is in the
-   canonical pipeline.** The 2026-04-22 profile breakdown
-   (graphCompute 91.8%, matmul 40.4% of graph time, 489 dispatches/token)
-   was captured against the old full-vocab + JS-sampling slow path.
-   With smoke-bench now at ~110 tok/s (decode step ≈ 9 ms/token) the
-   bucket attribution is stale. Run `make smoke-bench PERF_RUNS=3` with
-   `--profile` and re-record graphCompute / backendMatmulMs /
-   backendEncodeOverheadMs / backendDispatchCount before committing to
-   the next optimization. Likely-still-true: matmul + encode/dispatch
-   overhead remain the biggest compute-side buckets; the JS bucket is
-   now thin enough that further sampler-side optimization (WASM-port
-   `sampleFromTopK`, etc.) has tiny headroom.
-4. **GPU-side masking for qwen3 thinking-on (deferred).** Today the
-   topk branch is gated off when `thinkDepth > 0` /
-   `waitingForVisibleAnswer` / `hasVisibleAnswerText` because the GPU
-   picks top-K from raw logits before we can mask. Result: qwen3
-   thinking-on stays on the slow full path (~16.6 tok/s observed). Two
-   ways to recover: post-filter top-K on CPU (drop masked indices,
-   re-sample if K-after-filter is too small), or push the mask set
-   into the GPU TOP_K dispatch. Neither blocks any current workload.
-   Best implemented inside the library after §2.
-5. **Decode graph reuse** (item 1) remains deferred.
-   The richer trace still shows build/setup time as small compared with
-   `graphCompute`, so there is not yet enough evidence to make structural
-   graph reuse the next task.
-6. **Test on a larger model** (Phi-2, Llama-2-7B) now that the small
-   model works. Worth doing before the next perf pass — bigger models
-   shift the matmul/dispatch-overhead ratio and may change which lever
-   is highest-impact.
-7. The latent 3+ binding buffer-conflict edge case in
-   `ggml_backend_webgpu_build_multi` remains untested — no llama op hits it today.
-8. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
-   next implementation step.
-   - **Go/no-go:** no-go for the current milestone; the completion-driven
-     readback path is the active baseline.
-   - **What would have to change if revisited:** flip the WASM build from the
-     current ASYNCIFY setup toward JSPI-related flags in
-     `src/wasm/CMakeLists.txt`, replace `ggml-wasm.ts::callWithAsyncify()` with
-     direct JSPI-compatible async export handling, re-audit Emscripten runtime
-     exports to remove Asyncify-specific methods and keep only the JSPI-needed
+1. **Re-profile decode against the canonical pipeline.** §2 is done —
+   `engine.chatCompletion` is now the only decode path through the
+   smoke page, and dynamic per-step decode-mode selection is in the
+   library. The 2026-04-22 profile breakdown (graphCompute 91.8%,
+   matmul 40.4% of graph time, encodeOverhead 28.2%, 489
+   dispatches/token) was captured against the old full-vocab +
+   JS-sampling slow path and is stale. Action plan:
+   - Run `make smoke-bench PERF_RUNS=3
+     PERF_MODEL=tinyllama-1.1b-chat-q4_0` with `--profile`. The
+     `__decodeTraces` global is populated by
+     `createSmokeCompletionRunner` (one entry per decode step, not
+     per-prefill — verified in this session); read it via
+     `agentchrome js exec "JSON.stringify(window.__decodeTraces)"`.
+   - Record medians for: `graphComputeMs`, `downloadResultMs`,
+     `backendMatmulMs`, `backendEncodeOverheadMs`,
+     `backendAttentionMs`, `backendDispatchCount`. Compare against
+     the stale 2026-04-22 numbers above and update the
+     "Inference Performance Optimizations" preamble.
+   - Repeat for qwen3-0.6b-q4f16 thinking-off (now ~83 tok/s) and
+     thinking-on (~17 tok/s). Thinking-on still routes through full
+     mode while steering state is active — this is the biggest
+     remaining lever (Active Step §2). Confirm.
+   - Pick the next decode optimization based on what the fresh
+     numbers say. Likely-still-true: matmul + encode/dispatch
+     overhead remain the dominant compute-side buckets; the JS
+     bucket is now thin enough that further sampler-side
+     optimization has tiny headroom.
+
+2. **GPU-side masking for qwen3 thinking-on.** Today the topk branch
+   is gated off when steering state is active (`thinkDepth > 0` ||
+   `waitingForVisibleAnswer` || `hasVisibleAnswerText`) because the
+   GPU picks top-K from raw logits before we can mask. Result:
+   qwen3 thinking-on stays on the slow full path (~17 tok/s). Two
+   recovery paths:
+   - **CPU post-filter top-K**: ask GPU for `K + N` candidates, drop
+     masked indices on the CPU side, sample from remaining. Re-fetch
+     full logits if the post-filter pool is exhausted (rare). Lives
+     inside `Generator.generate`'s topk branch.
+   - **GPU-side mask in TOP_K**: thread a mask buffer into
+     `forwardDecode("topk", topK, maskBuffer)`. Bigger change
+     (touches `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`
+     + the WASM bridge + the TS bindings) but no extra GPU→CPU
+     round trip.
+   Decision goes into §1's profile pass — pick whichever dominates
+   the bucket. Neither blocks any current workload.
+
+3. **Decode graph reuse** (item 1 in "Inference Performance
+   Optimizations" preamble) remains deferred. The 2026-04-21 profile
+   measured non-GPU overhead (ctxCreate + buildGraph + backendAlloc +
+   teardown) at 1.7% of decode-step time — too small to chase. After
+   the throughput uplift and the consolidation, that fraction may
+   have grown; re-evaluate as part of §1's profile pass before
+   committing to the C-side refactor.
+
+4. **Test on a larger model** (Phi-2, Llama-2-7B). Bigger models
+   shift the matmul/dispatch-overhead ratio and may change which
+   lever is highest-impact. Worth running through `make bench-full`
+   alongside §1's profile pass — same fresh decode-mode pipeline.
+
+5. The latent 3+ binding buffer-conflict edge case in
+   `ggml_backend_webgpu_build_multi` (item 3 in preamble) remains
+   untested — no llama op hits it today.
+
+6. **JSPI feasibility checkpoint** remains a follow-up investigation,
+   not the next implementation step.
+   - **Go/no-go:** no-go for the current milestone; the
+     completion-driven readback path is the active baseline.
+   - **What would have to change if revisited:** flip the WASM build
+     from the current ASYNCIFY setup toward JSPI-related flags in
+     `src/wasm/CMakeLists.txt`, replace
+     `ggml-wasm.ts::callWithAsyncify()` with direct JSPI-compatible
+     async export handling, re-audit Emscripten runtime exports to
+     remove Asyncify-specific methods and keep only the JSPI-needed
      surface, assess whether the local `~/Repos/llama.cpp` branch's
-     `ggml-webgpu: browser + ASYNCIFY support bundle` needs a parallel JSPI
-     patch path, and verify browser support/behavior on the actual target
-     matrix before any migration.
+     `ggml-webgpu: browser + ASYNCIFY support bundle` needs a
+     parallel JSPI patch path, and verify browser support/behavior
+     on the actual target matrix before any migration.
 
 ---
 

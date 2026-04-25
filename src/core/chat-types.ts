@@ -34,6 +34,12 @@ export interface CompletionConfig {
 	topP?: number;
 	/** Repetition penalty. 1.0 = disabled. Default: 1.0 */
 	repetitionPenalty?: number;
+	/**
+	 * Optional PRNG seed for deterministic sampling. When omitted the
+	 * sampler falls back to `Math.random`. Useful for reproducible
+	 * smoke/bench runs.
+	 */
+	seed?: number;
 	/** AbortSignal to cancel generation mid-stream. */
 	signal?: AbortSignal;
 	/** Custom stop token IDs that halt generation. */

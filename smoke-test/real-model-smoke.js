@@ -156,336 +156,70 @@ export function findSingleTokenProbe(tokenizer, candidates) {
 	return null;
 }
 
-function decodeForDebug(tokenizer, tokenIds, includeSpecialTokens = false) {
-	return tokenizer.decode(tokenIds, { includeSpecialTokens });
-}
-
-function getForbiddenReentryTokens(parsed, detectChatTemplate, tokenizer) {
-	if (parsed?.hyperparams?.architecture !== "qwen3") return [];
-	const chatTemplate = parsed?.tokenizerConfig?.chatTemplate ?? "";
-	if (detectChatTemplate(chatTemplate) !== "chatml") return [];
-	const imStartId = tokenizer.getId("<|im_start|>");
-	return imStartId === undefined ? [] : [imStartId];
-}
-
-function getThinkingTokenIds(parsed, tokenizer) {
-	if (parsed?.hyperparams?.architecture !== "qwen3") return null;
-	const thinkOpenId = tokenizer.getId("<think>");
-	const thinkCloseId = tokenizer.getId("</think>");
-	if (thinkOpenId === undefined || thinkCloseId === undefined) return null;
-	return { thinkOpenId, thinkCloseId };
-}
-
-function getMaskedTokensWhileThinking(thinkingTokenIds, tokenizer) {
-	if (!thinkingTokenIds) return [];
-	const imStartId = tokenizer.getId("<|im_start|>");
-	const imEndId = tokenizer.getId("<|im_end|>");
-	const endoftextId = tokenizer.getId("<|endoftext|>");
-	return [
-		thinkingTokenIds.thinkOpenId,
-		imStartId,
-		imEndId,
-		endoftextId,
-	].filter((id) => id !== undefined);
-}
-
-function getMaskedTokensAfterThinkingUntilAnswer(thinkingTokenIds, tokenizer) {
-	if (!thinkingTokenIds) return [];
-	const imStartId = tokenizer.getId("<|im_start|>");
-	const imEndId = tokenizer.getId("<|im_end|>");
-	const endoftextId = tokenizer.getId("<|endoftext|>");
-	const toolCallOpenId = tokenizer.getId("<tool_call>");
-	const toolCallCloseId = tokenizer.getId("</tool_call>");
-	const toolResponseOpenId = tokenizer.getId("<tool_response>");
-	const toolResponseCloseId = tokenizer.getId("</tool_response>");
-	return [
-		thinkingTokenIds.thinkOpenId,
-		imStartId,
-		imEndId,
-		endoftextId,
-		toolCallOpenId,
-		toolCallCloseId,
-		toolResponseOpenId,
-		toolResponseCloseId,
-	].filter((id) => id !== undefined);
-}
-
-function getMaskedTokensDuringAnswer(thinkingTokenIds, tokenizer) {
-	if (!thinkingTokenIds) return [];
-	const imStartId = tokenizer.getId("<|im_start|>");
-	const toolCallOpenId = tokenizer.getId("<tool_call>");
-	const toolCallCloseId = tokenizer.getId("</tool_call>");
-	const toolResponseOpenId = tokenizer.getId("<tool_response>");
-	const toolResponseCloseId = tokenizer.getId("</tool_response>");
-	return [
-		thinkingTokenIds.thinkOpenId,
-		imStartId,
-		toolCallOpenId,
-		toolCallCloseId,
-		toolResponseOpenId,
-		toolResponseCloseId,
-	].filter((id) => id !== undefined);
-}
-
-function getExtraStopTokenIds(parsed, detectChatTemplate, tokenizer) {
-	if (parsed?.hyperparams?.architecture !== "qwen3") return [];
-	const chatTemplate = parsed?.tokenizerConfig?.chatTemplate ?? "";
-	if (detectChatTemplate(chatTemplate) !== "chatml") return [];
-	const endoftextId = tokenizer.getId("<|endoftext|>");
-	return endoftextId === undefined ? [] : [endoftextId];
-}
-
-function maskTokenLogits(logits, tokenIds) {
-	for (const tokenId of tokenIds) {
-		if (tokenId >= 0 && tokenId < logits.length) {
-			logits[tokenId] = -Infinity;
-		}
-	}
-}
-
-function isVisibleTextToken(tokenizer, tokenId) {
-	const token = tokenizer.getToken(tokenId);
-	if (!token) return false;
-	if (token.attr & (4 | 8)) return false;
-	return tokenizer.decode([tokenId]).trim().length > 0;
-}
-
-function isWhitespaceOnlyTextToken(tokenizer, tokenId) {
-	const token = tokenizer.getToken(tokenId);
-	if (!token) return false;
-	if (token.attr & (4 | 8)) return false;
-	return tokenizer.decode([tokenId]).trim().length === 0;
-}
-
-function tokenStartsWithWhitespace(tokenizer, tokenId) {
-	const token = tokenizer.getToken(tokenId);
-	if (!token) return false;
-	if (token.attr & (4 | 8)) return false;
-	const text = tokenizer.decode([tokenId]);
-	if (text.length === 0) return false;
-	return /^\s/.test(text);
-}
-
+/**
+ * Smoke completion runner: thin adapter over the library's
+ * `engine.chatCompletion` so the smoke page exercises the same decode
+ * pipeline that public consumers do. Output shape matches the legacy
+ * runner so callers (`real-model-page.js`, `real-model-runtime.js`,
+ * smoke-bench profiling) keep working.
+ */
 export function createSmokeCompletionRunner({
-	parsed,
-	tokenizer,
+	engine,
+	handleId,
 	inference,
-	detectChatTemplate,
+	tokenizer,
 	log,
 	profileMode = false,
 }) {
-	return async function runCompletion(label, promptTokens, sampler, maxGen = 64) {
+	return async function runCompletion({
+		label,
+		messages,
+		samplingConfig,
+		maxTokens,
+		chatOptions = {},
+	}) {
 		const tStart = performance.now();
-		const logits = await inference.forward(
-			new Int32Array(promptTokens),
-			new Int32Array(promptTokens.map((_, i) => i)),
-		);
-		const prefillMs = performance.now() - tStart;
-		const forbiddenReentryTokens = new Set(
-			getForbiddenReentryTokens(parsed, detectChatTemplate, tokenizer),
-		);
-		const extraStopTokens = new Set(
-			getExtraStopTokenIds(parsed, detectChatTemplate, tokenizer),
-		);
-		const thinkingTokenIds = getThinkingTokenIds(parsed, tokenizer);
-		const maskedTokensWhileThinking = getMaskedTokensWhileThinking(
-			thinkingTokenIds,
-			tokenizer,
-		);
-		const maskedTokensAfterThinkingUntilAnswer =
-			getMaskedTokensAfterThinkingUntilAnswer(thinkingTokenIds, tokenizer);
-		const maskedTokensDuringAnswer = getMaskedTokensDuringAnswer(
-			thinkingTokenIds,
-			tokenizer,
-		);
-		const requireVisibleAnswerAfterThinking = thinkingTokenIds !== null;
-		let thinkDepth = 0;
-		let hasVisibleAnswerText = false;
-		let waitingForVisibleAnswer = false;
-		let requireLeadingWhitespaceAfterThink = false;
+		log("running", `  ${label} messages: ${messages.length}`);
 
-		log("running", `  ${label} prompt tokens: ${promptTokens.length}`);
-		{
-			const arr = Array.from(logits).map((v, i) => [i, v]);
-			arr.sort((a, b) => b[1] - a[1]);
-			const top = arr.slice(0, 10).map(([id, v]) => {
-				const token = tokenizer.getToken(id);
-				return `${id}:"${token ? token.text : "?"}"(${v.toFixed(2)})`;
-			});
-			log("running", `  ${label} prefill top10: ${top.join(", ")}`);
-		}
+		const generatedIds = [];
+		let stats = null;
+		let yieldCount = 0;
 
-		const eosId = parsed.tokenizerConfig.eosTokenId;
-		const generated = [];
-		const recent = [...promptTokens];
-		let finishReason = "max-tokens";
-		sampler.applyRepetitionPenalty(logits, recent.slice(-64));
-		let sampledId = sampler.sample(logits);
-		if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkOpenId) {
-			thinkDepth = 1;
-		} else if (
-			thinkingTokenIds &&
-			sampledId === thinkingTokenIds.thinkCloseId
-		) {
-			return {
-				outputText: "",
-				rawOutputText: "",
-				displayOutputText: "",
-				genTokens: 0,
-				finishReason: "stop-token",
-				prefillMs,
-				genTime: performance.now() - tStart - prefillMs,
-				totalTime: performance.now() - tStart,
-			};
-		}
-		generated.push(sampledId);
-		recent.push(sampledId);
-
-		for (let step = 0; step < maxGen; step++) {
-			if (sampledId === eosId) {
-				finishReason = "eos";
-				break;
+		for await (const chunk of engine.chatCompletion(handleId, messages, {
+			...samplingConfig,
+			maxTokens,
+			enableThinking: chatOptions.enableThinking,
+		})) {
+			if (chunk.done) {
+				stats = chunk.stats ?? null;
+				continue;
 			}
-			if (extraStopTokens.has(sampledId)) {
-				finishReason = "stop-token";
-				break;
+			if (chunk.tokenId === undefined) continue;
+			yieldCount++;
+			generatedIds.push(chunk.tokenId);
+			// Match the legacy runner: only push decode-step traces, not the
+			// prefill trace (yieldCount === 1 covers the prefill+first-sample).
+			if (yieldCount > 1 && profileMode && inference?.lastTrace) {
+				window.__decodeTraces.push({ ...inference.lastTrace });
 			}
-			const pos = promptTokens.length + step;
-			if (sampler.isGreedy && sampler.noPenalty) {
-				const result = await inference.forwardDecode(
-					new Int32Array([sampledId]),
-					new Int32Array([pos]),
-					"greedy",
-				);
-				if (profileMode && inference.lastTrace) {
-					window.__decodeTraces.push({ ...inference.lastTrace });
-				}
-				sampledId = result.tokenId;
-			} else if (
-				sampler.topK > 0 &&
-				thinkDepth === 0 &&
-				!waitingForVisibleAnswer &&
-				!hasVisibleAnswerText
-			) {
-				// GPU TOP_K reduction → CPU sampling on k candidates only.
-				// Skipped when qwen masking/thinking state is active because the
-				// GPU picks top-K from raw logits before we can mask.
-				const result = await inference.forwardDecode(
-					new Int32Array([sampledId]),
-					new Int32Array([pos]),
-					"topk",
-					sampler.topK,
-				);
-				if (profileMode && inference.lastTrace) {
-					window.__decodeTraces.push({ ...inference.lastTrace });
-				}
-				if (!result.topKIndices || !result.topKValues) {
-					throw new Error("forwardDecode(topk) returned incomplete top-k data");
-				}
-				sampledId = sampler.sampleFromTopK(
-					result.topKIndices,
-					result.topKValues,
-					recent.slice(-64),
-				);
-			} else {
-				const stepLogits = await inference.forward(
-					new Int32Array([sampledId]),
-					new Int32Array([pos]),
-				);
-				if (profileMode && inference.lastTrace) {
-					window.__decodeTraces.push({ ...inference.lastTrace });
-				}
-				sampler.applyRepetitionPenalty(stepLogits, recent.slice(-64));
-				if (thinkDepth > 0) {
-					maskTokenLogits(stepLogits, maskedTokensWhileThinking);
-				} else if (waitingForVisibleAnswer) {
-					maskTokenLogits(stepLogits, maskedTokensAfterThinkingUntilAnswer);
-					if (requireVisibleAnswerAfterThinking) {
-						maskTokenLogits(stepLogits, [eosId]);
-					}
-				} else if (hasVisibleAnswerText) {
-					maskTokenLogits(stepLogits, maskedTokensDuringAnswer);
-				}
-				sampledId = sampler.sample(stepLogits);
-				if (waitingForVisibleAnswer && requireLeadingWhitespaceAfterThink) {
-					const maskedAttempts = new Set();
-					while (
-						!tokenStartsWithWhitespace(tokenizer, sampledId) &&
-						!maskedAttempts.has(sampledId)
-					) {
-						maskedAttempts.add(sampledId);
-						maskTokenLogits(stepLogits, [sampledId]);
-						sampledId = sampler.sample(stepLogits);
-					}
-					requireLeadingWhitespaceAfterThink = false;
-				} else if (waitingForVisibleAnswer) {
-					const maskedWhitespaceOnly = new Set();
-					while (
-						isWhitespaceOnlyTextToken(tokenizer, sampledId) &&
-						!maskedWhitespaceOnly.has(sampledId)
-					) {
-						maskedWhitespaceOnly.add(sampledId);
-						maskTokenLogits(stepLogits, [sampledId]);
-						sampledId = sampler.sample(stepLogits);
-					}
-				}
-			}
-			if (sampledId === eosId) {
-				finishReason = "eos";
-				break;
-			}
-			if (extraStopTokens.has(sampledId)) {
-				finishReason = "stop-token";
-				break;
-			}
-			if (thinkingTokenIds && sampledId === thinkingTokenIds.thinkOpenId) {
-				if (thinkDepth > 0) {
-					finishReason = "stop-token";
-					break;
-				}
-				thinkDepth++;
-			} else if (
-				thinkingTokenIds &&
-				sampledId === thinkingTokenIds.thinkCloseId
-			) {
-				if (thinkDepth === 0) {
-					finishReason = "stop-token";
-					break;
-				}
-				thinkDepth = Math.max(0, thinkDepth - 1);
-				if (thinkDepth === 0) {
-					waitingForVisibleAnswer = requireVisibleAnswerAfterThinking;
-					requireLeadingWhitespaceAfterThink =
-						requireVisibleAnswerAfterThinking;
-				}
-			}
-			if (
-				waitingForVisibleAnswer &&
-				!hasVisibleAnswerText &&
-				isVisibleTextToken(tokenizer, sampledId)
-			) {
-				hasVisibleAnswerText = true;
-				waitingForVisibleAnswer = false;
-			}
-			if (generated.length >= 1 && forbiddenReentryTokens.has(sampledId)) {
-				finishReason = "stop-token";
-				break;
-			}
-			generated.push(sampledId);
-			recent.push(sampledId);
 		}
 
 		const totalTime = performance.now() - tStart;
-		const outputText = decodeForDebug(tokenizer, generated);
-		const rawOutputText = decodeForDebug(tokenizer, generated, true);
+		const prefillMs = stats?.timeToFirstTokenMs ?? 0;
+		const finishReason = stats?.finishReason ?? "max-tokens";
+		const outputText = tokenizer.decode(generatedIds);
+		const rawOutputText = tokenizer.decode(generatedIds, {
+			includeSpecialTokens: true,
+		});
+
 		return {
 			outputText,
 			rawOutputText,
 			displayOutputText: sanitizeDisplayText(outputText),
-			genTokens: generated.length,
+			genTokens: generatedIds.length,
 			finishReason,
 			prefillMs,
-			genTime: totalTime - prefillMs,
+			genTime: Math.max(0, totalTime - prefillMs),
 			totalTime,
 		};
 	};

@@ -78,6 +78,15 @@ export interface GenerationConfig {
 	 * started, preventing relapse into control-token scaffolding.
 	 */
 	maskedTokensAfterAnswerStarts?: number[];
+	/**
+	 * When true, the first token sampled after `</think>` closes is forced to
+	 * begin with whitespace by masking + resampling until a non-control token
+	 * whose decoded text starts with `\s` is produced. One-shot: applies only
+	 * to the first post-`</think>` step, then defers to
+	 * `suppressWhitespaceOnlyAfterThinking` for subsequent steps. Prevents
+	 * run-on output like `</think>The answer ...`.
+	 */
+	requireLeadingWhitespaceAfterThinking?: boolean;
 }
 
 export type GenerationFinishReason =
@@ -197,10 +206,13 @@ export class Generator {
 			config.suppressWhitespaceOnlyAfterThinking === true;
 		const suppressWhitespaceOnlyUntilAnswer =
 			config.suppressWhitespaceOnlyUntilAnswer === true;
+		const requireLeadingWhitespaceAfterThinking =
+			config.requireLeadingWhitespaceAfterThinking === true;
 		let thinkDepth = 0;
 		let thinkClosed = false;
 		let hasVisibleAnswerText = false;
 		let waitingForVisibleAnswer = requireVisibleAnswerBeforeStop;
+		let requireLeadingWhitespaceForNextStep = false;
 
 		// 1. Prefill: process all prompt tokens at once
 		const promptPositions = promptTokenIds.map(
@@ -229,11 +241,12 @@ export class Generator {
 		if (waitingForVisibleAnswer) {
 			maskTokenLogits(logits, [...(config.stopTokens ?? []), eosTokenId]);
 		}
-		let sampledId = sampleTokenWithPostThinkGuards(
+		let sampledId = sampleVisibleAnswerToken(
 			logits,
 			sampler,
 			config.tokenizer,
 			waitingForVisibleAnswer,
+			false,
 			suppressWhitespaceOnlyUntilAnswer,
 		);
 		if (sampledId === thinkOpenTokenId) {
@@ -263,21 +276,15 @@ export class Generator {
 		recentTokens.push(sampledId);
 		let generatedCount = 1;
 
-		// Determine decode mode for subsequent steps
-		const requiresFullLogitsSteering =
-			maskedTokensWhileThinking.length > 0 ||
-			maskedTokensAfterThinkingUntilAnswer.length > 0 ||
-			requireVisibleAnswerAfterThinking ||
-			requireVisibleAnswerBeforeStop ||
-			suppressWhitespaceOnlyAfterThinking ||
-			suppressWhitespaceOnlyUntilAnswer;
-		const gpuMode: DecodeMode = requiresFullLogitsSteering
-			? "full"
-			: sampler.isGreedy && sampler.noPenalty
-				? "greedy"
-				: sampler.topK > 0
-					? "topk"
-					: "full";
+		// Decode-mode selection is dynamic per step. When no steering state
+		// is active (no open think block, not waiting for visible answer
+		// post-`</think>`, and no during-answer scaffolding mask) the topk
+		// fast path is safe even when the config configures steering — the
+		// masks would be no-ops for this step. This is what gives qwen3
+		// thinking-off and tinyllama realistic-sampling runs the topk
+		// throughput when steering happens to be inactive.
+		const greedyOk = sampler.isGreedy && sampler.noPenalty;
+		const topkOk = sampler.topK > 0 && !greedyOk;
 		const decodeStep = forwardDecode;
 
 		// 3. Autoregressive decode loop
@@ -290,6 +297,14 @@ export class Generator {
 				finishReason = "max-tokens";
 				break;
 			}
+
+			const steeringActive =
+				thinkDepth > 0 || waitingForVisibleAnswer || hasVisibleAnswerText;
+			const gpuMode: DecodeMode = greedyOk
+				? "greedy"
+				: topkOk && !steeringActive
+					? "topk"
+					: "full";
 
 			if (decodeStep && gpuMode === "greedy") {
 				// GPU ARGMAX — no CPU sampling needed
@@ -351,17 +366,21 @@ export class Generator {
 				} else if (hasVisibleAnswerText) {
 					maskTokenLogits(result.logits, maskedTokensAfterAnswerStarts);
 				}
-				sampledId = sampleTokenWithPostThinkGuards(
+				const usedLeadingWsGuard =
+					waitingForVisibleAnswer && requireLeadingWhitespaceForNextStep;
+				sampledId = sampleVisibleAnswerToken(
 					result.logits,
 					sampler,
 					config.tokenizer,
 					waitingForVisibleAnswer,
+					usedLeadingWsGuard,
 					waitingForVisibleAnswer
 						? thinkClosed
 							? suppressWhitespaceOnlyAfterThinking
 							: suppressWhitespaceOnlyUntilAnswer
 						: false,
 				);
+				if (usedLeadingWsGuard) requireLeadingWhitespaceForNextStep = false;
 			} else {
 				// Fallback: original path (no forwardDecode provided)
 				const stepLogits = await forwardPass(
@@ -387,17 +406,21 @@ export class Generator {
 				} else if (hasVisibleAnswerText) {
 					maskTokenLogits(stepLogits, maskedTokensAfterAnswerStarts);
 				}
-				sampledId = sampleTokenWithPostThinkGuards(
+				const usedLeadingWsGuard =
+					waitingForVisibleAnswer && requireLeadingWhitespaceForNextStep;
+				sampledId = sampleVisibleAnswerToken(
 					stepLogits,
 					sampler,
 					config.tokenizer,
 					waitingForVisibleAnswer,
+					usedLeadingWsGuard,
 					waitingForVisibleAnswer
 						? thinkClosed
 							? suppressWhitespaceOnlyAfterThinking
 							: suppressWhitespaceOnlyUntilAnswer
 						: false,
 				);
+				if (usedLeadingWsGuard) requireLeadingWhitespaceForNextStep = false;
 			}
 
 			generatedCount++;
@@ -418,6 +441,9 @@ export class Generator {
 				if (thinkDepth === 0) {
 					thinkClosed = true;
 					waitingForVisibleAnswer = true;
+					if (requireLeadingWhitespaceAfterThinking) {
+						requireLeadingWhitespaceForNextStep = true;
+					}
 				}
 			}
 			if (
@@ -512,26 +538,61 @@ function isWhitespaceOnlyTextToken(
 	return tokenizer.decode([tokenId]).trim().length === 0;
 }
 
-function sampleTokenWithPostThinkGuards(
+function tokenStartsWithWhitespace(
+	tokenizer: Tokenizer | undefined,
+	tokenId: number,
+): boolean {
+	if (
+		!tokenizer ||
+		typeof tokenizer.getToken !== "function" ||
+		typeof tokenizer.decode !== "function"
+	) {
+		return false;
+	}
+	const token = tokenizer.getToken(tokenId);
+	if (!token) return false;
+	if (token.attr & (TokenAttribute.CONTROL | TokenAttribute.USER_DEFINED)) {
+		return false;
+	}
+	const text = tokenizer.decode([tokenId]);
+	if (text.length === 0) return false;
+	return /^\s/.test(text);
+}
+
+function sampleVisibleAnswerToken(
 	logits: Float32Array,
 	sampler: Sampler,
 	tokenizer: Tokenizer | undefined,
 	guardPostThinkAnswerStart: boolean,
-	suppressWhitespaceOnlyAfterThinking: boolean,
+	requireLeadingWhitespace: boolean,
+	suppressWhitespaceOnly: boolean,
 ): number {
 	let sampledId = sampler.sample(logits);
-	if (!(guardPostThinkAnswerStart && suppressWhitespaceOnlyAfterThinking)) {
+	if (!guardPostThinkAnswerStart) return sampledId;
+
+	if (requireLeadingWhitespace) {
+		const masked = new Set<number>();
+		while (
+			!tokenStartsWithWhitespace(tokenizer, sampledId) &&
+			!masked.has(sampledId)
+		) {
+			masked.add(sampledId);
+			maskTokenLogits(logits, [sampledId]);
+			sampledId = sampler.sample(logits);
+		}
 		return sampledId;
 	}
 
-	const maskedWhitespaceOnly = new Set<number>();
-	while (
-		isWhitespaceOnlyTextToken(tokenizer, sampledId) &&
-		!maskedWhitespaceOnly.has(sampledId)
-	) {
-		maskedWhitespaceOnly.add(sampledId);
-		maskTokenLogits(logits, [sampledId]);
-		sampledId = sampler.sample(logits);
+	if (suppressWhitespaceOnly) {
+		const masked = new Set<number>();
+		while (
+			isWhitespaceOnlyTextToken(tokenizer, sampledId) &&
+			!masked.has(sampledId)
+		) {
+			masked.add(sampledId);
+			maskTokenLogits(logits, [sampledId]);
+			sampledId = sampler.sample(logits);
+		}
 	}
 	return sampledId;
 }

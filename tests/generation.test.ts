@@ -510,6 +510,107 @@ describe("Generator", () => {
 		expect(tokens).toEqual([5, 7, 6, 8]);
 	});
 
+	test("forces the first post-</think> token to start with whitespace", async () => {
+		const tokenizer = createThinkingTokenizer();
+		let callCount = 0;
+		async function leadingWhitespaceForward(): Promise<Float32Array> {
+			const logits = new Float32Array(tokenizer.vocabSize);
+			callCount++;
+			if (callCount === 1) {
+				logits[5] = 100.0;
+			} else if (callCount === 2) {
+				logits[6] = 100.0;
+			} else {
+				logits[8] = 100.0;
+				logits[7] = 90.0;
+			}
+			return logits;
+		}
+		const sampler = new Sampler({ temperature: 0 });
+		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
+		const config: GenerationConfig = {
+			prompt: "test",
+			maxTokens: 3,
+			temperature: 0,
+			topK: 40,
+			topP: 1,
+			repetitionPenalty: 1,
+			tokenizer,
+			thinkingOpenTokenId: 5,
+			thinkingCloseTokenId: 6,
+			enforceSingleThinkBlock: true,
+			maskedTokensWhileThinking: [5, 3, 4],
+			maskedTokensAfterThinkingUntilAnswer: [5, 3, 4, 9, 10, 11, 12],
+			requireVisibleAnswerAfterThinking: true,
+			requireLeadingWhitespaceAfterThinking: true,
+		};
+
+		const tokens: number[] = [];
+		for await (const token of Generator.generate(
+			[1],
+			sampler,
+			session,
+			2,
+			leadingWhitespaceForward,
+			config,
+		)) {
+			tokens.push(token);
+		}
+		expect(tokens).toEqual([5, 6, 7]);
+	});
+
+	test("requireLeadingWhitespaceAfterThinking only applies to the first post-</think> step", async () => {
+		const tokenizer = createThinkingTokenizer();
+		let callCount = 0;
+		async function followupForward(): Promise<Float32Array> {
+			const logits = new Float32Array(tokenizer.vocabSize);
+			callCount++;
+			if (callCount === 1) logits[5] = 100.0;
+			else if (callCount === 2) logits[6] = 100.0;
+			else if (callCount === 3) {
+				logits[8] = 100.0;
+				logits[7] = 90.0;
+			} else {
+				logits[8] = 100.0;
+			}
+			return logits;
+		}
+		const sampler = new Sampler({ temperature: 0 });
+		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
+		const config: GenerationConfig = {
+			prompt: "test",
+			maxTokens: 4,
+			temperature: 0,
+			topK: 40,
+			topP: 1,
+			repetitionPenalty: 1,
+			tokenizer,
+			thinkingOpenTokenId: 5,
+			thinkingCloseTokenId: 6,
+			enforceSingleThinkBlock: true,
+			maskedTokensWhileThinking: [5, 3, 4],
+			maskedTokensAfterThinkingUntilAnswer: [5, 3, 4, 9, 10, 11, 12],
+			requireVisibleAnswerAfterThinking: true,
+			requireLeadingWhitespaceAfterThinking: true,
+		};
+
+		const tokens: number[] = [];
+		for await (const token of Generator.generate(
+			[1],
+			sampler,
+			session,
+			2,
+			followupForward,
+			config,
+		)) {
+			tokens.push(token);
+		}
+		// Step 3: leading-WS guard masks 8, resamples to 7 ("\n", whitespace-only
+		// — but starts with whitespace, so the guard accepts it). Step 4: guard
+		// is one-shot, gone now; "answer" (id 8) wins and is the visible token.
+		expect(tokens).toEqual([5, 6, 7, 8]);
+	});
+
 	test("suppresses whitespace-only first token until visible answer text starts", async () => {
 		const tokenizer = createThinkingTokenizer();
 		let callCount = 0;

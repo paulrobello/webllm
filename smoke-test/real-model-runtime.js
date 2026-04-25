@@ -2,12 +2,11 @@ export async function runInteractiveChatTurn({
 	text,
 	session,
 	parsedModel,
-	tokenizer,
-	inference,
+	detectChatTemplate,
 	interactiveRunCompletion,
-	makeSmokeSampler,
 	getSmokeChatOptions,
-	encodeChatPrompt,
+	getSmokeSamplingConfig,
+	samplingOverrides = {},
 }) {
 	const trimmedText = text.trim();
 	if (!trimmedText) {
@@ -17,37 +16,29 @@ export async function runInteractiveChatTurn({
 		throw new Error("interactive completion helper not ready");
 	}
 
-	const nextSession = session ?? {
-		position: 0,
-		history: [],
-		messages: [],
-		prevCount: 0,
-	};
+	const nextSession = session ?? { messages: [] };
 	const chatTemplate = parsedModel?.tokenizerConfig?.chatTemplate;
 	const chatOptions = getSmokeChatOptions(parsedModel, chatTemplate);
-	const sampler = makeSmokeSampler(chatTemplate, chatOptions);
+	const samplingConfig = {
+		...getSmokeSamplingConfig(
+			parsedModel,
+			detectChatTemplate,
+			chatTemplate,
+			chatOptions,
+		),
+		...samplingOverrides,
+	};
 
 	nextSession.messages.push({ role: "user", content: trimmedText });
-	const promptTokens = encodeChatPrompt(
-		nextSession.messages,
-		tokenizer,
-		chatOptions,
-	);
-
-	inference.resetKVCache();
-	nextSession.position = 0;
-	nextSession.history = [];
-	nextSession.prevCount = nextSession.messages.length;
-
 	const thinkingOn = chatOptions.enableThinking !== false;
 	const maxTokens = thinkingOn ? 1024 : 100;
-	const result = await interactiveRunCompletion(
-		"chat-interactive",
-		promptTokens,
-		sampler,
+	const result = await interactiveRunCompletion({
+		label: "chat-interactive",
+		messages: nextSession.messages,
+		samplingConfig,
 		maxTokens,
 		chatOptions,
-	);
+	});
 	const fullText = result.displayOutputText || result.outputText;
 	const rawText = result.rawOutputText || fullText;
 	nextSession.messages.push({ role: "assistant", content: fullText });

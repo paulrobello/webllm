@@ -9,12 +9,11 @@
  */
 
 export async function runBenchMode({
-	WebLLM,
+	engine,
+	handleId,
 	runTasks,
 	score,
 	collectBrowserSystemProfile,
-	wasm,
-	inference,
 	parsed,
 	modelId,
 	taskListId,
@@ -29,14 +28,6 @@ export async function runBenchMode({
 	// Side-effect import; safe to call multiple times.
 	log("running", "[bench] loading custom-scorer registrations…");
 	await import(`./scorer-registrations.js${window.location.search || ""}`);
-	log("running", "[bench] requesting GPU device for library engine…");
-	if (!navigator.gpu) {
-		throw new Error("navigator.gpu not available; bench mode needs WebGPU");
-	}
-	const adapter = await navigator.gpu.requestAdapter();
-	if (!adapter) {
-		throw new Error("no WebGPU adapter; bench mode needs a GPU");
-	}
 
 	// System profile is normally collected once by real-model-page.js
 	// when an ingest URL is present. If the page didn't get a chance to
@@ -44,6 +35,13 @@ export async function runBenchMode({
 	let systemId = window.__webllmSystemId;
 	if (!systemId) {
 		try {
+			if (!navigator.gpu) {
+				throw new Error("navigator.gpu not available");
+			}
+			const adapter = await navigator.gpu.requestAdapter();
+			if (!adapter) {
+				throw new Error("no WebGPU adapter for system-profile collection");
+			}
 			const profile = await collectBrowserSystemProfile(adapter);
 			systemId = profile.systemId;
 			log(
@@ -63,18 +61,10 @@ export async function runBenchMode({
 		}
 	}
 
-	const device = await adapter.requestDevice();
-
-	log("running", "[bench] constructing WebLLM engine and adopting pipeline…");
-	const engine = await WebLLM.init({
-		device,
-		memoryBudget: 2_000_000_000,
-	});
-	const handle = await engine.adoptPreloadedModel(modelId, {
-		wasm,
-		inference,
-		parsed,
-	});
+	log(
+		"running",
+		`[bench] using engine handle ${handleId} (adopted by smoke page)`,
+	);
 
 	log("running", `[bench] fetching task list ${taskListId} from ${ingestUrl}…`);
 	const tasksRes = await fetch(`${ingestUrl}/tasks/${taskListId}`);
@@ -111,7 +101,7 @@ export async function runBenchMode({
 
 	const results = [];
 	try {
-		await runTasks(engine, handle.id, tasks, {
+		await runTasks(engine, handleId, tasks, {
 			onTaskStart: (task) => {
 				log("running", `[bench]   ${task.id} (${task.dimension}/${task.difficulty})…`);
 			},

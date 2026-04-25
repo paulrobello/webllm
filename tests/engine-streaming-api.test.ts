@@ -70,7 +70,7 @@ function createQwenChatTokenizer(): Tokenizer {
 		{ text: "<|im_end|>", score: 0, attr: TokenAttribute.CONTROL },
 		{ text: "<think>", score: 0, attr: TokenAttribute.USER_DEFINED },
 		{ text: "</think>", score: 0, attr: TokenAttribute.USER_DEFINED },
-		{ text: "Hello", score: -1, attr: TokenAttribute.NORMAL },
+		{ text: " Hello", score: -1, attr: TokenAttribute.NORMAL },
 		{ text: "!", score: -1, attr: TokenAttribute.NORMAL },
 	];
 	const config: TokenizerConfig = {
@@ -512,6 +512,54 @@ describe("WebLLM.generateStream", () => {
 		});
 	});
 
+	test("CompletionConfig.seed propagates to the sampler PRNG", async () => {
+		let usedSeededRng = false;
+		Sampler.prototype.sample = function sampleForTest(this: Sampler): number {
+			usedSeededRng = this.rng !== Math.random;
+			return 2;
+		};
+
+		const tokenizer = {
+			options: { chatTemplate: QWEN_TMPL, addBosToken: false },
+			bosId: 1,
+			eosId: 2,
+			vocabSize: 32,
+			encode: (): number[] => [21, 22, 23],
+			getId: () => undefined,
+			decode: () => "",
+		} as unknown as Tokenizer;
+		const engine = Object.create(WebLLM.prototype) as WebLLM &
+			Record<string, unknown>;
+		engine.modelManager = {
+			get: () => ({
+				loaded: true,
+				tokenizer,
+				hyperparams: { architecture: "qwen3" },
+			}),
+		};
+		engine.inferenceEngines = new Map([
+			[
+				"model",
+				{
+					forward: async () => createLogits(2, tokenizer.vocabSize),
+					cachedTokenCount: 0,
+					resetKVCache: () => {},
+				},
+			],
+		]);
+		engine.sessions = new Map();
+
+		for await (const _chunk of engine.generateStream(
+			"model",
+			[{ role: "user", content: "Hello" }],
+			{ seed: 12345 },
+		)) {
+			// consume stream
+		}
+
+		expect(usedSeededRng).toBe(true);
+	});
+
 	test("qwen chatCompletion yields visible assistant text through think tokens", async () => {
 		const engine = createTestEngineWithTokenizer(
 			createQwenChatTokenizer(),
@@ -537,12 +585,12 @@ describe("WebLLM.generateStream", () => {
 		expect(chunks).toEqual([
 			{ text: "", tokenId: 5, done: false },
 			{ text: "", tokenId: 6, done: false },
-			{ text: "Hello", tokenId: 7, done: false },
+			{ text: " Hello", tokenId: 7, done: false },
 			{ text: "!", tokenId: 8, done: false },
 			{ text: "", tokenId: undefined, done: true },
 		]);
 		expect(finalStats).toMatchObject({
-			text: "Hello!",
+			text: " Hello!",
 			tokenCount: 4,
 			finishReason: "eos",
 		});

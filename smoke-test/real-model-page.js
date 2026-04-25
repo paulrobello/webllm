@@ -6,7 +6,6 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		GgmlWasm,
 		ModelInference,
 		ModelLoader,
-		Sampler,
 		Tokenizer,
 		WebLLM,
 		collectBrowserSystemProfile,
@@ -22,11 +21,11 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		buildSmokePrompt,
 		createPrefillComparisonRunner,
 		createSmokeCompletionRunner,
-		createSmokeSamplerFactory,
 		findSingleTokenProbe,
 		getSmokeChatOptions,
 		getSmokePageCopy,
 		getSmokePageShellMarkup,
+		getSmokeSamplingConfig,
 		getSmokeSamplingOverridesFromParams,
 		getThinkingModeFromParams,
 		shouldAutoInsertBos,
@@ -110,7 +109,8 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	let parsedModel = null;
 	let wasmInstance = null;
 	let interactiveRunCompletion = null;
-	let makeSmokeSampler = null;
+	let smokeEngine = null;
+	let smokeEngineHandleId = null;
 
 	async function loadAndTest() {
 		const t0 = performance.now();
@@ -246,6 +246,36 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			window.parsedModel = parsed;
 		} catch (e) {
 			log("fail", `[6/8] Tokenizer failed: ${e.message}\n${e.stack || ""}`);
+			return;
+		}
+
+		// Build the WebLLM engine and adopt the already-loaded inference
+		// pipeline. Routes [7/8], the interactive chat box, and bench mode
+		// through `engine.chatCompletion` / `engine.embed` so the smoke
+		// page exercises the same decode path public consumers do.
+		try {
+			if (!navigator.gpu) {
+				throw new Error("navigator.gpu unavailable; smoke test needs WebGPU");
+			}
+			const engineAdapter = await navigator.gpu.requestAdapter();
+			if (!engineAdapter) {
+				throw new Error("requestAdapter() returned null for engine");
+			}
+			const engineDevice = await engineAdapter.requestDevice();
+			smokeEngine = await WebLLM.init({
+				device: engineDevice,
+				memoryBudget: 2_000_000_000,
+			});
+			const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
+				modelId,
+				{ wasm: wasmInstance, inference, parsed },
+			);
+			smokeEngineHandleId = smokeEngineHandle.id;
+		} catch (e) {
+			log(
+				"fail",
+				`[6/8] Engine construction failed: ${e.message}\n${e.stack || ""}`,
+			);
 			return;
 		}
 
@@ -422,12 +452,6 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 
 			const userMessage = promptOverride || "Tell one short joke.";
 			const chatTmpl = parsed.tokenizerConfig.chatTemplate;
-			makeSmokeSampler = createSmokeSamplerFactory({
-				Sampler,
-				parsedModel: parsed,
-				detectChatTemplate,
-				samplingOverrides,
-			});
 			const smokeChatOptions = getSmokeChatOptions(
 				parsed,
 				detectChatTemplate,
@@ -451,24 +475,33 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			}
 
 			const runCompletion = createSmokeCompletionRunner({
-				parsed,
-				tokenizer,
+				engine: smokeEngine,
+				handleId: smokeEngineHandleId,
 				inference,
-				detectChatTemplate,
+				tokenizer,
 				log,
 				profileMode,
 			});
 			interactiveRunCompletion = runCompletion;
 
-			const smokeSampler = makeSmokeSampler(chatTmpl, smokeChatOptions);
+			const smokeSamplingConfig = {
+				...getSmokeSamplingConfig(
+					parsed,
+					detectChatTemplate,
+					chatTmpl,
+					smokeChatOptions,
+				),
+				...samplingOverrides,
+			};
 			const smokeMaxTokens =
 				maxTokensOverride ?? (thinkingEnabled ? 1024 : 64);
-			const smokeResult = await runCompletion(
-				smokePrompt.mode,
-				smokePrompt.tokens,
-				smokeSampler,
-				smokeMaxTokens,
-			);
+			const smokeResult = await runCompletion({
+				label: smokePrompt.mode,
+				messages: [{ role: "user", content: userMessage }],
+				samplingConfig: smokeSamplingConfig,
+				maxTokens: smokeMaxTokens,
+				chatOptions: smokeChatOptions,
+			});
 
 			log(
 				"pass",
@@ -618,13 +651,17 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				const { runBenchMode } = await import(
 					`./real-model-bench.js${assetSuffix}`
 				);
+				if (!smokeEngine || !smokeEngineHandleId) {
+					throw new Error(
+						"bench mode reached without a constructed engine — did [7/8] fail silently?",
+					);
+				}
 				await runBenchMode({
-					WebLLM,
+					engine: smokeEngine,
+					handleId: smokeEngineHandleId,
 					runTasks,
 					score,
 					collectBrowserSystemProfile,
-					wasm: wasmInstance,
-					inference,
 					parsed: parsedModel,
 					modelId,
 					taskListId: benchTaskListId,
@@ -683,15 +720,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				text,
 				session: window._chatSession,
 				parsedModel,
-				tokenizer,
-				inference,
+				detectChatTemplate,
 				interactiveRunCompletion,
-				makeSmokeSampler,
 				getSmokeChatOptions: (nextParsedModel, chatTemplate) =>
 					getSmokeChatOptions(nextParsedModel, detectChatTemplate, chatTemplate, {
 						enableThinking: thinkingEnabled,
 					}),
-				encodeChatPrompt,
+				getSmokeSamplingConfig,
+				samplingOverrides,
 			});
 			window._chatSession = session;
 			const renderedText = thinkingEnabled

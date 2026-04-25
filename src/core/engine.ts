@@ -262,6 +262,7 @@ export class WebLLM {
 			topK: effectiveTopK,
 			topP: effectiveTopP,
 			repetitionPenalty: effectiveRepetitionPenalty,
+			seed: config?.seed,
 		});
 		const genConfig: GenerationConfig = {
 			prompt: typeof input === "string" ? input : "",
@@ -276,6 +277,7 @@ export class WebLLM {
 			if (isQwenChatml) {
 				const imStartId = tokenizer.getId("<|im_start|>");
 				const imEndId = tokenizer.getId("<|im_end|>");
+				const endoftextId = tokenizer.getId("<|endoftext|>");
 				const thinkOpenId = tokenizer.getId("<think>");
 				const thinkCloseId = tokenizer.getId("</think>");
 				const toolCallOpenId = tokenizer.getId("<tool_call>");
@@ -285,19 +287,13 @@ export class WebLLM {
 				if (imStartId !== undefined) {
 					genConfig.forbiddenReentryTokens = [imStartId];
 				}
+				if (endoftextId !== undefined) {
+					genConfig.stopTokens = [...(config?.stopTokenIds ?? []), endoftextId];
+				}
 				if (config?.enableThinking === false) {
 					genConfig.tokenizer = tokenizer;
 				}
 				if (thinkOpenId !== undefined && thinkCloseId !== undefined) {
-					const maskedPostThinkTokens = [
-						thinkOpenId,
-						imStartId,
-						imEndId,
-						toolCallOpenId,
-						toolCallCloseId,
-						toolResponseOpenId,
-						toolResponseCloseId,
-					].filter((id): id is number => id !== undefined);
 					genConfig.tokenizer = tokenizer;
 					genConfig.thinkingOpenTokenId = thinkOpenId;
 					genConfig.thinkingCloseTokenId = thinkCloseId;
@@ -306,12 +302,34 @@ export class WebLLM {
 						thinkOpenId,
 						imStartId,
 						imEndId,
+						endoftextId,
 					].filter((id): id is number => id !== undefined);
-					genConfig.maskedTokensAfterThinkingUntilAnswer =
-						maskedPostThinkTokens;
-					genConfig.maskedTokensAfterAnswerStarts = maskedPostThinkTokens;
+					genConfig.maskedTokensAfterThinkingUntilAnswer = [
+						thinkOpenId,
+						imStartId,
+						imEndId,
+						endoftextId,
+						toolCallOpenId,
+						toolCallCloseId,
+						toolResponseOpenId,
+						toolResponseCloseId,
+					].filter((id): id is number => id !== undefined);
+					// During the visible answer, the model must be allowed to
+					// terminate via `<|im_end|>` (the chat EOS) and
+					// `<|endoftext|>` (a secondary stop). Mask only the
+					// scaffolding controls so it can't relapse into a new
+					// `<think>`, `<|im_start|>`, or tool-call envelope.
+					genConfig.maskedTokensAfterAnswerStarts = [
+						thinkOpenId,
+						imStartId,
+						toolCallOpenId,
+						toolCallCloseId,
+						toolResponseOpenId,
+						toolResponseCloseId,
+					].filter((id): id is number => id !== undefined);
 					genConfig.requireVisibleAnswerAfterThinking = true;
 					genConfig.suppressWhitespaceOnlyAfterThinking = true;
+					genConfig.requireLeadingWhitespaceAfterThinking = true;
 				}
 			}
 		}
