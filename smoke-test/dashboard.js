@@ -636,27 +636,33 @@ function renderScatterChart() {
 		if (!prev || prev.timestamp < ev.timestamp) evalByKey.set(key, ev);
 	}
 
-	// Group by `modelId` so the legend turns into a model color key.
-	// Multiple profiles for the same model (cold/warm/hot, thinking on/off)
-	// show up as multiple dots in the same color; the tooltip still spells
-	// out exactly which profile a dot represents.
-	const pointsByModel = new Map();
+	// Group by `(modelId, thinking)` so the legend turns into a colour key
+	// that respects thinking mode — same model running thinking-on and
+	// thinking-off produces visibly different scores and shouldn't share a
+	// colour. Matches the convention used by the temperature-sweep and
+	// per-dimension grouped charts. Tooltip still spells out the full
+	// profile label and thinking mode for each individual dot.
+	const pointsByKey = new Map();
 	for (const [key, run] of runByKey) {
 		const ev = evalByKey.get(key);
 		if (!ev) continue;
 		const avgTps = ((run.oneShot?.tokensPerSecond ?? 0) + (run.interactive?.tokensPerSecond ?? 0)) / 2;
 		if (avgTps === 0) continue;
 		const modelId = ev.modelId ?? run.model ?? key;
-		if (!pointsByModel.has(modelId)) pointsByModel.set(modelId, []);
-		pointsByModel.get(modelId).push({
+		const thinking = ev.thinking === "on" ? "on" : "off";
+		const groupKey = `${modelId}::${thinking}`;
+		if (!pointsByKey.has(groupKey)) {
+			pointsByKey.set(groupKey, { modelId, thinking, points: [] });
+		}
+		pointsByKey.get(groupKey).points.push({
 			x: avgTps,
 			y: Math.round((ev.overall ?? 0) * 100),
 			label: key,
-			think: ev.thinking ?? "off",
+			think: thinking,
 		});
 	}
 
-	if (pointsByModel.size === 0) {
+	if (pointsByKey.size === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
 		if (scatterChartInstance) { scatterChartInstance.destroy(); scatterChartInstance = null; }
@@ -675,15 +681,22 @@ function renderScatterChart() {
 		"#22d3ee",
 		"#a78bfa",
 	];
-	const modelIds = Array.from(pointsByModel.keys()).sort();
-	const datasets = modelIds.map((modelId, i) => ({
-		label: modelId,
-		data: pointsByModel.get(modelId),
-		backgroundColor: palette[i % palette.length],
-		borderColor: palette[i % palette.length],
-		pointRadius: 6,
-		pointHoverRadius: 8,
-	}));
+	// Sort keys for stable colour assignment across renders. thinking-off
+	// keeps the bare model id as its dataset label so non-thinking-capable
+	// models read the same as before.
+	const sortedKeys = Array.from(pointsByKey.keys()).sort();
+	const datasets = sortedKeys.map((groupKey, i) => {
+		const { modelId, thinking, points } = pointsByKey.get(groupKey);
+		const label = thinking === "on" ? `${modelId} (think)` : modelId;
+		return {
+			label,
+			data: points,
+			backgroundColor: palette[i % palette.length],
+			borderColor: palette[i % palette.length],
+			pointRadius: 6,
+			pointHoverRadius: 8,
+		};
+	});
 	const data = { datasets };
 
 	const options = {
