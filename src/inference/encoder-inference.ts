@@ -191,7 +191,11 @@ export class EncoderInference {
 
 			const qp = wasm.opPermute(q3, 0, 2, 1, 3);
 			const kp = wasm.opPermute(k3, 0, 2, 1, 3);
-			const vp = wasm.opPermute(v3, 1, 2, 0, 3);
+			// V permute [1,2,0,3] yields [N, headDim, nHeads] logically but
+			// leaves nb[0] > nb[1], which ggml_mul_mat asserts against. Match
+			// llama.cpp's no-KV-cache BERT path: make V contiguous before the
+			// mul_mat that consumes it.
+			const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
 			const qk = wasm.opMulMat(kp, qp);
 			const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, 0.0);
