@@ -1,4 +1,9 @@
-import { buildTempSweepChartData, tempBucket } from "./dashboard-charts.js";
+import {
+	buildEmbeddingCosineChartData,
+	buildTempSweepChartData,
+	DIM_NAMES,
+	tempBucket,
+} from "./dashboard-charts.js";
 
 // ── state ────────────────────────────────────────────────────────
 const state = {
@@ -260,6 +265,7 @@ function render() {
 	renderToolChart();
 	renderScatterChart();
 	renderDimGroupedChart();
+	renderEmbeddingCosineChart();
 	renderTempSweepChart();
 	renderThinkingDeltaChart();
 	renderTtftChart();
@@ -730,8 +736,14 @@ function renderDimGroupedChart() {
 	if (host) host.hidden = false;
 	if (empty) empty.hidden = true;
 
-	const dimNames = ["tool-calling", "reasoning", "instruction-following", "semantic-reasoning"];
-	const dimColors = [CHART_COLORS.green, CHART_COLORS.blue, CHART_COLORS.purple, CHART_COLORS.yellow];
+	const dimNames = DIM_NAMES;
+	const dimColors = [
+		CHART_COLORS.green,
+		CHART_COLORS.blue,
+		CHART_COLORS.purple,
+		CHART_COLORS.yellow,
+		CHART_COLORS.orange ?? "#fb923c",
+	];
 	const models = Array.from(latestColdByModel.keys());
 	const labels = models;
 
@@ -776,6 +788,79 @@ function renderDimGroupedChart() {
 		dimGroupedChartInstance.update();
 	}
 	sizeChartHost(canvas, labels.length);
+}
+
+let embeddingCosineChartInstance = null;
+
+function renderEmbeddingCosineChart() {
+	const canvas = document.getElementById("embedding-cosine-chart");
+	const host = document.getElementById("embedding-cosine-host");
+	const empty = document.getElementById("embedding-cosine-empty");
+	if (!canvas) return;
+
+	const evals = Array.from(state.evalsByEvalId.values());
+	const data = buildEmbeddingCosineChartData(evals);
+
+	if (data.labels.length === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (embeddingCosineChartInstance) {
+			embeddingCosineChartInstance.destroy();
+			embeddingCosineChartInstance = null;
+		}
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	const palette = [
+		CHART_COLORS.blue,
+		CHART_COLORS.green,
+		CHART_COLORS.purple,
+		CHART_COLORS.yellow,
+		CHART_COLORS.orange ?? "#fb923c",
+		"#f472b6",
+	];
+	const datasets = data.datasets.map((ds, i) => ({
+		...ds,
+		backgroundColor: palette[i % palette.length],
+		borderRadius: 3,
+		barPercentage: 0.7,
+		categoryPercentage: 0.85,
+	}));
+
+	if (!embeddingCosineChartInstance) {
+		embeddingCosineChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: { labels: data.labels, datasets },
+			options: {
+				...baseChartOptions({ xTitle: "cosine" }),
+				plugins: {
+					legend: {
+						display: true,
+						position: "top",
+						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+					},
+					tooltip: {
+						backgroundColor: "#161b22",
+						titleColor: CHART_COLORS.text,
+						bodyColor: CHART_COLORS.text,
+						borderColor: "#30363d",
+						borderWidth: 1,
+						callbacks: {
+							label: (ctx) =>
+								`${ctx.dataset.label}: ${ctx.parsed.x?.toFixed?.(3) ?? ctx.parsed.y?.toFixed?.(3) ?? ctx.formattedValue}`,
+						},
+					},
+				},
+			},
+		});
+	} else {
+		embeddingCosineChartInstance.data.labels = data.labels;
+		embeddingCosineChartInstance.data.datasets = datasets;
+		embeddingCosineChartInstance.update();
+	}
+	sizeChartHost(canvas, data.labels.length);
 }
 
 function renderTempSweepChart() {

@@ -99,6 +99,15 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>Embedding cosine similarity per task</h2>
+    <div class="legend dim">raw cosine ∈ [-1, 1]; higher = more semantically similar</div>
+  </div>
+  <div id="embedding-cosine-empty" class="bar-empty">no embedding evals yet — try <code>--dimension embedding</code></div>
+  <div id="embedding-cosine-host" class="chart-host" hidden><canvas id="embedding-cosine-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Temperature sweep by dimension</h2>
     <div class="legend">
       <span class="legend-chip temp-cold-dot"></span><span>cold (≤0.4)</span>
