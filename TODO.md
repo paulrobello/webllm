@@ -410,18 +410,49 @@ needs to be collected.
   guards it); and `GGML_OP_NORM` added to the patched ggml-webgpu
   backend (commit `68f1738d5`, see `docs/LLAMA_CPP_PATCHES.md` patch #9).
 
-1. **If perf work resumes, keep it on narrow decode-compute tuning.**
+1. **Investigate ~50% smoke-bench regression introduced in Apr-23 commits.**
+   `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0` now
+   reports ~56 tok/s vs the 93.5 baseline noted at the top of this file —
+   roughly **-40%**. Bisect data (same WASM, same llama.cpp HEAD across all
+   runs; only the webllm TS bundle varies):
+
+   | Commit | Date | tok/s |
+   |---|---|---|
+   | `0548cd4` (last fast point) | Apr 22 | **115.3** |
+   | `9c19088` (live-bench dashboard) | Apr 23+ | 56.0 |
+   | `b178a29` (top-k WASM fix) | Apr 24 | 58.4 |
+   | `d286548` (last pre-encoder commit) | Apr 24 | 55.8 |
+   | `main` (encoder-forward-pass merged) | Apr 24 | 56.4 |
+
+   The encoder-forward-pass branch is **innocent** — `d286548` (immediately
+   before encoder work begins) is already at the regressed throughput. The
+   drop landed somewhere between `0548cd4` and `9c19088`. Top suspects:
+   - `5542bef Fix qwen smoke and chat generation stability` — touched the
+     generation loop / stop-token handling.
+   - `d131cf0 bench: cap browser smoke-test KV context by model` — directly
+     altered the bench harness for tinyllama; could have changed the KV
+     context size used during the bench.
+   - `9c19088 Add live benchmark dashboard with real-WebGPU accuracy bench`
+     — adds live-SSE wiring that runs concurrently with smoke decode.
+
+   Next action: bisect across the ~10 Apr-23 commits between `0548cd4` and
+   `9c19088` (two PERF_RUNS=2 bench iterations per candidate is sufficient
+   given the consistent ~55–60 tok/s noise floor on the slow side).
+   Until this is resolved, treat any tok/s numbers stored in the eval DB
+   from before this regression as not directly comparable to current runs.
+
+2. **If perf work resumes, keep it on narrow decode-compute tuning.**
    The current profiled traces still point to `graphCompute`, not readback, as
    the dominant bucket. Start with matmul-path work first, then reassess
    encode/dispatch overhead with fresh measurements.
-2. **Decode graph reuse** (item 1) remains deferred.
+3. **Decode graph reuse** (item 1) remains deferred.
    The current richer trace still shows build/setup time as small compared with
    `graphCompute`, so there is not yet enough evidence to make structural graph
    reuse the next task.
-3. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
-4. The latent 3+ binding buffer-conflict edge case in
+4. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
+5. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` remains untested — no llama op hits it today.
-5. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
+6. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
    next implementation step.
    - **Go/no-go:** no-go for the current milestone; the completion-driven
      readback path is the active baseline.
