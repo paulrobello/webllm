@@ -92,18 +92,10 @@
 <section class="panel">
   <div class="panel-head">
     <h2>Per-dimension accuracy by model</h2>
+    <div class="legend dim">generative models only — encoder/embedding models live in their own section below</div>
   </div>
   <div id="dim-grouped-empty" class="bar-empty">no completed evals yet</div>
   <div id="dim-grouped-host" class="chart-host" hidden><canvas id="dim-grouped-chart"></canvas></div>
-</section>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Embedding cosine similarity per task</h2>
-    <div class="legend dim">raw cosine ∈ [-1, 1]; higher = more semantically similar</div>
-  </div>
-  <div id="embedding-cosine-empty" class="bar-empty">no embedding evals yet — try <code>--dimension embedding</code></div>
-  <div id="embedding-cosine-host" class="chart-host" hidden><canvas id="embedding-cosine-chart"></canvas></div>
 </section>
 
 <section class="panel">
@@ -149,6 +141,35 @@
   </div>
   <div id="series-empty" class="bar-empty">no historical eval data available (requires SQLite persistence)</div>
   <div id="series-host" class="chart-host" hidden><canvas id="series-chart"></canvas></div>
+</section>
+
+<div class="section-divider">Embeddings</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Embedding cosine similarity per task</h2>
+    <div class="legend dim">raw cosine ∈ [-1, 1]; higher = more semantically similar</div>
+  </div>
+  <div id="embedding-cosine-empty" class="bar-empty">no embedding evals yet — try <code>make bench-full</code> with the dashboard running, or <code>--profiles arctic-embed-s</code> directly</div>
+  <div id="embedding-cosine-host" class="chart-host" hidden><canvas id="embedding-cosine-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Embedding latency by model</h2>
+    <div class="legend dim">median per-text wall time across all embedding tasks (lower is faster)</div>
+  </div>
+  <div id="embedding-latency-empty" class="bar-empty">no embedding evals yet</div>
+  <div id="embedding-latency-host" class="chart-host" hidden><canvas id="embedding-latency-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Embedding throughput by model</h2>
+    <div class="legend dim">texts per second derived from per-task latency (higher is faster)</div>
+  </div>
+  <div id="embedding-throughput-empty" class="bar-empty">no embedding evals yet</div>
+  <div id="embedding-throughput-host" class="chart-host" hidden><canvas id="embedding-throughput-chart"></canvas></div>
 </section>
 
 <section class="panel">

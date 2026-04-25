@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
 	buildEmbeddingCosineChartData,
+	buildEmbeddingLatencyChartData,
+	buildEmbeddingThroughputChartData,
 	buildTempSweepChartData,
 	DIM_NAMES,
 } from "../smoke-test/dashboard-charts.js";
@@ -109,6 +111,109 @@ test("buildEmbeddingCosineChartData returns empty when no embedding cosines pres
 	]);
 	expect(data.labels).toEqual([]);
 	expect(data.datasets).toEqual([]);
+});
+
+test("buildEmbeddingLatencyChartData returns median ms per text per model, latest eval wins", () => {
+	const evals = [
+		// older eval — should be overwritten by the newer one for the same model.
+		{
+			evalId: "old",
+			timestamp: "2026-04-25T09:00:00.000Z",
+			modelId: "arctic-embed-s",
+			results: [
+				{ taskId: "t1", dimension: "embedding", latencyMs: 200 },
+				{ taskId: "t2", dimension: "embedding", latencyMs: 200 },
+			],
+		},
+		{
+			evalId: "fresh",
+			timestamp: "2026-04-25T10:00:00.000Z",
+			modelId: "arctic-embed-s",
+			results: [
+				{ taskId: "t1", dimension: "embedding", latencyMs: 10 },
+				{ taskId: "t2", dimension: "embedding", latencyMs: 20 },
+				{ taskId: "t3", dimension: "embedding", latencyMs: 30 },
+				// non-embedding row must be ignored.
+				{ taskId: "t4", dimension: "reasoning", latencyMs: 9999 },
+			],
+		},
+		{
+			evalId: "m",
+			timestamp: "2026-04-25T10:30:00.000Z",
+			modelId: "arctic-embed-m",
+			results: [
+				{ taskId: "t1", dimension: "embedding", latencyMs: 40 },
+				{ taskId: "t2", dimension: "embedding", latencyMs: 60 },
+			],
+		},
+	];
+
+	const data = buildEmbeddingLatencyChartData(evals);
+	// Sorted by latency ascending: arctic-embed-s (median 20) before
+	// arctic-embed-m (median 50).
+	expect(data.labels).toEqual(["arctic-embed-s", "arctic-embed-m"]);
+	expect(data.datasets[0].data).toEqual([20, 50]);
+});
+
+test("buildEmbeddingThroughputChartData inverts latency to texts/sec", () => {
+	const evals = [
+		{
+			evalId: "fresh",
+			timestamp: "2026-04-25T10:00:00.000Z",
+			modelId: "arctic-embed-s",
+			results: [
+				{ taskId: "t1", dimension: "embedding", latencyMs: 10 },
+				{ taskId: "t2", dimension: "embedding", latencyMs: 20 },
+				{ taskId: "t3", dimension: "embedding", latencyMs: 30 },
+			],
+		},
+	];
+	const data = buildEmbeddingThroughputChartData(evals);
+	expect(data.labels).toEqual(["arctic-embed-s"]);
+	// 1000 / median(10,20,30) = 1000 / 20 = 50 texts/sec.
+	expect(data.datasets[0].data).toEqual([50]);
+});
+
+test("temperature sweep chart splits thinking-on and thinking-off into separate series", () => {
+	// Same modelId across both rows; only the `thinking` field differs.
+	// Pre-fix this would collapse to a single series with the later
+	// timestamp silently overwriting the earlier per bucket.
+	const make = (
+		evalId: string,
+		thinking: "on" | "off",
+		bucket: "cold" | "warm" | "hot",
+		score: number,
+		timestamp: string,
+	) => ({
+		evalId,
+		timestamp,
+		modelId: "qwen3-0.6b-q4f16",
+		thinking,
+		params: {
+			temperature: bucket === "cold" ? 0.1 : bucket === "warm" ? 0.6 : 0.9,
+		},
+		dimensions: {
+			reasoning: { total: 4, passed: 3, score, avgLatencyMs: 10 },
+		},
+	});
+
+	const data = buildTempSweepChartData([
+		make("a", "off", "cold", 0.4, "2026-04-25T10:00:00.000Z"),
+		make("b", "off", "warm", 0.5, "2026-04-25T10:01:00.000Z"),
+		make("c", "on", "cold", 0.7, "2026-04-25T10:02:00.000Z"),
+		make("d", "on", "warm", 0.8, "2026-04-25T10:03:00.000Z"),
+	]);
+
+	expect(data.labels.sort()).toEqual([
+		"qwen3-0.6b-q4f16 (think) · reasoning",
+		"qwen3-0.6b-q4f16 · reasoning",
+	]);
+	const cold = data.datasets.find((d) => d.label === "cold");
+	const warm = data.datasets.find((d) => d.label === "warm");
+	// Both thinking modes contribute their own cold + warm; nothing was
+	// overwritten by the latest-wins logic.
+	expect(cold?.data.filter((v) => v != null).length).toBe(2);
+	expect(warm?.data.filter((v) => v != null).length).toBe(2);
 });
 
 test("temperature sweep chart includes hot bucket data and styling", () => {

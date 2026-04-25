@@ -1,5 +1,7 @@
 import {
 	buildEmbeddingCosineChartData,
+	buildEmbeddingLatencyChartData,
+	buildEmbeddingThroughputChartData,
 	buildTempSweepChartData,
 	DIM_NAMES,
 	tempBucket,
@@ -266,6 +268,8 @@ function render() {
 	renderScatterChart();
 	renderDimGroupedChart();
 	renderEmbeddingCosineChart();
+	renderEmbeddingLatencyChart();
+	renderEmbeddingThroughputChart();
 	renderTempSweepChart();
 	renderThinkingDeltaChart();
 	renderTtftChart();
@@ -716,18 +720,34 @@ function renderDimGroupedChart() {
 	const empty = document.getElementById("dim-grouped-empty");
 	if (!canvas) return;
 
-	// Latest cold eval per model.
-	const latestColdByModel = new Map();
+	// Latest cold eval per (modelId, thinking).
+	//
+	// `thinking` is part of the key because Qwen-style models share a
+	// single modelId across thinking-on and thinking-off runs but score
+	// substantively differently. Without this split the row labelled
+	// e.g. `qwen3-0.6b-q4f16` would silently render whichever mode
+	// happened to land last — making thinking-on / thinking-off
+	// indistinguishable in the comparison.
+	//
+	// Embedding-only evals are excluded entirely: they live in the
+	// dedicated "Embeddings" section below (cosine + latency + throughput
+	// charts), and including them here would just draw four null bars
+	// next to a single embedding bar.
+	const latestColdByKey = new Map();
 	for (const ev of state.evalsByEvalId.values()) {
 		const t = ev.params?.temperature;
 		const bucket = tempBucket(t);
 		// Use cold profiles only (or unspecified temp treated as cold).
 		if (bucket !== null && bucket !== "cold") continue;
-		const prev = latestColdByModel.get(ev.modelId);
-		if (!prev || prev.timestamp < ev.timestamp) latestColdByModel.set(ev.modelId, ev);
+		const dims = Object.keys(ev.dimensions ?? {});
+		if (dims.length === 1 && dims[0] === "embedding") continue;
+		const thinking = ev.thinking === "on" ? "on" : "off";
+		const key = `${ev.modelId}::${thinking}`;
+		const prev = latestColdByKey.get(key);
+		if (!prev || prev.timestamp < ev.timestamp) latestColdByKey.set(key, ev);
 	}
 
-	if (latestColdByModel.size === 0) {
+	if (latestColdByKey.size === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
 		if (dimGroupedChartInstance) { dimGroupedChartInstance.destroy(); dimGroupedChartInstance = null; }
@@ -736,16 +756,25 @@ function renderDimGroupedChart() {
 	if (host) host.hidden = false;
 	if (empty) empty.hidden = true;
 
-	const dimNames = DIM_NAMES;
+	// Drop the "embedding" dimension here — it has its own dedicated
+	// section below. Keeping it in this chart would just draw an empty
+	// fifth column for every generative model.
+	const dimNames = DIM_NAMES.filter((d) => d !== "embedding");
 	const dimColors = [
 		CHART_COLORS.green,
 		CHART_COLORS.blue,
 		CHART_COLORS.purple,
 		CHART_COLORS.yellow,
-		CHART_COLORS.orange ?? "#fb923c",
 	];
-	const models = Array.from(latestColdByModel.keys());
-	const labels = models;
+	const keys = Array.from(latestColdByKey.keys());
+	// thinking-off keeps the bare model id as its label so non-thinking
+	// models (Llama, TinyLlama, arctic-embed-…) read the same as before.
+	const labels = keys.map((k) => {
+		const ev = latestColdByKey.get(k);
+		return ev?.thinking === "on"
+			? `${ev.modelId} (think)`
+			: (ev?.modelId ?? k);
+	});
 
 	const datasets = dimNames.map((dim, i) => ({
 		label: dim,
@@ -753,8 +782,8 @@ function renderDimGroupedChart() {
 		// on — embedding-only models would otherwise render as four "0%"
 		// bars on tool-calling/reasoning/instruction-following/semantic-
 		// reasoning, falsely implying they did poorly there.
-		data: models.map((m) => {
-			const ev = latestColdByModel.get(m);
+		data: keys.map((k) => {
+			const ev = latestColdByKey.get(k);
 			const ds = ev?.dimensions?.[dim];
 			return ds && (ds.total ?? 0) > 0
 				? Math.round((ds.score ?? 0) * 100)
@@ -865,6 +894,98 @@ function renderEmbeddingCosineChart() {
 		embeddingCosineChartInstance.data.labels = data.labels;
 		embeddingCosineChartInstance.data.datasets = datasets;
 		embeddingCosineChartInstance.update();
+	}
+	sizeChartHost(canvas, data.labels.length);
+}
+
+let embeddingLatencyChartInstance = null;
+let embeddingThroughputChartInstance = null;
+
+function renderEmbeddingLatencyChart() {
+	renderEmbeddingPerfChart({
+		canvasId: "embedding-latency-chart",
+		hostId: "embedding-latency-host",
+		emptyId: "embedding-latency-empty",
+		instanceRef: () => embeddingLatencyChartInstance,
+		setInstance: (v) => {
+			embeddingLatencyChartInstance = v;
+		},
+		buildData: buildEmbeddingLatencyChartData,
+		xTitle: "median ms / text",
+		color: CHART_COLORS.purple,
+	});
+}
+
+function renderEmbeddingThroughputChart() {
+	renderEmbeddingPerfChart({
+		canvasId: "embedding-throughput-chart",
+		hostId: "embedding-throughput-host",
+		emptyId: "embedding-throughput-empty",
+		instanceRef: () => embeddingThroughputChartInstance,
+		setInstance: (v) => {
+			embeddingThroughputChartInstance = v;
+		},
+		buildData: buildEmbeddingThroughputChartData,
+		xTitle: "texts / sec",
+		color: CHART_COLORS.green,
+	});
+}
+
+function renderEmbeddingPerfChart({
+	canvasId,
+	hostId,
+	emptyId,
+	instanceRef,
+	setInstance,
+	buildData,
+	xTitle,
+	color,
+}) {
+	const canvas = document.getElementById(canvasId);
+	const host = document.getElementById(hostId);
+	const empty = document.getElementById(emptyId);
+	if (!canvas) return;
+
+	const evals = Array.from(state.evalsByEvalId.values());
+	const data = buildData(evals);
+
+	if (data.labels.length === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		const inst = instanceRef();
+		if (inst) {
+			inst.destroy();
+			setInstance(null);
+		}
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	const datasets = data.datasets.map((ds) => ({
+		...ds,
+		backgroundColor: color,
+		borderRadius: 3,
+		barPercentage: 0.6,
+		categoryPercentage: 0.85,
+	}));
+
+	let inst = instanceRef();
+	if (!inst) {
+		inst = new Chart(canvas.getContext("2d"), {
+			type: "bar",
+			data: { labels: data.labels, datasets },
+			options: baseChartOptions({
+				xTitle,
+				tooltipLabel: (ctx) =>
+					`${ctx.dataset.label}: ${typeof ctx.parsed.x === "number" ? ctx.parsed.x.toFixed(2) : ctx.formattedValue}`,
+			}),
+		});
+		setInstance(inst);
+	} else {
+		inst.data.labels = data.labels;
+		inst.data.datasets = datasets;
+		inst.update();
 	}
 	sizeChartHost(canvas, data.labels.length);
 }
