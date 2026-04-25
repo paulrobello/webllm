@@ -1,6 +1,7 @@
 export async function runRealModelPage({ debugMode = false } = {}) {
 	const assetSuffix = window.location.search || "";
 	const {
+		EncoderInference,
 		GgufParser,
 		GgmlWasm,
 		ModelInference,
@@ -171,6 +172,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			return;
 		}
 
+		// BERT-arch GGUFs are bidirectional encoders — they have no causal
+		// generation, no KV cache, and a different weight set than llama-style
+		// causal LMs. Steps [4-5,7] are routed through EncoderInference for
+		// these models; the causal-LM ModelInference path would crash with
+		// `Weight "output_norm.weight" not found` because that tensor only
+		// exists on causal models.
+		const isEncoderModel = parsed.hyperparams.architecture === "bert";
+
 		log("running", "[3/8] Initializing WebGPU backend...");
 		try {
 			const wasm = new GgmlWasm();
@@ -180,10 +189,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 
 			log("running", "[4/8] Loading weights into GPU...");
 			setProgress(35);
-			inference = new ModelInference(wasm, parsed.hyperparams);
-			if (profileMode) {
-				inference.traceEnabled = true;
-				window.__decodeTraces = [];
+			if (isEncoderModel) {
+				inference = new EncoderInference(wasm, parsed.hyperparams);
+			} else {
+				inference = new ModelInference(wasm, parsed.hyperparams);
+				if (profileMode) {
+					inference.traceEnabled = true;
+					window.__decodeTraces = [];
+				}
 			}
 			const t1 = performance.now();
 			inference.loadWeights(ggufCtx, modelBuffer);
@@ -195,21 +208,29 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			return;
 		}
 
-		log("running", "[5/8] Initializing KV cache...");
-		try {
-			const kvContextLength =
-				requestedContextLength > 0
-					? Math.min(parsed.kvCacheConfig.maxContextLength, requestedContextLength)
-					: parsed.kvCacheConfig.maxContextLength;
-			await inference.initKVCache(kvContextLength);
+		if (isEncoderModel) {
 			log(
 				"pass",
-				`[5/8] KV cache: ${kvContextLength} slots x ${parsed.hyperparams.layerCount} layers`,
+				`[5/8] KV cache: skipped (encoder model — no autoregressive cache)`,
 			);
 			setProgress(85);
-		} catch (e) {
-			log("fail", `[5/8] KV cache failed: ${e.message}\n${e.stack || ""}`);
-			return;
+		} else {
+			log("running", "[5/8] Initializing KV cache...");
+			try {
+				const kvContextLength =
+					requestedContextLength > 0
+						? Math.min(parsed.kvCacheConfig.maxContextLength, requestedContextLength)
+						: parsed.kvCacheConfig.maxContextLength;
+				await inference.initKVCache(kvContextLength);
+				log(
+					"pass",
+					`[5/8] KV cache: ${kvContextLength} slots x ${parsed.hyperparams.layerCount} layers`,
+				);
+				setProgress(85);
+			} catch (e) {
+				log("fail", `[5/8] KV cache failed: ${e.message}\n${e.stack || ""}`);
+				return;
+			}
 		}
 
 		log("running", "[6/8] Creating tokenizer...");
@@ -368,6 +389,13 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			}
 		}
 
+		if (isEncoderModel) {
+			log(
+				"pass",
+				"[7/8] Generation: skipped (encoder model — bench mode runs embedding tasks instead)",
+			);
+			setProgress(90);
+		} else {
 		log("running", "[7/8] Generating text...");
 		setProgress(90);
 		try {
@@ -458,7 +486,19 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			log("fail", `[7/8] Generation failed: ${e.message}\n${e.stack || ""}`);
 			return;
 		}
+		}
 
+		// The [8/8] embed smoke check loads a *second* engine on a known-good
+		// arctic-embed-s F16 GGUF. For BERT bench runs we already have an
+		// encoder pipeline loaded (steps 1-6 above) — re-downloading the
+		// reference GGUF would only add noise. Skip when the page itself is
+		// already encoder-driven.
+		if (isEncoderModel) {
+			log(
+				"pass",
+				"[8/8] Reference encoder check: skipped (page is already running an encoder model)",
+			);
+		} else {
 		log(
 			"running",
 			"[8/8] Loading Arctic-Embed-s and computing embedding...",
@@ -530,6 +570,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		} catch (e) {
 			log("fail", `[8/8] embed failed: ${e.message}\n${e.stack || ""}`);
 			throw e;
+		}
 		}
 
 		// Best-effort: collect + register the system profile whenever an

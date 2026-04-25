@@ -132,7 +132,11 @@ export async function ensureModelDownloaded(
 	}
 
 	const files = (await res.json()) as Array<{ path: string; size: number }>;
+	// Explicit `ggufFilePattern` wins over the MLC quant probes — used when
+	// the GGUF repo's filenames don't follow MLC's `q…` naming (e.g. BERT
+	// encoder GGUFs ship as `*-F16.GGUF`).
 	const preferredQuants = [
+		...(model.ggufFilePattern ? [model.ggufFilePattern.toLowerCase()] : []),
 		model.defaultQuant.toLowerCase(),
 		"q4_k_m",
 		"q4_0",

@@ -87,6 +87,7 @@ export {
 	formatChatDelta,
 	formatChatPrompt,
 } from "./inference/chat-template.js";
+export { EncoderInference } from "./inference/encoder-inference.js";
 export type {
 	GenerationConfig,
 	GenerationFinishReason,

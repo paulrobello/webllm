@@ -43,6 +43,15 @@ export interface BenchmarkModel {
 	downloadUrl: string;
 	/** GGUF HuggingFace URL (for native llama.cpp). */
 	ggufUrl: string;
+	/**
+	 * Optional case-insensitive substring used by the bench downloader
+	 * (`ensureModelDownloaded` in `eval/browser-smoke.ts`) to pick a
+	 * specific GGUF file from the repo when the MLC `defaultQuant`
+	 * naming doesn't match the GGUF naming. Example: BERT embedding
+	 * GGUFs are commonly published as `<name>-F16.GGUF` while MLC uses
+	 * `q0f32`; setting `ggufFilePattern: "f16"` pins the verified file.
+	 */
+	ggufFilePattern?: string;
 }
 
 /**
@@ -296,6 +305,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/snowflake-arctic-embed-s-q0f32-MLC",
 		ggufUrl: "https://huggingface.co/ChristianAzinn/snowflake-arctic-embed-s-gguf",
+		ggufFilePattern: "f16",
 	},
 
 	{
@@ -314,6 +324,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/snowflake-arctic-embed-m-q0f32-MLC",
 		ggufUrl: "https://huggingface.co/ChristianAzinn/snowflake-arctic-embed-m-gguf",
+		ggufFilePattern: "f16",
 	},
 
 	// --- Specialized models ---

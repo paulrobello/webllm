@@ -493,17 +493,18 @@ export class WebLLM {
 		name: string,
 		pipeline: {
 			wasm: GgmlWasm;
-			inference: ModelInference;
+			inference: ModelInference | EncoderInference;
 			parsed: ParsedModel;
 		},
 	): Promise<ModelHandle> {
-		// The pipeline may have been used before (e.g. the smoke page's
-		// [7/7] one-shot writes to the KV cache). The engine's session
-		// tracker would treat this as a fresh model and try to write at
-		// position 0, colliding with the existing cache and aborting the
-		// WASM module. Reset the cache here so the engine's view matches
-		// reality.
-		pipeline.inference.resetKVCache();
+		const isEncoder = pipeline.inference instanceof EncoderInference;
+		// Causal-LM pipelines may have been used before (e.g. the smoke
+		// page's [7/8] one-shot writes to the KV cache). Reset the cache
+		// here so the engine's session tracker doesn't collide with
+		// existing state. Encoder pipelines have no KV cache to reset.
+		if (!isEncoder) {
+			(pipeline.inference as ModelInference).resetKVCache();
+		}
 
 		const handle = await this.loadModel(name, { priority: 0 });
 		const entry = this.modelManager.get(handle.id);
@@ -517,7 +518,17 @@ export class WebLLM {
 		entry.kvCache = new KVCache(pipeline.parsed.kvCacheConfig);
 		entry.loaded = true;
 		this.wasmModules.set(handle.id, pipeline.wasm);
-		this.inferenceEngines.set(handle.id, pipeline.inference);
+		if (isEncoder) {
+			this.encoderEngines.set(
+				handle.id,
+				pipeline.inference as EncoderInference,
+			);
+		} else {
+			this.inferenceEngines.set(
+				handle.id,
+				pipeline.inference as ModelInference,
+			);
+		}
 		return handle;
 	}
 
