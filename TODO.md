@@ -611,16 +611,38 @@ needs to be collected.
 
 ### Resumption checklist (start a fresh session here)
 
-1. `make checkall` — confirm 390 pass / 5 skip / 0 fail.
-2. Read the "Inference Performance Optimizations" preamble for the
-   2026-04-25 profile-mode hotspot ranking. The qwen3 thinking-on
-   numbers there are historical — that path now runs at ~93 tok/s
-   via `3e5be59`.
-3. Pick the next entry point from "Active next steps" §3 onward.
-   The largest single remaining lever is gone (§2 done). Likely
-   next candidates: re-profile to see what bucket is now dominant
-   on Qwen3 thinking-on (suspect: matmul + encode overhead, the
-   same as thinking-off), or move to §4 (test on a larger model).
+**Next high-value target: Active Step §4 — characterize a larger model
+through the consolidated pipeline.** The biggest single decode lever
+on the small-model set has been pulled (§2 took qwen3-0.6B thinking-on
+from 17 → 93 tok/s). Remaining levers (encode overhead, graph reuse,
+larger context) all have either uncertain payoff or upstream-patch
+maintenance cost. §4 produces information first — fresh per-step
+breakdowns at 1.7B–4B parameter scale tell us which of those levers
+is actually worth picking up next, and whether a larger-model
+consumer hits any unhandled edge cases.
+
+Boot sequence:
+
+1. `make checkall` — confirm 391 pass / 5 skip / 0 fail.
+2. `git log --oneline 6865a2c..HEAD` — review the 2026-04-25 work;
+   the §2 commit (`3e5be59`) and the harness fix (`953c560`) are
+   load-bearing for everything below.
+3. Read the "Inference Performance Optimizations" preamble for the
+   2026-04-25 profile baselines (TinyLlama / Qwen3-off / Qwen3-on
+   per-step + backend attribution). Use these as the baseline rows
+   to compare the larger-model numbers against.
+4. Start §4 below. The action plan is concrete; follow it
+   step-by-step.
+
+If §4 surfaces a clearly dominant bucket on the larger model that
+isn't already on the small-model set, treat that as the new highest-
+value target. Otherwise the secondary candidate is **encode-overhead
+reduction** — at 22.8% of `graphComputeMs` on Qwen3-0.6B (629
+dispatches/token vs TinyLlama's 450) it's a real lever, but it
+requires touching `~/Repos/llama.cpp/ggml/src/ggml-webgpu/` for op
+fusion or dispatch batching and carries patch-maintenance cost
+across rebases. Worth considering only if the larger-model run
+shows the same bucket dominating.
 
 ### Historical context (for archive — do not action again)
 
@@ -743,10 +765,62 @@ needs to be collected.
    have grown; re-evaluate as part of §1's profile pass before
    committing to the C-side refactor.
 
-4. **Test on a larger model** (Phi-2, Llama-2-7B). Bigger models
-   shift the matmul/dispatch-overhead ratio and may change which
-   lever is highest-impact. Worth running through `make bench-full`
-   alongside §1's profile pass — same fresh decode-mode pipeline.
+4. **NEXT (next-session entry point): characterize a larger model
+   through the consolidated pipeline.** All current baselines are at
+   ≤ 1.1B parameters with ≤ 152K vocab. Bigger models shift the
+   matmul/dispatch-overhead ratio (matmul scales with parameter count;
+   dispatch count is roughly invariant per-architecture) and tell us
+   which lever has actual headroom at the size people care about.
+
+   **Concrete model choice: `qwen3-1.7b-q4f16`** (registered in
+   `eval/models.ts:159`, ~1 GB download, same architecture as the
+   well-understood 0.6B). Llama-3.2-1B (`eval/models.ts:103`) is a
+   useful cross-architecture data point if there's session budget.
+   Skip 4B+ models in this pass — diminishing per-token info per
+   GB of download.
+
+   **Action plan (in order):**
+   - `make smoke-test` — confirm bundle still builds.
+   - `bun run eval/smoke-serve.ts --port 8031 &` (or `make
+     smoke-restart`).
+   - Steady-state baseline: `bun run eval/perf.ts --model
+     qwen3-1.7b-q4f16 --runs 3` then `--runs 3 --thinking`. Record
+     the two tok/s medians. Any output incoherence here (garbled
+     text, runaway max-tokens, premature EOS) is the FIRST thing
+     to debug — larger model + same tokenizer family should produce
+     comparable quality to 0.6B.
+   - Profile pass: same commands with `--profile` added. Capture
+     the per-mode breakdown (`graphComputeMs`, `downloadResultMs`,
+     `backendMatmulMs`, `backendEncodeOverheadMs`,
+     `backendDispatchCount`) for both thinking modes.
+   - Compare against the 0.6B baselines in the preamble. Hypothesis
+     to falsify: matmul share grows with parameter count while
+     dispatch count stays flat, so encode-overhead's *fraction* of
+     graph time should drop.
+   - End-to-end suite: `make bench-full` with the larger-model
+     profiles enabled (edit `eval/smoke-profiles.ts` — that's where
+     the smoke-bench profile registry and `DEFAULT_PROMPT` live) —
+     the dashboard's accuracy×speed scatter at 1.7B will show whether
+     the 5.4× lift on 0.6B holds shape at this size.
+   - Update the preamble with a fourth column for `qwen3-1.7b`.
+
+   **Decision criteria for what's next after §4:**
+   - If matmul dominates (>40% of graph at 1.7B): pursue matmul
+     kernel work — shader-side optimizations in
+     `~/Repos/llama.cpp/ggml/src/ggml-webgpu/shaders/`.
+   - If encode overhead still dominates (>25% of graph at 1.7B):
+     pursue dispatch batching / op fusion (currently item 2 is done
+     for plain compute passes; the lever now is op-level fusion).
+   - If matmul and encode are roughly balanced (~30% each):
+     graph-shape changes have higher leverage than either single
+     bucket.
+
+   **Memory + context caveats:**
+   - 1.7B Q4f16 weights are ~1 GB; bench-full's 2 GB browser memory
+     budget should be sufficient but verify via the page console.
+   - Default `eval/smoke-profiles.ts::DEFAULT_PROMPT` is short; if a
+     larger context is needed for the per-dimension scoring tasks,
+     check the prompts in `eval/tasks/` rather than smoke-profiles.
 
 5. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` (item 3 in preamble) remains
