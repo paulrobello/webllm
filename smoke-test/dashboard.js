@@ -153,6 +153,9 @@ function handleEvent(ev) {
 				state.runningEvalsByEvalId.delete(evt.payload.evalId);
 				state.evalsByEvalId.set(evt.payload.evalId, evt.payload);
 				flashFreshEval(evt.payload.evalId);
+				// Invalidate the cached `/evals/series` snapshot so the score-
+				// over-time chart re-fetches and includes this fresh eval.
+				seriesLoaded = false;
 				renderRunning();
 				renderEvals();
 				break;
@@ -1375,35 +1378,58 @@ function renderSeriesChartImpl(canvas, host, empty) {
 	if (host) host.hidden = false;
 	if (empty) empty.hidden = true;
 
-	// Group by (profile || modelId).
+	// Group by (profile || modelId). For the category x-axis to plot the
+	// points correctly we need (a) a labels array shared by every dataset
+	// and (b) each dataset's `data[i]` aligned to `labels[i]` (null for a
+	// profile that has no eval at that timestamp). Without this Chart.js
+	// has no way to position the points and the canvas renders blank.
 	const byProfile = new Map();
 	for (const pt of series) {
 		const key = pt.profile ?? pt.modelId;
-		if (!byProfile.has(key)) byProfile.set(key, []);
-		byProfile.get(key).push({ x: pt.timestamp, y: Math.round(pt.overall * 100) });
+		if (!byProfile.has(key)) byProfile.set(key, new Map());
+		byProfile.get(key).set(pt.timestamp, Math.round(pt.overall * 100));
 	}
+
+	const labels = Array.from(
+		new Set(series.map((pt) => pt.timestamp)),
+	).sort();
+	// Render compact human-readable labels (MM-DD HH:mm) for the axis but
+	// keep the full ISO string available for the tooltip via parsing.
+	const fmt = (iso) => {
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return iso;
+		const pad = (n) => String(n).padStart(2, "0");
+		return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	};
+	const tickLabels = labels.map(fmt);
 
 	const palette = [
 		CHART_COLORS.blue, CHART_COLORS.purple, CHART_COLORS.green,
 		CHART_COLORS.yellow, "#f778ba", "#79c0ff", "#56d364",
 	];
-	const profiles = Array.from(byProfile.keys());
+	const profiles = Array.from(byProfile.keys()).sort();
 
-	const datasets = profiles.map((profile, i) => ({
-		label: profile,
-		data: byProfile.get(profile),
-		borderColor: palette[i % palette.length],
-		backgroundColor: "transparent",
-		pointRadius: 3,
-		pointHoverRadius: 5,
-		borderWidth: 2,
-		tension: 0.15,
-	}));
+	const datasets = profiles.map((profile, i) => {
+		const pointsByTs = byProfile.get(profile);
+		return {
+			label: profile,
+			data: labels.map((ts) => pointsByTs.get(ts) ?? null),
+			borderColor: palette[i % palette.length],
+			backgroundColor: "transparent",
+			pointRadius: 3,
+			pointHoverRadius: 5,
+			borderWidth: 2,
+			tension: 0.15,
+			// Don't break a profile's line when it skips a timestamp another
+			// profile produced — connect across the null gap.
+			spanGaps: true,
+		};
+	});
 
 	if (!seriesChartInstance) {
 		seriesChartInstance = new Chart(canvas.getContext("2d"), {
 			type: "line",
-			data: { datasets },
+			data: { labels: tickLabels, datasets },
 			options: {
 				responsive: true,
 				maintainAspectRatio: false,
@@ -1438,6 +1464,7 @@ function renderSeriesChartImpl(canvas, host, empty) {
 			},
 		});
 	} else {
+		seriesChartInstance.data.labels = tickLabels;
 		seriesChartInstance.data.datasets = datasets;
 		seriesChartInstance.update();
 	}
