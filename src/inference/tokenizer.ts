@@ -338,7 +338,15 @@ export class Tokenizer {
 
 	/** Encode text into token IDs. */
 	encode(text: string): number[] {
-		if (text.length === 0) return [];
+		// WORDPIECE always frames with [CLS] ... [SEP], even when text is
+		// empty (HF parity: tokenizer.encode("") -> [101, 102]). For other
+		// tokenizer types empty input remains an empty id list.
+		if (text.length === 0) {
+			if (this.config.type === TokenizerType.WORDPIECE) {
+				return this.encodeWordPiece(text);
+			}
+			return [];
+		}
 
 		// Check for special/added tokens first
 		const addedResult = this.encodeWithSpecialTokens(text);
