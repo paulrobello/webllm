@@ -5,7 +5,8 @@
 > dashboard now has richer Chart.js visualizations for speed, accuracy,
 > per-dimension performance, temperature sweeps, thinking-mode deltas,
 > TTFT, finish reasons, and score-over-time. The eval suite now separates
-> chat-style semantic reasoning from true embedding-vector tasks.
+> chat-style semantic reasoning from true embedding-vector tasks, and the
+> public streaming APIs now route through `Generator` + `InferenceSession`.
 > Current Task 5 profiled investigation baseline: 93.5 tok/s decode on
 > `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0`.
 > Use this for hotspot attribution, not as the new steady-state shipping
@@ -34,6 +35,7 @@
 - [x] Semantic-reasoning eval dimension split from true embedding-vector tasks
 - [x] Live benchmark dashboard migrated to Chart.js with richer comparison charts
 - [x] Model support roadmap documented in `docs/MODEL_SUPPORT.md`
+- [x] Public streaming APIs (`generateStream`, `chatCompletion`) wired through `Generator` + `InferenceSession`
 
 ---
 
@@ -393,24 +395,33 @@ needs to be collected.
 - Fixed the Temperature sweep hot bucket rendering regression with shared
   chart-data tests.
 - Documented model support and follow-up roadmap in `docs/MODEL_SUPPORT.md`.
+- Wired the public streaming APIs (`WebLLM.generateStream()` and
+  `WebLLM.chatCompletion()`) through `Generator` + `InferenceSession`, with
+  stop-token handling, abort metadata, Qwen thinking controls, and tests in
+  `tests/engine-streaming-api.test.ts`.
+- 2026-04-24: Encoder forward pass shipped. `WebLLM.embed(modelId, text)`
+  drives a BERT-style bidirectional graph (input embed + post-norm
+  attention + GeLU FFN, mean/CLS pooling, L2-normalized output) on the
+  Arctic-Embed-s GGUF; smoke step `[8/8]` passes with `cosine('happy',
+  'joyful') ≈ 0.77`. Bring-up uncovered three load-bearing fixes:
+  V-permute → `opCont` to satisfy `ggml_mul_mat`'s `is_transposed`
+  assertion; tokenizer rewritten for llama.cpp's phantom-space BERT
+  vocab convention (HF golden fixture in `tests/wordpiece-golden.test.ts`
+  guards it); and `GGML_OP_NORM` added to the patched ggml-webgpu
+  backend (commit `68f1738d5`, see `docs/LLAMA_CPP_PATCHES.md` patch #9).
 
 1. **If perf work resumes, keep it on narrow decode-compute tuning.**
    The current profiled traces still point to `graphCompute`, not readback, as
    the dominant bucket. Start with matmul-path work first, then reassess
    encode/dispatch overhead with fresh measurements.
-2. **Wire up the existing `Generator` + `InferenceSession` classes for a proper
-   streaming JS API.**
-   The optimization cycle is in a verified state, so the next product-facing
-   milestone can resume without pretending the profile-mode numbers are a new
-   shipping ceiling.
-3. **Decode graph reuse** (item 1) remains deferred.
+2. **Decode graph reuse** (item 1) remains deferred.
    The current richer trace still shows build/setup time as small compared with
    `graphCompute`, so there is not yet enough evidence to make structural graph
    reuse the next task.
-4. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
-5. The latent 3+ binding buffer-conflict edge case in
+3. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
+4. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` remains untested — no llama op hits it today.
-6. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
+5. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
    next implementation step.
    - **Go/no-go:** no-go for the current milestone; the completion-driven
      readback path is the active baseline.
