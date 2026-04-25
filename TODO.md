@@ -1,16 +1,22 @@
 # WebLLM Project Status & Roadmap
 
-> **Date:** 2026-04-24
-> **Status:** End-to-end browser inference remains working. The live benchmark
-> dashboard now has richer Chart.js visualizations for speed, accuracy,
-> per-dimension performance, temperature sweeps, thinking-mode deltas,
-> TTFT, finish reasons, and score-over-time. The eval suite now separates
-> chat-style semantic reasoning from true embedding-vector tasks, and the
-> public streaming APIs now route through `Generator` + `InferenceSession`.
+> **Date:** 2026-04-25
+> **Status:** End-to-end browser inference is working for both causal LMs and
+> BERT-style encoders (Arctic-Embed). `make bench-full` now drives the
+> generative profiles plus the embedding profiles end-to-end into the live
+> SQLite-backed dashboard. The dashboard has a dedicated Embeddings section
+> (cosine, latency, throughput) and the per-dimension / temperature-sweep /
+> Accuracy×Speed charts now split Qwen thinking-on vs thinking-off into
+> distinct series so latest-wins logic doesn't silently overwrite one mode
+> with the other. The eval suite separates chat-style semantic reasoning
+> from true embedding-vector tasks, and the public streaming APIs route
+> through `Generator` + `InferenceSession`.
 > Current Task 5 profiled investigation baseline: 93.5 tok/s decode on
 > `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0`.
 > Use this for hotspot attribution, not as the new steady-state shipping
-> throughput baseline.
+> throughput baseline. **Note:** smoke-bench currently reports ~56 tok/s on
+> the same target — see Next Steps §1 for the open Apr-23 perf regression
+> investigation.
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -36,6 +42,10 @@
 - [x] Live benchmark dashboard migrated to Chart.js with richer comparison charts
 - [x] Model support roadmap documented in `docs/MODEL_SUPPORT.md`
 - [x] Public streaming APIs (`generateStream`, `chatCompletion`) wired through `Generator` + `InferenceSession`
+- [x] Encoder forward pass for BERT-style embedding models (`WebLLM.embed()`, Arctic-Embed-s/m)
+- [x] `make bench-full` exercises arctic-embed profiles end-to-end alongside generative profiles
+- [x] Dashboard "Embeddings" section (cosine per task, median latency, throughput)
+- [x] Charts that key on `modelId` now split Qwen thinking-on vs thinking-off into distinct series
 
 ---
 
@@ -55,6 +65,14 @@
 12. Multi-turn chat garbled output — TinyLlama without a system message interprets Zephyr markers as comparison operators. Fixed by auto-prepending DEFAULT_SYSTEM in `formatChatPrompt`.
 13. GPU TOP_K decode path reshaped logits as `[vocab, 1]` before `ggml_get_rows`; ggml gathers along row dimension, so the graph produced `[vocab, topK]` and later failed reshape assertions. Fixed by reshaping logits to `[1, vocab]` before `opGetRows`.
 14. Dashboard Temperature sweep hot series produced data but could render invisibly because `CHART_COLORS.red` was missing. Fixed by extracting shared temperature-sweep data construction and defining the hot color as `#f85149`.
+15. **Encoder V permute tripped `ggml_mul_mat`'s `is_transposed` assertion** — `permute(v3, 1,2,0,3)` produced the right logical shape `[N, headDim, nHeads]` but left `nb[0] > nb[1]`. Wrapped in `opCont` to match llama.cpp's no-KV-cache BERT path.
+16. **BERT WordPiece vocab follows llama.cpp's phantom-space convention** — `convert_hf_to_gguf.py::BertModel.set_vocab` rewrites the HF vocab so word-initial tokens gain a `▁` (U+2581) prefix and `##xyz` continuations have the `##` stripped. Our tokenizer was looking up `happy` / `##ful` (HF style) and missing every entry, producing `[CLS][UNK][SEP]` for every input. Rewrote `wpSubword` and `decodeWordPiece` to match `llm_tokenizer_wpm_session`. HF golden fixture in `tests/wordpiece-golden.test.ts` now guards it.
+17. **`ggml-webgpu` silently no-op'd `GGML_OP_NORM`** — only `RMS_NORM` and `L2_NORM` were in `supports_op`, so LayerNorm fell through and the result buffer kept its zero-init contents. Combined with `GGML_CPU=OFF` (no scheduler fallback) every encoder forward produced bit-identical output regardless of input. Added a `LAYER_NORM` variant to `row_norm.wgsl` (Σx + Σx² in one pass), registered the pipeline, and dispatched `GGML_OP_NORM` through `ggml_webgpu_row_norm`. See `docs/LLAMA_CPP_PATCHES.md` patch #9.
+18. **Bench-full smoke page hard-coded the causal-LM path at step [4/8]** — `ModelInference.loadWeights` failed on BERT GGUFs with `Weight "output_norm.weight" not found`. Page now branches on `arch === "bert"` and uses `EncoderInference`, skipping KV cache / generation / reference-encoder steps with explanatory pass logs.
+19. **HF downloader picked Q4_K_M for arctic-embed** because the MLC-style `q0f32` defaultQuant didn't match any file in the GGUF repo and `q4_k_m` was first in the fallback list. Added a `ggufFilePattern?: string` field to `BenchmarkModel`; arctic-embed pins `"f16"` and the picker checks it ahead of `defaultQuant`.
+20. **Tokenizer.encode("") returned `[]` for WORDPIECE** — bypassed the `[CLS] ... [SEP]` framing via an unconditional empty-string short-circuit in `encode()`. WORDPIECE now always frames; other tokenizer types keep returning `[]`.
+21. **Score-over-time chart was blank despite a populated DB** — `renderSeriesChart` was defined but never invoked from the `render()` loop, so the panel always showed the bar-empty placeholder. Adding the call to the render loop (between `renderFinishChart` and `renderTable`) fixed it. Also fixed: `seriesLoaded` was sticky after the first fetch, so SSE-delivered evals were invisible to the chart; now reset on every `eval_complete` event. The category x-axis was missing its `labels` array, so even when called the points had nowhere to plot — now built from the sorted union of timestamps.
+22. **Dashboard charts keyed on `modelId` collapsed Qwen thinking-on/off** — Temperature sweep, per-dimension grouped, and Accuracy×Speed scatter all shared a key for both Qwen modes; latest-wins silently overwrote one with the other. Group keys now include `thinking`; series labels gain a `" (think)"` suffix when thinking is on so non-thinking-capable models keep their existing labels.
 
 ---
 
@@ -344,6 +362,30 @@ needs to be collected.
 - **Blocker**: today every entry in `eval/models.ts` has exactly one
   quant. Needs multi-quant registrations to be meaningful. Deferred.
 
+### 21. Dedicated Embeddings dashboard section ✅ DONE
+- **Where**: `smoke-test/dashboard.html` (new section divider + three
+  panels), `smoke-test/dashboard.js`
+  (`renderEmbeddingCosineChart` / `renderEmbeddingLatencyChart` /
+  `renderEmbeddingThroughputChart`),
+  `smoke-test/dashboard-charts.js`
+  (`buildEmbeddingCosineChartData` / `buildEmbeddingLatencyChartData` /
+  `buildEmbeddingThroughputChartData`),
+  `tests/dashboard-charts.test.ts`.
+- **What**: separate "Embeddings" section at the bottom of the dashboard
+  with three panels — per-task cosine similarity, median ms-per-text
+  latency, and texts/sec throughput. Per-dimension grouped chart now
+  excludes embedding-only evals and drops the `embedding` column so
+  generative-model rows aren't cluttered.
+- **Answers**: "how fast and how good is each embedding model?"
+
+### 22. Accuracy × Speed model colour key ✅ DONE
+- **Where**: `smoke-test/dashboard.js::renderScatterChart`.
+- **What**: scatter dots are grouped by `(modelId, thinking)` into one
+  dataset per model+mode, each with its own colour from an 8-stop
+  palette. The chart's top legend acts as the colour key. Stable colour
+  assignment via sorted keys.
+- **Answers**: "which dot is which model?" without needing to hover.
+
 ---
 
 ## Won't-do (for now)
@@ -409,6 +451,43 @@ needs to be collected.
   vocab convention (HF golden fixture in `tests/wordpiece-golden.test.ts`
   guards it); and `GGML_OP_NORM` added to the patched ggml-webgpu
   backend (commit `68f1738d5`, see `docs/LLAMA_CPP_PATCHES.md` patch #9).
+
+### Completed on 2026-04-25
+
+- Wired arctic-embed-s/m profiles into `make bench-full`. New
+  `embedding?: boolean` flag on `SmokeProfile`; `bench.ts` skips the
+  `chat-smoke` (speed) phase for embedding profiles; `browser-eval.ts`
+  auto-restricts embedding-only models to the embedding dimension.
+  `eval/models.ts` gains a `ggufFilePattern?: string` field so the HF
+  downloader pins the verified F16 GGUF instead of falling through to
+  Q4_K_M. `smoke-test/real-model-page.js` branches on `arch === "bert"`
+  and routes through `EncoderInference`; `engine.adoptPreloadedModel`
+  now accepts either inference type. End-to-end:
+  `8/8 tasks passing · overall 93%` for arctic-embed-s.
+- HF golden WordPiece fixture: `scripts/extract-bert-vocab.ts` dumps
+  the real Arctic-Embed-s vocab (30522 tokens) to JSON;
+  `scripts/generate-bert-golden.py` generates HF reference encodings
+  for 16 probe strings (single words, multi-word, subword splits,
+  casing, accents, punctuation carve-outs, empty string);
+  `tests/wordpiece-golden.test.ts` asserts byte-for-byte parity.
+- Dashboard restructure:
+  - New "Embeddings" section with cosine, median latency, and
+    throughput panels.
+  - Per-dimension grouped chart now excludes embedding-only evals and
+    drops the `embedding` column; renders `null` (not `0`) for
+    dimensions a model wasn't scored on.
+  - Temperature sweep, per-dimension grouped, and Accuracy×Speed scatter
+    now key on `(modelId, thinking)` so Qwen thinking-on and
+    thinking-off render as distinct rows / colours.
+  - Accuracy × Speed scatter coloured by model with the chart's own top
+    legend acting as the colour key.
+  - Score over time: wired into the render loop (was defined but never
+    called), category x-axis given a labels array built from the sorted
+    union of timestamps, `seriesLoaded` cache invalidated on every
+    `eval_complete` event.
+- TODO.md records an Apr-23 ~50% smoke-bench tok/s regression bisect
+  result; the encoder branch is innocent — the drop landed somewhere
+  between `0548cd4` and `9c19088`. See Next Steps §1.
 
 1. **Investigate ~50% smoke-bench regression introduced in Apr-23 commits.**
    `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0` now
@@ -482,6 +561,13 @@ cd smoke-test && python3 -m http.server 8031
 ## Local Dependencies
 
 This repo depends on a local patched llama.cpp at `~/Repos/llama.cpp/` on branch
-**`webllm-browser-patches`**. Patches:
+**`webllm-browser-patches`**. Patches (full inventory in `docs/LLAMA_CPP_PATCHES.md`):
 1. `ggml: iterative ggml_visit_parents_graph for WASM stack safety`
 2. `ggml-webgpu: browser + ASYNCIFY support bundle`
+3. `ggml-webgpu: request-based browser readback API`
+4. `ggml-webgpu: harden async readback request cleanup`
+5. `ggml-webgpu: notify browser async readback completion`
+6. `ggml-webgpu: add opt-in browser graph profiling`
+7. `ggml-webgpu: specialize browser decode matmul dispatch` (paired with patch 8)
+8. `Revert "ggml-webgpu: specialize browser decode matmul dispatch"` (effective no-op vs patch 6)
+9. `ggml-webgpu: add GGML_OP_NORM (LayerNorm) support` — load-bearing for the BERT encoder path; without it `engine.embed()` returns bit-identical output for every input.
