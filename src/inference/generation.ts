@@ -283,9 +283,19 @@ export class Generator {
 		// masks would be no-ops for this step. This is what gives qwen3
 		// thinking-off and tinyllama realistic-sampling runs the topk
 		// throughput when steering happens to be inactive.
+		//
+		// When steering IS active, qwen3 mask sets almost never land in the
+		// top-K of full-vocab logits (measured 0.31% top-K hit rate / 0.41%
+		// top-(K+10) hit rate across 982 mask-token instances). So we ask
+		// the GPU for K + STEERING_TOPK_BUFFER candidates and CPU-filter
+		// the masked indices instead of paying for a full 32K/152K-vocab
+		// readback + JS sampling pipeline. Waiting-for-visible-answer
+		// steps stay on the full path because their whitespace-guard
+		// resampling needs full-vocab access.
 		const greedyOk = sampler.isGreedy && sampler.noPenalty;
 		const topkOk = sampler.topK > 0 && !greedyOk;
 		const decodeStep = forwardDecode;
+		const STEERING_TOPK_BUFFER = 10;
 
 		// 3. Autoregressive decode loop
 		while (!session.shouldStop(sampledId, eosTokenId)) {
@@ -300,9 +310,14 @@ export class Generator {
 
 			const steeringActive =
 				thinkDepth > 0 || waitingForVisibleAnswer || hasVisibleAnswerText;
+			// `waitingForVisibleAnswer` needs whitespace-guard resampling on
+			// full logits; everything else can use topk + CPU mask filter.
+			const steeringTopkOk =
+				topkOk && steeringActive && !waitingForVisibleAnswer;
+			const useTopK = topkOk && (!steeringActive || steeringTopkOk);
 			const gpuMode: DecodeMode = greedyOk
 				? "greedy"
-				: topkOk && !steeringActive
+				: useTopK
 					? "topk"
 					: "full";
 
@@ -320,21 +335,57 @@ export class Generator {
 				if (signal?.aborted) break;
 				sampledId = result.tokenId;
 			} else if (decodeStep && gpuMode === "topk") {
-				// GPU TOP_K + CPU sampling on reduced set
+				// GPU TOP_K + CPU sampling on reduced set. When steering is
+				// active we request K + STEERING_TOPK_BUFFER candidates so
+				// CPU-side mask filtering still leaves enough room.
+				const requestedK = steeringTopkOk
+					? sampler.topK + STEERING_TOPK_BUFFER
+					: sampler.topK;
 				const result = await decodeStep(
 					[sampledId],
 					[session.currentPosition],
 					"topk",
-					sampler.topK,
+					requestedK,
 				);
 				if (!result.topKIndices || !result.topKValues) {
 					throw new Error("forwardDecode(topk) returned incomplete top-k data");
 				}
 				session.advance(1);
 				if (signal?.aborted) break;
+
+				let indices = result.topKIndices;
+				let values = result.topKValues;
+				if (steeringTopkOk) {
+					const activeMask =
+						thinkDepth > 0
+							? maskedTokensWhileThinking
+							: hasVisibleAnswerText
+								? maskedTokensAfterAnswerStarts
+								: [];
+					if (activeMask.length > 0) {
+						const masked = new Set(activeMask);
+						const keepIdx: number[] = [];
+						const keepVal: number[] = [];
+						for (let i = 0; i < indices.length; i++) {
+							if (!masked.has(indices[i])) {
+								keepIdx.push(indices[i]);
+								keepVal.push(values[i]);
+							}
+						}
+						// If the entire pool is masked (essentially never — measured
+						// 0% across 982 mask checks) we degrade gracefully by
+						// sampling from the unfiltered pool for this one step
+						// rather than firing a redundant full-vocab readback.
+						if (keepIdx.length > 0) {
+							indices = new Int32Array(keepIdx);
+							values = new Float32Array(keepVal);
+						}
+					}
+				}
+
 				sampledId = sampler.sampleFromTopK(
-					result.topKIndices,
-					result.topKValues,
+					indices,
+					values,
 					recentTokens.slice(-64),
 				);
 			} else if (decodeStep && gpuMode === "full") {
