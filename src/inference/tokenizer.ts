@@ -567,21 +567,25 @@ export class Tokenizer {
 	}
 
 	private wpSubword(chunk: string, unkId: number): number[] {
-		const whole = this.tokenToId.get(chunk);
-		if (whole !== undefined) return [whole];
-
-		const chars = [...chunk]; // code-point array
+		// llama.cpp's BERT GGUF converter rewrites the vocabulary: the original
+		// HF "##xyz" continuation tokens are stored without the "##" prefix,
+		// and every other (word-initial) token gains a phantom "▁" (U+2581)
+		// prefix. Match that convention here: prepend "▁" to the whole word,
+		// then run a positional longest-match scan — the first iteration
+		// covers the whole-word shortcut, and subsequent positions naturally
+		// pick up continuation tokens (now stored without any prefix).
+		const word = `▁${chunk}`;
+		const chars = [...word]; // code-point array
 		// HF parity: BertWordpieceTokenizer treats any chunk longer than
 		// max_input_chars_per_word (default 100) as [UNK] without subword splitting.
-		if (chars.length > 100) return [unkId];
+		if (chars.length - 1 > 100) return [unkId];
 
 		const out: number[] = [];
 		let start = 0;
 		while (start < chars.length) {
 			let matched: { id: number; end: number } | null = null;
 			for (let end = chars.length; end > start; end--) {
-				let sub = chars.slice(start, end).join("");
-				if (start > 0) sub = `##${sub}`;
+				const sub = chars.slice(start, end).join("");
 				const id = this.tokenToId.get(sub);
 				if (id !== undefined) {
 					matched = { id, end };
@@ -612,10 +616,14 @@ export class Tokenizer {
 		}
 		let out = "";
 		for (const p of parts) {
-			if (p.startsWith("##")) {
-				out += p.slice(2);
-			} else {
+			// Phantom-space convention (matches llama.cpp's BERT GGUF):
+			// "▁foo" marks a word-initial token (emit preceded by a space
+			// except at output start); any other token is a continuation
+			// and concatenates directly.
+			if (p.startsWith("▁")) {
 				if (out.length > 0) out += " ";
+				out += p.slice(1);
+			} else {
 				out += p;
 			}
 		}

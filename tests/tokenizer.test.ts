@@ -350,21 +350,20 @@ describe("Tokenizer WordPiece config", () => {
 
 describe("WordPiece basic tokenize", () => {
 	test("lowercases and splits on whitespace", () => {
-		const tok = makeWordPieceTokenizer(["hello", "world"]);
-		// [CLS] hello world [SEP] -> [2, 4, 5, 3]
+		const tok = makeWordPieceTokenizer(["▁hello", "▁world"]);
+		// [CLS] ▁hello ▁world [SEP] -> [2, 4, 5, 3]
 		expect(tok.encode("Hello World")).toEqual([2, 4, 5, 3]);
 	});
 
 	test("splits punctuation off tokens", () => {
-		const tok = makeWordPieceTokenizer(["hello", ".", ",", "world"]);
-		// vocab: [CLS]=2 [SEP]=3 hello=4 .=5 ,=6 world=7
-		// [CLS] hello , world . [SEP]
+		const tok = makeWordPieceTokenizer(["▁hello", "▁.", "▁,", "▁world"]);
+		// vocab: [CLS]=2 [SEP]=3 ▁hello=4 ▁.=5 ▁,=6 ▁world=7
+		// [CLS] ▁hello ▁, ▁world ▁. [SEP]
 		expect(tok.encode("hello, world.")).toEqual([2, 4, 6, 7, 5, 3]);
-		//                                             ^hello ^, ^world ^.
 	});
 
 	test("strips accents", () => {
-		const tok = makeWordPieceTokenizer(["cafe"]);
+		const tok = makeWordPieceTokenizer(["▁cafe"]);
 		expect(tok.encode("café")).toEqual([2, 4, 3]);
 	});
 
@@ -390,54 +389,58 @@ describe("WordPiece basic tokenize", () => {
 });
 
 describe("WordPiece subword + decode", () => {
-	test("splits into subwords with ## prefix", () => {
-		// Vocab: "un", "##known" — "unknown" -> [un, ##known]
-		const tok = makeWordPieceTokenizer(["un", "##known"]);
+	test("splits into subwords using phantom-space word-start", () => {
+		// llama.cpp BERT vocab: "▁un" is word-start, "known" is continuation
+		// (originally "##known" in HF, stripped during GGUF conversion).
+		const tok = makeWordPieceTokenizer(["▁un", "known"]);
 		const ids = tok.encode("unknown");
 		expect(ids).toEqual([2, 4, 5, 3]);
 	});
 
 	test("falls back to UNK when no subword matches", () => {
-		// Vocab has "un" but no continuation for "known".
-		const tok = makeWordPieceTokenizer(["un"]);
+		// Vocab has "▁un" but no continuation for "known".
+		const tok = makeWordPieceTokenizer(["▁un"]);
 		expect(tok.encode("unknown")).toEqual([2, 1, 3]);
 	});
 
 	test("truncates over-length input keeping CLS and SEP", () => {
-		const extras = Array.from({ length: 600 }, (_, i) => `w${i}`);
+		const extras = Array.from({ length: 600 }, (_, i) => `▁w${i}`);
 		const tok = makeWordPieceTokenizer(extras, { contextLength: 10 });
-		const text = extras.slice(0, 20).join(" ");
+		const text = extras
+			.slice(0, 20)
+			.map((t) => t.slice(1))
+			.join(" ");
 		const ids = tok.encode(text);
 		expect(ids.length).toBe(10);
 		expect(ids[0]).toBe(2); // [CLS]
 		expect(ids[ids.length - 1]).toBe(3); // [SEP]
 	});
 
-	test("decode strips ## and joins with spaces", () => {
-		const tok = makeWordPieceTokenizer(["un", "##known", "dog"]);
-		// ids: [CLS, un, ##known, dog, SEP] -> "unknown dog"
+	test("decode rejoins phantom-space word starts with spaces", () => {
+		const tok = makeWordPieceTokenizer(["▁un", "known", "▁dog"]);
+		// ids: [CLS, ▁un, known, ▁dog, SEP] -> "unknown dog"
 		const decoded = tok.decode([2, 4, 5, 6, 3]);
 		expect(decoded).toBe("unknown dog");
 	});
 
 	test("decode preserves special tokens when requested", () => {
-		const tok = makeWordPieceTokenizer(["un", "##known"]);
+		const tok = makeWordPieceTokenizer(["▁un", "known"]);
 		const decoded = tok.decode([2, 4, 5, 3], { includeSpecialTokens: true });
 		expect(decoded).toContain("[CLS]");
 		expect(decoded).toContain("[SEP]");
 	});
 
 	test("emits UNK for chunks longer than max_input_chars_per_word (100)", () => {
-		const tok = makeWordPieceTokenizer(["a", "##a"]);
+		const tok = makeWordPieceTokenizer(["▁a", "a"]);
 		const longChunk = "a".repeat(101);
 		expect(tok.encode(longChunk)).toEqual([2, 1, 3]); // [CLS] [UNK] [SEP]
 	});
 
 	test("does NOT trigger UNK fallback for chunks exactly at max_input_chars (100)", () => {
-		const tok = makeWordPieceTokenizer(["a", "##a"]);
+		const tok = makeWordPieceTokenizer(["▁a", "a"]);
 		const exactChunk = "a".repeat(100);
 		const ids = tok.encode(exactChunk);
-		// 1 [CLS] + 1 ("a") + 99 ("##a") + 1 [SEP] = 102 ids
+		// 1 [CLS] + 1 ("▁a") + 99 ("a") + 1 [SEP] = 102 ids
 		expect(ids[0]).toBe(2);
 		expect(ids[ids.length - 1]).toBe(3);
 		expect(ids.length).toBe(102);
