@@ -636,13 +636,19 @@ function renderScatterChart() {
 		if (!prev || prev.timestamp < ev.timestamp) evalByKey.set(key, ev);
 	}
 
-	const points = [];
+	// Group by `modelId` so the legend turns into a model color key.
+	// Multiple profiles for the same model (cold/warm/hot, thinking on/off)
+	// show up as multiple dots in the same color; the tooltip still spells
+	// out exactly which profile a dot represents.
+	const pointsByModel = new Map();
 	for (const [key, run] of runByKey) {
 		const ev = evalByKey.get(key);
 		if (!ev) continue;
 		const avgTps = ((run.oneShot?.tokensPerSecond ?? 0) + (run.interactive?.tokensPerSecond ?? 0)) / 2;
 		if (avgTps === 0) continue;
-		points.push({
+		const modelId = ev.modelId ?? run.model ?? key;
+		if (!pointsByModel.has(modelId)) pointsByModel.set(modelId, []);
+		pointsByModel.get(modelId).push({
 			x: avgTps,
 			y: Math.round((ev.overall ?? 0) * 100),
 			label: key,
@@ -650,7 +656,7 @@ function renderScatterChart() {
 		});
 	}
 
-	if (points.length === 0) {
+	if (pointsByModel.size === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
 		if (scatterChartInstance) { scatterChartInstance.destroy(); scatterChartInstance = null; }
@@ -659,15 +665,26 @@ function renderScatterChart() {
 	if (host) host.hidden = false;
 	if (empty) empty.hidden = true;
 
-	const data = {
-		datasets: [{
-			label: "profile",
-			data: points,
-			backgroundColor: CHART_COLORS.blue,
-			pointRadius: 6,
-			pointHoverRadius: 8,
-		}],
-	};
+	const palette = [
+		CHART_COLORS.blue,
+		CHART_COLORS.purple,
+		CHART_COLORS.green,
+		CHART_COLORS.yellow,
+		CHART_COLORS.orange ?? "#fb923c",
+		"#f472b6",
+		"#22d3ee",
+		"#a78bfa",
+	];
+	const modelIds = Array.from(pointsByModel.keys()).sort();
+	const datasets = modelIds.map((modelId, i) => ({
+		label: modelId,
+		data: pointsByModel.get(modelId),
+		backgroundColor: palette[i % palette.length],
+		borderColor: palette[i % palette.length],
+		pointRadius: 6,
+		pointHoverRadius: 8,
+	}));
+	const data = { datasets };
 
 	const options = {
 		responsive: true,
@@ -687,7 +704,15 @@ function renderScatterChart() {
 			},
 		},
 		plugins: {
-			legend: { display: false },
+			legend: {
+				display: true,
+				position: "top",
+				labels: {
+					color: CHART_COLORS.muted,
+					boxWidth: 10,
+					font: { size: 11 },
+				},
+			},
 			tooltip: {
 				backgroundColor: "#161b22",
 				titleColor: CHART_COLORS.text,
