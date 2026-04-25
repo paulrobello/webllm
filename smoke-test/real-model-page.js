@@ -115,7 +115,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		const t0 = performance.now();
 		const profileMode = new URLSearchParams(window.location.search).has("profile");
 
-		log("running", "[1/7] Fetching model...");
+		log("running", "[1/8] Fetching model...");
 		progressEl.style.display = "block";
 		let modelBuffer;
 		try {
@@ -141,14 +141,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			modelBuffer = modelBuffer.buffer;
 			log(
 				"pass",
-				`[1/7] Model fetched: ${(received / 1e6).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+				`[1/8] Model fetched: ${(received / 1e6).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
 			);
 		} catch (e) {
-			log("fail", `[1/7] Fetch failed: ${e.message}`);
+			log("fail", `[1/8] Fetch failed: ${e.message}`);
 			return;
 		}
 
-		log("running", "[2/7] Parsing GGUF...");
+		log("running", "[2/8] Parsing GGUF...");
 		let ggufCtx;
 		let parsed;
 		try {
@@ -164,21 +164,21 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				`${pageCopy.subtitle} · Model: ${modelId} · arch=${hp.architecture} · ctx=${subtitleContextLength}`;
 			log(
 				"pass",
-				`[2/7] GGUF parsed: arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount}/${hp.headCountKv} layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`,
+				`[2/8] GGUF parsed: arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount}/${hp.headCountKv} layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`,
 			);
 		} catch (e) {
-			log("fail", `[2/7] Parse failed: ${e.message}\n${e.stack || ""}`);
+			log("fail", `[2/8] Parse failed: ${e.message}\n${e.stack || ""}`);
 			return;
 		}
 
-		log("running", "[3/7] Initializing WebGPU backend...");
+		log("running", "[3/8] Initializing WebGPU backend...");
 		try {
 			const wasm = new GgmlWasm();
 			wasmInstance = wasm;
 			await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
-			log("pass", "[3/7] WebGPU backend initialized");
+			log("pass", "[3/8] WebGPU backend initialized");
 
-			log("running", "[4/7] Loading weights into GPU...");
+			log("running", "[4/8] Loading weights into GPU...");
 			setProgress(35);
 			inference = new ModelInference(wasm, parsed.hyperparams);
 			if (profileMode) {
@@ -188,14 +188,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			const t1 = performance.now();
 			inference.loadWeights(ggufCtx, modelBuffer);
 			const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
-			log("pass", `[4/7] Weights loaded in ${weightTime}s`);
+			log("pass", `[4/8] Weights loaded in ${weightTime}s`);
 			setProgress(80);
 		} catch (e) {
-			log("fail", `[3/7-4/7] Init/load failed: ${e.message}\n${e.stack || ""}`);
+			log("fail", `[3/8-4/8] Init/load failed: ${e.message}\n${e.stack || ""}`);
 			return;
 		}
 
-		log("running", "[5/7] Initializing KV cache...");
+		log("running", "[5/8] Initializing KV cache...");
 		try {
 			const kvContextLength =
 				requestedContextLength > 0
@@ -204,27 +204,27 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			await inference.initKVCache(kvContextLength);
 			log(
 				"pass",
-				`[5/7] KV cache: ${kvContextLength} slots x ${parsed.hyperparams.layerCount} layers`,
+				`[5/8] KV cache: ${kvContextLength} slots x ${parsed.hyperparams.layerCount} layers`,
 			);
 			setProgress(85);
 		} catch (e) {
-			log("fail", `[5/7] KV cache failed: ${e.message}\n${e.stack || ""}`);
+			log("fail", `[5/8] KV cache failed: ${e.message}\n${e.stack || ""}`);
 			return;
 		}
 
-		log("running", "[6/7] Creating tokenizer...");
+		log("running", "[6/8] Creating tokenizer...");
 		try {
 			tokenizer = new Tokenizer(parsed.tokenizerConfig);
 			const testEncode = tokenizer.encode("hello");
 			log(
 				"pass",
-				`[6/7] Tokenizer ready: vocab=${tokenizer.vocabSize}, encode("hello")=[${testEncode}]`,
+				`[6/8] Tokenizer ready: vocab=${tokenizer.vocabSize}, encode("hello")=[${testEncode}]`,
 			);
 			window.inference = inference;
 			window.tokenizer = tokenizer;
 			window.parsedModel = parsed;
 		} catch (e) {
-			log("fail", `[6/7] Tokenizer failed: ${e.message}\n${e.stack || ""}`);
+			log("fail", `[6/8] Tokenizer failed: ${e.message}\n${e.stack || ""}`);
 			return;
 		}
 
@@ -368,7 +368,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			}
 		}
 
-		log("running", "[7/7] Generating text...");
+		log("running", "[7/8] Generating text...");
 		setProgress(90);
 		try {
 			if (debugMode) {
@@ -444,7 +444,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 
 			log(
 				"pass",
-				`[7/7] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason})`,
+				`[7/8] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason})`,
 			);
 			log("pass", `User: ${userMessage}`);
 			const assistantText = thinkingEnabled
@@ -455,8 +455,81 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			log("pass", `Assistant: ${assistantText}`);
 			setProgress(100);
 		} catch (e) {
-			log("fail", `[7/7] Generation failed: ${e.message}\n${e.stack || ""}`);
+			log("fail", `[7/8] Generation failed: ${e.message}\n${e.stack || ""}`);
 			return;
+		}
+
+		log(
+			"running",
+			"[8/8] Loading Arctic-Embed-s and computing embedding...",
+		);
+		try {
+			const embedUrl = `./models/snowflake-arctic-embed-s-f16.GGUF${assetSuffix}`;
+			const embedResp = await fetch(embedUrl);
+			if (!embedResp.ok) {
+				throw new Error(`HTTP ${embedResp.status} fetching ${embedUrl}`);
+			}
+			const embedBuf = await embedResp.arrayBuffer();
+			if (!navigator.gpu) {
+				throw new Error("navigator.gpu unavailable");
+			}
+			const embedAdapter = await navigator.gpu.requestAdapter();
+			if (!embedAdapter) {
+				throw new Error("requestAdapter() returned null");
+			}
+			const embedDevice = await embedAdapter.requestDevice();
+			const { engine: engine2, handle: embedHandle } =
+				await WebLLM.loadModelFromBuffer(
+					embedBuf,
+					"arctic-s",
+					{ device: embedDevice, memoryBudget: 500_000_000 },
+					`./webllm-wasm.js${assetSuffix}`,
+				);
+			const va = await engine2.embed(embedHandle.id, "happy");
+			const vb = await engine2.embed(embedHandle.id, "joyful");
+			window.embedA = va;
+			window.embedB = vb;
+
+			if (va.length !== 384) {
+				throw new Error(`expected 384-dim vector, got ${va.length}`);
+			}
+			if (!Number.isFinite(va[0])) {
+				throw new Error(`embedding[0] is not finite (=${va[0]})`);
+			}
+			let na = 0;
+			for (let i = 0; i < va.length; i++) na += va[i] * va[i];
+			const norm = Math.sqrt(na);
+			if (!(norm >= 0.99 && norm <= 1.01)) {
+				throw new Error(`‖v‖=${norm.toFixed(4)} not in [0.99, 1.01]`);
+			}
+			let dot = 0;
+			let nb = 0;
+			for (let i = 0; i < va.length; i++) {
+				dot += va[i] * vb[i];
+				nb += vb[i] * vb[i];
+			}
+			const cosine =
+				na === 0 || nb === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
+			if (!(cosine >= 0.75)) {
+				throw new Error(
+					`cosine=${cosine.toFixed(4)} below 0.75 threshold`,
+				);
+			}
+			// Guard against the "all inputs produce identical vectors" pathology —
+			// would pass the ≥0.75 check trivially but indicates broken tokenization
+			// or a position/token-type embedding bug.
+			if (cosine > 0.999) {
+				throw new Error(
+					`cosine=${cosine.toFixed(6)} suspiciously close to 1.0 for distinct synonyms — likely identical-vectors bug`,
+				);
+			}
+			log(
+				"pass",
+				`[8/8] embed('happy') · embed('joyful') cosine=${cosine.toFixed(2)} (>=0.75 expected, ‖v‖=${norm.toFixed(2)})`,
+			);
+		} catch (e) {
+			log("fail", `[8/8] embed failed: ${e.message}\n${e.stack || ""}`);
+			throw e;
 		}
 
 		// Best-effort: collect + register the system profile whenever an
@@ -498,7 +571,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			try {
 				if (!wasmInstance || !inference || !parsedModel) {
 					throw new Error(
-						"bench mode reached after [7/7] but wasm/inference/parsed are unset — did the smoke steps fail silently?",
+						"bench mode reached after [7/8] but wasm/inference/parsed are unset — did the smoke steps fail silently?",
 					);
 				}
 				const { runBenchMode } = await import(

@@ -86,6 +86,20 @@ Decode-phase specialization for the matmul dispatch path.
 Kept as a pair with commit 7 until the specialization is replaced.
 Effectively a no-op relative to commit 6's state.
 
+### 9. ggml-webgpu: add `GGML_OP_NORM` (LayerNorm) support
+
+Upstream `ggml-webgpu` only registers `GGML_OP_RMS_NORM` and
+`GGML_OP_L2_NORM`; `GGML_OP_NORM` falls through to `supports_op=false`
+and silently no-ops on a CPU-less build. That broke webllm's BERT
+encoder path (`EncoderInference`), producing bit-identical embeddings
+for every input. This patch extends `row_norm.wgsl` with a
+`LAYER_NORM` variant that computes both Σx and Σx² in one workgroup
+pass, derives variance, and emits `(x − mean) / sqrt(var + eps)`;
+registers the pipeline in `ggml-webgpu-shader-lib.hpp`; and dispatches
+`GGML_OP_NORM` through `ggml_webgpu_row_norm`. Touches the same three
+files as the other `ggml-webgpu` patches (`ggml-webgpu.cpp`,
+`ggml-webgpu-shader-lib.hpp`, `wgsl-shaders/row_norm.wgsl`).
+
 ## Rebase Procedure
 
 To pick up a newer upstream `llama.cpp` master:
