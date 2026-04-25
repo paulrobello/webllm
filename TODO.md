@@ -113,25 +113,63 @@ await window.inference.debugLayerOutput(
 Baseline (pre-optimization): ~44 tok/s decode, ~130 ms prefill on TinyLlama 1.1B
 Q4_0 via Emscripten WebGPU in-browser.
 
-**Current Task 5 profiled investigation baseline: 93.5 tok/s decode** on
-`make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0` with the
-richer `--profile` trace enabled. Treat this as a profiling reference point
-for hotspot ranking, not as the new representative steady-state throughput
-baseline.
+**Steady-state decode baselines (2026-04-25, non-profile, realistic
+sampler):** TinyLlama Q4_0 ~107 tok/s · Qwen3 0.6B thinking-off ~83 tok/s
+· Qwen3 0.6B thinking-on ~17 tok/s. These are the canonical numbers
+to compare new perf work against.
 
-On the median profiled run, decode is about **10.7 ms/token** (`331 ms / 31`
-tokens), with `graphComputeMs` at **9.96 ms mean / 91.8%** of decode-step time
-and `downloadResultMs` at **0.62 ms mean / 5.7%**. The backend attribution in
-that same run shows `backendMatmulMs` at **4.02 ms / 40.4% of graph time**,
-`backendEncodeOverheadMs` at **2.81 ms / 28.2%**, and `backendAttentionMs` at
-**0.40 ms / 4.0%**. Readback is no longer the dominant per-step cost; the
-remaining bottleneck is still inside decode compute, led by matmul with encode
-/ dispatch preparation still material.
+**Profile-mode hotspot ranking (2026-04-25, `--profile`).** Captured
+through `make smoke-bench PERF_RUNS=3` after fixing three latent
+harness bugs (`953c560`) that had been masking trace collection since
+the consolidation landed. `--profile` enables ggml-webgpu's detailed
+backend timing and perturbs throughput measurably:
 
-The same median run reported **2027 ms wall time** for the whole smoke-bench
-page completion. That number is useful as an end-to-end harness datapoint, but
-it includes browser/page/model setup and should not be treated as a direct
-replacement for steady-state decode throughput.
+| Profile          | Steady-state | Profile-mode | Perturbation |
+|------------------|--------------|--------------|--------------|
+| TinyLlama Q4_0   | ~107 tok/s   | 76 tok/s     | -29%         |
+| Qwen3-0.6 off    | ~83 tok/s    | 55 tok/s     | -34%         |
+| Qwen3-0.6 on     | ~17 tok/s    | 14.6 tok/s   | -14%         |
+
+Cite steady-state numbers for throughput claims; cite profile-mode
+ratios for hotspot ranking. Mixing the two is what derailed the
+"Apr-23 regression" investigation.
+
+Per-step decode breakdown by mode (medians from the runs above):
+
+| Bucket (ms/step)        | TinyLlama topk | Qwen3-off topk | Qwen3-on full |
+|-------------------------|----------------|----------------|---------------|
+| graphComputeMs          | 11.67 (88.8%)  | 13.91 (88.8%)  | 22.62 (94.5%) |
+| downloadResultMs        |  1.20 ( 9.1%)  |  1.37 ( 8.8%)  |  0.93 ( 3.9%) |
+| build + alloc + upload  |  0.26 ( 2.0%)  |  0.36 ( 2.3%)  |  0.35 ( 1.5%) |
+| **totalMs**             | **13.14**      | **15.66**      | **23.93**     |
+
+Backend attribution (% of `graphComputeMs`, profile mode only):
+
+| Field                    | TinyLlama topk | Qwen3-off topk | Qwen3-on full |
+|--------------------------|----------------|----------------|---------------|
+| backendMatmulMs          | 3.85 (33.0%)   | 4.05 (29.1%)   | 6.31 (27.9%)  |
+| backendEncodeOverheadMs  | 2.71 (23.2%)   | 4.07 (29.2%)   | 3.53 (15.6%)  |
+| backendAttentionMs       | 0.40 ( 3.5%)   | 0.49 ( 3.5%)   | 0.75 ( 3.3%)  |
+| backendDispatchCount     | 450/token      | 629/token      | 619/token     |
+
+Headlines:
+- **Decode is graph-compute-bound across all three profiles** (~89–95%
+  of step time). Readback is a 4–9% slice; further async-readback work
+  has tiny headroom.
+- **Matmul leads on TinyLlama (33%) but encode/dispatch overhead leads
+  on Qwen3-off (29.2%).** Qwen3 dispatches ~40% more ops per token (629
+  vs 450) — graph-shape reduction has more leverage there than on TinyLlama.
+- **Qwen3 thinking-on routes through `mode=full` while steering state
+  is active**, costing ~8.7 ms/step extra graph compute vs the topk
+  path the same model runs at thinking-off. Best-case lift if §2 lands
+  is ~17 → ~24 tok/s (see "Active Next Steps §2"). The matmul jump
+  (4.05 → 6.31 ms) between the two qwen3 modes is unexplained — full
+  vs topk should not change matmul cost — and is flagged for the §2
+  implementation pass to surface.
+- **Consolidation tightened TinyLlama dispatches and matmul share**
+  vs the stale 2026-04-22 numbers (489 → 450 dispatches/token, matmul
+  share 40.4% → 33.0%). Treat that as a quiet consolidation win, not
+  a headline.
 
 Items in rough order of expected impact. Each entry explains the idea, where
 the code lives today, the expected win, and the risk/tradeoff.
@@ -520,7 +558,7 @@ needs to be collected.
   Qwen3 thinking-off also benefits (~76 tok/s); thinking-on routes
   through the unchanged full path (~16.6 tok/s).
 - **TODO §2 done — library is now the single source of truth for
-  decode** (this session's work, uncommitted). The smoke decode loop
+  decode** (committed as `6865a2c`). The smoke decode loop
   in `createSmokeCompletionRunner` was a 200-line duplicate of
   `Generator.generate` that silently dropped throughput when the topk
   fast path landed on one side but not the other. Consolidation steps:
@@ -555,19 +593,27 @@ needs to be collected.
     · 236 tokens · finish=eos; embed cosine=0.76 on all three. Output
     text byte-identical across two tinyllama re-runs (seed=12345).
     Console: no errors. `make checkall`: 390 pass / 5 skip / 0 fail
-    across 43 files. **Note: not committed yet.**
+    across 43 files. Committed as `6865a2c`.
+- **Profile harness re-baselined** (commit `953c560`). Three latent
+  bugs in `eval/perf.ts` had been silently masking every `--profile`
+  run since the consolidation: greedy-only trace filter dropped the
+  realistic-sampler topk traces; `buildSmokeTestUrl` API drift swallowed
+  `?perf=` and `?profile=1`; and `fetchDecodeTraces` couldn't parse
+  agentchrome's `output_file` overflow envelope (>16 KB results).
+  Fixed all three, added `--thinking` to perf.ts, then captured the
+  fresh medians that now drive the "Inference Performance
+  Optimizations" preamble.
 
 ### Resumption checklist (start a fresh session here)
 
-1. `make checkall` — confirm 390 pass / 5 skip / 0 fail. The library
-   consolidation in this session is uncommitted; verify it's still
-   green on the working tree before doing anything else.
-2. `make smoke-test` then `bun run eval/smoke-serve.ts --port 8031`
-   (or `make smoke-restart`). Smoke a quick `?model=tinyllama-1.1b-chat-q4_0`
-   page load to make sure the bundle works in the browser.
-3. Commit the consolidation work (uncommitted as of 2026-04-25 — see
-   "Completed on 2026-04-25 (cont.)" above for the 8-file change list).
-4. Then start **§1** below.
+1. `make checkall` — confirm 390 pass / 5 skip / 0 fail.
+2. Read the "Inference Performance Optimizations" preamble for the
+   2026-04-25 profile-mode hotspot ranking (TinyLlama / Qwen3-off /
+   Qwen3-on per-step + backend attribution tables).
+3. Start **Active Step §2** (GPU-side masking for qwen3 thinking-on)
+   — that's the largest remaining single decode lever. Begin with
+   the §2 pre-implementation verification step (count masked-token
+   top-K hit rate while thinking is active) before scoping the fix.
 
 ### Historical context (for archive — do not action again)
 
@@ -654,51 +700,49 @@ needs to be collected.
 
 ### Active next steps
 
-1. **Re-profile decode against the canonical pipeline.** §2 is done —
-   `engine.chatCompletion` is now the only decode path through the
-   smoke page, and dynamic per-step decode-mode selection is in the
-   library. The 2026-04-22 profile breakdown (graphCompute 91.8%,
-   matmul 40.4% of graph time, encodeOverhead 28.2%, 489
-   dispatches/token) was captured against the old full-vocab +
-   JS-sampling slow path and is stale. Action plan:
-   - Run `make smoke-bench PERF_RUNS=3
-     PERF_MODEL=tinyllama-1.1b-chat-q4_0` with `--profile`. The
-     `__decodeTraces` global is populated by
-     `createSmokeCompletionRunner` (one entry per decode step, not
-     per-prefill — verified in this session); read it via
-     `agentchrome js exec "JSON.stringify(window.__decodeTraces)"`.
-   - Record medians for: `graphComputeMs`, `downloadResultMs`,
-     `backendMatmulMs`, `backendEncodeOverheadMs`,
-     `backendAttentionMs`, `backendDispatchCount`. Compare against
-     the stale 2026-04-22 numbers above and update the
-     "Inference Performance Optimizations" preamble.
-   - Repeat for qwen3-0.6b-q4f16 thinking-off (now ~83 tok/s) and
-     thinking-on (~17 tok/s). Thinking-on still routes through full
-     mode while steering state is active — this is the biggest
-     remaining lever (Active Step §2). Confirm.
-   - Pick the next decode optimization based on what the fresh
-     numbers say. Likely-still-true: matmul + encode/dispatch
-     overhead remain the dominant compute-side buckets; the JS
-     bucket is now thin enough that further sampler-side
-     optimization has tiny headroom.
+1. **DONE (2026-04-25): re-profiled decode against the canonical
+   pipeline.** Numbers landed in the "Inference Performance
+   Optimizations" preamble above. Three latent harness bugs had been
+   hiding the entire profile path since the consolidation; fixed in
+   `953c560`. The fresh numbers ratify the same broad direction the
+   stale 2026-04-22 profile pointed at — graph compute dominates,
+   matmul + encode/dispatch overhead are the leads — but with the
+   refinement that **encode overhead leads on Qwen3 (29.2% of graph)
+   while matmul leads on TinyLlama (33%)**. The biggest single lever
+   is still §2 below: getting qwen3 thinking-on off the full path.
 
 2. **GPU-side masking for qwen3 thinking-on.** Today the topk branch
    is gated off when steering state is active (`thinkDepth > 0` ||
    `waitingForVisibleAnswer` || `hasVisibleAnswerText`) because the
    GPU picks top-K from raw logits before we can mask. Result:
-   qwen3 thinking-on stays on the slow full path (~17 tok/s). Two
-   recovery paths:
-   - **CPU post-filter top-K**: ask GPU for `K + N` candidates, drop
-     masked indices on the CPU side, sample from remaining. Re-fetch
-     full logits if the post-filter pool is exhausted (rare). Lives
-     inside `Generator.generate`'s topk branch.
-   - **GPU-side mask in TOP_K**: thread a mask buffer into
-     `forwardDecode("topk", topK, maskBuffer)`. Bigger change
-     (touches `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`
-     + the WASM bridge + the TS bindings) but no extra GPU→CPU
-     round trip.
-   Decision goes into §1's profile pass — pick whichever dominates
-   the bucket. Neither blocks any current workload.
+   qwen3 thinking-on stays on the slow full path (~17 tok/s,
+   profile-mode 14.6 tok/s, `mode=full` for all 705 captured decode
+   steps). Best-case lift if thinking-on can route through topk
+   ≈ +35% throughput (`graphComputeMs` 22.62 → 13.91 ms; would lift
+   ~17 → ~24 tok/s steady-state). Two recovery paths, both viable:
+   - **CPU post-filter top-K** (smaller change). Ask GPU for `K + N`
+     candidates, drop masked indices on the CPU side, sample from
+     remaining. Re-fetch full logits if the post-filter pool is
+     exhausted. Lives inside `Generator.generate`'s topk branch.
+   - **GPU-side mask in TOP_K** (bigger change). Thread a mask buffer
+     into `forwardDecode("topk", topK, maskBuffer)`. Touches
+     `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp`, the
+     WASM bridge, and the TS bindings, but no extra GPU→CPU round
+     trip and no fallback fast-path needed.
+   **Pre-implementation verification step.** Before committing to
+   either path, instrument `Generator.generate`'s steering window to
+   count how often the masked tokens (`<|endoftext|>` 151643,
+   `<|im_end|>` 151645, the qwen3 thinking-window mask sets) land in
+   the top-`K + N` of full-vocab logits while thinking is active.
+   Concrete: bolt a temporary counter onto the existing full-path
+   step that records `tokenId in top(K+N) ? steered : tail`. If
+   masks routinely fall into the top-K, the CPU post-filter path
+   will keep refetching full logits and the savings collapse — push
+   straight to GPU-side masking instead. If they're tail tokens, CPU
+   post-filter is the simpler win. Run on one qwen3 thinking-on
+   trace from `make smoke-bench --thinking`. Decision recorded in
+   §1's now-completed profile preamble; this verification is the
+   last unknown.
 
 3. **Decode graph reuse** (item 1 in "Inference Performance
    Optimizations" preamble) remains deferred. The 2026-04-21 profile
