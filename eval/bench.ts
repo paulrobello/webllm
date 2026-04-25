@@ -108,7 +108,14 @@ function main(): void {
 		const label = entry.profile.name;
 		console.log(`\n═══ ${label} ═══`);
 
-		if (doSpeed) {
+		// Embedding-only profiles (encoder models like Arctic-Embed) don't
+		// generate text. The speed phase runs `chat-smoke` which would fail
+		// on a model that has no causal-LM path; skip it. Accuracy is still
+		// useful — it runs the embedding-dimension tasks and writes cosine
+		// scores to the dashboard.
+		const isEmbedding = entry.profile.embedding === true;
+
+		if (doSpeed && !isEmbedding) {
 			console.log(`\n--- speed: ${label} ---`);
 			const speedArgs = [
 				"run",
@@ -119,6 +126,8 @@ function main(): void {
 			const ok = runChild(speedArgs, childEnv);
 			results.push({ label, ok, phase: "speed" });
 			if (!ok && failFast) break;
+		} else if (doSpeed && isEmbedding) {
+			console.log(`\n--- speed: skipped (embedding profile) ---`);
 		}
 
 		if (doAccuracy) {

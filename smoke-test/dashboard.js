@@ -749,10 +749,16 @@ function renderDimGroupedChart() {
 
 	const datasets = dimNames.map((dim, i) => ({
 		label: dim,
+		// Return null (not 0) for dimensions a model wasn't actually scored
+		// on — embedding-only models would otherwise render as four "0%"
+		// bars on tool-calling/reasoning/instruction-following/semantic-
+		// reasoning, falsely implying they did poorly there.
 		data: models.map((m) => {
 			const ev = latestColdByModel.get(m);
 			const ds = ev?.dimensions?.[dim];
-			return ds ? Math.round((ds.score ?? 0) * 100) : 0;
+			return ds && (ds.total ?? 0) > 0
+				? Math.round((ds.score ?? 0) * 100)
+				: null;
 		}),
 		backgroundColor: dimColors[i],
 		borderRadius: 3,

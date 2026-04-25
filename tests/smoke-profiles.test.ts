@@ -10,14 +10,45 @@ import {
 	SMOKE_PROFILES,
 } from "../eval/smoke-profiles.js";
 
-test("every profile declares a known model id and a non-empty prompt", () => {
+test("every profile declares a known model id; non-embedding profiles also carry a prompt", () => {
 	expect(SMOKE_PROFILES.length).toBeGreaterThan(0);
 	for (const profile of SMOKE_PROFILES) {
 		expect(profile.name).toMatch(/^[a-z0-9][a-z0-9-_.]*$/);
 		expect(profile.model.length).toBeGreaterThan(0);
-		expect(profile.prompt?.length ?? 0).toBeGreaterThan(0);
 		expect(resolveProfileModel(profile)).toBeDefined();
+		if (profile.embedding) {
+			// Embedding profiles drive the encoder path, which takes per-task
+			// inputs from the eval suite — there is no single global prompt.
+			expect(profile.prompt).toBeUndefined();
+		} else {
+			expect(profile.prompt?.length ?? 0).toBeGreaterThan(0);
+		}
 	}
+});
+
+test("embedding profiles point at embedding-capable models", () => {
+	const embeddingProfiles = SMOKE_PROFILES.filter((p) => p.embedding === true);
+	expect(embeddingProfiles.length).toBeGreaterThan(0);
+	for (const profile of embeddingProfiles) {
+		const model = resolveProfileModel(profile);
+		expect(model?.capabilities?.embedding).toBe(true);
+	}
+});
+
+test("the `embeddings` profile set lists every embedding profile and only those", () => {
+	const set = getSmokeProfileSet("embeddings");
+	expect(set).toBeDefined();
+	const fromFlag = SMOKE_PROFILES.filter((p) => p.embedding === true).map(
+		(p) => p.name,
+	);
+	expect([...(set ?? [])].sort()).toEqual(fromFlag.sort());
+});
+
+test("the `full` profile set includes the embedding profiles", () => {
+	const full = getSmokeProfileSet("full");
+	expect(full).toBeDefined();
+	expect(full).toContain("arctic-embed-s");
+	expect(full).toContain("arctic-embed-m");
 });
 
 test("profile names are unique", () => {

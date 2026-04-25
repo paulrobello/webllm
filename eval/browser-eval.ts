@@ -162,6 +162,26 @@ function main(): void {
 		}
 	}
 
+	// Mirror of the above: embedding-only models (BERT-style encoders) can't
+	// run generative dimensions. When no explicit `--dimension` is set,
+	// auto-restrict to the embedding dimension so the bench harness can
+	// drive arctic-embed without hard-failing on tool-calling / reasoning
+	// / instruction-following / semantic-reasoning tasks.
+	if (
+		!dimension &&
+		model.capabilities?.embedding &&
+		!model.capabilities.toolCalling &&
+		!model.capabilities.structuredOutput
+	) {
+		const before = tasks.length;
+		tasks = tasks.filter((t) => t.dimension === "embedding");
+		if (before !== tasks.length) {
+			console.log(
+				`Restricting to embedding tasks (model "${model.id}" is embedding-only).`,
+			);
+		}
+	}
+
 	if (tasks.length === 0) {
 		console.error("Error: no tasks to run");
 		process.exit(1);

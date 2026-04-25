@@ -21,6 +21,12 @@ export interface SmokeProfile {
 	repetitionPenalty?: number;
 	seed?: number;
 	prompt?: string;
+	/**
+	 * Marks the profile as targeting an embedding-only model (no text
+	 * generation). Bench harnesses skip the speed phase (`chat-smoke`) and
+	 * accuracy harnesses default to the `embedding` dimension.
+	 */
+	embedding?: boolean;
 }
 
 const DEFAULT_PROMPT = "Tell one short joke.";
@@ -108,6 +114,21 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Snowflake Arctic Embed (encoder-only) ──────────────────
+	// Embedding profiles don't generate; the temperature / thinking /
+	// prompt fields are intentionally absent. Bench harnesses key on
+	// `embedding: true` to skip speed phases and route accuracy runs to
+	// the embedding dimension only.
+	{
+		name: "arctic-embed-s",
+		model: "snowflake-arctic-embed-s-q0f32-b4",
+		embedding: true,
+	},
+	{
+		name: "arctic-embed-m",
+		model: "snowflake-arctic-embed-m-q0f32-b4",
+		embedding: true,
+	},
 ];
 
 /**
@@ -145,7 +166,10 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"llama-3.2-1b-warm",
 		"llama-3.2-1b-hot",
 		"tinyllama-warm",
+		"arctic-embed-s",
+		"arctic-embed-m",
 	],
+	embeddings: ["arctic-embed-s", "arctic-embed-m"],
 };
 
 export function getSmokeProfileSet(name: string): readonly string[] | undefined {
