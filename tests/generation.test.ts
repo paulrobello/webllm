@@ -843,4 +843,108 @@ describe("Generator", () => {
 		}
 		expect(tokens.length).toBe(5);
 	});
+
+	test("routes through topk + CPU mask filter while inside an open think block", async () => {
+		// Verify the §2 optimization: when steering is active (open think
+		// block) and a topK sampler is in use, decode requests
+		// `topK + STEERING_TOPK_BUFFER` candidates from forwardDecode and
+		// CPU-filters the masked indices before sampleFromTopK fires. The
+		// raw highest-logit token is the masked one; the next-highest
+		// unmasked candidate must win after the filter applies.
+		const samplerTopK = 5;
+		const STEERING_TOPK_BUFFER = 10; // mirrors the constant in generation.ts
+		const expectedRequestedK = samplerTopK + STEERING_TOPK_BUFFER;
+
+		// First forwardPass returns the prefill logits (used to sample the
+		// initial token, and we want it to be `<think>` = 5 so steering kicks in).
+		async function prefillThink(): Promise<Float32Array> {
+			const logits = new Float32Array(20);
+			logits[5] = 100.0;
+			return logits;
+		}
+
+		const decodeCalls: Array<{ mode: string; topK?: number }> = [];
+		const masked = 8; // configured in maskedTokensWhileThinking
+		const winner = 7; // next-highest unmasked candidate
+		async function decodeStep(
+			_ids: number[],
+			_pos: number[],
+			mode: "full" | "greedy" | "topk",
+			topK?: number,
+		) {
+			decodeCalls.push({ mode, topK });
+			if (mode !== "topk") {
+				throw new Error(
+					`expected steering step to route through topk, got ${mode}`,
+				);
+			}
+			const k = topK ?? 0;
+			const indices = new Int32Array(k);
+			const values = new Float32Array(k);
+			// Place the masked token at the very top of the candidate set,
+			// followed by the unmasked winner, then arbitrary fillers.
+			indices[0] = masked;
+			values[0] = 100.0;
+			indices[1] = winner;
+			values[1] = 80.0;
+			for (let i = 2; i < k; i++) {
+				indices[i] = 13 + i;
+				values[i] = 10.0 - i;
+			}
+			return { topKIndices: indices, topKValues: values };
+		}
+
+		// repetitionPenalty != 1.0 ensures sampler.noPenalty is false so the
+		// decode loop routes through topk (greedy is gated on
+		// `isGreedy && noPenalty`). topK=5 keeps the path topk-eligible.
+		// temperature=0 keeps sampleFromTopK deterministic (argmax over the
+		// truncated set), so the assertion on the winner is exact.
+		const sampler = new Sampler({
+			temperature: 0,
+			topK: samplerTopK,
+			repetitionPenalty: 1.05,
+		});
+		const session = new InferenceSession(
+			{ ...BASE_SESSION_CONFIG, topK: samplerTopK, repetitionPenalty: 1.05 },
+			0,
+		);
+		const config: GenerationConfig = {
+			prompt: "test",
+			maxTokens: 3,
+			temperature: 0,
+			topK: samplerTopK,
+			topP: 1,
+			repetitionPenalty: 1.05,
+			thinkingOpenTokenId: 5,
+			thinkingCloseTokenId: 6,
+			maskedTokensWhileThinking: [masked],
+		};
+
+		const tokens: number[] = [];
+		for await (const token of Generator.generate(
+			[1],
+			sampler,
+			session,
+			99,
+			prefillThink,
+			config,
+			undefined,
+			decodeStep,
+		)) {
+			tokens.push(token);
+		}
+
+		// First yielded token is the prefill-sampled `<think>` (= 5); subsequent
+		// tokens come from decodeStep. Every steering decode call must hit
+		// the topk branch with K + buffer requested, and the masked index
+		// must be filtered before sampling.
+		expect(tokens[0]).toBe(5);
+		expect(decodeCalls.length).toBeGreaterThan(0);
+		for (const call of decodeCalls) {
+			expect(call.mode).toBe("topk");
+			expect(call.topK).toBe(expectedRequestedK);
+		}
+		expect(tokens.slice(1).every((t) => t === winner)).toBe(true);
+		expect(tokens.includes(masked)).toBe(false);
+	});
 });
