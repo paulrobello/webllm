@@ -277,6 +277,7 @@ function render() {
 	renderThinkingDeltaChart();
 	renderTtftChart();
 	renderFinishChart();
+	renderSeriesChart();
 	renderTable();
 	renderCompareButton();
 	renderEvals();
@@ -1353,7 +1354,7 @@ function renderSeriesChart() {
 	if (!seriesLoaded) {
 		seriesLoaded = true;
 		fetch("/evals/series")
-			.then((res) => res.ok ? res.json() : { series: [] })
+			.then((res) => (res.ok ? res.json() : { series: [] }))
 			.then((json) => {
 				state.evalSeries = json.series ?? [];
 				renderSeriesChartImpl(canvas, host, empty);
