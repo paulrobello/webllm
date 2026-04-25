@@ -24,7 +24,13 @@
  */
 
 import { parseArgs } from "node:util";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { getModelById, type BenchmarkModel } from "./models.js";
 import {
@@ -90,6 +96,7 @@ function main(): void {
 			tab: { type: "string" },
 			baseline: { type: "string" },
 			profile: { type: "boolean" },
+			thinking: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -115,6 +122,7 @@ function main(): void {
 		save: values.save ?? false,
 		baseline: values.baseline ?? BASELINE_PATH,
 		profile: values.profile ?? false,
+		thinking: values.thinking ?? false,
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -130,6 +138,7 @@ async function run(
 		save: boolean;
 		baseline: string;
 		profile: boolean;
+		thinking: boolean;
 	},
 ): Promise<void> {
 	await ensureSmokeServerReachable();
@@ -143,8 +152,11 @@ async function run(
 	for (let i = 0; i < nRuns; i++) {
 		process.stdout.write(`Run ${i + 1}/${nRuns}...`);
 		const url = buildSmokeTestUrl(model.id, model.contextLength, {
-			perf: `${Date.now()}-${i}`,
-			...(opts.profile ? { profile: 1 } : {}),
+			extraParams: {
+				perf: `${Date.now()}-${i}`,
+				...(opts.profile ? { profile: 1 } : {}),
+				...(opts.thinking ? { thinking: 1 } : {}),
+			},
 		});
 		agentchrome(port, tab, ["navigate", url]);
 		const result = await waitForSmokeTestResult(port, tab);
@@ -158,10 +170,8 @@ async function run(
 		});
 		if (opts.profile) {
 			const traces = fetchDecodeTraces(port, tab);
-			const greedyDecodeTraces = traces.filter(
-				(t) => t.mode === "greedy" && t.nTokens === 1,
-			);
-			allTraces.push(...greedyDecodeTraces);
+			const decodeTraces = traces.filter((t) => t.nTokens === 1);
+			allTraces.push(...decodeTraces);
 		}
 		process.stdout.write(` ${result.tokensPerSecond.toFixed(1)} tok/s\n`);
 	}
@@ -238,15 +248,41 @@ function compareToBaseline(current: PerfReport, baselinePath: string): void {
 }
 
 function fetchDecodeTraces(port: string, tab: string): DecodeTrace[] {
+	// agentchrome js exec inlines small results in `result` but offloads
+	// large payloads (>~16 KB) to `output_file`. Decode traces from a
+	// 64-token run blow past that threshold, so handle both shapes.
 	const out = agentchrome(port, tab, [
 		"js",
 		"exec",
 		`(() => JSON.stringify(window.__decodeTraces ?? []))()`,
 	]);
-	const resp = JSON.parse(out) as { result?: string };
-	if (!resp.result) return [];
+	const resp = JSON.parse(out) as {
+		result?: string;
+		output_file?: string;
+	};
+
+	let payload: string | undefined;
+	if (typeof resp.result === "string") {
+		payload = resp.result;
+	} else if (resp.output_file) {
+		try {
+			const fileBody = readFileSync(resp.output_file, "utf-8");
+			const parsed = JSON.parse(fileBody) as { result?: string };
+			payload = parsed.result;
+		} catch {
+			return [];
+		} finally {
+			try {
+				rmSync(resp.output_file, { force: true });
+			} catch {
+				// best-effort cleanup
+			}
+		}
+	}
+
+	if (!payload) return [];
 	try {
-		return JSON.parse(resp.result) as DecodeTrace[];
+		return JSON.parse(payload) as DecodeTrace[];
 	} catch {
 		return [];
 	}
@@ -257,6 +293,25 @@ function printProfileTable(traces: DecodeTrace[]): void {
 		console.log("\nNo decode traces captured (profile mode).");
 		return;
 	}
+
+	const buckets = new Map<DecodeTrace["mode"], DecodeTrace[]>();
+	for (const trace of traces) {
+		const list = buckets.get(trace.mode) ?? [];
+		list.push(trace);
+		buckets.set(trace.mode, list);
+	}
+
+	const modeOrder: Array<DecodeTrace["mode"]> = ["greedy", "topk", "full"];
+	const ordered = modeOrder
+		.map((m) => [m, buckets.get(m)] as const)
+		.filter((entry): entry is [DecodeTrace["mode"], DecodeTrace[]] => !!entry[1]);
+
+	for (const [mode, modeTraces] of ordered) {
+		printProfileBucket(mode, modeTraces);
+	}
+}
+
+function printProfileBucket(mode: DecodeTrace["mode"], traces: DecodeTrace[]): void {
 	const keys: Array<keyof DecodeTrace> = [
 		"ctxCreateMs",
 		"buildGraphMs",
@@ -267,7 +322,9 @@ function printProfileTable(traces: DecodeTrace[]): void {
 		"teardownMs",
 		"totalMs",
 	];
-	console.log(`\nPer-phase decode timing (${traces.length} single-token steps)`);
+	console.log(
+		`\nPer-phase decode timing — mode=${mode} (${traces.length} single-token steps)`,
+	);
 	console.log("Phase              mean(ms)  median(ms)  p90(ms)  %total");
 	console.log("-----------------  --------  ----------  -------  ------");
 	const totalMean = traces.reduce((acc, t) => acc + t.totalMs, 0) / traces.length;
@@ -378,6 +435,7 @@ Options:
       --tab <tab-id>    Use this specific Chrome tab ID
       --baseline <path> Baseline file path (default: ${BASELINE_PATH})
       --profile         Also print per-phase decode timing from browser traces
+      --thinking        Run with qwen3 chain-of-thought thinking enabled
   -h, --help            Show this help
 
 Prereqs:
