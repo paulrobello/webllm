@@ -11,12 +11,12 @@
 > with the other. The eval suite separates chat-style semantic reasoning
 > from true embedding-vector tasks, and the public streaming APIs route
 > through `Generator` + `InferenceSession`.
-> Current Task 5 profiled investigation baseline: 93.5 tok/s decode on
-> `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0`.
-> Use this for hotspot attribution, not as the new steady-state shipping
-> throughput baseline. **Note:** smoke-bench currently reports ~56 tok/s on
-> the same target — see Next Steps §1 for the open Apr-23 perf regression
-> investigation.
+> Current smoke-bench baseline (canonical): **~110 tok/s decode** on
+> `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0` with
+> realistic sampling (temp 0.7, topK 40, topP 0.95, repPenalty 1.05) after
+> wiring the smoke decode loop through the GPU TOP_K path on 2026-04-25.
+> Was ~59 tok/s when the loop only branched greedy/full and skipped the
+> existing `forwardDecode("topk")` middle path. See Next Steps §1.
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -485,40 +485,85 @@ needs to be collected.
     called), category x-axis given a labels array built from the sorted
     union of timestamps, `seriesLoaded` cache invalidated on every
     `eval_complete` event.
-- TODO.md records an Apr-23 ~50% smoke-bench tok/s regression bisect
-  result; the encoder branch is innocent — the drop landed somewhere
-  between `0548cd4` and `9c19088`. See Next Steps §1.
+- TODO.md records an Apr-23 ~50% smoke-bench tok/s drop; bisect attributed
+  it to the encoder-innocent commit `5542bef`. See Next Steps §1 for the
+  2026-04-25 root-cause finding (sampler-config change in the smoke page,
+  not an engine regression).
 
-1. **Investigate ~50% smoke-bench regression introduced in Apr-23 commits.**
-   `make smoke-bench PERF_RUNS=3 PERF_MODEL=tinyllama-1.1b-chat-q4_0` now
-   reports ~56 tok/s vs the 93.5 baseline noted at the top of this file —
-   roughly **-40%**. Bisect data (same WASM, same llama.cpp HEAD across all
-   runs; only the webllm TS bundle varies):
+1. **RESOLVED (2026-04-25): Apr-23 smoke-bench "regression" is a benchmark
+   methodology change, not an engine regression.** Bisect (TS bundle only;
+   WASM and llama.cpp HEAD constant via `make smoke-test` rebuilds):
 
-   | Commit | Date | tok/s |
-   |---|---|---|
-   | `0548cd4` (last fast point) | Apr 22 | **115.3** |
-   | `9c19088` (live-bench dashboard) | Apr 23+ | 56.0 |
-   | `b178a29` (top-k WASM fix) | Apr 24 | 58.4 |
-   | `d286548` (last pre-encoder commit) | Apr 24 | 55.8 |
-   | `main` (encoder-forward-pass merged) | Apr 24 | 56.4 |
+   | Commit | Sampler used by smoke page | Decode path | tok/s |
+   |---|---|---|---|
+   | `0548cd4` (last fast point) | `Sampler({ temperature: 0 })` | `forwardDecode` (4-byte readback) | **118.9** |
+   | `d111560` (profiling commit) | greedy | `forwardDecode` | **118.5** |
+   | `d131cf0` (KV cap commit) | greedy | `forwardDecode` | **119.6** |
+   | `5542bef` (qwen stability) | `makeSmokeSampler` (temp 0.7, topK 40, topP 0.95, repPenalty 1.05) | `forward` (full 32K logits) + JS topK/topP | **56.6** (page-reported) |
+   | `main` (HEAD a0d5b9a) | same as 5542bef | `forward` + JS topK/topP | **59.1** |
+   | `main` + `?temp=0&rep=1` URL override | greedy override | `forwardDecode` | **116.8** |
 
-   The encoder-forward-pass branch is **innocent** — `d286548` (immediately
-   before encoder work begins) is already at the regressed throughput. The
-   drop landed somewhere between `0548cd4` and `9c19088`. Top suspects:
-   - `5542bef Fix qwen smoke and chat generation stability` — touched the
-     generation loop / stop-token handling.
-   - `d131cf0 bench: cap browser smoke-test KV context by model` — directly
-     altered the bench harness for tinyllama; could have changed the KV
-     context size used during the bench.
-   - `9c19088 Add live benchmark dashboard with real-WebGPU accuracy bench`
-     — adds live-SSE wiring that runs concurrently with smoke decode.
+   **Root cause**: the new smoke decode loop in `5542bef` (and inherited by
+   the page-shell extractions through HEAD) only takes the GPU-reduced
+   ARGMAX fast path when `sampler.isGreedy && sampler.noPenalty`
+   (`smoke-test/real-model-smoke.js` → `getSmokeSamplingConfig`,
+   `smoke-test/real-model-page.js` decode loop). The new realistic sampler
+   has `temperature 0.7` and `repetitionPenalty 1.05`, so every step falls
+   through to `inference.forward()` — full 32K-vocab logits download plus
+   JS-side temperature/topK/topP/penalty work — instead of the 4-byte
+   greedy readback the old greedy page used.
 
-   Next action: bisect across the ~10 Apr-23 commits between `0548cd4` and
-   `9c19088` (two PERF_RUNS=2 bench iterations per candidate is sufficient
-   given the consistent ~55–60 tok/s noise floor on the slow side).
-   Until this is resolved, treat any tok/s numbers stored in the eval DB
-   from before this regression as not directly comparable to current runs.
+   **Engine evidence**: the same `main` build serving the same WASM hits
+   116.8 tok/s when the URL forces `temp=0&rep=1`. That matches the 118.9
+   tok/s baseline at `0548cd4` to within noise. There is no decode-path
+   regression in the inference engine, ggml-webgpu, or async readback.
+
+   **Decision (2026-04-25)**: realistic sampling is the new canonical
+   smoke-bench baseline. Do not re-baseline against the historical
+   `~115` / `~93.5` greedy-path numbers — they measured a different
+   workload and are retired as comparison targets. `forwardDecode` (greedy)
+   stays available as the upper-bound diagnostic via `?temp=0&rep=1`, but
+   smoke-bench tracks the realistic-sampling number going forward.
+
+   **Re-baseline of item 11 (2026-04-25)**, controlled comparison on HEAD
+   with TinyLlama-1.1B Q4_0 (3 trials each, medians shown):
+
+   | Scenario | Decode path | tok/s | ms/token |
+   |---|---|---|---|
+   | A — greedy + `forwardDecode` (4 B readback) | fast | **114.8** | 8.7 |
+   | B — greedy + `forward` (128 KB readback, argmax JS) | mid | **115.9** | 8.7 |
+   | C — sampled + `forward` + JS topK/topP/penalty | slow | **52.9** | 19.0 |
+
+   A vs B: ~0.1 ms/token. **Item 11's "negligible" framing still holds**
+   even post-async-readback — full 32 K-vocab readback costs essentially
+   nothing extra over the 4-byte ARGMAX readback. My earlier hedge was
+   wrong; do not block on re-baselining item 11 again.
+
+   B vs C: ~10 ms/token. **The entire 2× slowdown is the JS sampling
+   pipeline** (`Sampler.sample()` over 32 K floats: temperature scale +
+   topK selection + topP normalization, plus `applyRepetitionPenalty`
+   over the recent 64-token window). If decode optimization resumes,
+   that is the lever — vectorize / partial-sort / GPU-side topK before
+   chasing readback or graph-reuse. The temporary `?slowpath=1` URL
+   gate used to capture scenario B is not committed; re-add it from
+   git history if you want to re-measure.
+
+   **Fix landed (2026-04-25)**: the GPU TOP_K path already existed in
+   `Generator.generate` (`src/inference/generation.ts` 3-way branch
+   greedy/topk/full) but the smoke decode loop only branched greedy/full,
+   so realistic-sampler steps fell through to full-vocab readback + JS
+   topK on 32 K floats. Added a topk middle branch in
+   `smoke-test/real-model-smoke.js::createSmokeCompletionRunner` that
+   calls `inference.forwardDecode(..., "topk", sampler.topK)` and feeds
+   the reduced indices/values into `sampler.sampleFromTopK(...)` (which
+   already applies repetition penalty + temperature + topP on the
+   k-element set). Gated to skip when qwen masking/thinking state is
+   active (`thinkDepth > 0`, `waitingForVisibleAnswer`,
+   `hasVisibleAnswerText`) so the GPU's pre-mask top-K choice can't
+   leak masked tokens. Measured impact (TinyLlama Q4_0, 3 trials):
+   ~53 → ~111 tok/s (2.1×). Qwen3 thinking-off also benefits
+   (~76 tok/s with coherent output); thinking-on routes through the
+   full path unchanged.
 
 2. **If perf work resumes, keep it on narrow decode-compute tuning.**
    The current profiled traces still point to `graphCompute`, not readback, as

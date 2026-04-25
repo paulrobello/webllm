@@ -361,6 +361,32 @@ export function createSmokeCompletionRunner({
 					window.__decodeTraces.push({ ...inference.lastTrace });
 				}
 				sampledId = result.tokenId;
+			} else if (
+				sampler.topK > 0 &&
+				thinkDepth === 0 &&
+				!waitingForVisibleAnswer &&
+				!hasVisibleAnswerText
+			) {
+				// GPU TOP_K reduction → CPU sampling on k candidates only.
+				// Skipped when qwen masking/thinking state is active because the
+				// GPU picks top-K from raw logits before we can mask.
+				const result = await inference.forwardDecode(
+					new Int32Array([sampledId]),
+					new Int32Array([pos]),
+					"topk",
+					sampler.topK,
+				);
+				if (profileMode && inference.lastTrace) {
+					window.__decodeTraces.push({ ...inference.lastTrace });
+				}
+				if (!result.topKIndices || !result.topKValues) {
+					throw new Error("forwardDecode(topk) returned incomplete top-k data");
+				}
+				sampledId = sampler.sampleFromTopK(
+					result.topKIndices,
+					result.topKValues,
+					recent.slice(-64),
+				);
 			} else {
 				const stepLogits = await inference.forward(
 					new Int32Array([sampledId]),
