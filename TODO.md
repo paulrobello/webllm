@@ -418,6 +418,10 @@ needs to be collected.
   targeting matmul first, with encode overhead as the secondary decode-compute
   suspect.
 - **Update (2026-04-22):** Matmul follow-up attempt (increase legacy Q outputs per wg) showed no meaningful retained gain and was reverted.
+- **Update (2026-04-25):** baseline moved to ~110 tok/s after the GPU TOP_K
+  smoke-loop wiring (commit `9156deb`). Numbers in this section pre-date
+  that change — re-profile before relying on the bucket percentages. See
+  Next Steps §2 for the action.
 
 ### Completed on 2026-04-24
 
@@ -489,6 +493,22 @@ needs to be collected.
   it to the encoder-innocent commit `5542bef`. See Next Steps §1 for the
   2026-04-25 root-cause finding (sampler-config change in the smoke page,
   not an engine regression).
+- Re-baselined item 11 with the `?slowpath=1` URL gate (temporary, not
+  committed): full 32 K-vocab readback costs only ~0.1 ms/token over the
+  4-byte ARGMAX readback even post-async-readback. The "negligible gain"
+  framing for `forwardDecode("greedy")` is correct. The entire ~10 ms/token
+  gap between greedy and realistic sampling lives in the JS sampling
+  pipeline.
+- `perf(smoke): route realistic-sampler decode through GPU TOP_K path`
+  (commit `9156deb`). Added a topk middle branch in
+  `smoke-test/real-model-smoke.js::createSmokeCompletionRunner` that
+  calls `inference.forwardDecode(..., "topk", sampler.topK)` and feeds
+  the reduced indices/values into `sampler.sampleFromTopK(...)`. Gated
+  to skip when qwen masking/thinking state is active. **Measured impact
+  (TinyLlama Q4_0, 3 trials median): 52.9 → 110.7 tok/s (2.1×)**;
+  recovers 96% of the way to the greedy upper bound (114.8 tok/s).
+  Qwen3 thinking-off also benefits (~76 tok/s); thinking-on routes
+  through the unchanged full path (~16.6 tok/s).
 
 1. **RESOLVED (2026-04-25): Apr-23 smoke-bench "regression" is a benchmark
    methodology change, not an engine regression.** Bisect (TS bundle only;
@@ -565,18 +585,82 @@ needs to be collected.
    (~76 tok/s with coherent output); thinking-on routes through the
    full path unchanged.
 
-2. **If perf work resumes, keep it on narrow decode-compute tuning.**
-   The current profiled traces still point to `graphCompute`, not readback, as
-   the dominant bucket. Start with matmul-path work first, then reassess
-   encode/dispatch overhead with fresh measurements.
-3. **Decode graph reuse** (item 1) remains deferred.
-   The current richer trace still shows build/setup time as small compared with
-   `graphCompute`, so there is not yet enough evidence to make structural graph
-   reuse the next task.
-4. Test on a larger model (Phi-2, Llama-2-7B) now that the small model works.
-5. The latent 3+ binding buffer-conflict edge case in
+2. **Make the library the single source of truth for decode; delete the
+   parallel pipeline in smoke/bench. DO THIS BEFORE the next perf
+   re-profile (§3).** The topk-fix exercise made the cost of duplication
+   explicit: `Generator.generate` (`src/inference/generation.ts`) had the
+   correct three-way greedy/topk/full branch, but
+   `smoke-test/real-model-smoke.js::createSmokeCompletionRunner` had its
+   own decode loop that branched only greedy/full and silently dropped
+   ~50% of throughput. Any future perf win — GPU-side masking, decode
+   graph reuse, dispatch batching, sampler vectorization — that lands
+   only in one of the two pipelines will have the same problem.
+
+   **Plan**:
+   - Audit what the smoke loop has that `Generator.generate` doesn't:
+     qwen `thinkDepth` / `waitingForVisibleAnswer` /
+     `hasVisibleAnswerText` state machine, masked-token sets
+     (`getMaskedTokensWhileThinking`, `…AfterThinkingUntilAnswer`,
+     `…DuringAnswer`), `forbiddenReentryTokens`, `extraStopTokens`,
+     whitespace dedup loop (`tokenStartsWithWhitespace`,
+     `isWhitespaceOnlyTextToken`), and the `requireVisibleAnswer*`
+     guards. Cross-reference against the `requiresFullLogitsSteering`
+     state already inside `Generator.generate` — much of this likely
+     already exists in the library and just isn't reachable via the
+     smoke loop's call signature.
+   - For anything missing, port it into the library as opt-in
+     `GenerationConfig` fields (or an `InferenceSession` extension),
+     keeping the API stable for non-qwen consumers.
+   - Switch `createSmokeCompletionRunner` (and any duplicated decode
+     glue in `eval/chat-smoke*.ts` / `eval/browser-eval.ts` /
+     `smoke-test/real-model-bench.js`) to call
+     `engine.chatCompletion()` / `Generator.generate()` directly.
+     Sampler config selection (`getSmokeSamplingConfig`) and prompt
+     building (`buildSmokePrompt`) stay in smoke since they are
+     bench-policy, not decode-policy.
+   - Delete the smoke-side decode loop and helpers that are now dead.
+   - Verify with the existing tests + a tinyllama and qwen3 smoke run
+     (both thinking modes). Same prompt should yield the same output
+     bytes before and after (seeded sampler, deterministic).
+
+   **Why before the perf re-profile**: the next perf measurement
+   should be against the canonical pipeline, otherwise we waste effort
+   tuning a path that isn't what the public API uses, and any
+   optimization we land would have to be re-applied in the smoke
+   loop separately. Same logic applies to the `bench-full` path.
+
+3. **Re-profile decode after §2 lands and the topk fix is in the
+   canonical pipeline.** The 2026-04-22 profile breakdown
+   (graphCompute 91.8%, matmul 40.4% of graph time, 489 dispatches/token)
+   was captured against the old full-vocab + JS-sampling slow path.
+   With smoke-bench now at ~110 tok/s (decode step ≈ 9 ms/token) the
+   bucket attribution is stale. Run `make smoke-bench PERF_RUNS=3` with
+   `--profile` and re-record graphCompute / backendMatmulMs /
+   backendEncodeOverheadMs / backendDispatchCount before committing to
+   the next optimization. Likely-still-true: matmul + encode/dispatch
+   overhead remain the biggest compute-side buckets; the JS bucket is
+   now thin enough that further sampler-side optimization (WASM-port
+   `sampleFromTopK`, etc.) has tiny headroom.
+4. **GPU-side masking for qwen3 thinking-on (deferred).** Today the
+   topk branch is gated off when `thinkDepth > 0` /
+   `waitingForVisibleAnswer` / `hasVisibleAnswerText` because the GPU
+   picks top-K from raw logits before we can mask. Result: qwen3
+   thinking-on stays on the slow full path (~16.6 tok/s observed). Two
+   ways to recover: post-filter top-K on CPU (drop masked indices,
+   re-sample if K-after-filter is too small), or push the mask set
+   into the GPU TOP_K dispatch. Neither blocks any current workload.
+   Best implemented inside the library after §2.
+5. **Decode graph reuse** (item 1) remains deferred.
+   The richer trace still shows build/setup time as small compared with
+   `graphCompute`, so there is not yet enough evidence to make structural
+   graph reuse the next task.
+6. **Test on a larger model** (Phi-2, Llama-2-7B) now that the small
+   model works. Worth doing before the next perf pass — bigger models
+   shift the matmul/dispatch-overhead ratio and may change which lever
+   is highest-impact.
+7. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` remains untested — no llama op hits it today.
-6. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
+8. **JSPI feasibility checkpoint** remains a follow-up investigation, not the
    next implementation step.
    - **Go/no-go:** no-go for the current milestone; the completion-driven
      readback path is the active baseline.
