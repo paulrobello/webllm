@@ -34,6 +34,67 @@ const state = {
 	evalSeries: [],
 };
 
+// ── persisted filter / sort state ─────────────────────────────────
+// localStorage survives page reloads but not domain changes; the
+// dashboard always lives at the same origin (the live-server) so
+// this is the right scope. Per-tab session storage would lose
+// state across reloads, which is the opposite of what we want.
+const FILTER_STORAGE_KEY = "webllm-dashboard-filters/v1";
+
+function loadPersistedFilters() {
+	try {
+		const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+		if (!raw) return;
+		const saved = JSON.parse(raw);
+		if (typeof saved !== "object" || saved === null) return;
+		if (typeof saved.sortKey === "string") state.sortKey = saved.sortKey;
+		if (saved.sortDir === "asc" || saved.sortDir === "desc")
+			state.sortDir = saved.sortDir;
+		if (
+			saved.thinkingFilter === "all" ||
+			saved.thinkingFilter === "on" ||
+			saved.thinkingFilter === "off"
+		) {
+			state.thinkingFilter = saved.thinkingFilter;
+		}
+		if (typeof saved.textFilter === "string")
+			state.textFilter = saved.textFilter;
+		if (typeof saved.evalSortKey === "string")
+			state.evalSortKey = saved.evalSortKey;
+		if (saved.evalSortDir === "asc" || saved.evalSortDir === "desc")
+			state.evalSortDir = saved.evalSortDir;
+	} catch {
+		// Quota exceeded, JSON parse error, private-mode storage disabled —
+		// fall back to defaults silently. Filter state is convenience, not
+		// correctness.
+	}
+}
+
+function persistFilters() {
+	try {
+		localStorage.setItem(
+			FILTER_STORAGE_KEY,
+			JSON.stringify({
+				sortKey: state.sortKey,
+				sortDir: state.sortDir,
+				thinkingFilter: state.thinkingFilter,
+				textFilter: state.textFilter,
+				evalSortKey: state.evalSortKey,
+				evalSortDir: state.evalSortDir,
+			}),
+		);
+	} catch {
+		// see loadPersistedFilters() for rationale.
+	}
+}
+
+function syncFilterControlsToState() {
+	const thinkingSel = document.getElementById("filter-thinking");
+	if (thinkingSel) thinkingSel.value = state.thinkingFilter;
+	const textInput = document.getElementById("filter-text");
+	if (textInput) textInput.value = state.textFilter;
+}
+
 // ── SSE connection ────────────────────────────────────────────────
 let eventSource = null;
 let lastSeq = 0;
@@ -1991,6 +2052,7 @@ document.querySelectorAll("#runs-table thead th.sortable").forEach((th) => {
 			state.sortKey = key;
 			state.sortDir = key === "timestamp" ? "desc" : "desc";
 		}
+		persistFilters();
 		renderTable();
 	});
 });
@@ -2003,16 +2065,19 @@ document.querySelectorAll("#evals-table thead th.sortable").forEach((th) => {
 			state.evalSortKey = key;
 			state.evalSortDir = "desc";
 		}
+		persistFilters();
 		renderEvals();
 	});
 });
 
 document.getElementById("filter-thinking").addEventListener("change", (e) => {
 	state.thinkingFilter = e.target.value;
+	persistFilters();
 	renderTable();
 });
 document.getElementById("filter-text").addEventListener("input", (e) => {
 	state.textFilter = e.target.value.trim();
+	persistFilters();
 	renderTable();
 });
 
@@ -2045,5 +2110,10 @@ document.addEventListener("keydown", (e) => {
 		document.getElementById("modal-backdrop").hidden = true;
 	}
 });
+
+// Restore filter / sort state from localStorage before the first
+// SSE batch lands so initial renders honor the persisted view.
+loadPersistedFilters();
+syncFilterControlsToState();
 
 connect();
