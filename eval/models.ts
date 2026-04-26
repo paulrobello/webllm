@@ -299,7 +299,12 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "quality",
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/Qwen3-4B-q4f16_1-MLC",
-		ggufUrl: "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
+		// Qwen/Qwen3-4B-GGUF only carries K-quants + Q5/Q6/Q8 (no Q4_0).
+		// Switched to unsloth's mirror to match wave-1 cross-family Q4_0
+		// quant convention. Pin "Q4_0." with trailing dot to skip any
+		// future ARM-repack variants (mirrors llama-3.2-3b/hermes-3 style).
+		ggufUrl: "https://huggingface.co/unsloth/Qwen3-4B-GGUF",
+		ggufFilePattern: "Q4_0.",
 	},
 
 	// --- Specialized models ---

@@ -200,6 +200,21 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Qwen3 4B ───────────────────────────────────────────────
+	{
+		name: "qwen3-4b-warm",
+		model: "qwen3-4b-q4f16",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
+	{
+		name: "qwen3-4b-thinking-warm",
+		model: "qwen3-4b-q4f16",
+		thinking: "on",
+		temperature: 0.6,
+		maxTokens: 1024,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Snowflake Arctic Embed (encoder-only) ──────────────────
 	// Embedding profiles don't generate; the temperature / thinking /
 	// prompt fields are intentionally absent. Bench harnesses key on
@@ -234,6 +249,8 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen3-0.6b-thinking-warm",
 		"qwen3-1.7b-off-warm",
 		"qwen3-1.7b-thinking-warm",
+		"qwen3-4b-warm",
+		"qwen3-4b-thinking-warm",
 	],
 	"temperature-sweep": [
 		"qwen3-0.6b-off-cold",
@@ -276,6 +293,8 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen2.5-3b-warm",
 		"llama-3.2-3b-warm",
 		"hermes-3-llama-3.2-3b-warm",
+		"qwen3-4b-warm",
+		"qwen3-4b-thinking-warm",
 		"arctic-embed-s",
 		"arctic-embed-m",
 	],
