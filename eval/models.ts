@@ -509,6 +509,32 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufUrl: "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
 		ggufFilePattern: "IQ3_M",
 	},
+
+	// Wave 2 model 4 — Qwen3-8B at IQ3_M to round out the cross-
+	// family 8B comparison alongside Llama-3.1-8B IQ3_M. Q4_K_S
+	// 8B (4580 MB) exceeds the 4 GiB WASM cap; IQ3_M (3897 MB)
+	// fits with margin and reuses the same GGML_TYPE_IQ3_S code
+	// path verified working on Mistral IQ4_XS / Llama-3.1-8B
+	// IQ3_M in §13. Bartowski mirror is open with the full IQ
+	// ladder.
+	{
+		id: "qwen3-8b-iq3m",
+		name: "Qwen3 8B",
+		family: "Qwen3",
+		architecture: "qwen",
+		paramsB: 8.19,
+		vramMB: 4500,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: true, structuredOutput: true, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/Qwen/Qwen3-8B",
+		ggufUrl: "https://huggingface.co/bartowski/Qwen_Qwen3-8B-GGUF",
+		ggufFilePattern: "IQ3_M",
+	},
 ];
 
 /** Tier display order and labels. */

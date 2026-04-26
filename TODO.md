@@ -127,7 +127,7 @@
 > means that buffer was never used). Unblocks all wave-2
 > 7B+ candidates; reclaims multi-GB headroom across all sizes.
 >
-> **Wave 2 begun 2026-04-26 (Completed §12, §13, §15):** 3/4 done.
+> **Wave 2 complete 2026-04-26 (Completed §12, §13, §15, §16):** 4/4 done.
 > - **mistral-7b-instruct-v0.3-q4ks**: 34.4 tok/s steady-state
 >   / 26/36 (68%). 32 layers, GQA 4:1, KV 1024 MB, 650
 >   dispatches/token, matmul 47.0% of graph (~45% of decode).
@@ -153,11 +153,25 @@
 >   accuracy with Q4_K_S. **Q3_K is not a useful speed
 >   lever even when the file fits the cap;** Q4_K_S
 >   remains the throughput default at 7B.
+> - **qwen3-8b-iq3m** (§16, wave 2 closer): **16.2 tok/s
+>   steady-state / 33/36 (90%) off / 33/36 (90%) on.** 36
+>   layers, GQA 4:1, KV 1024 MB, **805 dispatches/token
+>   (matches qwen3-4b — qwen3 architecture-invariant)**,
+>   matmul 66.7% of graph (~65% of decode). **Effectively
+>   tied with llama-3.1-8b on speed** despite +23%
+>   dispatches — bandwidth-bound matmul flattens dispatch
+>   overhead. **Top accuracy in fleet** (ties qwen3-4b
+>   thinking-on at 90%); Qwen3 family quality advantage
+>   holds at 8B (+4 points over Llama-3.1-8B IQ3_M).
 > - **Net wave-2 finding:** at scale the §A subgroup-
 >   cooperative-loading ceiling rises sharply
->   (4B Q4_0: ~13% → 7B Q4_K_S: ~18% → 8B IQ3_M: ~28% of
->   decode time). The lever's percentage of total decode
->   keeps growing with scale.
+>   (4B Q4_0: ~13% → 7B Q4_K_S: ~18% → 8B IQ3_M: ~26-28%
+>   of decode time). The lever's percentage of total
+>   decode keeps growing with scale, regardless of
+>   family. **Quant compute cost is the load-bearing
+>   throughput axis at 7B+; family is a quality knob**
+>   (Q4_K_S → IQ3_M halves speed; same-quant family
+>   swap moves throughput <1%).
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -1679,14 +1693,118 @@ needs to be collected.
       next entry to round out the family-pattern analysis
       (Qwen accuracy ceiling vs Llama 3.1 IQ3_M's 86%).
 
+16. **Wave 2 model 4 — qwen3-8b-iq3m registered + benched
+    (wave 2 complete).** Cross-family 8B tie-break against
+    Llama-3.1-8B IQ3_M from §13. Bartowski mirror open;
+    pinned `ggufFilePattern: "IQ3_M"` (3716 MB file, fits
+    with margin under 4 GiB cap). Same `GGML_TYPE_IQ3_S`
+    code path verified working in §13 — pure quant-pin
+    change, zero engine work needed.
+    - **Profiles registered:** `qwen3-8b-warm` and
+      `qwen3-8b-thinking-warm` (mirrors qwen3-4b layout —
+      both modes for the qwen3 family); added to
+      `SMOKE_PROFILE_SETS.full` and `qwen3-sizes`.
+    - **Architecture (qwen3 / 36 layers):** matches
+      qwen3-4b's layer count; n_head 32 · n_head_kv 8
+      (GQA 4:1, same as Llama-3.1-8B and qwen3-4b) ·
+      embedding 4096 · head_dim 128 · ffn 12288 · vocab
+      151936 (Qwen3 tokenizer family). KV cache @ ctx=4096
+      = **1024 MB** (same as Llama-3.1-8B at the same
+      32-layer-equivalent KV shape).
+    - **Speed (3-trial median):**
+      - Steady-state **16.2 tok/s** (runs: 16.2 / 16.1 /
+        16.6 — tightest spread alongside Llama-3.1-8B's
+        16.3). **Effectively tied with llama-3.1-8b-iq3m**
+        (delta -0.6%, well inside noise).
+      - Profile-mode 14.6 tok/s (perturbation -10%, in
+        line with the 8B class where graph compute
+        dominates — Llama-3.1-8B was -11%).
+      - Chat-regression 14.5–14.9 tok/s (oneShot/
+        interactive); prefill 454 ms.
+    - **Profile-mode backend attribution (60-step decode):**
+      - `backendMatmulMs` 45.71 mean / **66.7% of graph**
+        — slightly under llama-3.1-8b's 71.4%. Absolute
+        matmul time near-identical (45.7 vs 47.1 ms);
+        graph fraction differs because Qwen3's per-head
+        Q-norm/K-norm pushes a bit more work into encode.
+      - `backendEncodeOverheadMs` 5.57 / 8.1% —
+        comparable to Llama-3.1-8B's 6.08 / 9.2%.
+      - `backendAttentionMs` 0.69 / 1.0%.
+      - `backendDispatchCount` **805/token — matches
+        qwen3-4b exactly.** qwen3 architecture-invariance
+        confirmed across the 4B → 8B span (805 is the
+        signature: 36 layers × ~22 ops/layer + globals).
+        +23% over Llama-3.1-8B's 652 (qwen3 has an extra
+        per-head norm pair); doesn't affect throughput
+        because matmul bandwidth dominates.
+      - graphComputeMs 97.4% of step → matmul ≈ **65% of
+        decode** (vs ~69% on Llama-3.1-8B IQ3_M).
+    - **Smoke chat regression:** PASSED both modes.
+      - Off: `"Why don't skeletons fight each other?
+        Because they don't have the *guts*. 😄"` —
+        finish=eos, 21 tokens.
+      - Thinking: clean `<think>` block (322 tokens of
+        candidate-joke deliberation) → same skeleton
+        joke punchline; finish=eos, 322 tokens total.
+        Both `<|im_end|>` and `<|endoftext|>` masking
+        held correctly.
+    - **Accuracy (`bench-profile PROFILES=qwen3-8b-warm
+      qwen3-8b-thinking-warm`):**
+      - Off-warm: **33/36 = 90%** — ties qwen3-4b
+        thinking-on for top of fleet.
+      - Thinking-warm: **33/36 = 90%** — same; both modes
+        converged.
+      - +4 points over Llama-3.1-8B IQ3_M (86%) at near-
+        identical param count and identical quant; the
+        Qwen3 family quality advantage holds at 8B.
+      - Tool-calling skipped (warm temp 0.6 > 0.4 gate);
+        embedding skipped (model lacks capability).
+    - **Cross-family 8B summary at IQ3_M (wave 2 closes):**
+      | Model            | Family   | Layers | Disp/tok | tok/s | Accuracy |
+      |------------------|----------|-------:|---------:|------:|---------:|
+      | llama-3.1-8b     | Llama 3.1|     32 |      652 |  16.3 |     86%  |
+      | **qwen3-8b**     | Qwen3    |     36 |      805 |  16.2 |     90%  |
+      Speed parity at 8B IQ3_M despite +23% dispatches:
+      bandwidth-bound matmul flattens dispatch-count
+      overhead. Family-quality gap (Qwen3 > Llama 3.1 by
+      ~4 points) holds at the 8B IQ3_M shape, mirroring
+      the 4B Q4_0 result (qwen3-4b 88-90% vs llama-3.2-3b
+      76% / hermes-3 74% — 12-16 pt gap; shrinks to 4 pt
+      at 8B because Llama 3.1 narrows the quality gap
+      meaningfully over Llama 3.2).
+    - **§A subgroup-cooperative-loading ceiling at 8B
+      IQ3_M Qwen3:** matmul 65% of decode × ~40%
+      bandwidth-bound (per §9 Stub B characterization)
+      ≈ **26% of decode time** — close to the 28%
+      predicted from Llama-3.1-8B IQ3_M's 71% matmul
+      slice. The lever's headroom keeps growing into
+      the 8B regime regardless of family.
+    - **Net wave-2 finding (4 entries, 3 quants, 2
+      families):** at scale, model-quality and quant
+      choice dominate throughput differences far more
+      than family-architecture differences do. Q4_K_S vs
+      IQ3_M cuts speed in half (Mistral Q4_K_S 34.4 →
+      Llama IQ3_M 16.3 / Qwen3 IQ3_M 16.2) for ~the same
+      param count; switching families at the same quant
+      moves throughput <1%. **Quant compute cost is the
+      load-bearing axis at 7B+; family is a quality
+      knob.**
+    - **Registration changes:** new model entry in
+      `eval/models.ts` (mirrors §13 Llama IQ3_M structure);
+      two new profiles in `eval/smoke-profiles.ts`;
+      profiles added to `SMOKE_PROFILE_SETS.full` and
+      `qwen3-sizes`. `make checkall` clean (393/5/0
+      pre-bench, no engine changes).
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
-skipped).** Wave 2 underway: **3/4 done** (mistral-7b-v0.3-q4ks
+skipped). Wave 2 complete: 4/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
-86% — §13; mistral-7b-v0.3-q3km at 19.7 tok/s / 69% — §15).
-Findings, one bug fix, one upstream rebase, one quant-promotion,
-plus a dashboard hygiene pass from these sessions:
+86% — §13; mistral-7b-v0.3-q3km at 19.7 tok/s / 69% — §15;
+qwen3-8b-iq3m at 16.2 tok/s / 90% off / 90% on — §16).
+Findings, one bug fix, one upstream rebase, one quant-
+promotion, plus a dashboard hygiene pass from these sessions:
 
 - **Bug #28 (Q3_K shader) FIXED — see §14.** Root cause was
   UB shift-by-32 in `load_u32_at_src{,0}` u32 loader helpers
@@ -1712,8 +1830,19 @@ plus a dashboard hygiene pass from these sessions:
   3.1-8B, ~3252 MB Qwen3-8B IQ3_XXS). MEMORY64 to bump
   the cap to 8 GiB requires the wasm memory64 proposal —
   multi-day engineering effort, not a flag flip.
-- **§A subgroup-loading ceiling scales with model size:**
-  4B Q4_0 ~13% → 7B Q4_K_S ~18% → 8B IQ3_M ~28% of decode.
+- **§A original premise REJECTED 2026-04-26.** Walked
+  `mul_mat_vec.wgsl`: src0 already partitioned perfectly
+  across threads (every weight byte read by exactly one
+  thread). Subgroup-broadcast cannot share what isn't
+  duplicated. §7's Stub-B speedup was load-**latency**,
+  not bandwidth. **Replacement levers in updated §A:**
+  (1) coarsen THREADS_PER_BLOCK 4→2 (halve load-issue
+  rate, one #define per quant — start here);
+  (2) vec4-packed consecutive-address loads (Q8/Q5/IQ
+  inner loops only); (3) lift `d` fp16 scale loads out
+  of the OUTPUTS_PER_WG row loop. Predicted combined
+  ceiling ~8-14% of total decode at 8B IQ3_M (down from
+  the rejected 26-28% but still real).
 - **Loader / parser refactor (§11):** GGUF streams cleanly
   through the WASM heap; ctxCreate over-allocation fixed.
   Confirmed working at 3.6 GB / 3.95 GB streaming.
@@ -1739,25 +1868,34 @@ plus a dashboard hygiene pass from these sessions:
   reload required to see the cleanup (live-server SSE doesn't
   broadcast deletes).
 
-**Next target options (pick one — recommended order: A → B,
-then everything else as appetite allows):**
+**Next target options (pick one — recommended order: B → E
+items, with A/C/F all closed):**
 
-A. **Add Qwen3-8B IQ3_M as wave-2 model 4** (final wave-2
-   slot) to complete the cross-family 8B comparison.
-   Qwen3-8B Q4_K_S exceeds the cap (4580 MB); IQ3_M is
-   the IQ-family equivalent. Same workflow as §13.
-   Expected ~13-15 tok/s steady, ~88-92% accuracy if
-   Qwen3 family pattern holds. Only ~30 min plus download
-   time. Highest information-per-hour. **Recommended.**
+A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done —
+   see §16. Wave 2 complete (4/4). 16.2 tok/s steady-
+   state / 90% off / 90% on. Top-of-fleet accuracy ties
+   qwen3-4b thinking-on; effectively tied with Llama-
+   3.1-8B on speed despite +23% dispatches.**
 
-B. **Pick up §A subgroup-cooperative loading.** The new
-   data point (matmul = 71.4% of graph at 8B IQ3_M) makes
-   §A's theoretical ceiling rise to ~28% of decode time.
-   With three working baselines at 4B / 7B / 8B and
-   matmul leading by a wide margin at 8B, this is the
-   highest-leverage perf optimization. Also the most
-   uncertain (subgroup-broadcast WGSL, may need
-   shader-architecture changes).
+B. **§A subgroup-cooperative loading — premise REJECTED
+   on inspection 2026-04-26. See updated §A entry below
+   for the kernel walk-through.** Subgroup-broadcast
+   cannot help: the existing kernel already partitions
+   src0 perfectly across threads (every weight byte read
+   by exactly one thread per pass). §7's Stub B speedup
+   was load-latency-bound, not bandwidth-bound.
+   **Viable replacement levers (in §A): (1) coarsen
+   THREADS_PER_BLOCK from 4 → 2 to halve load-issue rate;
+   (2) vec4-packed loads for consecutive-address
+   sequences (Q8/Q5/Q4_K_S/IQ inner loops); (3) lift
+   per-row `d` fp16 scale loads out of the OUTPUTS_PER_WG
+   row loop.** Predicted combined ceiling ~8-14% of total
+   decode at 8B IQ3_M (lower than the 26-28% pre-analysis
+   ceiling but still meaningful). **Recommended starting
+   point:** lever (1) on the 4-baseline harness — a
+   one-line change per quant. If it pays, layer in (2)
+   and (3). If it doesn't, the kernel is deeper-pipelined
+   than expected and §A is closed.
 
 C. ~~Fix the Q3_K shader (#28).~~ **Done — see §14.**
 
@@ -1767,49 +1905,51 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done —
    tied accuracy).**
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
-   priority).** Confirmed in this session that 4 GiB is
-   the 32-bit WASM hard cap (`wasm-ld: error: maximum
-   memory too large, cannot be greater than 4294967296`).
-   Going beyond requires `-sMEMORY64=1` (changes pointer
-   types throughout the bridge, possible asyncify
-   interactions). Multi-day engineering. Only worth it
-   for wave-3 12B+ candidates that need Q4_K_S+.
+   priority).** Confirmed in earlier sessions that 4 GiB
+   is the 32-bit WASM hard cap. Going beyond requires
+   `-sMEMORY64=1` (changes pointer types throughout the
+   bridge, possible asyncify interactions). Multi-day
+   engineering. Only worth it for wave-3 12B+ candidates
+   that need Q4_K_S+.
 
-E. **Other deferred items** (lower priority than A/B/F):
+E. **Other deferred items** (lower priority than B):
    - **§B FA shape-routing** for prefill/TTFT (§5 path a).
      FA's main win is seq>1; long-prompt latency lever.
      Becomes more attractive at 8B+ where K-dimension grows.
    - **§C drafter-based speculative decoding.** Large
      project; 2-3× wall-clock potential. Drafter could be
      wave-1 small (smollm2-360m, qwen3-0.6b) paired with a
-     7B-8B target.
+     7B-8B target. With wave 2 closed, the qwen3-0.6b →
+     qwen3-8b draft pair is now an obvious match.
    - **§D encoder/embedding perf pass.** Untouched since
      §21 dashboard.
    - **Deferred wave-1 architectures** (Gemma 2, Phi 3) —
      5+ gaps for Gemma; mostly fused-QKV for Phi 3. See
      "Completed on 2026-04-26" §9.
 
-**Net characterization at 8B IQ3_M (post-§13):** matmul =
-71% of graph × 97% of step ≈ **69% of decode time** —
-dominant bucket by a wide margin. §A subgroup-cooperative
-loading ceiling is ~28% of decode at 8B IQ3_M (matmul
-fraction × ~40% bandwidth-bound fraction from §9 Stub B).
-That's 2× the lever's 4B Q4_0 ceiling; §A becomes
-markedly more attractive at the new scale. Whether it pays
-its theoretical ceiling is still open — measure on the
-existing baselines before extending the fleet.
+**Net characterization at 8B IQ3_M (post-§16, both
+families):** matmul ≈ 65-69% of decode (Llama-3.1 71%,
+Qwen3 67% × graph 97% of step). §A's pre-analysis ceiling
+was ~26-28% of decode (matmul × 40% bandwidth-bound
+fraction from §9 Stub B). **The post-inspection ceiling
+is lower (~8-14% combined)** because the bandwidth-bound
+fraction is really load-latency-bound, and the only viable
+levers reduce issue rate, not bytes. Still the highest-
+leverage perf target left without scope expansion;
+worth a measurement pass before declaring closed.
 
 Boot sequence for a fresh session:
 
-1. `make checkall` — confirm 393 pass / 5 skip / 0 fail.
-2. `git log --oneline -5` — top of `main` should be
-   `e80c08b feat(eval): §15 wave-2 model 4 — mistral-7b-v0.3
-   -q3km promoted` (latest landing). Below that:
-   `a349b8c` (TODO refresh + llama.cpp rebase log),
-   `69f3c86` (bug-#28 closure docs), `0b863f5` (wave-2
-   model 2 — Llama-3.1-8B IQ3_M), `83dc890` (wave-2
-   model 1 + bug #28 discovery).
-3. `git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`
+1. **`make checkall`** — confirm 393 pass / 5 skip / 0 fail.
+2. **`git log --oneline -5`** — top of `main` should
+   reflect the §16 / §A-revision landing
+   (`feat(eval): §16 wave-2 model 4 — qwen3-8b-iq3m
+   registered` or similar, plus a docs commit refreshing
+   §A's levers). Below that: `e31dc62` (dashboard
+   inference/embeddings tab split), `a95f995` (TODO refresh
+   post §15 + dashboard cleanup), `e80c08b` (§15
+   mistral-7b Q3_K_M promoted).
+3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
    — confirm the **11-patch stack** is intact and the base
    is upstream `78433f606 Fix recurrent state serialization`
    (rebased 2026-04-26). Tip is `a536df4f4 ggml-webgpu: fix
@@ -1817,69 +1957,124 @@ Boot sequence for a fresh session:
    bug #28 fix. Safety branch
    `webllm-browser-patches-pre-rebase-2026-04-26` preserves
    the pre-rebase tip if needed.
-4. **Verify the WASM build still matches the rebased
-   patches:** `make wasm-build && bun build src/index.ts
-   --outfile smoke-test/webllm-bundle.js --target browser
-   && cp src/wasm/build/webllm-wasm.{js,wasm} smoke-test/
-   && make smoke-restart`. Then run
-   `tests/q3km-smoke-test.sh` (or navigate the smoke-test
-   page to `model=mistral-7b-instruct-v0.3-q3km`) — Q3_K_M
-   coherent at ≥20 tok/s confirms the rebase didn't break
-   patch 11.
-5. Read "Completed on 2026-04-26" §12 (Mistral 7B Q4_K_S +
-   bug #28 discovery), §13 (Llama 3.1 8B IQ3_M + IQ-family
-   workaround), §14 (bug #28 fix: UB-safe u32 loaders), and
-   §15 (Q3_K_M promotion — wave 2 model 4, finding that
-   K-quant compute overhead defeats bandwidth savings at 7B).
-   The full cross-family table at the end of §15 is the
-   headline; §14 is the diagnosis-and-fix narrative.
+4. **Verify the WASM build matches the rebased patches:**
+   `make wasm-build && bun build src/index.ts --outfile
+   smoke-test/webllm-bundle.js --target browser && cp
+   src/wasm/build/webllm-wasm.{js,wasm} smoke-test/ && make
+   smoke-restart`. Then navigate the smoke page to
+   `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M coherent
+   at ≥20 tok/s confirms patch 11 is healthy. (Skip if the
+   `smoke-test/webllm-wasm.{js,wasm}` mtime is recent and
+   matches HEAD — the §16 session left fresh artifacts.)
+5. **Read for context:** "Completed on 2026-04-26" §12-§16
+   (wave 2 closure narrative, with §15 cross-family table
+   as headline) and the **updated §A entry** in "Deferred
+   kernel-tuning targets" — the original subgroup-
+   broadcast premise is rejected; replacement levers are
+   THREADS_PER_BLOCK coarsening, vec4-packed loads, and
+   `d`-scale lifting.
 6. **Dashboard state check** (optional but useful before
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
-   COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` — should
-   return 27 runs / 28 evals (16+11 runs, 17+11 evals after
-   the 2026-04-26 hygiene pass + baseline re-bench). If the
-   dashboard tab is open from a prior session, force-reload
-   the page — live-server SSE doesn't broadcast deletes.
+   COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
+   after §16 should return **29 runs / 30 evals** (27/28
+   post-2026-04-26 hygiene + 2 qwen3-8b runs from §16).
+   The live dashboard SSE counter shows higher numbers
+   (~52/53 after §16) because it accumulates streaming
+   events without DB persistence; both views are correct
+   but independent. If the dashboard tab is open from a
+   prior session, force-reload — SSE doesn't broadcast
+   deletes.
 
-**Recommended first move:** option A (Qwen3-8B IQ3_M) —
-the only ~30-minute win left to close out wave 2. Options
-C / F (Q3_K shader fix, Q3_K_M promote/retire) closed in
-§14 / §15. Option B (subgroup-cooperative loading) is the
-bigger perf lever but uncertain and hours-long; with
-matmul=71% of graph at 8B, its theoretical ceiling is now
-~28% of decode time — measure on the 3-baseline harness
-(TinyLlama Q4_0 / Mistral-7B Q4_K_S / Llama-3.1-8B IQ3_M)
-before extending to Qwen3-8B.
+**Recommended first move:** option B (§A revised lever 1
+— THREADS_PER_BLOCK 4→2). Cheapest and most diagnostic
+of the three new levers; tells us whether the kernel is
+load-latency-bound (lever pays) or already-pipelined
+(lever neutral or negative → §A is closed).
 
-If continuing wave 2 (option A): GGUF mirror probe FIRST
-via `curl -s "https://huggingface.co/api/models/<repo>/tree/main" | python3 -c "..."`.
+#### How to test §A lever 1 — THREADS_PER_BLOCK 4→2
+
+**The change.** Edit
+`~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`
+on `webllm-browser-patches`. Per quant block, change
+`#define THREADS_PER_BLOCK 4` to `2` and adjust the
+inner loop so each thread covers double the bytes.
+
+| Quant | `#ifdef` | Loop change |
+|-------|----------|-------------|
+| Q4_0  | `MUL_ACC_Q4_0`  (line 131) | `THREADS_PER_BLOCK 2`; thread now reads 2 u32s of q (8 bytes) and 16 src1 elements per block. Adjust `block_byte_base + 2u + 4u * thread_within_block` → `+ 8u * thread_within_block + 4u * inner_packed` over 2 packed iterations. |
+| Q8_0  | `MUL_ACC_Q8_0`  (line 289) | `THREADS_PER_BLOCK 2`; ELEMS_PER_THREAD becomes 16. Outer `packed_idx` loop runs 4× instead of 2×. |
+| Q4_K_S, IQ3_M, IQ4_XS | similar | each has own block size; check whether `THREADS_PER_BLOCK` is a `#define` or a literal — Q2_K-class uses 16, leave alone. |
+
+**The 4-baseline harness.** Always measure both
+non-profile and profile mode:
+
+```bash
+# Pre-change baseline (re-verify; numbers may drift between sessions)
+make smoke-restart
+for m in tinyllama-1.1b-chat-q4_0 mistral-7b-instruct-v0.3-q4ks \
+         llama-3.1-8b-instruct-iq3m qwen3-8b-iq3m; do
+  echo "=== $m ==="
+  make bench-inference PERF_MODEL=$m PERF_RUNS=3 2>&1 | grep -A4 "p50\*"
+  make smoke-bench    PERF_MODEL=$m PERF_RUNS=3 2>&1 | grep -A4 "backendMatmulMs"
+done
+
+# Apply lever 1 to mul_mat_vec.wgsl, then:
+make wasm-build && bun build src/index.ts --outfile \
+  smoke-test/webllm-bundle.js --target browser && \
+  cp src/wasm/build/webllm-wasm.{js,wasm} smoke-test/
+
+# Re-run the same 4 baselines (post-change)
+# Decision: ship if all 4 are within noise or net-positive
+# AND profile-mode `backendMatmulMs` drops by 5%+ on at
+# least one quant. Revert if any model regresses >3% on
+# steady-state tok/s.
+```
+
+**Coherence guard.** Output garbage if the loop bounds
+are off by one. Run the smoke page on each model after
+the WASM rebuild and verify the joke prompt produces
+sensible English before trusting the perf number.
+
+**Expected results map.**
+- Lever 1 helps → matmul drops ~10-20% on Q4_0 and Q8_0,
+  steady-state tok/s rises 5-12% across the harness.
+  Layer in lever 2 (Q8 vec4-packed) and lever 3
+  (`d`-scale lifting); each adds another 1-3%.
+- Lever 1 hurts → Q4_0 and Q8_0 matmul flat or up. Means
+  the GPU was already pipelining loads across warps;
+  doubling per-thread work cost more in register pressure
+  than it saved in issue rate. Try lever 2 first instead;
+  if that's also flat, **§A is closed and the next
+  highest-leverage option is §C drafter-based speculative
+  decoding** (large project, 2-3× wall-clock potential).
+
+**If extending the size campaign instead** (option D /
+wave-3 territory): GGUF mirror probe FIRST via
+`curl -s "https://huggingface.co/api/models/<repo>/tree/main" | python3 -c "..."`.
 Wave 1 hit three bad mirrors and wave-2's Mistral mirror
 also lacked Q4_0. Unsloth and bartowski have been the
 reliable fallbacks. Pin `ggufFilePattern` in `eval/models.ts`
 and verify the chosen quant's code path is supported
-(Q3_K_M / Q4_K_S / Q4_K_M working; IQ-family working
-including IQ3_M / IQ3_S / IQ3_XXS / IQ4_XS).
+(Q3_K_M / Q4_K_S / Q4_K_M working post-§14; IQ-family
+working including IQ3_M / IQ3_S / IQ3_XXS / IQ4_XS). At
+12B+ Q4_K_S exceeds 4 GiB; option D (`MAXIMUM_MEMORY`
+bump via `-sMEMORY64=1`) becomes a prerequisite.
 
-If picking up §A subgroup-cooperative loading (option B):
-the kernel lives at
-`~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`.
-The §6–§9 stub diagnostics (TODO §6 / §7 / §8 in this file)
-characterized matmul as bandwidth-bound on Q4_0 / Q8_0 with
-src0 (weights) the dominant cost. §A's design is to share
-src0 reads across subgroup threads via `subgroupBroadcast` /
-`subgroupShuffle`. Validate against the 3-baseline regression
-harness: TinyLlama Q4_0 / Mistral 7B Q4_K_S / Llama 3.1 8B
-IQ3_M.
+#### Operational gotchas
 
-Note: the smoke page does a shader-cache warmup after [6/8]
-engine adoption. If you see "1.0 tok/s" on the smoke page
-after a fresh WASM rebuild, the warmup didn't run —
-investigate before investigating "the engine."
-
-Bench-profile speed-phase intermittent failure: if chat-
-smoke times out at 180s on 8B+ models, run `make smoke-stop
-&& make smoke-restart` to clear stale agentchrome state,
-then retry. Not a regression in the bench harness.
+- **Cold-shader artifact.** The smoke page does a shader-
+  cache warmup after [6/8] engine adoption. If you see
+  "1.0 tok/s" after a fresh WASM rebuild, the warmup
+  didn't run — investigate before investigating "the
+  engine."
+- **Bench-profile timeout on 8B+.** If chat-smoke times
+  out at 180s, run `make smoke-stop && make smoke-restart`
+  to clear stale agentchrome state, then retry. Not a
+  regression in the bench harness.
+- **`make smoke-bench` bundles `--profile`; `make
+  bench-inference` does not.** Use the former for backend
+  attribution (perturbs timing); the latter for canonical
+  steady-state tok/s. The §16 entry has both for qwen3-8b.
 
 ### Historical context (for archive — do not action again)
 
@@ -2453,23 +2648,79 @@ then retry. Not a regression in the bench harness.
 
 ### Deferred kernel-tuning targets (behind §10 in priority)
 
-§A. **Subgroup-cooperative `q_packed` loading in
-    `mul_mat_vec.wgsl::MUL_ACC_Q8_0` / `MUL_ACC_Q4_0`.** The
-    remaining Stub B remediation (was the prior §10 "NEXT"
-    before the size pivot). Threads in a subgroup share their
-    loaded `q_packed` values via `subgroupBroadcast` so each
-    thread issues fewer src0 reads. Realistic ceiling: ~13% of
-    decode time at the current scale (matmul × bandwidth-bound
-    fraction). May change with larger models — re-evaluate after
-    wave 1 of §10. Risk: the current per-thread access uses
-    `thread_within_block` to address q_packed, which already
-    partitions src0 across threads — further sharing across
-    subgroup boundaries (vs the current within-workgroup
-    partitioning) may not buy anything.
+§A. **Subgroup-cooperative loading — premise REJECTED on
+    inspection 2026-04-26.** Walked the kernel
+    (`~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`)
+    in detail. Conclusion: **subgroup-broadcast cannot
+    reduce src0 reads here** because the existing kernel
+    already partitions src0 perfectly across threads.
 
-    Lower-cost alternative: vec4-packed loads (read 4
-    consecutive `q_packed` u32s in one instruction). Smaller
-    engineering cost, smaller predicted win.
+    For Q4_0 (line 138-165) and Q8_0 (line 296-321): each
+    32-element block has 16 bytes (Q4) or 32 bytes (Q8) of
+    weights. THREADS_PER_BLOCK=4 threads cooperate on each
+    block, indexed by `thread_within_block = thread_id % 4`.
+    Each thread reads its own non-overlapping slice via
+    `block_byte_base + 2u + 4u * thread_within_block` (Q4)
+    or `+ 4u * (thread_within_block * 2u + packed_idx)`
+    (Q8). Across the 4 threads, every byte of weights is
+    read by exactly one thread per pass. **No redundant
+    loads exist; broadcasting cannot share work that isn't
+    duplicated.**
+
+    Why §7's Stub B (replacing all real src0 loads with
+    one broadcast) showed -40% Q8 / -20% Q4: the kernel is
+    bound by **load latency**, not bus bandwidth. The
+    per-thread loads can't overlap because the row-loop
+    issues them serially with data-dependent reduction
+    arithmetic between them. Stub B replaced N serial
+    loads with 1 load and let the ALU pipeline saturate;
+    the speedup measures latency stalls, not bus saturation.
+
+    **Viable levers that follow from this diagnosis:**
+    1. **Coarsen per-thread block coverage.** Drop
+       THREADS_PER_BLOCK from 4 → 2 so each thread handles
+       8 bytes (Q4) or 16 bytes (Q8) per block. Halves
+       load-issue rate per block, doubles per-thread work
+       (compute is cheap; loads are expensive). Requires
+       sweeping THREADS_PER_BLOCK alongside the existing
+       OUTPUTS_PER_WG sweep.
+    2. **vec4-packed load helper.** Replace
+       `load_u32_at_src0(addr) ... load_u32_at_src0(addr+4)
+       ... load_u32_at_src0(addr+8)` with a single vec4 u32
+       load when the addresses are consecutive (Q8: 2 u32s
+       per row per block per thread; Q4: 1 u32 only — Q4
+       wouldn't benefit). Issue rate reduction × narrower
+       than option 1 because only Q8/Q5/Q4_K_S/IQ inner
+       loops have 2+ consecutive u32 loads.
+    3. **Lift `d` (fp16 scale) out of the row loop.**
+       Currently `let d = f32(load_f16_at_src0(block_byte_base))`
+       is loaded per-row inside the OUTPUTS_PER_WG×blocks
+       loop. The scale is per-row, but if we re-batch loads
+       to fetch all OUTPUTS_PER_WG `d` values into a small
+       array up front (one vec4 u32 / vec2 u32 load), we
+       cut OUTPUTS_PER_WG fp16 loads to one composite load.
+       Predicted win: ~5-10% of load-issue cost.
+
+    Predicted ceiling for combined (1)+(2)+(3) at 8B IQ3_M:
+    matmul 65-69% of decode × 40% latency-bound fraction
+    × maybe 30-50% issue-rate reduction = **~8-14% of total
+    decode time**. Lower than the 26-28% pre-analysis
+    ceiling but still meaningful. Risk: GPU scheduler may
+    already be pipelining loads across warps, in which case
+    THREADS_PER_BLOCK=2 could increase register pressure
+    enough to hurt occupancy and net out flat or negative.
+
+    **Recommended approach:** start with lever (1) — a one-
+    line change to `#define THREADS_PER_BLOCK` per quant —
+    on the 4-baseline regression harness. If it pays, layer
+    (2) and (3) on top. If it doesn't pay, the kernel is
+    deeper-pipelined than expected and §A is closed.
+
+    The ~~subgroupBroadcast / subgroupShuffle~~ angle is
+    closed: nothing to share. The vec4-packed-load angle
+    survives but in the lever-(2) form above (consecutive-
+    address packing within a single thread), not as
+    cross-thread coalescing.
 
 §B. **FA shape-routing for prefill/TTFT** (§5 path a). Decode
     shape (N=1, head_dim 128, GQA 16:8) doesn't engage FA
