@@ -34,10 +34,13 @@ binary that crashes the page during inference.
 
 ## Patch Inventory
 
-The branch currently carries eight commits on top of upstream `master`,
+The branch currently carries ten commits on top of upstream `master`,
 in the order shown (oldest first). Commit 7 and its revert (commit 8)
 are kept as a pair pending a proper replacement; treat them as a no-op
-until you hear otherwise.
+until you hear otherwise. Last rebased onto upstream master 2026-04-25
+to a tip at-or-after `13d36cf89` ("ggml-webgpu: enable FLASH_ATTN_EXT
+on browser without subgroup matrix") — see notes below patch 9 for the
+status of the FA enablement on browser decode.
 
 ### 1. ggml: iterative `ggml_visit_parents_graph` for WASM stack safety
 
@@ -99,6 +102,38 @@ registers the pipeline in `ggml-webgpu-shader-lib.hpp`; and dispatches
 `GGML_OP_NORM` through `ggml_webgpu_row_norm`. Touches the same three
 files as the other `ggml-webgpu` patches (`ggml-webgpu.cpp`,
 `ggml-webgpu-shader-lib.hpp`, `wgsl-shaders/row_norm.wgsl`).
+
+### 10. ggml-webgpu: split LAYER_NORM accumulation loop from legacy norms
+
+The patch 9 LAYER_NORM addition hoisted the inner load into
+`let v = src[...]` and replaced `pow(v, 2.0)` with `v * v`, which is
+correct for LAYER_NORM but also subtly changed codegen on the
+RMS_NORM / L2_NORM path that shader already used. This patch splits
+the inner accumulation so the LAYER_NORM branch keeps the
+single-load form (needed for `sum_x`) while the RMS_NORM / L2_NORM
+branch reverts to the original `pow(src[...], 2.0)` form. Behavior
+is byte-identical to the pre-LAYER_NORM shader on the legacy paths.
+
+### Note: FA browser engagement (2026-04-25)
+
+The 2026-04-25 rebase pulled in upstream `13d36cf89`
+("ggml-webgpu: enable FLASH_ATTN_EXT on browser without subgroup
+matrix"). On Qwen3-1.7B decode shapes (N=1, head_dim 128, GQA 16:8,
+K=2048+, mask present) the new
+`ggml_webgpu_flash_attn_get_decisions` returns the
+SUBGROUP_MATRIX path; browser hits the `supports_op = false`
+branch and falls back to the manual attention path (multi-step
+softmax + KV reads). Dispatch count and `backendAttentionMs`
+on profile-mode runs are unchanged from pre-rebase.
+
+The new VEC and TILE paths apparently target different shape
+regions (longer K, prefill seq>1, different head_dim). Engaging
+FA on this workload requires investigation into
+`ggml_webgpu_flash_attn_get_decisions` to understand which
+heuristics gate it out — see `TODO.md` Active Step §6 path (a).
+**Prefill (seq>1) was not measured** — the browser `--profile`
+trace filter is `nTokens=1`, so FA *might* engage on prefill
+without us seeing it in the dispatch count.
 
 ## Rebase Procedure
 
