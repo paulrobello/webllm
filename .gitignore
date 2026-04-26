@@ -35,6 +35,7 @@ CLAUDE.local.md
 .gemini-clipboard
 .cc2cc-session-id
 claude_scratch/
+.claude/scheduled_tasks.lock
 
 # Debug / Coverage
 coverage/
