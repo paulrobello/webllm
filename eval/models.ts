@@ -435,6 +435,31 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "Q4_K_S",
 	},
 
+	// Q3_K_M verification entry — proves the UB-safe u32 loader fix
+	// (llama.cpp `webllm-browser-patches` patch 11) restores Q3_K
+	// correctness on Tint/Dawn. The original optimized Q3_K
+	// mul_mat_vec / get_rows kernels are unchanged. Local file is on
+	// disk from the §12 attempt. Verified coherent at 24.4 tok/s on
+	// 2026-04-26; see "Completed on 2026-04-26 §14" in TODO.md.
+	{
+		id: "mistral-7b-instruct-v0.3-q3km",
+		name: "Mistral 7B Instruct v0.3 (Q3_K_M, bug #28 verified)",
+		family: "Mistral",
+		architecture: "mistral",
+		paramsB: 7.25,
+		vramMB: 3500,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3",
+		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+		ggufFilePattern: "Q3_K_M",
+	},
+
 	// IQ-family probe (kept as a working data point alongside the
 	// Q4_K_S canonical entry above). IQ4_XS verified coherent
 	// output on 2026-04-26 after the Q3_K shader (#28) blocked

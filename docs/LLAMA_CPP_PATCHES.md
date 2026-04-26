@@ -34,7 +34,7 @@ binary that crashes the page during inference.
 
 ## Patch Inventory
 
-The branch currently carries ten commits on top of upstream `master`,
+The branch currently carries eleven commits on top of upstream `master`,
 in the order shown (oldest first). Commit 7 and its revert (commit 8)
 are kept as a pair pending a proper replacement; treat them as a no-op
 until you hear otherwise. Last rebased onto upstream master 2026-04-25
@@ -113,6 +113,22 @@ the inner accumulation so the LAYER_NORM branch keeps the
 single-load form (needed for `sum_x`) while the RMS_NORM / L2_NORM
 branch reverts to the original `pow(src[...], 2.0)` form. Behavior
 is byte-identical to the pre-LAYER_NORM shader on the legacy paths.
+
+### 11. ggml-webgpu: fix UB shift-by-32 in `load_u32_at_src{,0}`
+
+The unaligned u32 helpers in `wgsl-shaders/common_decls.tmpl` compute
+`hi << (32u - shift)` where `shift = (byte_offset & 0x3u) * 8u`. When
+`byte_offset` is u32-aligned (`shift == 0`), this becomes `hi << 32u`,
+which is undefined behavior in WGSL (shift count must be < bit_width).
+The trailing `select(shifted, lo, shift == 0u)` was meant to mask the
+UB result, but on Tint/Dawn the UB leaks and corrupts the returned
+word on aligned reads. This corrupted Q3_K mul_mat_vec and Q3_K
+get_rows for Q3_K_M models; Q4_K_S happened to issue unaligned loads
+in the affected lanes and was unaffected. The fix branches explicitly
+on `byte_in_word == 0` and returns the aligned word directly, never
+executing the UB shift. Verified: Mistral-7B Q3_K_M coherent at
+24.4 tok/s (was gibberish); Q4_K_S regression-safe at 36.0 tok/s.
+Closes webllm bug #28.
 
 ### Note: FA browser engagement (2026-04-25)
 

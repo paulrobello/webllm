@@ -1558,17 +1558,79 @@ needs to be collected.
       template for further 8B+ candidates while bug #28
       remains open.
 
+14. **Bug #28 fixed: UB shift-by-32 in WGSL u32 loaders.** Root
+    cause was *not* the Q3_K matmul kernel itself — it was
+    `load_u32_at_src` and `load_u32_at_src0` in
+    `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/common_decls.tmpl`.
+    Both helpers compute `hi << (32u - shift)` where
+    `shift = (byte_offset & 0x3u) * 8u`. On u32-aligned reads
+    (`shift == 0`) this becomes `hi << 32u`, undefined behavior
+    in WGSL (shift count must be < bit_width). The trailing
+    `select(shifted, lo, shift == 0u)` was meant to mask the
+    UB result but on Tint/Dawn the UB leaks into the returned
+    word. Q3_K mul_mat_vec and Q3_K get_rows both load through
+    these helpers and were corrupted on aligned reads; Q4_K_S
+    happened to issue unaligned loads in the affected lanes
+    and was unaffected. **Fix:** branch explicitly on
+    `byte_in_word == 0` and return `src[word_idx]` directly,
+    never executing the UB shift.
+    - **Diagnosis path:** Python ports of Q3_K mul_mat (both
+      simplified element-by-element and the original optimized
+      16-thread × 16-block layout), Q3_K get_rows, and Q5_K
+      mul_mat were each verified mathematically equivalent to
+      `dequantize_row_q3_K` / `dequantize_row_q5_K` to ~1e-6
+      relative error. Sentinel writes (`acc[row] += 999`)
+      confirmed kernels were reachable. CPU `llama-cli` on
+      the same Q3_K_M GGUF produced coherent output, so the
+      tensor data itself was fine. Common dependency between
+      mul_mat_vec.wgsl and get_rows.wgsl is the loader
+      helpers in `common_decls.tmpl`. The Python ports
+      correctly skipped the UB shift via early-return; only
+      the GPU-side WGSL code hit the UB.
+    - **Why Python ports passed but WGSL didn't:** the Python
+      ports computed `(lo >> shift) | (hi << (32 - shift))`
+      with `shift == 0` short-circuited as `lo`. They did not
+      reproduce the GPU UB.
+    - **Verified:** Mistral-7B-Instruct-v0.3 Q3_K_M produces
+      coherent joke output ("What do you call a fake noodle?
+      An impasta!") at **24.4 tok/s** (was pure noise tokens
+      at §12). Mistral-7B Q4_K_S regression-safe at **36.0
+      tok/s** ("What do you call cheese that isn't yours?
+      Nacho cheese!"), within noise of the §12 baseline of
+      34.4 tok/s.
+    - **Patch landed:** committed to `webllm-browser-patches`
+      branch as patch 11 (`391c59f39 ggml-webgpu: fix UB
+      shift-by-32 in load_u32_at_src{,0} for aligned offsets`).
+      The 10-patch stack is now 11 patches. `docs/LLAMA_CPP_PATCHES.md`
+      updated with the patch description and inventory count.
+    - **What this unblocks:** Q3_K_M is a viable wave-2 quant
+      again. For 7B+ models where Q4_K_S sits near the WASM
+      cap, Q3_K_M (~3.4 GB at 7B) is a smaller-bandwidth
+      option that previously would have been blocked by this
+      bug. The IQ-family workaround (IQ3_M / IQ3_S / IQ3_XXS)
+      remains valid and is still the path of choice for 8B+
+      where Q4_K_S exceeds the cap. Q3_K_M test entry left in
+      `eval/models.ts` as `mistral-7b-instruct-v0.3-q3km` for
+      cross-quant comparison; can be promoted to a registered
+      wave-2 candidate or removed depending on whether the
+      fleet wants Q3_K vs Q4_K_S vs IQ3_M coverage at 7B.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
 skipped).** Wave 2 underway: **2/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
-86% — §13). Three findings + one bug from this session:
+86% — §13). Three findings + one bug fix from this session:
 
-- **Bug #28 (Q3_K shader):** Q3_K matmul produces gibberish
-  in ggml-webgpu. Wave-1 never exercised it (all Q4_0); §9
-  tested only Q4_K_M. Q3_K_M was the smallest viable 7B+
-  quant under the WASM cap, but it's broken.
+- **Bug #28 (Q3_K shader) FIXED — see §14.** Root cause was
+  UB shift-by-32 in `load_u32_at_src{,0}` u32 loader helpers
+  (`hi << (32u - shift)` when `shift == 0`), corrupting any
+  aligned read through these helpers. Q3_K mul_mat_vec and
+  Q3_K get_rows are the user-visible victims; Q4_K_S happened
+  to use unaligned reads and was unaffected. Patch 11 on
+  `webllm-browser-patches` (`391c59f39`). Q3_K_M now coherent
+  at 24.4 tok/s on Mistral-7B; Q4_K_S regression-safe at 36.0
+  tok/s.
 - **Workarounds for the 4 GiB WASM cap:** Q4_K_S works at
   7B (3953 MB Mistral). For 8B+, Q4_K_S exceeds the cap;
   IQ3_M / IQ3_S are the smaller-bandwidth working
@@ -1600,13 +1662,16 @@ B. **Pick up §A subgroup-cooperative loading.** The new
    uncertain (subgroup-broadcast WGSL, may need
    shader-architecture changes).
 
-C. **Fix the Q3_K shader (#28) to unblock more 8B
-   options.** With IQ3_M working, the urgency dropped —
-   IQ3_M is the established workaround. Worth doing if
-   we want to compare Q3_K vs IQ3_M at the same scale,
-   or before adding wave-3 candidates that lack a usable
-   IQ-quant variant. Bug investigation effort still
-   ~1-3 hours.
+C. ~~Fix the Q3_K shader (#28).~~ **Done — see §14.**
+   Q3_K mul_mat_vec is now correct on Tint/Dawn after the
+   UB-safe loader fix (patch 11). Q3_K_M is a viable
+   wave-2 quant again. Promote
+   `mistral-7b-instruct-v0.3-q3km` from a test entry to a
+   registered wave-2 candidate, or remove it from
+   `eval/models.ts` if the fleet doesn't want Q3_K
+   coverage in the cross-family table. A Q3_K vs IQ3_M
+   comparison at 8B is now possible via Llama-3.1-8B
+   Q3_K_M (~3.4 GB, under the WASM cap).
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in this session that 4 GiB is
@@ -1646,22 +1711,26 @@ Boot sequence for a fresh session:
 1. `make checkall` — confirm 393 pass / 5 skip / 0 fail.
 2. `git log --oneline -5` — confirm `0b863f5` (wave-2 model
    2 — Llama-3.1-8B IQ3_M) and `83dc890` (wave-2 model 1
-   + bug #28) at the tip.
-3. `git -C ~/Repos/llama.cpp log --oneline -10 webllm-browser-patches`
-   — confirm the 10-patch stack is intact.
+   + bug #28 discovery) at the tip; this session's TODO/docs
+   update lands on top.
+3. `git -C ~/Repos/llama.cpp log --oneline -11 webllm-browser-patches`
+   — confirm the **11-patch stack** is intact (tip
+   `391c59f39 ggml-webgpu: fix UB shift-by-32 in
+   load_u32_at_src{,0}` is patch 11, the bug #28 fix).
 4. Read "Completed on 2026-04-26" §12 (Mistral 7B Q4_K_S +
-   bug #28 discovery) and §13 (Llama 3.1 8B IQ3_M + IQ-
-   family workaround). The full cross-family table at the
-   end of §13 is the headline.
+   bug #28 discovery), §13 (Llama 3.1 8B IQ3_M + IQ-family
+   workaround), and §14 (bug #28 fix: UB-safe u32 loaders).
+   The full cross-family table at the end of §13 is the
+   headline; §14 is the diagnosis-and-fix narrative.
 
 If continuing wave 2 (option A): GGUF mirror probe FIRST
 via `curl -s "https://huggingface.co/api/models/<repo>/tree/main" | python3 -c "..."`.
 Wave 1 hit three bad mirrors and wave-2's Mistral mirror
 also lacked Q4_0. Unsloth and bartowski have been the
 reliable fallbacks. Pin `ggufFilePattern` in `eval/models.ts`
-and verify the chosen quant's code path is supported (Q3_K
-broken; Q4_K_S/M working; IQ-family working including
-IQ3_M / IQ3_S / IQ3_XXS / IQ4_XS).
+and verify the chosen quant's code path is supported
+(Q3_K_M / Q4_K_S / Q4_K_M working; IQ-family working
+including IQ3_M / IQ3_S / IQ3_XXS / IQ4_XS).
 
 If picking up §A subgroup-cooperative loading (option B):
 the kernel lives at
