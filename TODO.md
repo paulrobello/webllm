@@ -1685,8 +1685,8 @@ needs to be collected.
 skipped).** Wave 2 underway: **3/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
 86% — §13; mistral-7b-v0.3-q3km at 19.7 tok/s / 69% — §15).
-Findings, one bug fix, one upstream rebase, one quant-promotion
-from these sessions:
+Findings, one bug fix, one upstream rebase, one quant-promotion,
+plus a dashboard hygiene pass from these sessions:
 
 - **Bug #28 (Q3_K shader) FIXED — see §14.** Root cause was
   UB shift-by-32 in `load_u32_at_src{,0}` u32 loader helpers
@@ -1717,6 +1717,27 @@ from these sessions:
 - **Loader / parser refactor (§11):** GGUF streams cleanly
   through the WASM heap; ctxCreate over-allocation fixed.
   Confirmed working at 3.6 GB / 3.95 GB streaming.
+- **Dashboard hygiene pass (2026-04-26):** dropped 23 broken-
+  era runs and 23 broken-era evals from
+  `eval/reports/smoke-runs.db`. Three cohorts purged:
+  bug-#28 q3km gibberish (3+3); pre-`9156deb` (Apr-25 16:19Z)
+  realistic-sampler ½-speed JS slow path (qwen3-0.6b ×6 +
+  llama-3.2-1b ×3 = 9 profile runs ×2 phases = 18+18); pre-
+  `38e41c4` (Apr-26 03:50Z) qwen2 missing attention biases
+  (qwen2.5-1.5b ×1 = 2+2). Repopulated dashboard by re-running
+  11 profiles under the post-fix pipeline (qwen3-0.6b cold/
+  warm/hot × off+thinking, llama-3.2-1b cold/warm/hot,
+  tinyllama-warm, qwen2.5-1.5b-warm) — all 22 phases passed,
+  output coherent. **bench-profile harness numbers run ~70%
+  of `perf.ts` smoke-bench steady-state** (TinyLlama 73.6 vs
+  105 perf.ts; qwen3-0.6b-warm 62 vs 85; qwen2.5-1.5b 42 vs
+  84) — known harness-overhead gap, not a regression. Use
+  `perf.ts` for engine-throughput claims; bench-profile for
+  cross-task accuracy + dashboard. **TinyLlama 35% accuracy
+  is real model weakness** (1.1B base-class generates a
+  poem when asked for a joke), not broken pipeline. dashboard
+  reload required to see the cleanup (live-server SSE doesn't
+  broadcast deletes).
 
 **Next target options (pick one — recommended order: A → B,
 then everything else as appetite allows):**
@@ -1781,11 +1802,13 @@ existing baselines before extending the fleet.
 Boot sequence for a fresh session:
 
 1. `make checkall` — confirm 393 pass / 5 skip / 0 fail.
-2. `git log --oneline -5` — top of `main` should include
-   `69f3c86 docs(bug#28): close Q3_K shader bug` (this
-   session's TODO/docs update); below that `0b863f5`
-   (wave-2 model 2 — Llama-3.1-8B IQ3_M) and `83dc890`
-   (wave-2 model 1 + bug #28 discovery).
+2. `git log --oneline -5` — top of `main` should be
+   `e80c08b feat(eval): §15 wave-2 model 4 — mistral-7b-v0.3
+   -q3km promoted` (latest landing). Below that:
+   `a349b8c` (TODO refresh + llama.cpp rebase log),
+   `69f3c86` (bug-#28 closure docs), `0b863f5` (wave-2
+   model 2 — Llama-3.1-8B IQ3_M), `83dc890` (wave-2
+   model 1 + bug #28 discovery).
 3. `git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`
    — confirm the **11-patch stack** is intact and the base
    is upstream `78433f606 Fix recurrent state serialization`
@@ -1810,11 +1833,23 @@ Boot sequence for a fresh session:
    K-quant compute overhead defeats bandwidth savings at 7B).
    The full cross-family table at the end of §15 is the
    headline; §14 is the diagnosis-and-fix narrative.
+6. **Dashboard state check** (optional but useful before
+   benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
+   COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` — should
+   return 27 runs / 28 evals (16+11 runs, 17+11 evals after
+   the 2026-04-26 hygiene pass + baseline re-bench). If the
+   dashboard tab is open from a prior session, force-reload
+   the page — live-server SSE doesn't broadcast deletes.
 
 **Recommended first move:** option A (Qwen3-8B IQ3_M) —
-the only ~30-minute win left. Option F (Q3_K_M promotion)
-closed in §15. Option B (subgroup-cooperative loading) is
-the bigger perf lever but uncertain and hours-long.
+the only ~30-minute win left to close out wave 2. Options
+C / F (Q3_K shader fix, Q3_K_M promote/retire) closed in
+§14 / §15. Option B (subgroup-cooperative loading) is the
+bigger perf lever but uncertain and hours-long; with
+matmul=71% of graph at 8B, its theoretical ceiling is now
+~28% of decode time — measure on the 3-baseline harness
+(TinyLlama Q4_0 / Mistral-7B Q4_K_S / Llama-3.1-8B IQ3_M)
+before extending to Qwen3-8B.
 
 If continuing wave 2 (option A): GGUF mirror probe FIRST
 via `curl -s "https://huggingface.co/api/models/<repo>/tree/main" | python3 -c "..."`.
