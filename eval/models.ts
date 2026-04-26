@@ -137,7 +137,13 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "fast",
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+		// Picker would otherwise fall through to q4_k_m (1066 MB). §9 on
+		// Qwen3-1.7B showed Q4_K_M is a slight tok/s regression vs Q8 due
+		// to K-quant compute overhead clawing back bandwidth savings; Q4_0
+		// (1017 MB) keeps wave-1 cross-family GEMV comparisons clean
+		// against tinyllama-1.1b-chat-q4_0 and smollm2-360m-q4f16.
 		ggufUrl: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+		ggufFilePattern: "Q4_0",
 	},
 
 	{

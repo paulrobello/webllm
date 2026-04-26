@@ -78,13 +78,17 @@
 > 3B+ scale (memory pressure, KV cache size, dispatch counts may
 > reshape the profile in ways that change which lever matters).
 >
-> **Wave 1 progress (2026-04-26):** smollm2-360m-q4f16 landed
-> (1/10). 106 tok/s steady-state Q4_0; 32 layers / 651
-> dispatches/token; encode overhead 33% > matmul 28% — first
-> profile in fleet where encode leads. 24/36 accuracy (62%,
-> lowest in fleet, expected at this size). Architectural finding:
-> dispatch count grows faster than parameters across the small-
-> model regime, so the encode-vs-matmul ratio is scale-dependent.
+> **Wave 1 progress (2026-04-26):** 2/10 done.
+> - smollm2-360m-q4f16: 106 tok/s steady-state Q4_0; 32 layers /
+>   651 dispatches/token; encode 33% > matmul 28% — first profile
+>   where encode leads. 24/36 accuracy (62%, lowest in fleet).
+> - qwen2.5-1.5b-q4f16: 84 tok/s steady-state Q4_0 / 28 layers /
+>   657 dispatches/token; matmul 40% (highest in fleet) > encode
+>   31%. 29/36 accuracy (81%). Run uncovered bug #25 — qwen2
+>   attention biases were silently dropped (gibberish output,
+>   4% pre-fix); fix lands `attn_{q,k,v}.bias` loaders + opAdd
+>   wires in all 3 forward branches. Unblocks qwen2.5-coder-1.5b
+>   and qwen2.5-3b for the rest of wave 1.
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -144,6 +148,8 @@
 22. **Dashboard charts keyed on `modelId` collapsed Qwen thinking-on/off** — Temperature sweep, per-dimension grouped, and Accuracy×Speed scatter all shared a key for both Qwen modes; latest-wins silently overwrote one with the other. Group keys now include `thinking`; series labels gain a `" (think)"` suffix when thinking is on so non-thinking-capable models keep their existing labels.
 23. **`engine.generateStream` qwen3-chatml wiring diverged from the smoke loop in 4 places** discovered while consolidating onto the library. Effects: (a) `maskedTokensWhileThinking` and `maskedTokensAfterThinkingUntilAnswer` were missing `<|endoftext|>`, so the model could emit it mid-think and either get a stray stop or pollute the chain-of-thought; (b) `maskedTokensAfterAnswerStarts` mistakenly included `<|im_end|>`, which is the chat EOS — the model could not terminate normally during the visible answer and qwen3 thinking-on always ran to `max-tokens`; (c) `<|endoftext|>` wasn't auto-added as a stop token; (d) the smoke loop's first-post-`</think>` leading-whitespace guard (forces `</think>` to be followed by a token starting with whitespace) had no library counterpart. Fixed all four; added `requireLeadingWhitespaceAfterThinking` to `GenerationConfig` for parity, and threaded the seed through `engine.generateStream`'s internal `Sampler` (added `CompletionConfig.seed`) so smoke runs are reproducible through the public API.
 24. **`Generator.generate` computed `gpuMode` once, statically, before the decode loop** — `requiresFullLogitsSteering = (any qwen3 mask set configured)` forced `gpuMode = "full"` for the entire run. Once the smoke loop migrated onto the library, qwen3 thinking-off ran at ~17 tok/s on the full path instead of ~83 tok/s on the topk path, even on steps where no steering state was active. Replaced with per-step dynamic selection: `greedy` if sampler is greedy + no penalty; `topk` if `sampler.topK > 0` AND no current steering state (`thinkDepth === 0 && !waitingForVisibleAnswer && !hasVisibleAnswerText`); else `full`. The smoke loop's old code had this dynamic check inline; the library now matches.
+25. **Qwen2 / Qwen2.5 attention biases were silently dropped, producing random-token output.** Discovered while running §10 wave-1 model 2 (`qwen2.5-1.5b-q4f16`): the smoke chat regression "passed" structurally but emitted gibberish (`"ña！" szerǃ yaboler...`) and accuracy collapsed to 1/36 = 4%. `eval/models.ts` resolved to `qwen2.5-1.5b-instruct-q4_0.gguf`, which carries `blk.<i>.attn_q.bias`, `attn_k.bias`, `attn_v.bias` tensors that **only the qwen2 architecture uses** (Llama, Qwen3, Mistral, etc. all leave Q/K/V projections unbiased). `ModelInference.loadWeights` only requested the `.weight` tensors, so Q/K/V values were off by a constant shift in every layer, polluting attention scores from the first prefill step. Fix: added `qBias`/`kBias`/`vBias: TensorPtr | null` to `LayerWeights`, conditionally loaded mirroring the existing `qNorm`/`kNorm` pattern (lines 140-145), and wrapped every `opMulMat` of qProj/kProj/vProj with `opAdd(bias)` when present in all three forward branches (prefill, decode, debug-checkpoint). Verified post-fix: same model produces `"Why don't scientists trust atoms? Because they're always splitting up!"`, finish=eos, accuracy 29/36 = **81%**. Dispatch count went from 573 to 657 (+84 = 3 ops × 28 layers, exactly matches the per-layer bias add). Regression coverage is the smoke chat regression itself — a unit-level test would have to mock 15+ wasm methods and only test mechanical wiring; the live bench output is the higher-signal check.
+26. **Dashboard "Accuracy & tool-calling" panel listed embedding-only models with empty/zero rows.** `renderEvalDimensions()` and `renderEvalsTable()` in `smoke-test/dashboard.js` iterated over every eval, including embedding evals whose only dimension is `"embedding"`. The result: each arctic-embed run rendered as either a single embedding bar surrounded by null space (cards) or a row whose only dimension chip read `embedding: 1/1 · 100%` (table) — not the panel's intent, and duplicative against the dedicated Embeddings section that already shows cosine + latency + throughput. Same convention already existed in `renderDimGroupedChart()` at line 785 (`if (dims.length === 1 && dims[0] === "embedding") continue`); applied that pattern in `renderEvalDimensions`, `renderEvalsTable`, and the header `eval-count` badge in `renderEvals()` so all three reflect accuracy/tool-calling evals only.
 
 ---
 
@@ -773,18 +779,86 @@ needs to be collected.
      (32 layers at 0.36B implies an unusually deep+narrow shape:
      embedding_length 960 vs Qwen3-0.6B's 1024 at 28 layers).
 
+2. **§10 wave 1, model 2: qwen2.5-1.5b-q4f16 registered + benched
+   (after architectural fix).** First wave-1 model to expose a
+   correctness gap.
+   - **Profile registered:** `qwen2.5-1.5b-warm` (temperature 0.6,
+     `DEFAULT_PROMPT`); added to `SMOKE_PROFILE_SETS.full`.
+   - **Repo + quant:** `Qwen/Qwen2.5-1.5B-Instruct-GGUF` mirror is
+     open. Pinned `ggufFilePattern: "Q4_0"` to skip the picker's
+     Q4_K_M fallback (Q4_K_M was a -4% regression on Qwen3-1.7B per
+     §9; Q4_0 also matches TinyLlama and SmolLM2 wave-1 quant for
+     clean cross-family GEMV comparison). File 1016.8 MB.
+   - **Architecture (qwen2 / GGUF metadata):** 28 layers · n_head 12
+     · n_head_kv 2 (GQA 6:1, the most aggressive in fleet) ·
+     embedding 1536 · head_dim 128 · ffn 8960 · ctx_max 32768 (we
+     run at 4096). KV cache @ ctx=4096 ≈ 224 MB.
+   - **First-run finding (broken): qwen2 attention biases were
+     silently dropped.** `attn_q.bias` / `attn_k.bias` / `attn_v.bias`
+     tensors exist in qwen2 GGUFs but our `ModelInference.loadWeights`
+     only requested `.weight`. Result: gibberish output (`"ña！"
+     szerǃ yaboler..."`), accuracy 1/36 = 4%. See bug-fix #25 above
+     for the full diagnosis and fix.
+   - **Post-fix re-bench (after bias support landed):**
+     - Output: `"Why don't scientists trust atoms? Because they're
+       always splitting up!"` — coherent, finish=eos, 22 tokens
+       (was 64-token max-tokens with gibberish pre-fix).
+     - Accuracy: **29/36 = 81%** (was 4% pre-fix). Within range of
+       Qwen3-1.7B's 82-89% per-profile band; +14 points over
+       SmolLM2-360M's 62%, consistent with 4× larger param count.
+     - Speed (3-trial median):
+       - Steady-state **84.3 tok/s** (runs: 83.9, 84.3, 85.2).
+       - Profile-mode **57.6 tok/s** (perturbation -32%).
+     - Profile-mode backend attribution (63-step decode):
+       - `backendMatmulMs`: 5.53 mean / **40.1% of graph** —
+         highest matmul fraction in fleet.
+       - `backendEncodeOverheadMs`: 4.30 mean / 31.2% — high but
+         second to matmul.
+       - `backendAttentionMs`: 0.44 / 3.2%.
+       - `backendDispatchCount`: **657/token** (+84 from the
+         pre-bias-fix 573, exactly 3 ops × 28 layers — confirms
+         every q/k/v bias add lands in the graph).
+   - **Architectural finding: qwen3 vs qwen2 dispatch delta is
+     almost exactly the cost of Q-norm + K-norm.** Pre-fix qwen2.5
+     reported 573 dispatches/token; Qwen3-0.6B/1.7B both report
+     629 at the same 28 layers. 629 - 573 = 56 = 2 ops × 28 layers,
+     matching Qwen3's distinguishing feature (per-head Q-norm and
+     K-norm). After bias support, qwen2.5 reports 657 — 28 more
+     than Qwen3 because Q3 has biases too? No: Qwen3 doesn't bias
+     Q/K/V (its weights confirm this). 657 - 629 = 28 = the bias
+     add we now do for qwen2 (3 adds × 28 layers = 84 total; but
+     dispatches per token is 657 - 573 = 84, which adds to a base
+     where Qwen3-style q-norm/k-norm aren't done). Net: Qwen2 path
+     adds 84 dispatches; Qwen3 path adds 56. Either way, the dispatch
+     budget tracks per-layer-extras precisely.
+   - **`SMOKE_PROFILE_SETS.full` entry kept** (the 4% accuracy dot
+     ingested before the fix is now superseded by the 81% dot from
+     the post-fix re-run; dashboard latest-wins handles it).
+
+3. **Dashboard "Accuracy & tool-calling" panel cleanup.** Filtered
+   embedding-only evals out of `renderEvalDimensions` (the cards),
+   `renderEvalsTable` (the runs list), and the header `eval-count`
+   badge in `renderEvals`. Same condition as the existing
+   `renderDimGroupedChart` filter at line 785 (`dims.length === 1
+   && dims[0] === "embedding"`). Embedding evals continue to render
+   in the dedicated Embeddings section (cosine + latency +
+   throughput).
+
 ### Resumption checklist (start a fresh session here)
 
 **Next target: Active Step §10 — large-model test campaign,
-wave 1 model 2.** Wave 1 is in progress: `smollm2-360m-q4f16`
-landed 2026-04-26 (see "Completed on 2026-04-26 §1"). The next
-unprofiled entry by ascending size is **`qwen2.5-1.5b-q4f16`
-(1.54B)** — same family as the already-profiled Qwen3-0.6B/1.7B,
-useful for a Qwen2 vs Qwen3 architectural-version contrast at
-the 1.5B/1.7B scale. Remaining wave-1 fleet after that:
-qwen2.5-coder-1.5b, smollm2-1.7b, gemma-2-2b, qwen2.5-3b,
-llama-3.2-3b, hermes-3-llama-3.2-3b, phi-3.5-mini, qwen3-4b.
-No 7B+ model is registered yet (wave 2).
+wave 1 model 3.** Wave 1 is in progress: `smollm2-360m-q4f16`
+and `qwen2.5-1.5b-q4f16` landed 2026-04-26 (see "Completed on
+2026-04-26 §1, §2"). The qwen2.5-1.5b run uncovered a real
+correctness bug (qwen2 attention biases — bug-fix #25) that
+unblocks `qwen2.5-coder-1.5b` and `qwen2.5-3b` as well. The
+next unprofiled entry by ascending size is
+**`qwen2.5-coder-1.5b-q4f16` (1.54B)** if a code-generation
+eval task is in scope, otherwise **`smollm2-1.7b-q4f16`
+(1.71B)** — same size as Qwen3-1.7B for a cross-family
+contrast at the 1.7B scale. Remaining wave-1 fleet after that:
+gemma-2-2b, qwen2.5-3b, llama-3.2-3b, hermes-3-llama-3.2-3b,
+phi-3.5-mini, qwen3-4b. No 7B+ model is registered yet (wave 2).
 
 **Decode tuning is paused at the current scale** — §6/§7/§8/§9
 showed the bandwidth-bound fraction is ~40% of matmul on Q8 /
@@ -1269,6 +1343,11 @@ investigating "the engine."
       dispatches/token / 24/36 accuracy. Encode overhead leads
       matmul. See "Completed on 2026-04-26 §1" above for full
       numbers + the bartowski-mirror repo fix.
+    - [x] `qwen2.5-1.5b-q4f16` (1.54B) — DONE 2026-04-26 after
+      adding qwen2 bias support (bug-fix #25). Steady-state 84.3
+      tok/s / profile-mode 57.6 / 657 dispatches/token / 29/36
+      = 81% accuracy. Matmul leads at 40.1% (highest in fleet).
+      See "Completed on 2026-04-26 §2" above.
     - `qwen2.5-1.5b-q4f16` (1.54B) — Qwen2.5 1.5B for a
       family/version comparison vs Qwen3-1.7B already profiled.
     - `qwen2.5-coder-1.5b-q4f16` (1.54B) — code-tuned variant;

@@ -14,6 +14,13 @@ interface LayerWeights {
 	qProj: TensorPtr;
 	kProj: TensorPtr;
 	vProj: TensorPtr;
+	// Qwen2 / Qwen2.5 use biased Q/K/V projections. Llama, Qwen3, and
+	// most other architectures don't — these stay null and the forward
+	// graph skips the add. Without this, qwen2 GGUFs produce garbage
+	// (random-token) output because Q/K/V are off by the bias shift.
+	qBias: TensorPtr | null;
+	kBias: TensorPtr | null;
+	vBias: TensorPtr | null;
 	qNorm: TensorPtr | null;
 	kNorm: TensorPtr | null;
 	oProj: TensorPtr;
@@ -137,6 +144,15 @@ export class ModelInference {
 				qProj: this.makeTensor(tensorMap, p("attn_q.weight")),
 				kProj: this.makeTensor(tensorMap, p("attn_k.weight")),
 				vProj: this.makeTensor(tensorMap, p("attn_v.weight")),
+				qBias: tensorMap.has(p("attn_q.bias"))
+					? this.makeTensor(tensorMap, p("attn_q.bias"))
+					: null,
+				kBias: tensorMap.has(p("attn_k.bias"))
+					? this.makeTensor(tensorMap, p("attn_k.bias"))
+					: null,
+				vBias: tensorMap.has(p("attn_v.bias"))
+					? this.makeTensor(tensorMap, p("attn_v.bias"))
+					: null,
 				qNorm: tensorMap.has(p("attn_q_norm.weight"))
 					? this.makeTensor(tensorMap, p("attn_q_norm.weight"))
 					: null,
@@ -281,9 +297,12 @@ export class ModelInference {
 				lw.attnNorm,
 			);
 
-			const q = wasm.opMulMat(lw.qProj, normed);
-			const k = wasm.opMulMat(lw.kProj, normed);
-			const v = wasm.opMulMat(lw.vProj, normed);
+			const qRaw = wasm.opMulMat(lw.qProj, normed);
+			const kRaw = wasm.opMulMat(lw.kProj, normed);
+			const vRaw = wasm.opMulMat(lw.vProj, normed);
+			const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
+			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
+			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
 
 			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
 			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
@@ -611,9 +630,12 @@ export class ModelInference {
 				lw.attnNorm,
 			);
 
-			const q = wasm.opMulMat(lw.qProj, normed);
-			const k = wasm.opMulMat(lw.kProj, normed);
-			const v = wasm.opMulMat(lw.vProj, normed);
+			const qRaw = wasm.opMulMat(lw.qProj, normed);
+			const kRaw = wasm.opMulMat(lw.kProj, normed);
+			const vRaw = wasm.opMulMat(lw.vProj, normed);
+			const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
+			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
+			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
 
 			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
 			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
@@ -1184,17 +1206,20 @@ export class ModelInference {
 					returnTensor = normed;
 					break;
 				}
-				const q = wasm.opMulMat(lw.qProj, normed);
+				const qRaw = wasm.opMulMat(lw.qProj, normed);
+				const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
 				if (il === layerIdx && checkpoint === "attn_q") {
 					returnTensor = q;
 					break;
 				}
-				const k = wasm.opMulMat(lw.kProj, normed);
+				const kRaw = wasm.opMulMat(lw.kProj, normed);
+				const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
 				if (il === layerIdx && checkpoint === "attn_k") {
 					returnTensor = k;
 					break;
 				}
-				const v = wasm.opMulMat(lw.vProj, normed);
+				const vRaw = wasm.opMulMat(lw.vProj, normed);
+				const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
 				if (il === layerIdx && checkpoint === "attn_v") {
 					returnTensor = v;
 					break;

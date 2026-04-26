@@ -1589,7 +1589,13 @@ function renderEvals() {
 	const progressWrap = document.getElementById("eval-progress-wrap");
 	const progressLabel = document.getElementById("eval-progress-label");
 
-	countEl.textContent = String(evals.length);
+	// Header count reflects accuracy / tool-calling evals only; embedding
+	// evals have their own dedicated section with cosine + latency charts.
+	const accuracyEvals = evals.filter((rep) => {
+		const dims = Object.keys(rep.dimensions ?? {});
+		return !(dims.length === 1 && dims[0] === "embedding");
+	});
+	countEl.textContent = String(accuracyEvals.length);
 
 	if (running.length > 0) {
 		const r = running[0];
@@ -1613,9 +1619,15 @@ function renderEvals() {
 
 function renderEvalDimensions(evals) {
 	const host = document.getElementById("evals-dimensions");
-	// Latest per model for dimension aggregation.
+	// Latest per model for dimension aggregation. Embedding-only evals
+	// (single "embedding" dimension) get their own dedicated section
+	// below; rendering them here would draw a single bar plus null space
+	// for the missing accuracy dimensions. Skip them — same convention as
+	// renderDimGroupedChart() above.
 	const latestByModel = new Map();
 	for (const rep of evals) {
+		const dims = Object.keys(rep.dimensions ?? {});
+		if (dims.length === 1 && dims[0] === "embedding") continue;
 		const prev = latestByModel.get(rep.modelId);
 		if (!prev || prev.timestamp < rep.timestamp) latestByModel.set(rep.modelId, rep);
 	}
@@ -1707,7 +1719,14 @@ function overallStrength(overall) {
 
 function renderEvalsTable(evals) {
 	const tbody = document.getElementById("evals-tbody");
-	const sorted = [...evals].sort(evalComparator);
+	// Embedding-only evals belong to the Embeddings section, not the
+	// "Accuracy & tool-calling > runs" table — same convention as the
+	// dim-cards filter and renderDimGroupedChart.
+	const filtered = evals.filter((rep) => {
+		const dims = Object.keys(rep.dimensions ?? {});
+		return !(dims.length === 1 && dims[0] === "embedding");
+	});
+	const sorted = [...filtered].sort(evalComparator);
 	tbody.innerHTML = "";
 	for (const rep of sorted) {
 		const tr = document.createElement("tr");
