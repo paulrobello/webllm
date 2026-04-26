@@ -15,14 +15,33 @@
 > `createSmokeCompletionRunner` is gone. Decode-mode selection is now
 > per-step (greedy / topk / full) so steps without active steering state
 > stay on the topk fast path even when the config configures steering.
-> Current smoke-bench baselines (browser, TinyLlama Q4_0 + Qwen3 0.6B Q4f16,
-> realistic sampling, 3-trial median on 2026-04-25 after the qwen3 steering
-> topk path landed):
+> Current smoke-bench baselines (browser, realistic sampling, 3-trial
+> median on 2026-04-25 after qwen3-1.7B characterization landed):
 > - tinyllama-1.1b-chat-q4_0: **~105 tok/s decode**
-> - qwen3-0.6b-q4f16, thinking-off: **~85 tok/s decode**
-> - qwen3-0.6b-q4f16, thinking-on: **~93 tok/s decode** (was ~17 — see
->   `3e5be59`: CPU post-filter top-K replaced the full-vocab readback +
->   JS sampling pipeline that was costing ~76 tok/s on Qwen3's 152K vocab)
+> - qwen3-0.6b-q4f16 (actual: Q8_0), thinking-off: **~85 tok/s decode**
+> - qwen3-0.6b-q4f16 (actual: Q8_0), thinking-on: **~93 tok/s decode**
+>   (was ~17 — see `3e5be59`: CPU post-filter top-K replaced the
+>   full-vocab readback + JS sampling pipeline that was costing
+>   ~76 tok/s on Qwen3's 152K vocab)
+> - qwen3-1.7b-q4f16 (actual: Q8_0), thinking-on: **~66 tok/s decode**
+>   (clean 117-token run; thinking-off 17-token run measured ~59 but
+>   is warmup-dominated)
+>
+> Bench-full coverage at 1.7B landed (6 profiles · 3 off + 3 thinking)
+> with overall accuracy 82–89% and per-profile decode (smoke chat
+> regression, oneShot tok/s) 45.9–49.8. Smoke-regression numbers
+> are lower than `perf.ts` steady-state due to harness overhead;
+> compare against `perf.ts` for engine-throughput claims. Dashboard
+> on port 8033 has all 6 dots in the accuracy×speed scatter.
+>
+> llama.cpp `webllm-browser-patches` rebased onto upstream master
+> 2026-04-25 (carries `13d36cf89` FA browser unblock + `dd2914dc8`
+> SSM_SCAN/set_rows changes). 10 patches now (added a row_norm
+> codegen-stability split). No engine regression; FA path doesn't
+> engage on Qwen3-1.7B decode shapes — see Active Step §5 for the
+> diagnosis. Smoke page now runs a shader-cache warmup after [6/8]
+> engine adoption to keep speed measurements steady-state across
+> WASM rebuilds.
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -117,9 +136,21 @@ Baseline (pre-optimization): ~44 tok/s decode, ~130 ms prefill on TinyLlama 1.1B
 Q4_0 via Emscripten WebGPU in-browser.
 
 **Steady-state decode baselines (2026-04-25, non-profile, realistic
-sampler):** TinyLlama Q4_0 ~107 tok/s · Qwen3 0.6B thinking-off ~83 tok/s
-· Qwen3 0.6B thinking-on ~17 tok/s. These are the canonical numbers
-to compare new perf work against.
+sampler):** TinyLlama Q4_0 ~107 tok/s · Qwen3 0.6B thinking-off ~83
+tok/s · Qwen3 0.6B thinking-on ~17 tok/s · Qwen3 1.7B thinking-on
+~66 tok/s · (Qwen3 1.7B thinking-off measured at ~59 tok/s but on a
+17-token run that's warmup-dominated; the thinking-on number is the
+clean steady-state at this size). These are the canonical numbers to
+compare new perf work against.
+
+**Quant caveat:** model IDs `qwen3-*-q4f16` actually resolve to
+`Qwen3-*-Q8_0.gguf` files (610 MB at 0.6B, 1.7 GB at 1.7B) because no
+`ggufFilePattern` is pinned and the picker fallback hits Q8 first. So
+within-Qwen3 comparisons across sizes are clean (both Q8), but
+TinyLlama-Q4 vs Qwen3-Q8 absolute matmul ms cross two variables —
+read matmul *fraction of graph time* across families, not absolute ms.
+Cleanup item: pin `ggufFilePattern: "Q4_K"` (or similar) on the qwen3
+entries in `eval/models.ts` if Q4 comparisons become load-bearing.
 
 **Profile-mode hotspot ranking (2026-04-25, `--profile`).** Captured
 through `make smoke-bench PERF_RUNS=3` after fixing three latent
@@ -132,6 +163,11 @@ backend timing and perturbs throughput measurably:
 | TinyLlama Q4_0   | ~107 tok/s   | 76 tok/s     | -29%         |
 | Qwen3-0.6 off    | ~83 tok/s    | 55 tok/s     | -34%         |
 | Qwen3-0.6 on     | ~17 tok/s    | 14.6 tok/s   | -14%         |
+| Qwen3-1.7 off    | ~59 tok/s*   | 41.5 tok/s   | -29%         |
+| Qwen3-1.7 on     | ~66 tok/s    | 43.2 tok/s   | -34%         |
+
+\* warmup-dominated 17-token run; trust the thinking-on number for the
+clean 1.7B steady-state.
 
 Cite steady-state numbers for throughput claims; cite profile-mode
 ratios for hotspot ranking. Mixing the two is what derailed the
@@ -139,38 +175,49 @@ ratios for hotspot ranking. Mixing the two is what derailed the
 
 Per-step decode breakdown by mode (medians from the runs above):
 
-| Bucket (ms/step)        | TinyLlama topk | Qwen3-off topk | Qwen3-on full |
-|-------------------------|----------------|----------------|---------------|
-| graphComputeMs          | 11.67 (88.8%)  | 13.91 (88.8%)  | 22.62 (94.5%) |
-| downloadResultMs        |  1.20 ( 9.1%)  |  1.37 ( 8.8%)  |  0.93 ( 3.9%) |
-| build + alloc + upload  |  0.26 ( 2.0%)  |  0.36 ( 2.3%)  |  0.35 ( 1.5%) |
-| **totalMs**             | **13.14**      | **15.66**      | **23.93**     |
+| Bucket (ms/step)        | TinyLlama topk | Qwen3-0.6 topk | Qwen3-0.6 full | Qwen3-1.7 topk-off | Qwen3-1.7 topk-on |
+|-------------------------|----------------|----------------|----------------|--------------------|-------------------|
+| graphComputeMs          | 11.67 (88.8%)  | 13.91 (88.8%)  | 22.62 (94.5%)  | 19.10 (93.6%)      | 19.00 (92.8%)     |
+| downloadResultMs        |  1.20 ( 9.1%)  |  1.37 ( 8.8%)  |  0.93 ( 3.9%)  |  1.00 ( 4.7%)      |  1.10 ( 5.6%)     |
+| build + alloc + upload  |  0.26 ( 2.0%)  |  0.36 ( 2.3%)  |  0.35 ( 1.5%)  |  0.36 ( 1.7%)      |  0.32 ( 1.5%)     |
+| **totalMs**             | **13.14**      | **15.66**      | **23.93**      | **20.40**          | **20.60**         |
 
 Backend attribution (% of `graphComputeMs`, profile mode only):
 
-| Field                    | TinyLlama topk | Qwen3-off topk | Qwen3-on full |
-|--------------------------|----------------|----------------|---------------|
-| backendMatmulMs          | 3.85 (33.0%)   | 4.05 (29.1%)   | 6.31 (27.9%)  |
-| backendEncodeOverheadMs  | 2.71 (23.2%)   | 4.07 (29.2%)   | 3.53 (15.6%)  |
-| backendAttentionMs       | 0.40 ( 3.5%)   | 0.49 ( 3.5%)   | 0.75 ( 3.3%)  |
-| backendDispatchCount     | 450/token      | 629/token      | 619/token     |
+| Field                    | TinyLlama topk | Qwen3-0.6 topk | Qwen3-0.6 full | Qwen3-1.7 topk-off | Qwen3-1.7 topk-on |
+|--------------------------|----------------|----------------|----------------|--------------------|-------------------|
+| backendMatmulMs          | 3.85 (33.0%)   | 4.05 (29.1%)   | 6.31 (27.9%)   | 6.68 (33.8%)       | 6.88 (34.2%)      |
+| backendEncodeOverheadMs  | 2.71 (23.2%)   | 4.07 (29.2%)   | 3.53 (15.6%)   | 4.20 (22.4%)       | 3.90 (19.9%)      |
+| backendAttentionMs       | 0.40 ( 3.5%)   | 0.49 ( 3.5%)   | 0.75 ( 3.3%)   | 0.46 ( 2.6%)       | 0.52 ( 2.7%)      |
+| backendDispatchCount     | 450/token      | 629/token      | 619/token      | 629/token          | 629/token         |
 
 Headlines:
-- **Decode is graph-compute-bound across all three profiles** (~89–95%
-  of step time). Readback is a 4–9% slice; further async-readback work
+- **Decode is graph-compute-bound across every profile** (~89–95% of
+  step time). Readback is a 4–9% slice; further async-readback work
   has tiny headroom.
-- **Matmul leads on TinyLlama (33%) but encode/dispatch overhead leads
-  on Qwen3-off (29.2%).** Qwen3 dispatches ~40% more ops per token (629
-  vs 450) — graph-shape reduction has more leverage there than on TinyLlama.
-- **Qwen3 thinking-on previously routed through `mode=full` while
-  steering state was active**, costing ~8.7 ms/step extra graph
-  compute and a 152K-float JS sampling pipeline. The full-path
-  numbers above are now historical — Active Step §2 landed
-  (commit `3e5be59`) and thinking-on now runs through topk + CPU
-  mask filter at ~93 tok/s steady-state (5.4× lift over the 17 tok/s
-  full path). The matmul jump (4.05 → 6.31 ms) between the old qwen3
-  modes is unexplained but no longer load-bearing now that thinking-on
-  doesn't hit the full path; flagged for any future graph-shape work.
+- **Dispatch count is architecture-invariant within Qwen3** (629/token
+  for both 0.6B and 1.7B topk paths). The earlier "graph-shape reduction
+  has more leverage on Qwen3" framing was right about the dispatch
+  delta vs TinyLlama (629 vs 450); what we now know is that *encode
+  overhead's absolute cost is ~flat* (4.07 → 4.20 ms across the 2.83×
+  param jump). Its *fraction* of graph time drops with model size
+  (29.2% → 22.4%) — i.e. the encode lever has *diminishing*
+  trajectory at scale.
+- **Matmul scales sub-linearly with parameter count** within Qwen3:
+  4.05 → 6.88 ms (1.7×) for 2.83× params, consistent with bandwidth-
+  bound GEMV on Q8 weights. Matmul share grows from 29.1% → 34.2%, so
+  matmul kernel work has *growing* trajectory at scale and is now the
+  clear lead bucket on Qwen3-1.7B (33–34%) by ~12pp over encode.
+- **§2's topk fix holds at scale.** Thinking-on at 1.7B routes 342/348
+  steps (98%) through topk; the remaining 6 full-path steps add ~3 ms/
+  step but contribute negligibly to wall time. Cost-per-token is at
+  near-parity with thinking-off at this size.
+- **Decision criteria don't cleanly hit the >40% / >25% / ~30%
+  thresholds** in TODO §4. Matmul 33–34% is below the >40% rule;
+  encode 20–22% is below the >25% rule; "balanced ~30%" is closest
+  but matmul leads by a margin. The recommendation below is a
+  trajectory call (encode flat-absolute, matmul still scaling), not
+  a threshold match.
 - **Consolidation tightened TinyLlama dispatches and matmul share**
   vs the stale 2026-04-22 numbers (489 → 450 dispatches/token, matmul
   share 40.4% → 33.0%). Treat that as a quiet consolidation win, not
@@ -244,15 +291,32 @@ the code lives today, the expected win, and the risk/tradeoff.
 
 ## Medium impact
 
-### 4. Enable flash attention in the browser ❌ BLOCKED UPSTREAM
+### 4. Enable flash attention in the browser 🟡 UPSTREAM UNBLOCKED 2026-04-25
 - **Where**: `ggml-webgpu.cpp::ggml_backend_webgpu_device_supports_op`
-  under `GGML_OP_FLASH_ATTN_EXT` — currently `#ifndef __EMSCRIPTEN__`.
-- **Blocker**: emdawnwebgpu does NOT expose
-  `wgpu::FeatureName::ChromiumExperimentalSubgroupMatrix`. Only plain
-  `Subgroups` is available. llama.cpp's flash-attention shaders use
-  subgroup-matrix operations specifically.
-- **For now**: defer. Reconsider when Chrome ships stable subgroup-matrix
-  support and emdawnwebgpu rolls.
+  under `GGML_OP_FLASH_ATTN_EXT` — currently `#ifndef __EMSCRIPTEN__`
+  on our patch branch (rebase point `68f1738d5`).
+- **Was blocked on**: emdawnwebgpu does NOT expose
+  `wgpu::FeatureName::ChromiumExperimentalSubgroupMatrix`; llama.cpp's
+  original FA shaders required subgroup-matrix.
+- **Unblock**: upstream commit `13d36cf89` ("ggml-webgpu: enable
+  FLASH_ATTN_EXT on browser without subgroup matrix", #22199, merged
+  2026-04-24) adds a tile / vec FA fallback that does NOT require
+  subgroup-matrix. Path forward is now a rebase, not waiting on
+  Chrome.
+- **Expected gain (decode):** modest. Decode-mode attention is N=1,
+  so the [seq, seq] matrix that FA avoids materializing is tiny. The
+  per-token win comes from fewer dispatches (likely 3–5 fewer per
+  layer, ~100/token on Qwen3) reducing encode overhead by ~0.5–1 ms,
+  plus a small `backendAttentionMs` saving. Realistic ceiling at
+  decode: 3–5%. Not a 10% lever on its own.
+- **Expected gain (prefill):** substantial. FA's main win is for
+  long-prompt prefill where attention matrix size scales with seq².
+  If prefill latency / TTFT becomes a target, this is the lever.
+- **Action**: rebase the patch branch to a point at-or-after
+  `13d36cf89`, drop the `#ifndef __EMSCRIPTEN__` guard, re-verify
+  smoke + perf, capture the dispatch-count delta on Qwen3-1.7B as
+  the headline measurement. Rebase carries non-trivial maintenance
+  cost (~9 patches; see `docs/LLAMA_CPP_PATCHES.md`).
 
 ### 5. Fused SwiGLU op ✅ DONE
 - **Where**: `src/inference/model-inference.ts` FFN section.
@@ -611,38 +675,53 @@ needs to be collected.
 
 ### Resumption checklist (start a fresh session here)
 
-**Next high-value target: Active Step §4 — characterize a larger model
-through the consolidated pipeline.** The biggest single decode lever
-on the small-model set has been pulled (§2 took qwen3-0.6B thinking-on
-from 17 → 93 tok/s). Remaining levers (encode overhead, graph reuse,
-larger context) all have either uncertain payoff or upstream-patch
-maintenance cost. §4 produces information first — fresh per-step
-breakdowns at 1.7B–4B parameter scale tell us which of those levers
-is actually worth picking up next, and whether a larger-model
-consumer hits any unhandled edge cases.
+**Next target: Active Step §6 — matmul-side dequant-stub diagnostic
+or `flash_attn_get_decisions` shape-routing investigation.** §5 (FA
+rebase) closed 2026-04-25 in a third session pass: rebase landed
+clean (one minor conflict resolved), no engine regression, but FA
+**did not engage** on Qwen3-1.7B decode shapes — the upstream
+path-selector returns the subgroup-matrix path for N=1 / head_dim
+128 / GQA 16:8, and browser falls back to manual attention. So §5
+got the rebase value (newer upstream baseline, future easier
+rebases) but not the FA win. Two follow-up paths:
+
+(a) Dig into `ggml_webgpu_flash_attn_get_decisions` to learn which
+shape regions route to VEC vs TILE vs subgroup-matrix; if a small
+heuristic adjustment routes our shapes to VEC/TILE, the FA win
+becomes accessible. (Lower-cost upstream contribution if the result
+is reusable.)
+
+(b) Matmul-side dequant-stub diagnostic (advisor's prior pick): in
+`mul_mat_vec.wgsl::MUL_ACC_Q8_0`, replace
+`f32(get_byte_i32(...)) * d` with `0.0` and re-profile. If
+`backendMatmulMs` collapses → compute-bound → dequant fusion is the
+lever. If it barely moves → memory-bound → shared-memory caching
+of src1 is the lever. Cheap, decisive, ~30 min.
 
 Boot sequence:
 
 1. `make checkall` — confirm 391 pass / 5 skip / 0 fail.
-2. `git log --oneline 6865a2c..HEAD` — review the 2026-04-25 work;
-   the §2 commit (`3e5be59`) and the harness fix (`953c560`) are
-   load-bearing for everything below.
+2. `git -C ~/Repos/llama.cpp log --oneline -10 webllm-browser-patches`
+   — confirm the 10-patch stack is intact (last rebase landed
+   2026-04-25). Backup at `webllm-browser-patches-pre-fa-rebase`
+   if recovery needed.
 3. Read the "Inference Performance Optimizations" preamble for the
-   2026-04-25 profile baselines (TinyLlama / Qwen3-off / Qwen3-on
-   per-step + backend attribution). Use these as the baseline rows
-   to compare the larger-model numbers against.
-4. Start §4 below. The action plan is concrete; follow it
-   step-by-step.
+   five-profile baselines and the §5 outcome: FA rebased but
+   `flash_attn_get_decisions` returns the subgroup-matrix path for
+   our N=1 / head_dim 128 / GQA decode shapes, so FA falls back to
+   manual attention. Prefill (long-prompt seq>1) was *not* measured
+   — could engage there; the current `--profile` traces filter to
+   `nTokens=1` and don't see prefill, so a future investigator
+   would need to instrument prefill explicitly.
+4. Pick path (a) or (b) from §6 below based on session budget:
+   (a) is upstream-shape investigation, lower per-hour value but
+   reusable; (b) is the cheap diagnostic that decides whether
+   matmul kernel work is worthwhile at all.
 
-If §4 surfaces a clearly dominant bucket on the larger model that
-isn't already on the small-model set, treat that as the new highest-
-value target. Otherwise the secondary candidate is **encode-overhead
-reduction** — at 22.8% of `graphComputeMs` on Qwen3-0.6B (629
-dispatches/token vs TinyLlama's 450) it's a real lever, but it
-requires touching `~/Repos/llama.cpp/ggml/src/ggml-webgpu/` for op
-fusion or dispatch batching and carries patch-maintenance cost
-across rebases. Worth considering only if the larger-model run
-shows the same bucket dominating.
+Note: the smoke page now does a shader-cache warmup after [6/8]
+engine adoption. If you see "1.0 tok/s" on the smoke page after
+a fresh WASM rebuild, the warmup didn't run — investigate before
+investigating "the engine."
 
 ### Historical context (for archive — do not action again)
 
@@ -765,68 +844,149 @@ shows the same bucket dominating.
    have grown; re-evaluate as part of §1's profile pass before
    committing to the C-side refactor.
 
-4. **NEXT (next-session entry point): characterize a larger model
-   through the consolidated pipeline.** All current baselines are at
-   ≤ 1.1B parameters with ≤ 152K vocab. Bigger models shift the
-   matmul/dispatch-overhead ratio (matmul scales with parameter count;
-   dispatch count is roughly invariant per-architecture) and tell us
-   which lever has actual headroom at the size people care about.
+4. **DONE (2026-04-25): characterized qwen3-1.7b-q4f16 through the
+   consolidated pipeline.** Numbers landed in the "Inference
+   Performance Optimizations" preamble above. Headlines:
+   - Steady-state thinking-on **66 tok/s** (clean, 117-token run);
+     thinking-off **59 tok/s** but on a 17-token warmup-dominated
+     run — trust the thinking-on number for the canonical 1.7B rate.
+   - Output coherence verified on the smoke page: clean `<think>` →
+     answer transition, finish=eos, embed step still passes
+     (cosine=0.76).
+   - **Hypothesis confirmed**: dispatch count is architecture-invariant
+     within Qwen3 (629/token at both 0.6B and 1.7B). Encode overhead's
+     *absolute* cost stays nearly flat (4.07 → 4.20 ms) across 2.83×
+     param scale; its *fraction* of graph time *drops* (29.2% →
+     22.4%). Matmul scales sub-linearly (4.05 → 6.88 ms, 1.7×) but
+     its fraction *grows* (29.1% → 34.2%).
+   - **§2's topk fix holds at scale.** 342/348 thinking-on steps
+     route through topk; the 6 full-path steps add ~3 ms/step but
+     contribute negligibly to wall time.
+   - **Quant caveat surfaced**: the `qwen3-*-q4f16` model IDs resolve
+     to `Qwen3-*-Q8_0.gguf` (no `ggufFilePattern` pinned, picker
+     fallback hits Q8 first). Within-Qwen3 comparisons are clean
+     (both Q8); TinyLlama-Q4 vs Qwen3-Q8 absolute matmul ms cross
+     two variables — read fractions, not absolute ms, across families.
+   - **Bench-full coverage landed (2026-04-25, second session pass)**:
+     6 1.7B profiles registered in `eval/smoke-profiles.ts` (3 off +
+     3 thinking, mirroring 0.6B layout) and added to `full` /
+     `llama-vs-qwen` / `thinking-modes` sets plus a new `qwen3-sizes`
+     set. `bench.ts --profiles qwen3-1.7b-*` ran clean: 12/12 phases
+     passed, no errors. Dashboard ingested all 6 dots.
+     - Per-profile speed (oneShot tok/s, smoke chat regression):
+       off-cold 48.3 · off-warm 47.2 · off-hot 45.9 · thinking-cold
+       49.8 · thinking-warm 48.2 · thinking-hot 47.8.
+     - Per-profile accuracy (overall): off-cold 82% · off-warm 87% ·
+       off-hot 88% · thinking-cold 83% · thinking-warm 89% ·
+       thinking-hot 87%.
+     - Per-dimension headlines: tool-calling 65–71% (cold only;
+       skipped at warm/hot per gate), reasoning 92–100% (thinking-
+       warm hits 100%), instruction-following 100% across all
+       profiles, semantic-reasoning 68–72% (flat; not addressed
+       by this size bump).
+     - Speed regression note: smoke chat regression numbers
+       (45.9–49.8 tok/s) are lower than `perf.ts` steady-state
+       (~59–66 tok/s); the gap is the chat-regression harness
+       overhead (page-load + interactive run path) not engine
+       throughput. Use `perf.ts` for engine claims and dashboard
+       for cross-profile accuracy×speed tradeoff.
 
-   **Concrete model choice: `qwen3-1.7b-q4f16`** (registered in
-   `eval/models.ts:159`, ~1 GB download, same architecture as the
-   well-understood 0.6B). Llama-3.2-1B (`eval/models.ts:103`) is a
-   useful cross-architecture data point if there's session budget.
-   Skip 4B+ models in this pass — diminishing per-token info per
-   GB of download.
+5. **DONE (2026-04-25, third pass): rebased onto upstream master
+   carrying `13d36cf89` (FA browser unblock).** Branch is now 10
+   commits on top of upstream (added a row_norm codegen-stability
+   split as patch 10 before rebasing — `docs/LLAMA_CPP_PATCHES.md`
+   updated with new patch count and rebase note). One conflict on
+   `ggml-webgpu.cpp` end-of-`graph_compute` resolved cleanly
+   (kept our profiling finalization block; upstream restructured
+   nearby `WEBGPU_CPU_PROFILE_TOTAL_END` placement). Backup at
+   `webllm-browser-patches-pre-fa-rebase`.
 
-   **Action plan (in order):**
-   - `make smoke-test` — confirm bundle still builds.
-   - `bun run eval/smoke-serve.ts --port 8031 &` (or `make
-     smoke-restart`).
-   - Steady-state baseline: `bun run eval/perf.ts --model
-     qwen3-1.7b-q4f16 --runs 3` then `--runs 3 --thinking`. Record
-     the two tok/s medians. Any output incoherence here (garbled
-     text, runaway max-tokens, premature EOS) is the FIRST thing
-     to debug — larger model + same tokenizer family should produce
-     comparable quality to 0.6B.
-   - Profile pass: same commands with `--profile` added. Capture
-     the per-mode breakdown (`graphComputeMs`, `downloadResultMs`,
-     `backendMatmulMs`, `backendEncodeOverheadMs`,
-     `backendDispatchCount`) for both thinking modes.
-   - Compare against the 0.6B baselines in the preamble. Hypothesis
-     to falsify: matmul share grows with parameter count while
-     dispatch count stays flat, so encode-overhead's *fraction* of
-     graph time should drop.
-   - End-to-end suite: `make bench-full` with the larger-model
-     profiles enabled (edit `eval/smoke-profiles.ts` — that's where
-     the smoke-bench profile registry and `DEFAULT_PROMPT` live) —
-     the dashboard's accuracy×speed scatter at 1.7B will show whether
-     the 5.4× lift on 0.6B holds shape at this size.
-   - Update the preamble with a fourth column for `qwen3-1.7b`.
+   **No regression:** Qwen3-1.7B steady-state 66.8 tok/s thinking-on
+   (was 65.8 pre-rebase — within noise). Profile-mode dispatch count
+   **629/token unchanged**, `backendAttentionMs` 0.59ms unchanged,
+   matmul/encode within noise. Output coherent on smoke step [7/8]
+   ("Why don't scientists trust atoms..."), embed step [8/8] passes.
 
-   **Decision criteria for what's next after §4:**
-   - If matmul dominates (>40% of graph at 1.7B): pursue matmul
-     kernel work — shader-side optimizations in
-     `~/Repos/llama.cpp/ggml/src/ggml-webgpu/shaders/`.
-   - If encode overhead still dominates (>25% of graph at 1.7B):
-     pursue dispatch batching / op fusion (currently item 2 is done
-     for plain compute passes; the lever now is op-level fusion).
-   - If matmul and encode are roughly balanced (~30% each):
-     graph-shape changes have higher leverage than either single
-     bucket.
+   **FA didn't engage on these decode shapes.** The new upstream
+   `ggml_webgpu_flash_attn_get_decisions` returns the
+   subgroup-matrix-required path for our N=1 decode shapes (head_dim
+   128, GQA 16/8, K=2048+); browser hits the `supports_op = false`
+   branch at line 4460 and falls back to the manual attention path.
+   The new VEC and TILE paths target different shapes (longer K, or
+   prefill seq>1). To actually engage FA, would need to dig into
+   `flash_attn_get_decisions` to understand which shape regions
+   route to VEC vs TILE vs subgroup-matrix — see §6 path (a) below.
 
-   **Memory + context caveats:**
-   - 1.7B Q4f16 weights are ~1 GB; bench-full's 2 GB browser memory
-     budget should be sufficient but verify via the page console.
-   - Default `eval/smoke-profiles.ts::DEFAULT_PROMPT` is short; if a
-     larger context is needed for the per-dimension scoring tasks,
-     check the prompts in `eval/tasks/` rather than smoke-profiles.
+   **Cold-shader artifact discovered + fixed.** The first decode
+   after a WASM rebuild reported 1.0 tok/s on the smoke page — that's
+   shader compilation, not a regression. Added a warmup pass in
+   `smoke-test/real-model-page.js` after [6/8] engine adoption: runs
+   a 2-token `chatCompletion` with realistic sampling (temp 0.6,
+   topK 40, repPenalty 1.05) so the topk decode pipeline compiles
+   here, not on the first measured call (greedy warmup would only
+   compile the greedy/full path). Encoder models warm with
+   `embed("warmup")` instead. Verified: cold reload reports
+   "[6/8] Shader-cache warmup complete in ~290ms" then
+   "[7/8] ... 60.5 tok/s" instead of 1.0 tok/s. Warmup result is
+   discarded; KV cache is reset automatically by the next
+   `chatCompletion` call. `perf.ts`'s 3-trial median already
+   absorbs cold-shader on the first trial, so no harness change
+   needed there. The warmup runs on every page load including
+   interactive use, not just measurement runs — flag-gating on
+   `chatSmoke=` / `bench=` URL params is a follow-up if the ~290ms
+   load cost matters.
 
-5. The latent 3+ binding buffer-conflict edge case in
+6. **NEXT (next-session entry point): pick (a) or (b).**
+
+   **Path (a) — FA shape-routing investigation.**
+   Read `ggml_webgpu_flash_attn_get_decisions` in
+   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp` (search
+   for the function, returns `ggml_webgpu_flash_attn_decisions`).
+   Goal: understand which (head_dim, kv_tile, q_tile, has_mask,
+   browser-without-subgroup-matrix) combinations route to VEC vs
+   TILE vs SUBGROUP_MATRIX. Hypothesis: a small heuristic adjustment
+   could route Qwen3 decode (head_dim 128, GQA 16:8, K=2048,
+   N=1, mask present) to VEC or TILE. Falsifiable by adding
+   `ggml_log_set` traces, capturing the chosen path on a smoke run,
+   and checking what's gating ours out. If the fix is small and
+   correct, it's an upstream contribution; if it's hairy, defer.
+   **Also worth a separate measurement**: prefill (seq>1) may
+   already engage FA — current `--profile` traces filter to
+   `nTokens=1` and don't see prefill, so dispatch-count delta on
+   prefill is unmeasured. Adding a prefill profile path to
+   `eval/perf.ts` is a 1-hour task that would settle whether FA
+   *does* engage somewhere.
+
+   **Path (b) — matmul dequant-stub diagnostic** (advisor's
+   first-pick discriminator). In
+   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`,
+   `MUL_ACC_Q8_0` branch (~line 289), replace
+   `f32(get_byte_i32(...)) * d` with `0.0` (or `f32(get_byte_i32(...))
+   * 0.0` to keep the load shape). Rebuild WASM, profile Qwen3-1.7B.
+   If `backendMatmulMs` collapses → compute-bound → next lever is
+   dequant fusion. If it barely moves → memory-bound → next lever
+   is shared-memory caching of src1 (the activation vector). Either
+   outcome answers the question; don't ship the stub. ~30 min.
+   **Cross-validate** on TinyLlama Q4_0 too (replace `q_byte_offset`
+   load → 0 in `MUL_ACC_Q4_0`); the Q4 GEMV may have a different
+   bottleneck mix than the Q8 path, and the prior 4→8 outputs_per_wg
+   experiment was reverted on Q4 with no diagnosis.
+
+   **Pick path (b) first** unless you have a session-scale block of
+   time to invest in (a). (b) gives a definitive answer about whether
+   matmul kernel work is worthwhile *at all* in 30 min; (a) might
+   produce nothing actionable in a multi-hour read.
+
+   **Cleanup item** worth landing whenever next touching `eval/models.ts`:
+   pin `ggufFilePattern` on the `qwen3-*-q4f16` entries so the file on
+   disk matches the model ID, or rename the IDs to `*-q8` to be honest
+   about what the picker fetches.
+
+7. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` (item 3 in preamble) remains
    untested — no llama op hits it today.
 
-6. **JSPI feasibility checkpoint** remains a follow-up investigation,
+8. **JSPI feasibility checkpoint** remains a follow-up investigation,
    not the next implementation step.
    - **Go/no-go:** no-go for the current milestone; the
      completion-driven readback path is the active baseline.
