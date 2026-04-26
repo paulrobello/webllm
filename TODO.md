@@ -78,24 +78,30 @@
 > 3B+ scale (memory pressure, KV cache size, dispatch counts may
 > reshape the profile in ways that change which lever matters).
 >
-> **Wave 1 progress (2026-04-26):** 3/10 done.
-> - smollm2-360m-q4f16: 106 tok/s steady-state Q4_0; 32 layers /
->   651 dispatches/token; encode 33% > matmul 28% — first profile
->   where encode leads. 24/36 accuracy (62%, lowest in fleet).
-> - qwen2.5-1.5b-q4f16: 84 tok/s steady-state Q4_0 / 28 layers /
->   657 dispatches/token; matmul 40% (highest in fleet) > encode
->   31%. 29/36 accuracy (81%). Run uncovered bug #25 — qwen2
->   attention biases were silently dropped (gibberish output,
->   4% pre-fix); fix lands `attn_{q,k,v}.bias` loaders + opAdd
->   wires in all 3 forward branches. Unblocks qwen2.5-coder-1.5b
->   and qwen2.5-3b for the rest of wave 1.
-> - smollm2-1.7b-q4f16: 86 tok/s steady-state Q4_0 / 24 layers
->   (fewest 1.5B+) / no GQA (n_head_kv=32, KV cache 1536 MB —
->   largest in fleet) / 491 dispatches/token (lowest 1.5B+).
->   27/36 accuracy (74%). 31% faster than Qwen3-1.7B at same
->   params — fewer layers + no per-head norm + Q4 vs Q8 stacks.
->   Cross-family pattern at 1.5B-1.7B: SmolLM2 fastest/lowest-
->   accuracy → Qwen2 mid/mid → Qwen3 slowest/highest-accuracy.
+> **Wave 1 progress (2026-04-26):** 5/10 done · 2 deferred.
+> - smollm2-360m-q4f16: 106 tok/s steady-state Q4_0 / 24/36 (62%).
+> - qwen2.5-1.5b-q4f16: 84 tok/s / 29/36 (81%). Run uncovered
+>   bug #25 — qwen2 attention biases were silently dropped
+>   (gibberish output, 4% pre-fix); fix lands `attn_{q,k,v}.bias`
+>   loaders + opAdd in all 3 forward branches.
+> - smollm2-1.7b-q4f16: 86 tok/s / 27/36 (74%). 24 layers, no
+>   GQA, KV 1536 MB (largest). 31% faster than Qwen3-1.7B at
+>   same params.
+> - qwen2.5-3b-q4f16: 45 tok/s / 32/36 (86%). 36 layers, GQA
+>   8:1. Highest non-qwen3 accuracy in fleet. Bias path (#25)
+>   generalizes cleanly to 3B.
+> - llama-3.2-3b-q4f16: 58 tok/s / 27/36 (76%). 28 layers, GQA
+>   3:1, KV 896 MB. 29% faster than qwen2.5-3b at same scale.
+>   Encode overhead 15.5% — new fleet low.
+> - DEFERRED: gemma-2-2b (pre+post norm pairs, logit/attn
+>   soft-cap, sliding-window, (1+w) RMSNorm), phi-3.5-mini
+>   (fused QKV).
+>
+> Cross-family speed/accuracy pattern is robust across the
+> 1.5-3B span: **Llama family fastest/lower-accuracy → Qwen
+> family slower/higher-accuracy**. Speed delta tracks
+> dispatch count (layer count + arch-specific extras), not
+> param count.
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -973,7 +979,68 @@ needs to be collected.
      3B, slightly less than the 1.7B prediction. Re-evaluate
      once 4B (qwen3-4b) lands for the full size sweep.
 
-7. **Gemma 2 + Phi 3 deferred from wave 1 — architectural gaps
+7. **§10 wave 1, model 5: llama-3.2-3b-q4f16 registered + benched.**
+   First non-qwen 3B-class entry; cross-family contrast against
+   qwen2.5-3b at the same param scale.
+   - **Profile registered:** `llama-3.2-3b-warm` (temperature 0.6,
+     `DEFAULT_PROMPT`); added to `SMOKE_PROFILE_SETS.full`.
+     Bartowski mirror open. Pinned `ggufFilePattern: "Q4_0."`
+     (with trailing dot) to disambiguate against the ARM repack
+     variants `Q4_0_4_4`, `Q4_0_4_8`, `Q4_0_8_8` — those use a
+     SVE/dot-product layout our shader can't decode.
+   - **Architecture (llama / 28 layers):** n_head 24 · n_head_kv 8
+     (GQA 3:1, much less aggressive than qwen2.5-3b's 8:1) ·
+     embedding 3072 (wider than qwen2.5-3b's 2048) · head_dim 128 ·
+     ffn 8192 (narrower than qwen2.5-3b's 11008) · ctx_max
+     **131072** (32× the 4096 we run at — clear long-context
+     headroom). KV cache @ ctx=4096 = **896 MB** — 3.1× larger
+     than qwen2.5-3b (288 MB) due to less aggressive GQA, but
+     still well under SmolLM2-1.7B's 1536 MB. File 1832.9 MB.
+   - **Speed (3-trial median):**
+     - Steady-state **58.2 tok/s** (runs: 60.0 / 58.2 / 57.0) —
+       **29% faster than qwen2.5-3b** (45.1 tok/s) at the same
+       param class. Three architectural differences stack: 28
+       layers vs 36 (-22%), no per-projection biases (-84
+       dispatches/token vs qwen2 path), wider/shallower vs qwen's
+       narrower/deeper.
+     - Profile-mode 37.9 tok/s (perturbation -35%, slightly above
+       fleet's typical -28 to -33%).
+   - **Profile-mode backend attribution (156-step decode):**
+     - `backendMatmulMs`: 8.28 mean / 34.9% — almost identical
+       to qwen2.5-3b's 8.91 mean / 34.4%. Despite Llama's wider
+       hidden (3072 vs 2048) and Qwen2.5's deeper layer count,
+       per-step matmul cost converges at the 3B Q4_0 scale.
+     - `backendEncodeOverheadMs`: 3.67 mean / **15.5%** —
+       **new fleet low** (was smollm2-1.7b's 20.2%). Fewer
+       layers + bias-free + GQA 3:1 stacks to the smallest
+       per-step encode cost we've seen.
+     - `backendAttentionMs`: 0.51 mean / 2.1%.
+     - `backendDispatchCount`: **572/token** — 32% lower than
+       qwen2.5-3b's 841. The 184-dispatch delta breaks down as:
+       28 layers × ~3 fewer ops/layer (no qwen2 biases, no extra
+       norm path) = ~84 fewer; plus 8-layer count delta × 23
+       ops = ~184. Sub-linear sum.
+   - **Smoke chat regression:** PASSED. Output: `"A man walked
+     into a library and asked the librarian, 'Do you have any
+     books on Pavlov's dogs and Schrödinger's cat?' The
+     librarian replied, 'It rings a bell, but I'm not sure if
+     it's here or not.'"` — coherent and notably clever, 53
+     tokens, finish=eos.
+   - **Accuracy (`bench-full --profiles llama-3.2-3b-warm`):**
+     **27/36 passing · overall 76%** — 10 points below
+     qwen2.5-3b's 86% at the same param scale, mirroring the
+     wave-1 cross-family pattern: **Llama family fastest with
+     lower accuracy, Qwen family slower with higher accuracy**.
+     The pattern is consistent across the 1.5-3B band now
+     (smollm2-1.7b 74% vs qwen2.5-1.5b 81%; llama-3.2-3b 76%
+     vs qwen2.5-3b 86%).
+   - **3B-class speed/accuracy table (Q4_0):**
+     | Model              | Layers | Disp/tok | tok/s | Accuracy |
+     |--------------------|-------:|---------:|------:|---------:|
+     | qwen2.5-3b         |     36 |      841 |  45.1 |     86%  |
+     | llama-3.2-3b       |     28 |      572 |  58.2 |     76%  |
+
+8. **Gemma 2 + Phi 3 deferred from wave 1 — architectural gaps
    identified.** Both families need substantially more
    inference-path work than the qwen2 bias fix did. Documented
    here so future work has a clear scope.
@@ -1021,21 +1088,24 @@ needs to be collected.
 ### Resumption checklist (start a fresh session here)
 
 **Next target: Active Step §10 — large-model test campaign,
-wave 1 model 4.** Wave 1 is in progress: `smollm2-360m-q4f16`,
-`qwen2.5-1.5b-q4f16`, and `smollm2-1.7b-q4f16` landed 2026-04-26
-(see "Completed on 2026-04-26 §1, §2, §5"). The qwen2.5-1.5b
-run uncovered bug #25 (qwen2 attention biases) which unblocks
-`qwen2.5-coder-1.5b` and `qwen2.5-3b`. SmolLM2-1.7B confirmed
-that the qwen-family per-head Q/K-norm + extra layers cost is
-real — SmolLM2 came in 31% faster than Qwen3-1.7B at the same
-param count. The next unprofiled entry by ascending size is
-**`gemma-2-2b-q4f16` (2.61B)** — first Gemma family member;
-expect different RoPE / norm conventions worth verifying as a
-correctness gate before pushing into 3B+ territory. Remaining
-wave-1 fleet after gemma-2-2b: qwen2.5-coder-1.5b (or skip
-without code-gen eval task), qwen2.5-3b, llama-3.2-3b,
-hermes-3-llama-3.2-3b, phi-3.5-mini, qwen3-4b. No 7B+ model is
-registered yet (wave 2).
+wave 1 model 6.** Wave 1 progress: 5/10 + 2 deferred. Five
+landed (smollm2-360m, qwen2.5-1.5b, smollm2-1.7b, qwen2.5-3b,
+llama-3.2-3b — see "Completed on 2026-04-26 §1, §2, §5, §6,
+§7"); two deferred for arch gaps (gemma-2-2b, phi-3.5-mini —
+see "Completed on 2026-04-26 §8"). Cross-family speed/accuracy
+pattern (Llama fast/lower-accuracy vs Qwen slow/higher-accuracy)
+is robust across the 1.5-3B span.
+
+The next unprofiled supported entry by ascending size is
+**`hermes-3-llama-3.2-3b-q4f16` (3.21B)** — Hermes fine-tune
+of Llama-3.2-3B, useful for tool-calling eval contrast (Hermes
+is specifically tool-tuned). Same arch as llama-3.2-3b so no
+new arch work needed. After that the final supported wave-1
+entry is **`qwen3-4b-q4f16` (4.0B)** — largest registered, the
+stress test for the current WASM/GPU memory budget at Q4.
+`qwen2.5-coder-1.5b` is also available (qwen2 arch, supported)
+if a code-gen eval task is in scope. No 7B+ model is registered
+yet (wave 2).
 
 **Decode tuning is paused at the current scale** — §6/§7/§8/§9
 showed the bandwidth-bound fraction is ~40% of matmul on Q8 /
@@ -1531,22 +1601,33 @@ investigating "the engine."
       GQA (n_head_kv=32), KV cache 1536 MB at ctx=4096 (largest
       in fleet). 31% faster than Qwen3-1.7B at same params. See
       "Completed on 2026-04-26 §5" above.
-    - `qwen2.5-1.5b-q4f16` (1.54B) — Qwen2.5 1.5B for a
-      family/version comparison vs Qwen3-1.7B already profiled.
     - `qwen2.5-coder-1.5b-q4f16` (1.54B) — code-tuned variant;
       mostly interesting if we add a code-generation eval task.
-    - `smollm2-1.7b-q4f16` (1.71B) — same size as Qwen3-1.7B,
-      different family.
-    - `gemma-2-2b-q4f16` (2.61B) — first Gemma family member;
-      different RoPE / norm conventions worth verifying.
-    - `qwen2.5-3b-q4f16` (3.09B) — first 3B-class entry.
-    - `llama-3.2-3b-q4f16` (3.21B) — Llama family at 3B.
+      Same arch as qwen2.5-1.5b (qwen2 with bias support).
+    - [-] `gemma-2-2b-q4f16` (2.61B) — DEFERRED 2026-04-26.
+      Architectural gap: needs pre+post norm pairs, logit/attn
+      soft-cap (new opTanh WASM binding), RMSNorm (1+w) scaling,
+      sliding-window attention every other layer. Bench-full
+      not run; inventory in "Completed on 2026-04-26 §8" above.
+    - [x] `qwen2.5-3b-q4f16` (3.09B) — DONE 2026-04-26.
+      Steady-state 45.1 tok/s / profile-mode 32.3 / 841
+      dispatches/token (highest in fleet) / 32/36 = 86%
+      accuracy. 36 layers (qwen2 with bias support); KV 288 MB
+      thanks to GQA 8:1. See "Completed on 2026-04-26 §6" above.
+    - [x] `llama-3.2-3b-q4f16` (3.21B) — DONE 2026-04-26.
+      Steady-state 58.2 tok/s / profile-mode 37.9 / 572
+      dispatches/token / 27/36 = 76% accuracy. 28 layers, GQA
+      3:1, KV 896 MB. 29% faster than qwen2.5-3b at same param
+      scale. See "Completed on 2026-04-26 §7" above.
     - `hermes-3-llama-3.2-3b-q4f16` (3.21B) — Hermes fine-tune
       of Llama 3.2 3B; useful for tool-calling eval contrast.
-    - `phi-3.5-mini-q4f16` (3.82B) — Phi family (different
-      architecture than Llama/Qwen).
+      Same arch as llama-3.2-3b — no new arch work needed.
+    - [-] `phi-3.5-mini-q4f16` (3.82B) — DEFERRED 2026-04-26.
+      Architectural gap: needs fused QKV projection unpacking
+      and FFN gate_up split. Inventory in §8 above.
     - `qwen3-4b-q4f16` (4.0B) — **largest registered**; the
       stress test for current WASM/GPU memory budget at Q4.
+      Same arch as qwen3-1.7b (qwen3 with q/k norm) — supported.
 
     **Wave 2: register 7B+ candidates with small quants if the
     WASM 4 GB cap allows.** Q4_0 7B = ~3.94 GB just for weights —

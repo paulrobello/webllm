@@ -186,6 +186,13 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Llama 3.2 3B ───────────────────────────────────────────
+	{
+		name: "llama-3.2-3b-warm",
+		model: "llama-3.2-3b-q4f16",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Snowflake Arctic Embed (encoder-only) ──────────────────
 	// Embedding profiles don't generate; the temperature / thinking /
 	// prompt fields are intentionally absent. Bench harnesses key on
@@ -260,6 +267,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen2.5-1.5b-warm",
 		"smollm2-1.7b-warm",
 		"qwen2.5-3b-warm",
+		"llama-3.2-3b-warm",
 		"arctic-embed-s",
 		"arctic-embed-m",
 	],

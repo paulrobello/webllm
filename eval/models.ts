@@ -230,7 +230,11 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "balanced",
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/Llama-3.2-3B-Instruct-q4f16_1-MLC",
+		// Bartowski lists Q4_0 plus ARM-repack variants (Q4_0_4_4, _4_8,
+		// _8_8) that use a SVE/dot-product layout our shader doesn't
+		// handle. Pin the trailing dot to match the plain Q4_0.gguf only.
 		ggufUrl: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF",
+		ggufFilePattern: "Q4_0.",
 	},
 
 	{
