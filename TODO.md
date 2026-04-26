@@ -920,6 +920,104 @@ needs to be collected.
      count (-14% layers + per-head norm overhead in Qwen3) more
      than parameter count.
 
+6. **§10 wave 1, model 4: qwen2.5-3b-q4f16 registered + benched.**
+   First 3B-class entry; stress-tests the qwen2 bias path
+   (bug-fix #25) at 2× the 1.5B scale.
+   - **Profile registered:** `qwen2.5-3b-warm` (temperature 0.6,
+     `DEFAULT_PROMPT`); added to `SMOKE_PROFILE_SETS.full`.
+     `Qwen/Qwen2.5-3B-Instruct-GGUF` mirror open;
+     `ggufFilePattern: "Q4_0"` pinned (1905.3 MB, well under
+     WASM cap).
+   - **Architecture (qwen2 / 36 layers):** n_head 16 · n_head_kv 2
+     (GQA 8:1, even more aggressive than 1.5B's 6:1) ·
+     embedding 2048 · head_dim 128 · ffn 11008 · ctx_max 32768.
+     KV cache @ ctx=4096 = 288 MB (only +64 over 1.5B's 224 MB
+     thanks to GQA 8:1 keeping n_head_kv flat at 2). +8 layers
+     over qwen2.5-1.5b accounts for the dispatch-count delta
+     (657 → 841 = +184 = ~23 ops/layer × 8 layers).
+   - **Speed (3-trial median):**
+     - Steady-state **45.1 tok/s** (runs: 44.8 / 45.7 / 45.1).
+       1.87× slower than qwen2.5-1.5b (84.3 tok/s) — linear-ish
+       scaling with parameter ratio (2×) at this size class.
+     - Profile-mode 32.3 tok/s (perturbation -28%).
+   - **Profile-mode backend attribution (39-step decode):**
+     - `backendMatmulMs`: 8.91 mean / 34.4% — scales 1.67× from
+       qwen2.5-1.5b's 5.32 ms (vs 2× param ratio → sub-linear,
+       which is the bandwidth-bound matmul signature §6-§9
+       characterized).
+     - `backendEncodeOverheadMs`: 5.63 mean / 21.7% (was 3.69 at
+       1.5B = +52%, tracks the +29% layer-count increase plus
+       per-step overhead growth).
+     - `backendAttentionMs`: 0.66 mean / 2.6%.
+     - `backendDispatchCount`: **841/token** (highest in fleet
+       to date).
+   - **Smoke chat regression:** PASSED. Output: `"Why did the
+     tomato turn red? Because it saw the salad dressing!"` —
+     finish=eos, 14 tokens, no console errors. Same prompt that
+     caused gibberish on qwen2.5-1.5b pre-fix; now coherent at
+     2× the scale, confirming bug-fix #25 works generally for
+     the qwen2 family.
+   - **Accuracy (`bench-full --profiles qwen2.5-3b-warm`):**
+     **32/36 passing · overall 86%** — within the Qwen3-1.7B
+     band (82-89%) and the highest non-qwen3 entry in the fleet.
+     +5 points over qwen2.5-1.5b (81%), consistent with the
+     2× param scale for an instruction-tuned model.
+   - **Architectural finding: matmul-bandwidth fraction holds at
+     3B.** §9 characterized matmul as ≈40% of decode time on
+     Q8_0 / ≈20% on Q4_0 at the 1.7B scale. At 3B Q4_0,
+     matmul = 34.4% of graph time (graph = ~84% of step time)
+     ≈ 29% of step time. That's modestly lower than 1.5B's
+     ~38% of step (matmul% × graph%). Suggests the bandwidth-
+     bound kernel-tuning ceiling (§A subgroup-cooperative
+     loading) might still be worth ~10-12% of decode time at
+     3B, slightly less than the 1.7B prediction. Re-evaluate
+     once 4B (qwen3-4b) lands for the full size sweep.
+
+7. **Gemma 2 + Phi 3 deferred from wave 1 — architectural gaps
+   identified.** Both families need substantially more
+   inference-path work than the qwen2 bias fix did. Documented
+   here so future work has a clear scope.
+
+   **Gemma 2 (gemma-2-2b-q4f16) — needs all of:**
+   - Pre-norm AND post-norm pairs for both attn and FFN (4 norm
+     sites per layer instead of 2); requires `attn_post_norm`
+     and `ffn_post_norm` tensors loaded + extra `opMul`/
+     `opRmsNorm` calls in all 3 forward branches.
+   - Logit soft-capping at output:
+     `logits = soft_cap * tanh(logits / soft_cap)`. Requires
+     `opTanh` WASM binding (not currently exposed) plus
+     `final_logit_softcapping` metadata read.
+   - Attention soft-capping inside the attention block,
+     applied between Q·K^T and softmax. Same `opTanh` plus
+     `attn_logit_softcapping` metadata.
+   - **RMSNorm `(1 + weight)` scaling** — Gemma uses
+     `weight + 1` while Llama uses just `weight`. Either patch
+     in a Gemma-specific RMSNorm path or pre-bake `+1` into
+     the loaded gamma tensor.
+   - Sliding-window attention alternating with full attention
+     (every other layer). Significant complexity; alternating
+     attention masks per layer.
+   - Bartowski mirror has only Q4_K_M (1.6 GB) + Q8_0
+     (2.7 GB), no Q4_0 — would need a separate
+     `ggufFilePattern: "Q4_K_M"` pin.
+
+   **Phi 3 (phi-3.5-mini-q4f16) — needs at minimum:**
+   - Fused QKV projection (`attn_qkv.weight` instead of
+     separate `attn_q/k/v.weight`). Requires either splitting
+     the fused tensor at load time or a fused-QKV forward path.
+   - Verify FFN structure (Phi3 uses `gate_up.weight` fused
+     vs the SwiGLU split llama uses).
+   - Verify chat template alignment (we have `phi3` in
+     `chat-template.ts:8` but inference path is untested).
+
+   **Per §10 stop-conditions, both deferrals are recorded
+   without code changes.** Bench-full was *not* run on either
+   model; the architectural gaps are clear enough from tensor
+   inventories and llama.cpp Gemma2/Phi3 sources that running
+   them blind would just produce garbage and burn 1.6-3.8 GB
+   of HF bandwidth per attempt. Adding either family is now a
+   concrete future task with the inventory above as the spec.
+
 ### Resumption checklist (start a fresh session here)
 
 **Next target: Active Step §10 — large-model test campaign,

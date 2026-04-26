@@ -248,7 +248,12 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "balanced",
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/Qwen2.5-3B-Instruct-q4f16_1-MLC",
+		// Q4_0 (1.9 GB) is the wave-1 cross-family default. Qwen2 arch
+		// requires the attn_{q,k,v}.bias support that landed 2026-04-26
+		// (bug-fix #25); without it this entry produces gibberish like
+		// qwen2.5-1.5b did pre-fix.
 		ggufUrl: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF",
+		ggufFilePattern: "Q4_0",
 	},
 
 	{
