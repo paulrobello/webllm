@@ -1999,9 +1999,13 @@ needs to be collected.
 skipped). Wave 2 complete: 4/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
 86% — §13; mistral-7b-v0.3-q3km at 19.7 tok/s / 69% — §15;
-qwen3-8b-iq3m at 16.2 tok/s / 90% off / 90% on — §16).
-Findings, one bug fix, one upstream rebase, one quant-
-promotion, plus a dashboard hygiene pass from these sessions:
+qwen3-8b-iq3m at 16.2 tok/s / 90% off / 90% on — §16). **Two
+kernel-tuning levers measured + closed:** §A subgroup-cooperative
+loading (§17) and §4 Flash Attention enable (§18). With both
+closed, the next lever with real headroom is §C drafter-based
+speculative decoding. Findings, one bug fix, one upstream rebase,
+one quant-promotion, plus a dashboard hygiene pass from these
+sessions:
 
 - **Bug #28 (Q3_K shader) FIXED — see §14.** Root cause was
   UB shift-by-32 in `load_u32_at_src{,0}` u32 loader helpers
@@ -2027,19 +2031,37 @@ promotion, plus a dashboard hygiene pass from these sessions:
   3.1-8B, ~3252 MB Qwen3-8B IQ3_XXS). MEMORY64 to bump
   the cap to 8 GiB requires the wasm memory64 proposal —
   multi-day engineering effort, not a flag flip.
-- **§A original premise REJECTED 2026-04-26.** Walked
-  `mul_mat_vec.wgsl`: src0 already partitioned perfectly
-  across threads (every weight byte read by exactly one
-  thread). Subgroup-broadcast cannot share what isn't
-  duplicated. §7's Stub-B speedup was load-**latency**,
-  not bandwidth. **Replacement levers in updated §A:**
-  (1) coarsen THREADS_PER_BLOCK 4→2 (halve load-issue
-  rate, one #define per quant — start here);
-  (2) vec4-packed consecutive-address loads (Q8/Q5/IQ
-  inner loops only); (3) lift `d` fp16 scale loads out
-  of the OUTPUTS_PER_WG row loop. Predicted combined
-  ceiling ~8-14% of total decode at 8B IQ3_M (down from
-  the rejected 26-28% but still real).
+- **§A subgroup-cooperative loading CLOSED 2026-04-26 (§17).**
+  Original subgroup-broadcast premise rejected on inspection
+  (kernel already partitions src0 perfectly across threads;
+  no redundant loads to coalesce). Lever-1 replacement
+  (THREADS_PER_BLOCK 4→2) measured on the 4-baseline harness:
+  only TinyLlama Q4_0 benefited (sub-trigger -2.9% matmul /
+  +0.6% tok/s — noise). Q4_K_S (Mistral) is a K-quant with
+  TPB=16 and a different block layout (structurally excluded
+  from §A's design); IQ3_M (both 8Bs) has no `mul_mat_vec.wgsl`
+  path and routes through general `mul_mat.wgsl` instead.
+  Levers 2 + 3 face the same applicability constraint. Shader
+  reverted; no patches landed.
+- **§4 Flash Attention enable CLOSED 2026-04-26 (§18).**
+  Integrated `ggml_flash_attn_ext` into all three attention
+  branches (decode, prefill, debug-checkpoint) with F16 KV
+  cache + transposed V layout. Measured on the 4-baseline:
+  FA engaged on all 4 (dispatch counts -10-13%, matmul
+  -2 to -16%), but the new `backendAttentionMs` overhead
+  (1.3-3.3 ms/step) exceeds savings at single-token decode.
+  Mistral-7B regressed -5.8% (blocking — exceeds 3% gate);
+  no model gained ≥2%. **FA's main wins are prefill (long
+  prompts) and longer decode batches (>256 tokens) — neither
+  is exercised by the bench-inf gate.** Bridge wrappers,
+  TS bindings, surface test retained as future-work
+  infrastructure (`33f10eb`, `4692bce`+`d26d736`, `068ef84`);
+  implementation reverted via `git checkout 068ef84 --
+  src/inference/model-inference.ts smoke-test/real-model-page.js`.
+  **A future revisit at long-decode or prefill-TTFT scope
+  could ship FA without touching the bridge.** See
+  `docs/superpowers/plans/2026-04-26-fa-enable.md` for the
+  plan and decision-rule details.
 - **Loader / parser refactor (§11):** GGUF streams cleanly
   through the WASM heap; ctxCreate over-allocation fixed.
   Confirmed working at 3.6 GB / 3.95 GB streaming.
@@ -2065,31 +2087,14 @@ promotion, plus a dashboard hygiene pass from these sessions:
   reload required to see the cleanup (live-server SSE doesn't
   broadcast deletes).
 
-**Next target options (pick one — recommended order: B → E
-items, with A/C/F all closed):**
+**Next target options (pick one — recommended: §C drafter,
+with A/B/C/F/§4 all closed):**
 
-A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done —
-   see §16. Wave 2 complete (4/4). 16.2 tok/s steady-
-   state / 90% off / 90% on. Top-of-fleet accuracy ties
-   qwen3-4b thinking-on; effectively tied with Llama-
-   3.1-8B on speed despite +23% dispatches.**
-
-B. ~~§A subgroup-cooperative loading / replacement
-   levers.~~ **CLOSED 2026-04-26 — see §17 above.** Lever 1
-   (THREADS_PER_BLOCK 4→2) measured against the 4-baseline
-   harness; only TinyLlama Q4_0 benefited (sub-trigger
-   -2.9% matmul / +0.6% tok/s noise). Q4_K_S is a K-quant
-   (TPB=16, structurally excluded from §A); IQ3_M has no
-   `mul_mat_vec.wgsl` path (routes through general matmul).
-   Levers 2 + 3 face the same applicability constraint
-   and don't help the production fleet. Shader reverted.
-
-C. ~~Fix the Q3_K shader (#28).~~ **Done — see §14.**
-
-F. ~~Promote or retire the Q3_K_M test entry.~~ **Done —
-   see §15. Promoted; finding is that Q3_K is not a
-   useful speed lever (43% slower than Q4_K_S at 7B with
-   tied accuracy).**
+A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
+B. ~~§A subgroup-cooperative loading.~~ **CLOSED 2026-04-26 — §17.**
+C. ~~Fix the Q3_K shader (#28).~~ **Done — §14.**
+F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
+§4. ~~Flash Attention enable for decode.~~ **CLOSED 2026-04-26 — §18.**
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -2099,43 +2104,65 @@ D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    engineering. Only worth it for wave-3 12B+ candidates
    that need Q4_K_S+.
 
-E. **Other deferred items** (lower priority than B):
-   - **§B FA shape-routing** for prefill/TTFT (§5 path a).
-     FA's main win is seq>1; long-prompt latency lever.
-     Becomes more attractive at 8B+ where K-dimension grows.
-   - **§C drafter-based speculative decoding.** Large
-     project; 2-3× wall-clock potential. Drafter could be
-     wave-1 small (smollm2-360m, qwen3-0.6b) paired with a
-     7B-8B target. With wave 2 closed, the qwen3-0.6b →
-     qwen3-8b draft pair is now an obvious match.
+E. **Remaining deferred items (in rough priority):**
+   - **§C drafter-based speculative decoding** *(recommended
+     first move for next session).* Large project; theoretical
+     2-3× wall-clock decode for chat-style workloads. Drafter
+     could be wave-1 small (smollm2-360m, qwen3-0.6b) paired
+     with a 7B-8B target. **The qwen3-0.6b → qwen3-8b draft
+     pair is the obvious match** (same family, shared
+     tokenizer, ~13× param spread). Memory budget: 0.6B Q8_0
+     (~640 MB) + 8B IQ3_M (~3.7 GB) = ~4.3 GB total weights
+     plus 2× KV cache — tight against the 4 GiB WASM cap;
+     option D (MEMORY64) may become a prerequisite. Warrants
+     `writing-plans` + `subagent-driven-development` sequence
+     like §17 + §18 did.
+   - **§4 FA revisit at long-decode / prefill-TTFT scope.**
+     The §18 closure measured FA at decode N=1 only; FA's
+     real wins (prefill + decode batches >256 tokens) were
+     never tested. Bridge infrastructure is already in place
+     (`33f10eb`, `4692bce`+`d26d736`, `068ef84`) — a future
+     revisit just needs to re-land the implementation files
+     from `1f1a9da` and measure under a different gate.
+   - **§B FA shape-routing** for prefill/TTFT — overlaps with
+     the §4 revisit above; same `flash_attn_get_decisions`
+     code path at the same shapes.
    - **§D encoder/embedding perf pass.** Untouched since
-     §21 dashboard.
+     §21 dashboard. Smaller scope; quick wins likely on
+     arctic-embed-s/m if anyone uses `engine.embed()` at
+     throughput.
    - **Deferred wave-1 architectures** (Gemma 2, Phi 3) —
      5+ gaps for Gemma; mostly fused-QKV for Phi 3. See
      "Completed on 2026-04-26" §9.
 
 **Net characterization at 8B IQ3_M (post-§16, both
 families):** matmul ≈ 65-69% of decode (Llama-3.1 71%,
-Qwen3 67% × graph 97% of step). §A's pre-analysis ceiling
-was ~26-28% of decode (matmul × 40% bandwidth-bound
-fraction from §9 Stub B). **The post-inspection ceiling
-is lower (~8-14% combined)** because the bandwidth-bound
-fraction is really load-latency-bound, and the only viable
-levers reduce issue rate, not bytes. Still the highest-
-leverage perf target left without scope expansion;
-worth a measurement pass before declaring closed.
+Qwen3 67% × graph 97% of step). **All single-token decode
+kernel-tuning levers are now closed without ship.** §17 ruled
+out matmul-kernel rework (§A); §18 ruled out FA fusion at
+N=1 decode. The remaining headroom is at a different scope:
+(1) algorithmic — §C drafter speculative decoding amortizes
+the matmul cost across draft+verify steps; (2) workload —
+§4 FA revisit at prefill/long-decode where the kernel
+overhead pays back. Both are documented above under
+"Remaining deferred items".
 
 Boot sequence for a fresh session:
 
 1. **`make checkall`** — confirm 394 pass / 5 skip / 0 fail.
-2. **`git log --oneline -5`** — top of `main` should
-   reflect the §16 / §A-revision landing
-   (`feat(eval): §16 wave-2 model 4 — qwen3-8b-iq3m
-   registered` or similar, plus a docs commit refreshing
-   §A's levers). Below that: `e31dc62` (dashboard
-   inference/embeddings tab split), `a95f995` (TODO refresh
-   post §15 + dashboard cleanup), `e80c08b` (§15
-   mistral-7b Q3_K_M promoted).
+   The 394th test is `tests/op-flash-attn-ext.test.ts`
+   (added by §18 — it pins the FA bridge wrapper presence
+   on `GgmlWasm.prototype` even though no caller uses them
+   post-revert).
+2. **`git log --oneline -10`** — top of `main` should be
+   `d680371 docs(TODO): bump resumption checkall count
+   393 -> 394`, then `ffd7276 docs(TODO): §18 — §4 FA
+   enable measured + closed`. Below those: the §18 plan
+   commits (`d4988a0` `1f1a9da` `baad612` — implementation
+   reverted by `ffd7276`'s `git checkout`), then the §18
+   infrastructure commits that survived (`068ef84`
+   `d26d736` `4692bce` `33f10eb`). Below that: `bebed0c`
+   (§17 §A closure) and `c98d0a7` (§16 qwen3-8b register).
 3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
    — confirm the **11-patch stack** is intact and the base
    is upstream `78433f606 Fix recurrent state serialization`
@@ -2143,55 +2170,114 @@ Boot sequence for a fresh session:
    UB shift-by-32 in load_u32_at_src{,0}` — patch 11, the
    bug #28 fix. Safety branch
    `webllm-browser-patches-pre-rebase-2026-04-26` preserves
-   the pre-rebase tip if needed.
-4. **Verify the WASM build matches the rebased patches:**
-   `make wasm-build && bun build src/index.ts --outfile
+   the pre-rebase tip if needed. **§17 and §18 added zero
+   patches** — the `__EMSCRIPTEN__` guard around FA was
+   already removed in the 2026-04-25 rebase.
+4. **WASM build state.** `smoke-test/webllm-wasm.{js,wasm}`
+   mtimes from this session are fresh (Apr 26 ~14:00); they
+   match the §18 closure state (no FA call sites — the
+   wrappers are present but unused). If the artifacts look
+   stale, run: `source ~/emsdk/emsdk_env.sh && make wasm-build
+   && bun build src/index.ts --outfile
    smoke-test/webllm-bundle.js --target browser && cp
    src/wasm/build/webllm-wasm.{js,wasm} smoke-test/ && make
    smoke-restart`. Then navigate the smoke page to
    `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M coherent
-   at ≥20 tok/s confirms patch 11 is healthy. (Skip if the
-   `smoke-test/webllm-wasm.{js,wasm}` mtime is recent and
-   matches HEAD — the §16 session left fresh artifacts.)
-5. **Read for context:** "Completed on 2026-04-26" §12-§16
-   (wave 2 closure narrative, with §15 cross-family table
-   as headline) and the **updated §A entry** in "Deferred
-   kernel-tuning targets" — the original subgroup-
-   broadcast premise is rejected; replacement levers are
-   THREADS_PER_BLOCK coarsening, vec4-packed loads, and
-   `d`-scale lifting.
+   at ≥20 tok/s confirms patch 11 is healthy.
+5. **Read for context:** "Completed on 2026-04-26" §17 (§A
+   closure) and §18 (§4 FA closure). Both follow the same
+   "measure-and-close" pattern — useful templates if §C
+   drafter or §4 FA-revisit produces a similar outcome.
+   The §18 plan at `docs/superpowers/plans/2026-04-26-fa-enable.md`
+   is also worth skimming for the V cache layout choice +
+   FA shape contract — that work is recoverable from
+   git (the implementation lived briefly on commits
+   `baad612` + `1f1a9da` before the closure revert).
 6. **Dashboard state check** (optional but useful before
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
-   after §16 should return **29 runs / 30 evals** (27/28
-   post-2026-04-26 hygiene + 2 qwen3-8b runs from §16).
-   The live dashboard SSE counter shows higher numbers
-   (~52/53 after §16) because it accumulates streaming
-   events without DB persistence; both views are correct
-   but independent. If the dashboard tab is open from a
-   prior session, force-reload — SSE doesn't broadcast
-   deletes.
+   should return **29 runs / 30 evals** (unchanged through
+   §17 and §18 — neither closure produced new dashboard
+   data, only TODO writeups). The live dashboard SSE counter
+   shows higher numbers (~52/53) because it accumulates
+   streaming events without DB persistence; both views are
+   correct but independent. If the dashboard tab is open
+   from a prior session, force-reload — SSE doesn't
+   broadcast deletes.
+7. **Bridge wrappers retained from §18.** `op_flash_attn_ext`,
+   `op_flash_attn_ext_set_prec`, `op_flash_attn_ext_add_sinks`
+   exist in `src/wasm/webgpu-bridge.cpp` and are exported
+   in `src/wasm/CMakeLists.txt`. `opFlashAttn`,
+   `opFlashAttnSetPrec`, `opFlashAttnAddSinks` exist on the
+   `GgmlWasm` class in `src/inference/ggml-wasm.ts`. There
+   are no call sites — they're dead code by design. **Do
+   not delete them** — they are the foundation for any
+   future FA revisit (§4 long-decode / prefill scope).
 
-**Recommended first move:** option E.§C — drafter-based
-speculative decoding. **§A is now closed (see §17 above)** —
-lever 1 measured against the 4-baseline harness on
-2026-04-26; only TinyLlama Q4_0 benefited (sub-trigger
--2.9% matmul / noise +0.6% tok/s) because the 7B/8B fleet
-uses K-quants (Q4_K_S, TPB=16, structurally excluded) or
-IQ3_M (no `mul_mat_vec.wgsl` path — routes through general
-`mul_mat.wgsl`). Levers 2 + 3 in §A are subject to the
-same applicability constraint and are not worth pursuing.
-With kernel-tuning now exhausted at 7B+ without a major
-rewrite, §C (drafter-based speculative decoding) is the
-remaining lever with meaningful headroom. Wave 2 closed
-the natural draft pair: qwen3-0.6b ↔ qwen3-8b (same
-family, shared tokenizer, ~13× param spread). Larger
-project but theoretical 2-3× wall-clock decode for
-chat-style workloads. §B FA shape-routing is the
-secondary option (helps prefill/TTFT, not steady-state
-decode).
+**Recommended first move:** §C drafter-based speculative
+decoding using the **qwen3-0.6b → qwen3-8b draft pair**.
+Both kernel-tuning levers (§17 §A and §18 §4 FA) are now
+closed for single-token decode; §C is the remaining lever
+with real algorithmic headroom (theoretical 2-3× wall-clock
+decode on chat workloads where the drafter is mostly right).
 
-#### How to test §A lever 1 — THREADS_PER_BLOCK 4→2
+**Why this pair:** same Qwen3 family (shared tokenizer +
+chat template), ~13× param spread between drafter and
+target, both already registered + benched in §16. Both
+files cached locally (`smoke-test/models/qwen3-0.6b-q4f16.gguf`
+0.6 GB + `qwen3-8b-iq3m.gguf` 3.7 GB).
+
+**Scope estimate:** 2-3 days work. Touches:
+1. **Engine** — load two `ModelInference` instances
+   simultaneously (drafter + target). Check WASM heap
+   budget; 4.3 GB total weights + 2× KV caches will be
+   tight against the 4 GiB cap (option D MEMORY64 may
+   become a prerequisite at 8B target).
+2. **Inference layer** — add a `forward(K)` parallel
+   verify path on the target. Currently `forward` is
+   strictly N=1 in the decode branch; this needs to
+   accept K candidate tokens and return K logit
+   distributions in parallel.
+3. **Decode loop** — speculative driver that orchestrates
+   draft (run drafter K steps) → verify (target forward
+   on all K tokens at once) → accept (largest prefix
+   matching target's argmax / sampled output) → reset
+   draft state and resume from accept boundary.
+4. **Memory** — 2× KV cache management; on accept
+   boundary mismatch, draft KV must roll back.
+5. **Sampling** — must preserve target's distribution
+   exactly (rejection sampling with target's softmax)
+   so user-visible behavior matches non-drafted runs.
+
+**Recommended path:** invoke `superpowers:writing-plans`
+with the above scope, then execute via
+`superpowers:subagent-driven-development` (per global
+preference). Mirror the §18 plan structure: explicit
+phases, gates, and a measure-and-close decision rule
+on a 2-3 model harness (qwen3-8b alone vs qwen3-8b
+drafted by qwen3-0.6b).
+
+**Secondary option:** §4 FA revisit at long-decode /
+prefill-TTFT scope. The §18 closure measured FA at decode
+N=1 only; FA's real wins (prefill + decode batches >256
+tokens) were never tested. Bridge infrastructure is
+already in place (`33f10eb`, `4692bce`+`d26d736`,
+`068ef84`) — a future revisit just needs to re-land the
+implementation files from `1f1a9da` and measure under a
+different gate (e.g., bench TTFT on a 512-token prompt;
+or bench steady-state at decode batch 256+). Smaller
+scope than §C but narrower upside ceiling.
+
+#### Archived: How to test §A lever 1 — THREADS_PER_BLOCK 4→2 (CLOSED 2026-04-26 — §17)
+
+> **Preserved for archive only. Do not run this.** §A
+> lever 1 was measured on Q4_0 (TinyLlama) and produced
+> only +0.6% — within noise — and the lever is excluded
+> from K-quants (TPB=16) and IQ-family (no
+> `mul_mat_vec.wgsl` path) entirely. The shader change
+> was reverted. See §17 in the journal for the full
+> measurement and rationale. The next-move recommendation
+> is now §C drafter speculative decoding, not lever 2/3.
 
 **The change.** Edit
 `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`
