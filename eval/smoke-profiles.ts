@@ -88,6 +88,50 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		maxTokens: 1024,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Qwen3 1.7B — thinking off ──────────────────────────────
+	{
+		name: "qwen3-1.7b-off-cold",
+		model: "qwen3-1.7b-q4f16",
+		temperature: 0.1,
+		prompt: DEFAULT_PROMPT,
+	},
+	{
+		name: "qwen3-1.7b-off-warm",
+		model: "qwen3-1.7b-q4f16",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
+	{
+		name: "qwen3-1.7b-off-hot",
+		model: "qwen3-1.7b-q4f16",
+		temperature: 0.9,
+		prompt: DEFAULT_PROMPT,
+	},
+	// ── Qwen3 1.7B — thinking ──────────────────────────────────
+	{
+		name: "qwen3-1.7b-thinking-cold",
+		model: "qwen3-1.7b-q4f16",
+		thinking: "on",
+		temperature: 0.1,
+		maxTokens: 1024,
+		prompt: DEFAULT_PROMPT,
+	},
+	{
+		name: "qwen3-1.7b-thinking-warm",
+		model: "qwen3-1.7b-q4f16",
+		thinking: "on",
+		temperature: 0.6,
+		maxTokens: 1024,
+		prompt: DEFAULT_PROMPT,
+	},
+	{
+		name: "qwen3-1.7b-thinking-hot",
+		model: "qwen3-1.7b-q4f16",
+		thinking: "on",
+		temperature: 0.9,
+		maxTokens: 1024,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Llama 3.2 1B ───────────────────────────────────────────
 	{
 		name: "llama-3.2-1b-cold",
@@ -139,7 +183,15 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 	"llama-vs-qwen": [
 		"qwen3-0.6b-off-warm",
 		"qwen3-0.6b-thinking-warm",
+		"qwen3-1.7b-off-warm",
+		"qwen3-1.7b-thinking-warm",
 		"llama-3.2-1b-warm",
+	],
+	"qwen3-sizes": [
+		"qwen3-0.6b-off-warm",
+		"qwen3-0.6b-thinking-warm",
+		"qwen3-1.7b-off-warm",
+		"qwen3-1.7b-thinking-warm",
 	],
 	"temperature-sweep": [
 		"qwen3-0.6b-off-cold",
@@ -154,6 +206,10 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen3-0.6b-thinking-cold",
 		"qwen3-0.6b-thinking-warm",
 		"qwen3-0.6b-thinking-hot",
+		"qwen3-1.7b-off-warm",
+		"qwen3-1.7b-thinking-cold",
+		"qwen3-1.7b-thinking-warm",
+		"qwen3-1.7b-thinking-hot",
 	],
 	full: [
 		"qwen3-0.6b-off-cold",
@@ -162,6 +218,12 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen3-0.6b-thinking-cold",
 		"qwen3-0.6b-thinking-warm",
 		"qwen3-0.6b-thinking-hot",
+		"qwen3-1.7b-off-cold",
+		"qwen3-1.7b-off-warm",
+		"qwen3-1.7b-off-hot",
+		"qwen3-1.7b-thinking-cold",
+		"qwen3-1.7b-thinking-warm",
+		"qwen3-1.7b-thinking-hot",
 		"llama-3.2-1b-cold",
 		"llama-3.2-1b-warm",
 		"llama-3.2-1b-hot",
