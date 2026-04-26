@@ -190,6 +190,33 @@ void* op_soft_max_ext(void* x, void* mask, float scale, float max_bias) {
                              (struct ggml_tensor*)mask, scale, max_bias);
 }
 
+// Fused scaled-dot-product attention. Replaces opMulMat(K,Q) + opSoftMaxExt + opMulMat(V,attn).
+// Q: [head_dim, n_tokens, n_head]
+// K: [head_dim, n_kv,     n_head_kv]   (must match V layout; F16/Q4_0/Q8_0 for VEC/TILE paths)
+// V: [head_dim, n_kv,     n_head_kv]   (n.b. matches K layout — different from old V cache layout)
+// mask: [n_kv_padded, n_tokens] F32, broadcast over heads. -inf masked, 0 visible. May be nullptr.
+// scale: typically 1/sqrt(head_dim).
+// max_bias: ALiBi max bias; pass 0 for standard causal attention.
+// logit_softcap: Gemma-style logit soft-cap; pass 0 for standard.
+// Returns: [head_dim, n_head, n_tokens] (note the dim order — caller must reshape/permute).
+void* op_flash_attn_ext(void* q, void* k, void* v, void* mask,
+                        float scale, float max_bias, float logit_softcap) {
+    return ggml_flash_attn_ext(current_ctx(),
+                               (struct ggml_tensor*)q,
+                               (struct ggml_tensor*)k,
+                               (struct ggml_tensor*)v,
+                               (struct ggml_tensor*)mask,
+                               scale, max_bias, logit_softcap);
+}
+
+void op_flash_attn_ext_set_prec(void* a, int32_t prec) {
+    ggml_flash_attn_ext_set_prec((struct ggml_tensor*)a, (enum ggml_prec)prec);
+}
+
+void op_flash_attn_ext_add_sinks(void* a, void* sinks) {
+    ggml_flash_attn_ext_add_sinks((struct ggml_tensor*)a, (struct ggml_tensor*)sinks);
+}
+
 // Fused silu(a) * b (LLaMA SwiGLU FFN), avoids three separate dispatches.
 void* op_swiglu_split(void* a, void* b) {
     return ggml_glu_split(current_ctx(), (struct ggml_tensor*)a,
