@@ -223,12 +223,22 @@ function calculateTotalDataSize(tensors: GgufTensorInfo[]): number {
 
 function ggmlTypeSize(type: number): number {
 	const sizes: Record<number, number> = {
-		0: 4,
-		1: 2,
-		2: 0.5,
-		3: 0.5,
-		6: 1,
-		7: 1,
+		0: 4, // F32
+		1: 2, // F16
+		2: 18 / 32, // Q4_0  (block: 32 elem in 18 bytes)
+		3: 20 / 32, // Q4_1
+		6: 22 / 32, // Q5_0
+		7: 24 / 32, // Q5_1
+		8: 34 / 32, // Q8_0
+		9: 36 / 32, // Q8_1
+		10: 84 / 256, // Q2_K
+		11: 110 / 256, // Q3_K
+		12: 144 / 256, // Q4_K  (block: 256 elem in 144 bytes)
+		13: 176 / 256, // Q5_K
+		14: 210 / 256, // Q6_K
+		15: 292 / 256, // Q8_K
+		26: 4, // I32
+		30: 2, // BF16
 	};
 	return sizes[type] ?? 4;
 }

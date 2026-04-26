@@ -76,7 +76,12 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "ultrafast",
 		requiresShaderF16: true,
 		downloadUrl: "https://huggingface.co/mlc-ai/SmolLM2-360M-Instruct-q4f16_1-MLC",
-		ggufUrl: "https://huggingface.co/huggingface-quants/SmolLM2-360M-Instruct-GGUF",
+		// huggingface-quants/SmolLM2-360M-Instruct-GGUF returns 401 (gated/missing
+		// as of 2026-04-26). bartowski's mirror is open and includes Q4_0 plus
+		// the K-quant ladder. Pinning Q4_0 keeps the cross-family GEMV comparison
+		// honest against tinyllama-1.1b-chat-q4_0's Q4_0 baseline.
+		ggufUrl: "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF",
+		ggufFilePattern: "Q4_0",
 	},
 
 	// --- Fast tier (1-2GB VRAM, 60+ tok/s) ---
@@ -170,6 +175,14 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "balanced",
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/Qwen3-1.7B-q4f16_1-MLC",
+		// Resolves to Qwen3-1.7B-Q8_0.gguf via the picker fallback (only file
+		// in the repo). TODO §9 (2026-04-26) tested Q4_0 (-11.8% matmul,
+		// +0.7% tok/s — in noise, ~58% smaller download) and Q4_K_M
+		// (-5.8% matmul, -4% tok/s) as alternatives via unsloth's mirror;
+		// neither delivered Stub B's predicted ~40% matmul drop. Keeping Q8
+		// as the canonical baseline. To re-enable the alternative-quant
+		// experiment, switch ggufUrl to unsloth/Qwen3-1.7B-GGUF and pin
+		// ggufFilePattern (e.g. "Q4_0", "Q4_K_M").
 		ggufUrl: "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
 	},
 

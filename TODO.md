@@ -1,6 +1,6 @@
 # WebLLM Project Status & Roadmap
 
-> **Date:** 2026-04-25
+> **Date:** 2026-04-26
 > **Status:** End-to-end browser inference is working for both causal LMs and
 > BERT-style encoders (Arctic-Embed). `make bench-full` now drives the
 > generative profiles plus the embedding profiles end-to-end into the live
@@ -26,6 +26,10 @@
 > - qwen3-1.7b-q4f16 (actual: Q8_0), thinking-on: **~66 tok/s decode**
 >   (clean 117-token run; thinking-off 17-token run measured ~59 but
 >   is warmup-dominated)
+> - smollm2-360m-q4f16 (Q4_0): **~106 tok/s decode** (within noise of
+>   TinyLlama-1.1B at the same quant despite 3× fewer params; encode
+>   overhead dominates at this scale, matmul takes a back seat — see
+>   Active Step §10 wave-1 entry below)
 >
 > Bench-full coverage at 1.7B landed (6 profiles · 3 off + 3 thinking)
 > with overall accuracy 82–89% and per-profile decode (smoke chat
@@ -47,10 +51,40 @@
 > matmul dequant-stub on both Q8 (Qwen3-1.7B) and Q4 (TinyLlama)
 > moved `backendMatmulMs` by less than ±5.5% / ±2.5% with dispatch
 > count unchanged — both kernels are **memory-bound, not
-> compute-bound**. Next lever (Active Step §7): run two more stubs
-> to discriminate `src0` (weight) vs `src1` (activation) bandwidth
-> dominance, then pick the matching cache strategy (workgroup-cache
-> `src1` vs larger `OUTPUTS_PER_WG` tiles).
+> compute-bound**. Follow-up src0-vs-src1 discrimination (Active
+> Step §7) ran 2026-04-26: **src0 (weights) dominates**, src1
+> (activations) is already L2-cached fine. Stub A moved matmul
+> -0.8% Q4 / 0.0% Q8; Stub B moved matmul **-20% Q4 / -40% Q8**
+> with decode +5.5% / +45%. `OUTPUTS_PER_WG` sweep (§8) confirmed
+> OPW=4 locally optimal — bigger OPW only reduces src1 reads
+> (already cached); doesn't address src0. Quant lever (§9) tested
+> on Qwen3-1.7B: Q4_0 -11.8% matmul / +0.7% tok/s (in noise),
+> Q4_K_M -5.8% matmul / -4% tok/s (regression — K-quant compute
+> overhead claws back bandwidth savings). Reverted to Q8 baseline
+> for dashboard continuity. **Net characterization: matmul ≈ 33%
+> of decode time, bandwidth-bound fraction ≈ 40% of matmul on
+> Q8 → theoretical ceiling for any pure-bandwidth lever ≈ 13%
+> total decode.** Further matmul-kernel tuning is in diminishing-
+> returns territory.
+>
+> **Pivot 2026-04-26: scope expansion to larger models.** Decode
+> kernel tuning has bottomed out at the current model fleet (max
+> 1.7B). The active priority is now **exercising the registered-
+> but-untested 3B–4B models and registering 7B+ candidates with
+> small quants** to characterize how the engine scales. See
+> Active Step §10 below for the campaign plan. Subgroup-
+> cooperative loading and FA-shape-routing are deferred behind
+> the size-campaign work until we see how kernels behave at
+> 3B+ scale (memory pressure, KV cache size, dispatch counts may
+> reshape the profile in ways that change which lever matters).
+>
+> **Wave 1 progress (2026-04-26):** smollm2-360m-q4f16 landed
+> (1/10). 106 tok/s steady-state Q4_0; 32 layers / 651
+> dispatches/token; encode overhead 33% > matmul 28% — first
+> profile in fleet where encode leads. 24/36 accuracy (62%,
+> lowest in fleet, expected at this size). Architectural finding:
+> dispatch count grows faster than parameters across the small-
+> model regime, so the encode-vs-matmul ratio is scale-dependent.
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -682,45 +716,121 @@ needs to be collected.
   fresh medians that now drive the "Inference Performance
   Optimizations" preamble.
 
+### Completed on 2026-04-26
+
+1. **§10 wave 1, model 1: smollm2-360m-q4f16 registered + benched.**
+   First entry in the large-model size campaign. Smallest registered
+   generative model; ultrafast-tier reference point.
+   - **Profile registered:** `smollm2-360m-warm` (temperature 0.6,
+     `DEFAULT_PROMPT`); added to `SMOKE_PROFILE_SETS.full`.
+   - **Repo fix:** the registered `huggingface-quants/SmolLM2-360M-
+     Instruct-GGUF` returns HTTP 401 (gated/missing as of 2026-04-26);
+     repointed `eval/models.ts` to `bartowski/SmolLM2-360M-Instruct-GGUF`
+     and pinned `ggufFilePattern: "Q4_0"` so the picker doesn't fall
+     through to Q4_K_M. Q4_0 keeps the cross-family GEMV comparison
+     honest against `tinyllama-1.1b-chat-q4_0`.
+   - **Architecture (from GGUF metadata):** llama arch · 32 layers ·
+     n_head 15 · n_head_kv 5 (GQA 3:1) · embedding_length 960 ·
+     head_dim 64 · context_length 8192 (we run at ctx=4096). File
+     size 219.1 MB (Q4_0). KV cache at ctx=4096 ≈ 320 MB
+     (`2 × 32 × 5 × 64 × 4096 × 4`).
+   - **Speed (3-trial median, `eval/perf.ts`):**
+     - **Steady-state 106.2 tok/s** (runs: 106.2 / 103.1 / 106.7)
+       — within noise of TinyLlama-1.1B Q4_0 (~107 tok/s) despite
+       3× fewer params. The speed gap collapse is consistent with
+       **encode-overhead dominating at small scale**: SmolLM2's
+       32-layer dispatch count (651/token) eclipses TinyLlama's
+       22 layers (450/token) and Qwen3-1.7B's 28 layers (629/token).
+     - **Profile-mode 75.6 tok/s** (perturbation -29%, identical
+       to TinyLlama Q4_0's perturbation factor).
+   - **Profile-mode backend attribution (60-step decode):**
+     - `backendMatmulMs`: 3.11 mean / 27.9% of graph
+     - `backendEncodeOverheadMs`: **3.70 mean / 33.2% of graph
+       — leads matmul. First model in the fleet where this is true**
+       (TinyLlama: matmul 33% > encode 28%; Qwen3-1.7B: matmul 34% >
+       encode 22%). Implication: at this scale dispatch overhead is
+       the bigger lever than matmul tuning, which lines up with the
+       §6–§9 "matmul kernel tuning has bottomed out" finding from
+       the other end of the size axis.
+     - `backendAttentionMs`: 0.49 mean / 4.4%
+     - `backendDispatchCount`: **651/token** (highest in fleet).
+   - **Smoke chat regression:** PASSED. Output: `"Why did the tomato
+     turn red? Because it saw the salad dressing!"` — finish=eos,
+     21 tokens, no console errors.
+   - **Accuracy (`bench-full --profiles smollm2-360m-warm`):**
+     **24/36 passing · overall 62%** — lowest accuracy in the fleet,
+     expected at 0.36B. Tool-calling skipped (temp 0.6 > 0.4 gate);
+     embedding skipped (model lacks the capability). Dashboard runs
+     27 / evals 28 (was 26/27 pre-test). Dot landed in
+     accuracy×speed scatter.
+   - **Behavioural surprises:** none in correctness — chat template,
+     tokenizer, KV/attention all clean. The interesting finding is
+     architectural: **dispatch count grows faster than parameters
+     across the small-model regime** (360M / 32 layers > 1.1B / 22
+     layers), which inverts the encode-vs-matmul fraction split.
+     Worth re-checking after wave 1's 1.5B+ entries to see whether
+     this is a scale crossover or a SmolLM2-specific design choice
+     (32 layers at 0.36B implies an unusually deep+narrow shape:
+     embedding_length 960 vs Qwen3-0.6B's 1024 at 28 layers).
+
 ### Resumption checklist (start a fresh session here)
 
-**Next target: Active Step §7 — shared-memory caching of `src1`
-(the activation vector) in `mul_mat_vec.wgsl`.** §6 path (b) closed
-2026-04-26: matmul-side dequant-stub diagnostic ran on both Q8_0
-and Q4_0 paths. Both kernels are **memory-bound, not compute-bound**
-— stubbed-out arithmetic moved `backendMatmulMs` by less than ±5.5%
-on Q8 and ±2.5% on Q4 (within noise on both), with `backendDispatchCount`
-unchanged (629/token Qwen3-1.7B, 450/token TinyLlama — confirms the
-load chain survived the optimizer). So dequant fusion is **not** the
-right next lever; the lever is shared-memory caching of the activation
-vector that every workgroup re-reads from global memory.
+**Next target: Active Step §10 — large-model test campaign,
+wave 1 model 2.** Wave 1 is in progress: `smollm2-360m-q4f16`
+landed 2026-04-26 (see "Completed on 2026-04-26 §1"). The next
+unprofiled entry by ascending size is **`qwen2.5-1.5b-q4f16`
+(1.54B)** — same family as the already-profiled Qwen3-0.6B/1.7B,
+useful for a Qwen2 vs Qwen3 architectural-version contrast at
+the 1.5B/1.7B scale. Remaining wave-1 fleet after that:
+qwen2.5-coder-1.5b, smollm2-1.7b, gemma-2-2b, qwen2.5-3b,
+llama-3.2-3b, hermes-3-llama-3.2-3b, phi-3.5-mini, qwen3-4b.
+No 7B+ model is registered yet (wave 2).
 
-Path (a) (`flash_attn_get_decisions` shape-routing) remains available
-as a separate investigation: rebase landed §5 but FA didn't engage
-on Qwen3-1.7B N=1 decode shapes (head_dim 128, GQA 16:8). It's a
-lower-per-hour-value upstream contribution; defer unless prefill
-optimization becomes a target (FA's main win is seq>1 prefill which
-isn't currently profiled).
+**Decode tuning is paused at the current scale** — §6/§7/§8/§9
+showed the bandwidth-bound fraction is ~40% of matmul on Q8 /
+~20% on Q4, ceiling for any further pure-bandwidth lever ~13%
+of decode time. Whether that picture holds at 3B–4B scale is the
+first thing the campaign needs to answer; the kernel-tuning
+levers (subgroup-cooperative loading, FA shape-routing) are
+deferred behind that.
 
 Boot sequence:
 
 1. `make checkall` — confirm 391 pass / 5 skip / 0 fail.
 2. `git -C ~/Repos/llama.cpp log --oneline -10 webllm-browser-patches`
    — confirm the 10-patch stack is intact (last rebase landed
-   2026-04-25). Backup at `webllm-browser-patches-pre-fa-rebase`
-   if recovery needed.
-3. Read the "Inference Performance Optimizations" preamble for the
-   five-profile baselines plus the §5 / §6 outcomes: FA didn't
-   engage on N=1 decode shapes; dequant-stub diagnostic identified
-   both Q8 and Q4 as memory-bound.
-4. Action: run the src0-vs-src1 discrimination stubs in
-   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`
-   to identify which buffer is the bandwidth bottleneck before
-   committing to a kernel rewrite. See Active Step §7 below for
-   the two-stub sequence (Stub A: replace `src1` reads with `1.0`;
-   Stub B: replace `src0` reads with `0`), the decision matrix that
-   routes the outcome to the matching lever (workgroup-cache `src1`
-   vs larger `OUTPUTS_PER_WG` tiles), and the falsifier checks.
+   2026-04-25).
+3. Read the "Inference Performance Optimizations" preamble for
+   §6–§9 background and the "Completed on 2026-04-26 §1" entry
+   for wave-1 model-1 numbers + the GGUF-mirror lesson, then
+   jump to Active Step §10 for the wave plan.
+4. Action: register `qwen2.5-1.5b-warm` (temperature 0.6,
+   `DEFAULT_PROMPT`) in `eval/smoke-profiles.ts`, add to
+   `SMOKE_PROFILE_SETS.full`, then `make smoke-bench
+   PERF_MODEL=qwen2.5-1.5b-q4f16 PERF_RUNS=3` followed by
+   `bun run eval/bench.ts --profiles qwen2.5-1.5b-warm
+   --fail-fast` (with `WEBLLM_LIVE_BENCH_URL` set). Verify the
+   `Qwen/Qwen2.5-1.5B-Instruct-GGUF` repo isn't gated *before*
+   running smoke-bench (smollm2-360m's first registered URL
+   was 401 — bartowski mirror fixed it). Watch for: WASM
+   memory exhaustion on load, GPU buffer allocation failures,
+   KV-cache-size scaling, dispatch-count growth.
+
+Old kernel-tuning targets remain available as **deferred** items:
+
+- **§A — subgroup-cooperative `q_packed` loading** (last
+  bandwidth lever; realistic ceiling ~13% decode; was the prior
+  §10 entry, now demoted).
+- **§B — FA shape-routing for prefill/TTFT** (§5 path a;
+  higher-impact for long prompts; FA's main win is seq>1).
+- **§C — drafter-based speculative decoding** (large project;
+  2-3× wall-clock potential).
+- **§D — encoder/embedding perf pass** (untouched since §21).
+
+These deferred targets are below the size campaign in priority,
+not abandoned — pick them up after wave 1 lands or if the
+campaign hits a blocker (e.g., WASM cap forces a quant rewrite
+for 7B+).
 
 Note: the smoke page now does a shader-cache warmup after [6/8]
 engine adoption. If you see "1.0 tok/s" on the smoke page after
@@ -981,91 +1091,319 @@ investigating "the engine."
    disk matches the model ID, or rename the IDs to `*-q8` to be honest
    about what the picker fetches.
 
-7. **NEXT (next-session entry point): src0-vs-src1 discrimination
-   stub, then pick the matching cache strategy.** §6 proved both
-   Q8 and Q4 GEMV are memory-bound but did *not* identify which
-   buffer dominates. The two candidates have different remediation
-   paths, so a 30-min discriminator is worth running before
-   committing to a kernel rewrite:
+7. **DONE (2026-04-26): src0-vs-src1 discrimination identified
+   src0 (quantized weights) as the dominant bandwidth bottleneck
+   on both Q4 and Q8 GEMV decode kernels.** The literal-constant
+   form of Stub A (`x_block[i] = 1.0`) tripped a WGSL→SPIR-V
+   compiler regression on the first attempt — `backendMatmulMs`
+   exploded from 3.87 → 139.62 ms with dispatch count unchanged,
+   suggesting register spill of `var<private>` array initialization
+   to private memory rather than register allocation. The fix was
+   to keep the array fill pattern identical but source `x_block[i]`
+   from a single broadcast-load (`let x_const = f32(src1[src1_idx_base])`)
+   so the optimizer still sees a real memory dependency and
+   register-allocates `x_block` normally. Stub B mirrored that
+   approach for src0 (`let d_const = f32(load_f16_at_src0(0u));
+   let q_const = load_u32_at_src0(0u);`). With both stubs in
+   structurally-equivalent broadcast form, results were:
 
-   - **`src0` (quantized weights)** — read once per token per row;
-     for Qwen3-1.7B Q8_0 that's ~1.7 GB / token. If this is the
-     bottleneck, `var<workgroup>` caching of `src1` won't help
-     because `src1` isn't where the bandwidth is going. Lever:
-     bigger tiles per workgroup (more output rows per WG so each
-     weight load is amortized; the prior `OUTPUTS_PER_WG` 4 → 8
-     experiment was reverted on Q4 with no diagnosis — re-run with
-     this hypothesis in mind), or smaller-bandwidth quants (Q4_K)
-     with re-validated accuracy.
-   - **`src1` (activation vector)** — already register-cached per
-     thread across `OUTPUTS_PER_WG=4` output rows in the existing
-     shader, but EVERY workgroup re-reads the SAME activation
-     slice from global memory. For `m=4096`, that's `m/OUTPUTS_PER_WG
-     = 1024` workgroups all loading the same `params.k * 4 B = 16 KB`.
-     L2 cache *should* absorb that, but if profiling says no,
-     `var<workgroup>` caching with one block-group prefetch +
-     `workgroupBarrier()` could still help for the cross-workgroup
-     scheduling pattern.
+   | Stub | Quant / Model              | Baseline matmul | Stub matmul | Δ matmul | Δ tok/s | Dispatch |
+   |------|----------------------------|----------------:|------------:|---------:|--------:|----------|
+   | A    | Q4_0 / TinyLlama-1.1B chat |          3.87 ms |      3.84 ms |    -0.8% |   -3.3% | 450 ✅   |
+   | A    | Q8_0 / Qwen3-1.7B          |          6.67 ms |      6.67 ms |     0.0% |    n/a* | 629 ✅   |
+   | B    | Q4_0 / TinyLlama-1.1B chat |          3.87 ms |      3.09 ms |  **-20%** | **+5.5%** | 450 ✅   |
+   | B    | Q8_0 / Qwen3-1.7B          |          6.67 ms |      3.98 ms |  **-40%** | **+45%**  | 629 ✅   |
 
-   **Discriminator stubs (both go in `mul_mat_vec.wgsl`, run in
-   sequence on Qwen3-1.7B + TinyLlama, then revert as in §6):**
+   \* Qwen3-1.7B captured under thinking-off in profile mode for
+   both Stub A baseline (44.8 tok/s) and Stub B (65.2 tok/s) since
+   the matmul kernel is identical regardless of thinking mode.
 
-   1. **Stub A (test src1 dominance).** Replace the `x_block` fill
-      loop with a constant: `x_block[i] = 1.0;` (drop the `f32(src1[...])`
-      load). If `backendMatmulMs` collapses → src1 is the bottleneck →
-      go to workgroup-cache prototype. If it barely moves → src1 is
-      already L2-cached fine → continue to Stub B.
-   2. **Stub B (test src0 dominance).** Replace `load_u32_at_src0(...)`
-      with a constant `0u` and `load_f16_at_src0(...)` with constant
-      `0.0` so the weight reads disappear (output will be wrong; that's
-      fine, we're measuring time). If `backendMatmulMs` collapses →
-      src0 is the bottleneck → revisit the larger-tile experiment,
-      this time with a pre-experiment hypothesis (more output rows per
-      WG amortizes weight reads).
+   **Decision per matrix:** B collapses, A barely moves → re-run
+   `OUTPUTS_PER_WG` 4 → 8 (or 16). Bigger tiles amortize each
+   weight load across more output rows; this is the matching
+   structural lever for src0-bandwidth dominance. Q8 is the
+   sweeter target since each block carries 32 q-bytes vs Q4's
+   16 q-half-bytes — proportionally more bandwidth per dispatch
+   to recover.
 
-   **Decision matrix:**
-   - A collapses, B barely moves → workgroup-cache `src1` (prototype
-     in `MUL_ACC_Q8_0` first; port to `MUL_ACC_Q4_0` on success).
-   - B collapses, A barely moves → re-run `OUTPUTS_PER_WG` 4 → 8 (or
-     16) on both quants, with `partial_sums` storage budget verified
-     against WG_SIZE workgroup memory cap.
-   - Both collapse partially → mixed; pick the cheaper change first.
-   - Neither collapses → experiment is invalid (compiler eliminated
-     downstream code, e.g., `acc[row] += row_sum;` got optimized away);
-     re-run with a forced read pattern.
+   **Stubs reverted** (`git -C ~/Repos/llama.cpp checkout --
+   ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`); WASM
+   rebuilt clean; TinyLlama steady-state ~77.5 tok/s on the
+   resulting 2-trial verification (within profile-mode noise of
+   pre-stub baseline 81.9). `git -C ~/Repos/llama.cpp status`
+   confirms clean working tree.
 
-   **Action sequence:**
-   1. Apply Stub A to `MUL_ACC_Q8_0` (line 300-302 fill loop) AND
-      `MUL_ACC_Q4_0` (line 142-145), rebuild WASM, profile both
-      models with `make smoke-bench PERF_RUNS=3 --profile`. Sanity-
-      check `backendDispatchCount` unchanged (load chain on the
-      *other* buffer survived).
-   2. Revert Stub A. Apply Stub B (replace `load_u32_at_src0` and
-      `load_f16_at_src0` returns with constants). Profile again.
-   3. Revert Stub B. Confirm `git -C ~/Repos/llama.cpp status` clean.
-   4. Pick the matching prototype path from the decision matrix
-      above, implement it, verify smoke [7/8] still produces coherent
-      output (correctness gate), capture matmul delta. If wins on
-      both quants, rebase onto `webllm-browser-patches` as a new
-      patch (not a stub) and update `docs/LLAMA_CPP_PATCHES.md`.
+8. **DONE (2026-04-26): `OUTPUTS_PER_WG` sweep on
+   `WEBGPU_MUL_MAT_VEC_LEGACY_Q_OUTPUTS_PER_WG` — OPW=4 is
+   locally optimal in [2, 8]. The §7 lever was wrong; the
+   reasoning that "bigger tiles amortize weight loads" doesn't
+   hold under analysis.** Three-trial medians on the same
+   profile harness as §7:
 
-   **Risk:** WGSL `var<workgroup>` storage requires explicit
-   `workgroupBarrier()` calls and competes with the existing
-   `partial_sums` allocation (already `OUTPUTS_PER_WG * WG_SIZE`
-   floats = 1 KiB at OUTPUTS_PER_WG=4, WG_SIZE=64). Watch for
-   register spill on integrated GPUs.
+   | OPW  | TinyLlama Q4 tok/s | TinyLlama matmul ms | Qwen3-1.7B Q8 tok/s | Qwen3 matmul ms |
+   |-----:|-------------------:|--------------------:|--------------------:|----------------:|
+   |   2  |             — *    |               — *   |               34.9  |          8.17   |
+   |   4  |             81.9  |               3.87  |               44.8  |          6.67   |
+   |   8  |             80.7  |               3.81  |               41.0  |          6.83   |
 
-   **Reference:** see §6 for the stub-form template (`* 0.0` to
-   keep IEEE-754 dependency chains alive against optimizer DCE)
-   and the Q8/Q4 baseline numbers to compare against. Both
-   stubs above need to keep the *other* buffer's reads alive to
-   isolate one variable; verify via `backendDispatchCount` parity.
+   \* OPW=2 only profiled on Qwen3-1.7B; the trend was clear
+   enough not to spend a TinyLlama run (more workgroups → more
+   redundant src1 reads, exactly the inverse of the OPW=8
+   regression).
 
-8. The latent 3+ binding buffer-conflict edge case in
-   `ggml_backend_webgpu_build_multi` (item 3 in preamble) remains
-   untested — no llama op hits it today.
+   **Why bigger OPW doesn't help (corrected analysis).** Total
+   src0 reads = num_wg × src0_per_wg = (m/OPW) × (OPW × num_blocks ×
+   bytes_per_block) = m × num_blocks × bytes_per_block — *invariant
+   to OPW*. What bigger OPW *does* reduce is **total src1 reads**
+   (each WG reads src1 once and reuses it across OPW output rows;
+   total src1 reads scale as m/OPW). Stub A in §7 already
+   established that src1 isn't the bandwidth bottleneck, so the
+   amortization-of-src1 win bigger OPW provides isn't load-bearing.
+   On Q8 specifically, OPW=8 made things *worse* (-8.5% tok/s,
+   +2.4% matmul ms) — almost certainly per-thread register
+   pressure: the inner loop now keeps `acc: array<f32, 8>` plus
+   8 × 8 q-bytes' worth of in-flight FMA state instead of 4 × 8.
+   OPW=2 made things much worse (-22% tok/s, +22% matmul ms),
+   ruling out "more parallelism for latency hiding" as the lever.
 
-9. **JSPI feasibility checkpoint** remains a follow-up investigation,
+   **What this means for the actual src0 bottleneck.** Stub B in
+   §7 measured src0 bandwidth as the dominant cost. Real bandwidth
+   savings can only come from:
+
+   - **Smaller-bandwidth quantization** (Q4_K ≈ 4.85 bpw vs Q8_0
+     8.5 bpw). A 1.7B Q4_K model would have ~57% of Q8_0's weight
+     bandwidth per token. Quality cost needs eval validation —
+     dashboard-driven A/B against the existing Qwen3-1.7B Q8 dot
+     would be the way.
+   - **Subgroup intrinsics for cooperative loading** — threads in
+     a subgroup share src0 reads via `subgroupBroadcast` /
+     `subgroupShuffle`. Could reduce per-thread src0 reads by
+     `subgroup_size`. Requires `enable subgroups;` (already in
+     mul_mat_vec.wgsl gated on `USE_SUBGROUP_REDUCTION`) and may
+     need shader-architecture changes to expose the right access
+     pattern. emdawnwebgpu does support subgroups (just not
+     subgroup-matrix); §5 covers the latter.
+   - **Inner-loop restructure** for better memory coalescing.
+     Current Q8 reads `q_packed` at `block_byte_base + 2u + 4u *
+     (thread_within_block * 2u + packed_idx)` — packed_idx
+     iterates 0..1 inside the row loop, so consecutive threads in
+     the same row issue strided 4-byte loads. Switching to
+     `vec4<u32>` reads (load all 4 q_packed at once per block per
+     row) might hit the L1/L2 line size more efficiently and is
+     a smaller change than subgroup-cooperative loading.
+
+   **OPW reverted to 4** in
+   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp:48`.
+   `git -C ~/Repos/llama.cpp status` confirms clean working tree.
+
+9. **DONE (2026-04-26): smaller-bandwidth quantization tested via
+   `unsloth/Qwen3-1.7B-GGUF` mirror. Q4_0 buys ~12% matmul
+   reduction (about 1/3 of Stub B's prediction) for +0.7% tok/s
+   (in noise) and 42% smaller download. Q4_K_M is a slight
+   regression. Reverted to Q8_0 to keep dashboard baseline
+   continuity.** Three-trial profile-mode medians on Qwen3-1.7B
+   thinking-off:
+
+   | Quant     | tok/s |  matmul ms | Δ matmul | Δ tok/s | File MB |
+   |-----------|------:|-----------:|---------:|--------:|--------:|
+   | Q8_0 base |  44.8 |       6.67 |    —     |    —    |    1749 |
+   | Q4_K_M    |  43.0 |       6.28 |   -5.8%  |   -4.0% |    1056 |
+   | Q4_0      |  45.1 |       5.88 |  -11.8%  |   +0.7% |    1008 |
+
+   **Why Stub B over-predicted.** Stub B replaced *all* src0
+   reads with a single broadcast (~1000× bandwidth cut) →
+   matmul -40% on Q8 / -20% on Q4. That measures the
+   *bandwidth-bound fraction* of matmul kernel time: ~40% on Q8,
+   ~20% on Q4. Switching Q8 → Q4_0 only halves bandwidth, so the
+   modeled win is 50% × 40% = 20% matmul drop, observed 11.8%
+   (~60% of model). The gap is attributable to Q4_0's slightly
+   different inner-loop arithmetic (Q4 unpacks two 4-bit nibbles
+   per byte vs Q8's single byte), modest cache-pattern shifts,
+   and run-to-run variance.
+
+   **Q4_K_M's poor result** is consistent with K-quants being
+   compute-heavier per element: 8 sub-blocks per 256-element
+   super-block, multiple scales/mins per super-block, more
+   metadata reads. The bandwidth savings (Q8 1.06 bpw → Q4_K_M
+   0.56 bpw, same as Q4_0) get clawed back by more inner-loop
+   arithmetic and metadata fetches. Q4_K is a quality/bandwidth
+   trade-off, not a quality/throughput one.
+
+   **Net for the §7 lever investigation:** matmul on Qwen3-1.7B
+   is ~33% of decode time, of which ~40% is bandwidth-bound. So
+   the *theoretical max* speedup from any pure-bandwidth lever
+   is ~13% of decode time. Bigger structural wins (prefill,
+   speculative decoding, drafter models) live elsewhere.
+
+   **Side fixes landed:**
+   - `src/models/gguf-parser.ts::ggmlTypeSize` was missing Q8_0,
+     Q4_K and all K-quants — they fell to `?? 4` which
+     over-estimates `totalDataSize` by ~7×. With `no_alloc:true`
+     in `ctx_create` (`src/wasm/webgpu-bridge.cpp`), this hadn't
+     been load-bearing for Q8_0 in practice, but Q4_K_M would
+     have requested a ~6 GB ggml ctx buffer (above 4 GB WASM
+     cap) without the fix. Table now covers F32, F16, Q4_0–Q8_K
+     legacy + K-quants, I32, BF16.
+   - `eval/models.ts` Qwen3-1.7B entry has a maintenance comment
+     describing how to swap to unsloth's mirror + ggufFilePattern
+     to re-run the quant experiment.
+
+10. **IN PROGRESS (wave 1 underway): large-model test campaign.**
+    The current smoke fleet tops out at Qwen3-1.7B. Decode-kernel
+    tuning has bottomed out at this scale (§6–§9). The active
+    priority is now **scaling the model fleet** — exercise the
+    registered-but-unprofiled 3B–4B models, then register and
+    test 7B+ candidates with small quants. Whether the
+    bandwidth-bound matmul picture from §6–§9 holds at 3B+
+    scale is the first question this campaign answers; that
+    informs whether the deferred kernel-tuning levers (§A
+    subgroup-cooperative loading, §B FA shape-routing) become
+    worth chasing again.
+
+    **Wave 1: registered-but-untested models (lowest risk; same
+    kernel paths; just need profile registration).** Order by
+    increasing size. Each entry is already in `eval/models.ts`;
+    none has a smoke profile in `eval/smoke-profiles.ts`.
+    - [x] `smollm2-360m-q4f16` (0.36B) — DONE 2026-04-26.
+      Steady-state 106 tok/s Q4_0 / profile-mode 75.6 / 651
+      dispatches/token / 24/36 accuracy. Encode overhead leads
+      matmul. See "Completed on 2026-04-26 §1" above for full
+      numbers + the bartowski-mirror repo fix.
+    - `qwen2.5-1.5b-q4f16` (1.54B) — Qwen2.5 1.5B for a
+      family/version comparison vs Qwen3-1.7B already profiled.
+    - `qwen2.5-coder-1.5b-q4f16` (1.54B) — code-tuned variant;
+      mostly interesting if we add a code-generation eval task.
+    - `smollm2-1.7b-q4f16` (1.71B) — same size as Qwen3-1.7B,
+      different family.
+    - `gemma-2-2b-q4f16` (2.61B) — first Gemma family member;
+      different RoPE / norm conventions worth verifying.
+    - `qwen2.5-3b-q4f16` (3.09B) — first 3B-class entry.
+    - `llama-3.2-3b-q4f16` (3.21B) — Llama family at 3B.
+    - `hermes-3-llama-3.2-3b-q4f16` (3.21B) — Hermes fine-tune
+      of Llama 3.2 3B; useful for tool-calling eval contrast.
+    - `phi-3.5-mini-q4f16` (3.82B) — Phi family (different
+      architecture than Llama/Qwen).
+    - `qwen3-4b-q4f16` (4.0B) — **largest registered**; the
+      stress test for current WASM/GPU memory budget at Q4.
+
+    **Wave 2: register 7B+ candidates with small quants if the
+    WASM 4 GB cap allows.** Q4_0 7B = ~3.94 GB just for weights —
+    sits right at the WASM cap; will probably need Q3_K_M (~3.0 GB)
+    or smaller. Candidates to register:
+    - Llama-3.1-8B-Instruct (or Llama-3.2-equivalent)
+    - Qwen3-7B / Qwen3-8B
+    - Mistral-7B-Instruct-v0.3
+    - Gemma-2-9B (probably won't fit)
+
+    **Per-model action sequence:**
+    1. Register a smoke profile in `eval/smoke-profiles.ts` —
+       at minimum a `<id>-warm` (temperature 0.6, prompt
+       `DEFAULT_PROMPT`); for Qwen3 family also add `-thinking-warm`.
+       Add the new name to `SMOKE_PROFILE_SETS.full` (and the
+       relevant family set, e.g., `qwen3-sizes` for qwen3-4b).
+    2. `make smoke-bench PERF_MODEL=<id> PERF_RUNS=3` — captures
+       tok/s, prefill/decode ms, matmul ms, dispatch count.
+       Watch for: download success, model loads, [7/8] coherent
+       output, no console errors.
+    3. `make bench-full --profiles <profile-name>` — lands the
+       accuracy×speed dot in the dashboard.
+    4. Update this TODO with measured numbers (tok/s, matmul ms,
+       dispatch count, dashboard accuracy summary, anything
+       surprising).
+
+    **Failure modes to watch for at scale:**
+    - **WASM memory exhaustion at load.** ggml ctx_create + tensor
+      uploads + KV cache must fit in the 4 GB WASM cap. Q4 4B
+      models are ~2.25 GB weights + KV; should fit.  7B Q3_K may
+      not. If `_ctx_create` fails or `RangeError: Memory size out
+      of bounds`, drop to a smaller quant or investigate
+      `MAXIMUM_MEMORY` bump.
+    - **GPU buffer allocation failures.** Browsers vary on
+      `maxBufferSize` / `maxStorageBufferBindingSize`. Look for
+      `Buffer creation failed` in the WebGPU console.
+    - **KV cache scaling.** Default `contextLength` in
+      `eval/models.ts` is 4096 for most entries. KV cache size =
+      `2 × n_layer × n_head × head_dim × seq × 4 bytes`. For
+      Llama 3.2-3B at 4K context that's ~128 MB; for an 8B at
+      4K it's ~512 MB. Could be the second hardest constraint
+      after weights.
+    - **Dispatch count growth.** TinyLlama (22 layers) emits 450
+      dispatches/token; Qwen3-1.7B (28 layers) 629/token. A 4B
+      model with ~36 layers would hit ~810/token; 7B (~32 layers
+      typical) ~720/token. Encode-overhead-per-step scales
+      linearly with dispatch count.
+    - **Matmul `m` dimension scaling.** Most matmuls have
+      `m = hidden_size`. Going from 1.7B (hidden 2048) to 4B
+      (hidden 2560) to 7B (hidden 4096) increases per-matmul
+      bandwidth roughly proportionally. The §6–§9
+      bandwidth-bound characterization may or may not hold —
+      part of the campaign value is finding out.
+
+    **Output format for each measurement:** add a numbered entry
+    under "### Completed on YYYY-MM-DD" with the model id,
+    profile name, observed tok/s (steady-state and profile-mode),
+    matmul ms / fraction, dispatch count, KV cache size at the
+    test prompt length, smoke output verdict, and any
+    behavioural surprises (e.g., chat template quirks, BOS
+    handling, tool-call format edge cases).
+
+    **Stop conditions / when to pivot back to deferred §A–§D:**
+    - All wave 1 models land cleanly with no engine regressions
+      and decode behaviour matches §6–§9 predictions → §A
+      subgroup loading becomes worth attempting.
+    - WASM cap forces a build change (e.g., MAXIMUM_MEMORY
+      bump to 8 GB, JSPI investigation §12) → that becomes the
+      blocker, address it before continuing the campaign.
+    - A model exposes a correctness bug (template, tokenizer,
+      arch) → fix in `src/models/` and add a regression test
+      before resuming the campaign.
+
+### Deferred kernel-tuning targets (behind §10 in priority)
+
+§A. **Subgroup-cooperative `q_packed` loading in
+    `mul_mat_vec.wgsl::MUL_ACC_Q8_0` / `MUL_ACC_Q4_0`.** The
+    remaining Stub B remediation (was the prior §10 "NEXT"
+    before the size pivot). Threads in a subgroup share their
+    loaded `q_packed` values via `subgroupBroadcast` so each
+    thread issues fewer src0 reads. Realistic ceiling: ~13% of
+    decode time at the current scale (matmul × bandwidth-bound
+    fraction). May change with larger models — re-evaluate after
+    wave 1 of §10. Risk: the current per-thread access uses
+    `thread_within_block` to address q_packed, which already
+    partitions src0 across threads — further sharing across
+    subgroup boundaries (vs the current within-workgroup
+    partitioning) may not buy anything.
+
+    Lower-cost alternative: vec4-packed loads (read 4
+    consecutive `q_packed` u32s in one instruction). Smaller
+    engineering cost, smaller predicted win.
+
+§B. **FA shape-routing for prefill/TTFT** (§5 path a). Decode
+    shape (N=1, head_dim 128, GQA 16:8) doesn't engage FA
+    post-rebase. Higher-impact for prefill latency / longer
+    prompts; FA's main win is seq>1. Probe
+    `flash_attn_get_decisions` for the VEC vs TILE vs
+    subgroup-matrix shape regions and adjust the guard. Becomes
+    more attractive once larger models (longer K dimension at
+    the same context length) land in §10.
+
+§C. **Drafter-based speculative decoding.** Larger project,
+    well-trodden territory in the literature. Potential 2–3×
+    wall-clock decode for chat-style workloads where the
+    drafter is mostly right. Drafter could be one of the §10
+    wave 1 small models (smollm2-360m or qwen3-0.6b) paired
+    with a 3B+ target.
+
+§D. **Encoder/embedding perf pass.** §21 dashboard section
+    shipped but the encoder forward pass hasn't had a perf
+    pass. Quick win possible if anyone uses arctic-embed-s/m
+    at throughput.
+
+11. The latent 3+ binding buffer-conflict edge case in
+    `ggml_backend_webgpu_build_multi` (item 3 in preamble) remains
+    untested — no llama op hits it today.
+
+12. **JSPI feasibility checkpoint** remains a follow-up investigation,
    not the next implementation step.
    - **Go/no-go:** no-go for the current milestone; the
      completion-driven readback path is the active baseline.
