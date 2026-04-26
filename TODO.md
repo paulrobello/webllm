@@ -43,6 +43,15 @@
 > engine adoption to keep speed measurements steady-state across
 > WASM rebuilds.
 >
+> Decode hotspot diagnostic landed 2026-04-26 (Active Step §6):
+> matmul dequant-stub on both Q8 (Qwen3-1.7B) and Q4 (TinyLlama)
+> moved `backendMatmulMs` by less than ±5.5% / ±2.5% with dispatch
+> count unchanged — both kernels are **memory-bound, not
+> compute-bound**. Next lever (Active Step §7): run two more stubs
+> to discriminate `src0` (weight) vs `src1` (activation) bandwidth
+> dominance, then pick the matching cache strategy (workgroup-cache
+> `src1` vs larger `OUTPUTS_PER_WG` tiles).
+>
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -675,28 +684,23 @@ needs to be collected.
 
 ### Resumption checklist (start a fresh session here)
 
-**Next target: Active Step §6 — matmul-side dequant-stub diagnostic
-or `flash_attn_get_decisions` shape-routing investigation.** §5 (FA
-rebase) closed 2026-04-25 in a third session pass: rebase landed
-clean (one minor conflict resolved), no engine regression, but FA
-**did not engage** on Qwen3-1.7B decode shapes — the upstream
-path-selector returns the subgroup-matrix path for N=1 / head_dim
-128 / GQA 16:8, and browser falls back to manual attention. So §5
-got the rebase value (newer upstream baseline, future easier
-rebases) but not the FA win. Two follow-up paths:
+**Next target: Active Step §7 — shared-memory caching of `src1`
+(the activation vector) in `mul_mat_vec.wgsl`.** §6 path (b) closed
+2026-04-26: matmul-side dequant-stub diagnostic ran on both Q8_0
+and Q4_0 paths. Both kernels are **memory-bound, not compute-bound**
+— stubbed-out arithmetic moved `backendMatmulMs` by less than ±5.5%
+on Q8 and ±2.5% on Q4 (within noise on both), with `backendDispatchCount`
+unchanged (629/token Qwen3-1.7B, 450/token TinyLlama — confirms the
+load chain survived the optimizer). So dequant fusion is **not** the
+right next lever; the lever is shared-memory caching of the activation
+vector that every workgroup re-reads from global memory.
 
-(a) Dig into `ggml_webgpu_flash_attn_get_decisions` to learn which
-shape regions route to VEC vs TILE vs subgroup-matrix; if a small
-heuristic adjustment routes our shapes to VEC/TILE, the FA win
-becomes accessible. (Lower-cost upstream contribution if the result
-is reusable.)
-
-(b) Matmul-side dequant-stub diagnostic (advisor's prior pick): in
-`mul_mat_vec.wgsl::MUL_ACC_Q8_0`, replace
-`f32(get_byte_i32(...)) * d` with `0.0` and re-profile. If
-`backendMatmulMs` collapses → compute-bound → dequant fusion is the
-lever. If it barely moves → memory-bound → shared-memory caching
-of src1 is the lever. Cheap, decisive, ~30 min.
+Path (a) (`flash_attn_get_decisions` shape-routing) remains available
+as a separate investigation: rebase landed §5 but FA didn't engage
+on Qwen3-1.7B N=1 decode shapes (head_dim 128, GQA 16:8). It's a
+lower-per-hour-value upstream contribution; defer unless prefill
+optimization becomes a target (FA's main win is seq>1 prefill which
+isn't currently profiled).
 
 Boot sequence:
 
@@ -706,17 +710,17 @@ Boot sequence:
    2026-04-25). Backup at `webllm-browser-patches-pre-fa-rebase`
    if recovery needed.
 3. Read the "Inference Performance Optimizations" preamble for the
-   five-profile baselines and the §5 outcome: FA rebased but
-   `flash_attn_get_decisions` returns the subgroup-matrix path for
-   our N=1 / head_dim 128 / GQA decode shapes, so FA falls back to
-   manual attention. Prefill (long-prompt seq>1) was *not* measured
-   — could engage there; the current `--profile` traces filter to
-   `nTokens=1` and don't see prefill, so a future investigator
-   would need to instrument prefill explicitly.
-4. Pick path (a) or (b) from §6 below based on session budget:
-   (a) is upstream-shape investigation, lower per-hour value but
-   reusable; (b) is the cheap diagnostic that decides whether
-   matmul kernel work is worthwhile at all.
+   five-profile baselines plus the §5 / §6 outcomes: FA didn't
+   engage on N=1 decode shapes; dequant-stub diagnostic identified
+   both Q8 and Q4 as memory-bound.
+4. Action: run the src0-vs-src1 discrimination stubs in
+   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`
+   to identify which buffer is the bandwidth bottleneck before
+   committing to a kernel rewrite. See Active Step §7 below for
+   the two-stub sequence (Stub A: replace `src1` reads with `1.0`;
+   Stub B: replace `src0` reads with `0`), the decision matrix that
+   routes the outcome to the matching lever (workgroup-cache `src1`
+   vs larger `OUTPUTS_PER_WG` tiles), and the falsifier checks.
 
 Note: the smoke page now does a shader-cache warmup after [6/8]
 engine adoption. If you see "1.0 tok/s" on the smoke page after
@@ -936,57 +940,132 @@ investigating "the engine."
    `chatSmoke=` / `bench=` URL params is a follow-up if the ~290ms
    load cost matters.
 
-6. **NEXT (next-session entry point): pick (a) or (b).**
+6. **DONE (2026-04-26): matmul dequant-stub diagnostic — both Q8 and
+   Q4 GEMV decode are memory-bound, not compute-bound.** Stubbed out
+   the dequant arithmetic in `mul_mat_vec.wgsl::MUL_ACC_Q8_0`
+   (`f32(get_byte_i32(q_packed, byte_idx)) * 0.0`) and `MUL_ACC_Q4_0`
+   (`(f32(q_byte & 0xFu) - 8.0) * 0.0` / `(f32((q_byte >> 4u) & 0xFu)
+   - 8.0) * 0.0`) — preserves the `q_packed` and `d` load chain via
+   IEEE-754 `* 0.0 ≠ statically 0` so the optimizer can't DCE the
+   reads, just zeroes the contribution to `row_sum`. Rebuilt WASM,
+   profiled both quants on the consolidated pipeline against
+   immediately-prior baselines:
 
-   **Path (a) — FA shape-routing investigation.**
-   Read `ggml_webgpu_flash_attn_get_decisions` in
-   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-webgpu.cpp` (search
-   for the function, returns `ggml_webgpu_flash_attn_decisions`).
-   Goal: understand which (head_dim, kv_tile, q_tile, has_mask,
-   browser-without-subgroup-matrix) combinations route to VEC vs
-   TILE vs SUBGROUP_MATRIX. Hypothesis: a small heuristic adjustment
-   could route Qwen3 decode (head_dim 128, GQA 16:8, K=2048,
-   N=1, mask present) to VEC or TILE. Falsifiable by adding
-   `ggml_log_set` traces, capturing the chosen path on a smoke run,
-   and checking what's gating ours out. If the fix is small and
-   correct, it's an upstream contribution; if it's hairy, defer.
-   **Also worth a separate measurement**: prefill (seq>1) may
-   already engage FA — current `--profile` traces filter to
-   `nTokens=1` and don't see prefill, so dispatch-count delta on
-   prefill is unmeasured. Adding a prefill profile path to
-   `eval/perf.ts` is a 1-hour task that would settle whether FA
-   *does* engage somewhere.
+   | Quant / Model              | Baseline matmul | Stub matmul | Delta  | Dispatch (load survived?) |
+   |----------------------------|----------------:|------------:|-------:|---------------------------|
+   | Q8_0 / Qwen3-1.7B think-on |        6.67 ms  |    7.04 ms  |  +5.5% | 629 → 629 ✅              |
+   | Q4_0 / TinyLlama-1.1B chat |        3.76 ms  |    3.67 ms  |  -2.4% | 450 → 450 ✅              |
 
-   **Path (b) — matmul dequant-stub diagnostic** (advisor's
-   first-pick discriminator). In
-   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`,
-   `MUL_ACC_Q8_0` branch (~line 289), replace
-   `f32(get_byte_i32(...)) * d` with `0.0` (or `f32(get_byte_i32(...))
-   * 0.0` to keep the load shape). Rebuild WASM, profile Qwen3-1.7B.
-   If `backendMatmulMs` collapses → compute-bound → next lever is
-   dequant fusion. If it barely moves → memory-bound → next lever
-   is shared-memory caching of src1 (the activation vector). Either
-   outcome answers the question; don't ship the stub. ~30 min.
-   **Cross-validate** on TinyLlama Q4_0 too (replace `q_byte_offset`
-   load → 0 in `MUL_ACC_Q4_0`); the Q4 GEMV may have a different
-   bottleneck mix than the Q8 path, and the prior 4→8 outputs_per_wg
-   experiment was reverted on Q4 with no diagnosis.
+   Both deltas are within profile-mode noise (compare ±5% noise on
+   raw 3-trial medians); the dispatch-count invariant on both
+   quants confirms the load chain wasn't optimizer-eliminated.
+   **If the kernel were compute-bound, removing the FMA work should
+   drop matmul time substantially (e.g. 30–60%). It barely moved on
+   either quant — that's the memory-bound signature.** Stubs reverted
+   (`git checkout --` on `mul_mat_vec.wgsl`); WASM rebuilt clean;
+   TinyLlama steady-state back to **106.2 tok/s** post-revert.
 
-   **Pick path (b) first** unless you have a session-scale block of
-   time to invest in (a). (b) gives a definitive answer about whether
-   matmul kernel work is worthwhile *at all* in 30 min; (a) might
-   produce nothing actionable in a multi-hour read.
+   **Implication for the next lever:** dequant fusion is *not* the
+   right target. The activation vector `src1` (called `x_block` in
+   the per-quant inner loops) is loaded by every workgroup from
+   global memory; cache it in `var<workgroup>` shared memory and
+   load each k-stride exactly once per workgroup. See §7 below for
+   the design.
+
+   **FA shape-routing investigation (path a)** remains untouched as
+   a separate side-quest — defer unless prefill optimization
+   becomes a target.
 
    **Cleanup item** worth landing whenever next touching `eval/models.ts`:
    pin `ggufFilePattern` on the `qwen3-*-q4f16` entries so the file on
    disk matches the model ID, or rename the IDs to `*-q8` to be honest
    about what the picker fetches.
 
-7. The latent 3+ binding buffer-conflict edge case in
+7. **NEXT (next-session entry point): src0-vs-src1 discrimination
+   stub, then pick the matching cache strategy.** §6 proved both
+   Q8 and Q4 GEMV are memory-bound but did *not* identify which
+   buffer dominates. The two candidates have different remediation
+   paths, so a 30-min discriminator is worth running before
+   committing to a kernel rewrite:
+
+   - **`src0` (quantized weights)** — read once per token per row;
+     for Qwen3-1.7B Q8_0 that's ~1.7 GB / token. If this is the
+     bottleneck, `var<workgroup>` caching of `src1` won't help
+     because `src1` isn't where the bandwidth is going. Lever:
+     bigger tiles per workgroup (more output rows per WG so each
+     weight load is amortized; the prior `OUTPUTS_PER_WG` 4 → 8
+     experiment was reverted on Q4 with no diagnosis — re-run with
+     this hypothesis in mind), or smaller-bandwidth quants (Q4_K)
+     with re-validated accuracy.
+   - **`src1` (activation vector)** — already register-cached per
+     thread across `OUTPUTS_PER_WG=4` output rows in the existing
+     shader, but EVERY workgroup re-reads the SAME activation
+     slice from global memory. For `m=4096`, that's `m/OUTPUTS_PER_WG
+     = 1024` workgroups all loading the same `params.k * 4 B = 16 KB`.
+     L2 cache *should* absorb that, but if profiling says no,
+     `var<workgroup>` caching with one block-group prefetch +
+     `workgroupBarrier()` could still help for the cross-workgroup
+     scheduling pattern.
+
+   **Discriminator stubs (both go in `mul_mat_vec.wgsl`, run in
+   sequence on Qwen3-1.7B + TinyLlama, then revert as in §6):**
+
+   1. **Stub A (test src1 dominance).** Replace the `x_block` fill
+      loop with a constant: `x_block[i] = 1.0;` (drop the `f32(src1[...])`
+      load). If `backendMatmulMs` collapses → src1 is the bottleneck →
+      go to workgroup-cache prototype. If it barely moves → src1 is
+      already L2-cached fine → continue to Stub B.
+   2. **Stub B (test src0 dominance).** Replace `load_u32_at_src0(...)`
+      with a constant `0u` and `load_f16_at_src0(...)` with constant
+      `0.0` so the weight reads disappear (output will be wrong; that's
+      fine, we're measuring time). If `backendMatmulMs` collapses →
+      src0 is the bottleneck → revisit the larger-tile experiment,
+      this time with a pre-experiment hypothesis (more output rows per
+      WG amortizes weight reads).
+
+   **Decision matrix:**
+   - A collapses, B barely moves → workgroup-cache `src1` (prototype
+     in `MUL_ACC_Q8_0` first; port to `MUL_ACC_Q4_0` on success).
+   - B collapses, A barely moves → re-run `OUTPUTS_PER_WG` 4 → 8 (or
+     16) on both quants, with `partial_sums` storage budget verified
+     against WG_SIZE workgroup memory cap.
+   - Both collapse partially → mixed; pick the cheaper change first.
+   - Neither collapses → experiment is invalid (compiler eliminated
+     downstream code, e.g., `acc[row] += row_sum;` got optimized away);
+     re-run with a forced read pattern.
+
+   **Action sequence:**
+   1. Apply Stub A to `MUL_ACC_Q8_0` (line 300-302 fill loop) AND
+      `MUL_ACC_Q4_0` (line 142-145), rebuild WASM, profile both
+      models with `make smoke-bench PERF_RUNS=3 --profile`. Sanity-
+      check `backendDispatchCount` unchanged (load chain on the
+      *other* buffer survived).
+   2. Revert Stub A. Apply Stub B (replace `load_u32_at_src0` and
+      `load_f16_at_src0` returns with constants). Profile again.
+   3. Revert Stub B. Confirm `git -C ~/Repos/llama.cpp status` clean.
+   4. Pick the matching prototype path from the decision matrix
+      above, implement it, verify smoke [7/8] still produces coherent
+      output (correctness gate), capture matmul delta. If wins on
+      both quants, rebase onto `webllm-browser-patches` as a new
+      patch (not a stub) and update `docs/LLAMA_CPP_PATCHES.md`.
+
+   **Risk:** WGSL `var<workgroup>` storage requires explicit
+   `workgroupBarrier()` calls and competes with the existing
+   `partial_sums` allocation (already `OUTPUTS_PER_WG * WG_SIZE`
+   floats = 1 KiB at OUTPUTS_PER_WG=4, WG_SIZE=64). Watch for
+   register spill on integrated GPUs.
+
+   **Reference:** see §6 for the stub-form template (`* 0.0` to
+   keep IEEE-754 dependency chains alive against optimizer DCE)
+   and the Q8/Q4 baseline numbers to compare against. Both
+   stubs above need to keep the *other* buffer's reads alive to
+   isolate one variable; verify via `backendDispatchCount` parity.
+
+8. The latent 3+ binding buffer-conflict edge case in
    `ggml_backend_webgpu_build_multi` (item 3 in preamble) remains
    untested — no llama op hits it today.
 
-8. **JSPI feasibility checkpoint** remains a follow-up investigation,
+9. **JSPI feasibility checkpoint** remains a follow-up investigation,
    not the next implementation step.
    - **Go/no-go:** no-go for the current milestone; the
      completion-driven readback path is the active baseline.
