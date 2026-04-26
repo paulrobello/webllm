@@ -1533,6 +1533,11 @@ function renderSeriesChartImpl(canvas, host, empty) {
 	sizeChartHost(canvas, profiles.length * 2);
 }
 
+function isEmbeddingRun(run) {
+	const haystack = `${run.profile ?? ""} ${run.model ?? ""}`.toLowerCase();
+	return /\bembed/.test(haystack);
+}
+
 function passesFilter(run) {
 	if (state.thinkingFilter !== "all" && run.thinking !== state.thinkingFilter) {
 		return false;
@@ -1574,7 +1579,9 @@ function valueFor(run, key) {
 function renderTable() {
 	const tbody = document.getElementById("runs-tbody");
 	const countEl = document.getElementById("run-count");
-	const runs = Array.from(state.runsByRunId.values()).filter(passesFilter);
+	const runs = Array.from(state.runsByRunId.values())
+		.filter((r) => !isEmbeddingRun(r))
+		.filter(passesFilter);
 	runs.sort(comparator);
 	countEl.textContent = String(runs.length);
 	tbody.innerHTML = "";
@@ -1607,8 +1614,9 @@ function renderTable() {
 		tbody.appendChild(tr);
 	}
 
-	// failed rows: show at bottom with red stripe
+	// failed rows: show at bottom with red stripe (inference only)
 	for (const failed of state.failedByRunId.values()) {
+		if (isEmbeddingRun(failed)) continue;
 		const tr = document.createElement("tr");
 		tr.className = "failed";
 		tr.innerHTML = `
@@ -1622,6 +1630,59 @@ function renderTable() {
 		tbody.appendChild(tr);
 	}
 	updateSortHeaders();
+	renderEmbeddingTable();
+}
+
+function renderEmbeddingTable() {
+	const tbody = document.getElementById("embedding-runs-tbody");
+	const countEl = document.getElementById("embedding-run-count");
+	const emptyEl = document.getElementById("embedding-runs-empty");
+	const wrapEl = document.getElementById("embedding-runs-wrap");
+	if (!tbody || !countEl || !emptyEl || !wrapEl) return;
+
+	const runs = Array.from(state.runsByRunId.values()).filter(isEmbeddingRun);
+	runs.sort(comparator);
+	const failed = Array.from(state.failedByRunId.values()).filter(isEmbeddingRun);
+	countEl.textContent = String(runs.length);
+
+	tbody.innerHTML = "";
+	if (runs.length === 0 && failed.length === 0) {
+		emptyEl.hidden = false;
+		wrapEl.hidden = true;
+		return;
+	}
+	emptyEl.hidden = true;
+	wrapEl.hidden = false;
+
+	for (const run of runs) {
+		const tr = document.createElement("tr");
+		tr.dataset.runId = run.runId;
+		if (state.freshRunIds.has(run.runId)) tr.classList.add("fresh");
+		const profileCell = run.profile
+			? escapeHtml(run.profile)
+			: `<span class="dim">—</span>`;
+		tr.innerHTML = `
+			<td>${formatTime(run.timestamp)}</td>
+			<td>${profileCell}</td>
+			<td>${escapeHtml(run.model)}</td>
+			<td class="num">${formatNum(run.oneShot?.totalMs, 0)}</td>
+			<td>${escapeHtml(run.oneShot?.finishReason ?? "—")}</td>
+			<td>${systemPill(run.systemId)}</td>
+		`;
+		tr.addEventListener("click", () => openDetail([run]));
+		tbody.appendChild(tr);
+	}
+	for (const f of failed) {
+		const tr = document.createElement("tr");
+		tr.className = "failed";
+		tr.innerHTML = `
+			<td>${formatTime(new Date().toISOString())}</td>
+			<td>${escapeHtml(f.profile ?? "—")}</td>
+			<td>${escapeHtml(f.model)}</td>
+			<td colspan="3"><span class="pill fail">FAILED</span> ${escapeHtml(f.error)}</td>
+		`;
+		tbody.appendChild(tr);
+	}
 }
 
 function updateSortHeaders() {
@@ -2115,5 +2176,33 @@ document.addEventListener("keydown", (e) => {
 // SSE batch lands so initial renders honor the persisted view.
 loadPersistedFilters();
 syncFilterControlsToState();
+
+// Tab switching: hidden panes use display:none so Chart.js canvases get
+// 0×0 parents until visible. Dispatching a resize after switching forces
+// every responsive chart to recalculate its dimensions.
+const TAB_STORAGE_KEY = "webllm-dashboard-tab/v1";
+function activateTab(name) {
+	const tabs = document.querySelectorAll("#tab-nav .tab");
+	const panes = document.querySelectorAll(".tab-pane");
+	for (const t of tabs) {
+		const active = t.dataset.tab === name;
+		t.classList.toggle("active", active);
+		t.setAttribute("aria-selected", active ? "true" : "false");
+	}
+	for (const p of panes) {
+		p.hidden = p.id !== `tab-${name}`;
+	}
+	try { localStorage.setItem(TAB_STORAGE_KEY, name); } catch {}
+	window.dispatchEvent(new Event("resize"));
+}
+document.getElementById("tab-nav").addEventListener("click", (e) => {
+	const btn = e.target.closest(".tab");
+	if (!btn) return;
+	activateTab(btn.dataset.tab);
+});
+try {
+	const saved = localStorage.getItem(TAB_STORAGE_KEY);
+	if (saved === "embeddings" || saved === "inference") activateTab(saved);
+} catch {}
 
 connect();

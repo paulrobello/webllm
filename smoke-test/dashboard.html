@@ -21,6 +21,13 @@
   <div id="running-list" class="running-list empty">nothing running</div>
 </section>
 
+<nav class="tabs" id="tab-nav" role="tablist">
+  <button type="button" class="tab active" data-tab="inference" role="tab" aria-selected="true">Inference</button>
+  <button type="button" class="tab" data-tab="embeddings" role="tab" aria-selected="false">Embeddings</button>
+</nav>
+
+<div class="tab-pane active" id="tab-inference" role="tabpanel">
+
 <section class="panel" id="evals-panel">
   <div class="panel-head">
     <h2>Accuracy &amp; tool-calling <span id="eval-count" class="dim">0</span></h2>
@@ -141,35 +148,6 @@
   <div id="series-host" class="chart-host" hidden><canvas id="series-chart"></canvas></div>
 </section>
 
-<div class="section-divider">Embeddings</div>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Embedding cosine similarity per task</h2>
-    <div class="legend dim">raw cosine ∈ [-1, 1]; higher = more semantically similar</div>
-  </div>
-  <div id="embedding-cosine-empty" class="bar-empty">no embedding evals yet — try <code>make bench-full</code> with the dashboard running, or <code>--profiles arctic-embed-s</code> directly</div>
-  <div id="embedding-cosine-host" class="chart-host" hidden><canvas id="embedding-cosine-chart"></canvas></div>
-</section>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Embedding latency by model</h2>
-    <div class="legend dim">median per-text wall time across all embedding tasks (lower is faster)</div>
-  </div>
-  <div id="embedding-latency-empty" class="bar-empty">no embedding evals yet</div>
-  <div id="embedding-latency-host" class="chart-host" hidden><canvas id="embedding-latency-chart"></canvas></div>
-</section>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Embedding throughput by model</h2>
-    <div class="legend dim">texts per second derived from per-task latency (higher is faster)</div>
-  </div>
-  <div id="embedding-throughput-empty" class="bar-empty">no embedding evals yet</div>
-  <div id="embedding-throughput-host" class="chart-host" hidden><canvas id="embedding-throughput-chart"></canvas></div>
-</section>
-
 <section class="panel">
   <div class="panel-head">
     <h2>Runs <span id="run-count" class="dim">0</span></h2>
@@ -210,6 +188,62 @@
     </table>
   </div>
 </section>
+
+</div><!-- /#tab-inference -->
+
+<div class="tab-pane" id="tab-embeddings" role="tabpanel" hidden>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Embedding cosine similarity per task</h2>
+    <div class="legend dim">raw cosine ∈ [-1, 1]; higher = more semantically similar</div>
+  </div>
+  <div id="embedding-cosine-empty" class="bar-empty">no embedding evals yet — try <code>make bench-full</code> with the dashboard running, or <code>--profiles arctic-embed-s</code> directly</div>
+  <div id="embedding-cosine-host" class="chart-host" hidden><canvas id="embedding-cosine-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Embedding latency by model</h2>
+    <div class="legend dim">median per-text wall time across all embedding tasks (lower is faster)</div>
+  </div>
+  <div id="embedding-latency-empty" class="bar-empty">no embedding evals yet</div>
+  <div id="embedding-latency-host" class="chart-host" hidden><canvas id="embedding-latency-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Embedding throughput by model</h2>
+    <div class="legend dim">texts per second derived from per-task latency (higher is faster)</div>
+  </div>
+  <div id="embedding-throughput-empty" class="bar-empty">no embedding evals yet</div>
+  <div id="embedding-throughput-host" class="chart-host" hidden><canvas id="embedding-throughput-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Runs <span id="embedding-run-count" class="dim">0</span></h2>
+    <div class="legend dim">embedding-only profiles</div>
+  </div>
+  <div id="embedding-runs-empty" class="bar-empty">no embedding runs yet</div>
+  <div id="embedding-runs-wrap" class="table-wrap" hidden>
+    <table id="embedding-runs-table">
+      <thead>
+        <tr>
+          <th data-sort="timestamp" class="sortable">time</th>
+          <th data-sort="profile" class="sortable">profile</th>
+          <th data-sort="model" class="sortable">model</th>
+          <th data-sort="oneShotTotalMs" class="sortable num">total ms</th>
+          <th data-sort="oneShotFinishReason" class="sortable">finish</th>
+          <th>system</th>
+        </tr>
+      </thead>
+      <tbody id="embedding-runs-tbody"></tbody>
+    </table>
+  </div>
+</section>
+
+</div><!-- /#tab-embeddings -->
 
 <div class="modal-backdrop" id="modal-backdrop" hidden>
   <div class="modal">
