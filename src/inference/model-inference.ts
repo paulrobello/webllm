@@ -119,15 +119,34 @@ export class ModelInference {
 		this.hp = hyperparams;
 	}
 
-	loadWeights(ggufCtx: GgufContext, ggufData: ArrayBuffer): void {
+	loadWeights(
+		ggufCtx: GgufContext,
+		ggufData: Uint8Array | ((offset: number, byteLength: number) => Uint8Array),
+	): void {
+		// Callback form is required when the source bytes live in the WASM
+		// heap: ctxCreate / backendAllocCtxTensors / per-chunk scratch
+		// mallocs below may grow memory, which detaches any pre-existing
+		// JS view of HEAPU8. uploadRangeChunked re-derives a fresh view
+		// from the live heap once per chunk *after* its scratch malloc,
+		// so the upload path stays valid across grow events.
+		const isCallback = typeof ggufData === "function";
+		const dataAt = isCallback
+			? ggufData
+			: (off: number, len: number) =>
+					new Uint8Array(ggufData.buffer, ggufData.byteOffset + off, len);
 		const { hp, wasm } = this;
 		const tensorMap = new Map<string, GgufTensorInfo>();
 		for (const t of ggufCtx.tensors) {
 			tensorMap.set(t.name, t);
 		}
 
-		const memSize =
-			ggufCtx.tensors.length * 16384 + ggufCtx.totalDataSize + (1 << 20);
+		// ctxCreate uses no_alloc=true (see webgpu-bridge.cpp::ctx_create);
+		// tensor data lives in GPU buffers assigned by backendAllocCtxTensors,
+		// not in this mempool. We only need room for ggml_tensor + ggml_object
+		// metadata per tensor — adding ggufCtx.totalDataSize here would
+		// allocate a multi-GB unused buffer and push 4B-class models over
+		// the WASM 4 GB cap.
+		const memSize = ggufCtx.tensors.length * 16384 + (1 << 20);
 		wasm.ctxCreate(memSize);
 
 		const tokEmb = this.makeTensor(tensorMap, "token_embd.weight");
@@ -175,10 +194,15 @@ export class ModelInference {
 			if (!tensor) continue;
 			const srcOffset = ggufCtx.dataOffset + t.offset;
 			const nbytes = wasm.tensorNbytes(tensor);
-			wasm.uploadToTensorChunked(
-				tensor,
-				new Uint8Array(ggufData, srcOffset, nbytes),
-			);
+			if (isCallback) {
+				wasm.uploadRangeChunked(
+					tensor,
+					(off, len) => dataAt(srcOffset + off, len),
+					nbytes,
+				);
+			} else {
+				wasm.uploadToTensorChunked(tensor, dataAt(srcOffset, nbytes));
+			}
 		}
 	}
 

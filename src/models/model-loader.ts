@@ -25,7 +25,7 @@ export interface ParsedModel {
 // biome-ignore lint/complexity/noStaticOnlyClass: instance methods planned for Phase 2
 export class ModelLoader {
 	/** Parse a GGUF model buffer into hyperparams, tokenizer config, and KV cache config. */
-	static parseModel(data: ArrayBuffer): ParsedModel {
+	static parseModel(data: Uint8Array): ParsedModel {
 		const ctx = GgufParser.parse(data);
 		const hyperparams = ModelLoader.extractHyperparams(ctx);
 		const tokenizerConfig = ModelLoader.buildTokenizerConfig(ctx);

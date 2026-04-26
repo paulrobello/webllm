@@ -223,7 +223,7 @@ describe("ModelLoader BPE tokenizer config", () => {
 			offset = writeString(view, offset, token);
 		}
 
-		const parsed = ModelLoader.parseModel(buf.slice(0, offset));
+		const parsed = ModelLoader.parseModel(new Uint8Array(buf, 0, offset));
 		expect(parsed.hyperparams.ropeFreqBase).toBe(1_000_000);
 	});
 });

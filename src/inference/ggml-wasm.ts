@@ -389,6 +389,32 @@ export class GgmlWasm {
 		}
 	}
 
+	/** Upload `byteLength` bytes via a callback-resolved source, chunk by
+	 * chunk. The callback is invoked once per chunk *after* the scratch
+	 * malloc, so any heap growth from that malloc can't detach the source
+	 * view between derivation and `set`. Use this when source bytes live
+	 * in the WASM heap (where they share the buffer that may grow mid-
+	 * upload). Static JS-heap sources should use `uploadToTensorChunked`.
+	 */
+	uploadRangeChunked(
+		tensor: TensorPtr,
+		dataAt: (srcOffset: number, byteLength: number) => Uint8Array,
+		byteLength: number,
+		chunkSize = 4 * 1024 * 1024,
+	): void {
+		const ptr = this.malloc(Math.min(chunkSize, byteLength));
+		try {
+			for (let off = 0; off < byteLength; off += chunkSize) {
+				const end = Math.min(off + chunkSize, byteLength);
+				const slice = dataAt(off, end - off);
+				this.heapU8.set(slice, ptr);
+				this.m._backend_tensor_set(tensor, ptr, off, slice.byteLength);
+			}
+		} finally {
+			this.free(ptr);
+		}
+	}
+
 	beginDownloadFromTensor(
 		tensor: TensorPtr,
 		byteLength: number,

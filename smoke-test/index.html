@@ -289,7 +289,7 @@ async function runSmokeTest() {
     const s1 = addStep('Build synthetic tiny GGUF model');
     let ggufBuf;
     try {
-        ggufBuf = buildTinyGGUF();
+        ggufBuf = new Uint8Array(buildTinyGGUF());
         setStep(s1, 'pass', `Buffer size: ${ggufBuf.byteLength} bytes`);
     } catch (e) { setStep(s1, 'fail', e.message); return finish(false); }
 

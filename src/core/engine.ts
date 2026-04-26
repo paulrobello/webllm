@@ -551,7 +551,7 @@ export class WebLLM {
 	}
 
 	static async loadModelFromBuffer(
-		data: ArrayBuffer,
+		data: ArrayBuffer | Uint8Array,
 		name: string,
 		config: WebLLMConfig,
 		wasmUrl = "webllm-wasm.js",
@@ -562,8 +562,9 @@ export class WebLLM {
 	}> {
 		const engine = await WebLLM.init(config);
 
-		const parsed = ModelLoader.parseModel(data);
-		const ggufCtx = GgufParser.parse(data) as GgufContext;
+		const view = data instanceof Uint8Array ? data : new Uint8Array(data);
+		const parsed = ModelLoader.parseModel(view);
+		const ggufCtx = GgufParser.parse(view) as GgufContext;
 
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl });
@@ -572,11 +573,11 @@ export class WebLLM {
 		let inference: ModelInference | EncoderInference;
 		if (isEncoder) {
 			const enc = new EncoderInference(wasm, parsed.hyperparams);
-			enc.loadWeights(ggufCtx, data);
+			enc.loadWeights(ggufCtx, view);
 			inference = enc;
 		} else {
 			const inf = new ModelInference(wasm, parsed.hyperparams);
-			inf.loadWeights(ggufCtx, data);
+			inf.loadWeights(ggufCtx, view);
 			inf.initKVCache(parsed.kvCacheConfig.maxContextLength);
 			inference = inf;
 		}

@@ -115,7 +115,7 @@ function writeKvIntArray(
  * Build a minimal GGUF buffer with all metadata keys required by ModelLoader.
  * Includes architecture hyperparams and tokenizer config fields.
  */
-function buildModelLoaderGguf(): ArrayBuffer {
+function buildModelLoaderGguf(): Uint8Array {
 	const headerSize = 24;
 	const arch = "llama";
 
@@ -284,7 +284,7 @@ function buildModelLoaderGguf(): ArrayBuffer {
 	view.setBigUint64(offset, BigInt(0), true); // offset
 	offset += 8;
 
-	return buf.slice(0, offset);
+	return new Uint8Array(buf, 0, offset);
 }
 
 describe("ModelLoader", () => {
@@ -390,7 +390,7 @@ interface BertGgufOptions {
  * subset of bert.* hyperparam keys needed by ModelLoader.parseModel, with
  * configurable pooling_type / attention.causal / layer_norm_epsilon entries.
  */
-function buildBertGguf(options: BertGgufOptions = {}): ArrayBuffer {
+function buildBertGguf(options: BertGgufOptions = {}): Uint8Array {
 	const headerSize = 24;
 	const arch = "bert";
 	const tokens = options.withBertTokenizer
@@ -572,7 +572,7 @@ function buildBertGguf(options: BertGgufOptions = {}): ArrayBuffer {
 	view.setBigUint64(offset, BigInt(0), true);
 	offset += 8;
 
-	return buf.slice(0, offset);
+	return new Uint8Array(buf, 0, offset);
 }
 
 describe("ModelLoader bert metadata extraction", () => {

@@ -61,13 +61,25 @@ export class EncoderInference {
 		this.hp = hyperparams;
 	}
 
-	loadWeights(ggufCtx: GgufContext, ggufData: ArrayBuffer): void {
+	loadWeights(
+		ggufCtx: GgufContext,
+		ggufData: Uint8Array | ((offset: number, byteLength: number) => Uint8Array),
+	): void {
+		// Callback form is required when the source bytes live in the WASM
+		// heap; see ModelInference.loadWeights for the full rationale.
+		const isCallback = typeof ggufData === "function";
+		const dataAt = isCallback
+			? ggufData
+			: (off: number, len: number) =>
+					new Uint8Array(ggufData.buffer, ggufData.byteOffset + off, len);
 		const { hp, wasm } = this;
 		const tensorMap = new Map<string, GgufTensorInfo>();
 		for (const t of ggufCtx.tensors) tensorMap.set(t.name, t);
 
-		const memSize =
-			ggufCtx.tensors.length * 16384 + ggufCtx.totalDataSize + (1 << 20);
+		// ctxCreate uses no_alloc=true; tensor data lives in GPU buffers,
+		// not in the ggml mempool. Only metadata budget is needed.
+		// See ModelInference.loadWeights for the full rationale.
+		const memSize = ggufCtx.tensors.length * 16384 + (1 << 20);
 		wasm.ctxCreate(memSize);
 
 		const tokEmb = this.makeTensor(tensorMap, "token_embd.weight");
@@ -114,10 +126,15 @@ export class EncoderInference {
 			if (!tensor) continue;
 			const srcOffset = ggufCtx.dataOffset + t.offset;
 			const nbytes = wasm.tensorNbytes(tensor);
-			wasm.uploadToTensorChunked(
-				tensor,
-				new Uint8Array(ggufData, srcOffset, nbytes),
-			);
+			if (isCallback) {
+				wasm.uploadRangeChunked(
+					tensor,
+					(off, len) => dataAt(srcOffset + off, len),
+					nbytes,
+				);
+			} else {
+				wasm.uploadToTensorChunked(tensor, dataAt(srcOffset, nbytes));
+			}
 		}
 	}
 

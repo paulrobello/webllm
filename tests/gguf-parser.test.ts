@@ -12,7 +12,7 @@ function writeString(buf: DataView, offset: number, str: string): number {
 	return offset;
 }
 
-function buildMinimalGguf(): ArrayBuffer {
+function buildMinimalGguf(): Uint8Array {
 	const headerSize = 24;
 	const kv: Array<{ key: string; type: GgufValueType; value: unknown }> = [
 		{ key: "general.architecture", type: 8 as GgufValueType, value: "llama" },
@@ -66,7 +66,7 @@ function buildMinimalGguf(): ArrayBuffer {
 	view.setBigUint64(offset, BigInt(0), true);
 	offset += 8;
 
-	return buf.slice(0, offset);
+	return new Uint8Array(buf, 0, offset);
 }
 
 describe("GgufParser", () => {
@@ -97,7 +97,9 @@ describe("GgufParser", () => {
 	test("throws on invalid magic", () => {
 		const buf = new ArrayBuffer(24);
 		new DataView(buf).setUint32(0, 0xdeadbeef, true);
-		expect(() => GgufParser.parse(buf)).toThrow("Invalid GGUF magic");
+		expect(() => GgufParser.parse(new Uint8Array(buf))).toThrow(
+			"Invalid GGUF magic",
+		);
 	});
 
 	test("throws on unsupported version", () => {
@@ -105,7 +107,9 @@ describe("GgufParser", () => {
 		const view = new DataView(buf);
 		view.setUint32(0, GGUF_MAGIC, true);
 		view.setUint32(4, 99, true);
-		expect(() => GgufParser.parse(buf)).toThrow("Unsupported GGUF version");
+		expect(() => GgufParser.parse(new Uint8Array(buf))).toThrow(
+			"Unsupported GGUF version",
+		);
 	});
 
 	test("getMetadataString returns string value", () => {
@@ -120,5 +124,23 @@ describe("GgufParser", () => {
 		expect(GgufParser.getMetadataNumber(ctx, "llama.context_length")).toBe(
 			4096,
 		);
+	});
+
+	test("parses a sub-view that lives at non-zero byteOffset", () => {
+		// Streaming GGUF into the WASM heap places the file at a non-zero
+		// offset within a much larger backing ArrayBuffer. Guards against
+		// an accidental `new DataView(data.buffer)` regression that would
+		// view from offset 0 and read garbage prefix bytes.
+		const inner = buildMinimalGguf();
+		const prefixBytes = 1024;
+		const outer = new ArrayBuffer(prefixBytes + inner.byteLength + 64);
+		new Uint8Array(outer, 0, prefixBytes).fill(0xff);
+		const innerView = new Uint8Array(outer, prefixBytes, inner.byteLength);
+		innerView.set(inner);
+		const ctx = GgufParser.parse(innerView);
+		expect(ctx.header.magic).toBe(GGUF_MAGIC);
+		expect(ctx.header.tensorCount).toBe(1);
+		expect(ctx.metadata.get("general.architecture")?.value).toBe("llama");
+		expect(ctx.tensors[0].name).toBe("token_embd.weight");
 	});
 });

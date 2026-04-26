@@ -20,12 +20,15 @@ export class GgufParser {
 	/**
 	 * Parse a GGUF binary buffer into a structured context.
 	 *
-	 * @param buffer - Raw ArrayBuffer of the GGUF file.
+	 * @param data - Uint8Array view over the GGUF file. Carries
+	 *   `byteOffset` + `byteLength` so callers can pass a sub-view of a
+	 *   larger backing ArrayBuffer (e.g. a region of the WASM heap)
+	 *   without copying.
 	 * @returns Parsed GgufContext with header, metadata, tensor info, and alignment.
 	 * @throws Error if magic number or version is invalid.
 	 */
-	static parse(buffer: ArrayBuffer): GgufContext {
-		const view = new DataView(buffer);
+	static parse(data: Uint8Array): GgufContext {
+		const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 		let offset = 0;
 
 		const header = readHeader(view, offset);

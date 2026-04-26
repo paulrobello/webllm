@@ -117,45 +117,85 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		const t0 = performance.now();
 		const profileMode = new URLSearchParams(window.location.search).has("profile");
 
-		log("running", "[1/8] Fetching model...");
+		// WebGPU init moved to step 1: subsequent steps stream the GGUF
+		// directly into the WASM heap, so the heap must exist first.
+		// JS-heap `new Uint8Array(N)` caps at ~2 GiB on Chrome and fails
+		// for >2 GiB GGUFs (4B Q4 ≈ 2.27 GiB). A `Uint8Array` *view* over
+		// the WASM-backed ArrayBuffer can exceed 2 GiB.
+		log("running", "[1/8] Initializing WebGPU backend...");
+		let wasm;
+		try {
+			wasm = new GgmlWasm();
+			wasmInstance = wasm;
+			await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
+			log("pass", "[1/8] WebGPU backend initialized");
+		} catch (e) {
+			log("fail", `[1/8] WebGPU init failed: ${e.message}\n${e.stack || ""}`);
+			return;
+		}
+
+		log("running", "[2/8] Fetching model...");
 		progressEl.style.display = "block";
-		let modelBuffer;
+		// Saved (ptr, length) is the source of truth: WASM memory growth
+		// during ctxCreate / backendAllocCtxTensors detaches any prior
+		// Uint8Array view, so views must be re-derived from the live
+		// `wasm.heapU8.buffer` at each use via the dataAt callback below.
+		let modelPtr = 0;
+		let modelByteLength = 0;
+		const fetchStart = performance.now();
 		try {
 			const resp = await fetch(modelUrl);
 			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 			const total = Number(resp.headers.get("content-length") || 0);
+			if (total <= 0) {
+				throw new Error(
+					"missing content-length on model response; streaming into WASM heap requires it",
+				);
+			}
+			modelPtr = wasm.malloc(total);
+			if (!modelPtr) throw new Error(`wasm malloc(${total}) returned null`);
+			modelByteLength = total;
 			const reader = resp.body.getReader();
-			const chunks = [];
 			let received = 0;
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				chunks.push(value);
+				// Re-fetch heapU8 each chunk: malloc above and any future
+				// growth invalidate prior buffer references. Module.HEAPU8
+				// is re-bound by Emscripten on grow; the getter returns
+				// the current view.
+				wasm.heapU8.set(value, modelPtr + received);
 				received += value.length;
-				if (total > 0) setProgress((received / total) * 30);
+				setProgress((received / total) * 30);
 			}
-			modelBuffer = new Uint8Array(received);
-			let off = 0;
-			for (const chunk of chunks) {
-				modelBuffer.set(chunk, off);
-				off += chunk.length;
+			if (received !== total) {
+				throw new Error(
+					`short read: expected ${total} bytes, got ${received}`,
+				);
 			}
-			modelBuffer = modelBuffer.buffer;
 			log(
 				"pass",
-				`[1/8] Model fetched: ${(received / 1e6).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+				`[2/8] Model fetched: ${(received / 1e6).toFixed(1)} MB in ${((performance.now() - fetchStart) / 1000).toFixed(1)}s`,
 			);
 		} catch (e) {
-			log("fail", `[1/8] Fetch failed: ${e.message}`);
+			log("fail", `[2/8] Fetch failed: ${e.message}`);
+			if (modelPtr) wasm.free(modelPtr);
 			return;
 		}
 
-		log("running", "[2/8] Parsing GGUF...");
+		// Build the model-region accessor. Re-derives a fresh sub-view of
+		// HEAPU8 on every call so callers can't accidentally hold a
+		// stale reference across a memory-grow event.
+		const modelDataAt = (off, len) =>
+			new Uint8Array(wasm.heapU8.buffer, modelPtr + off, len);
+
+		log("running", "[3/8] Parsing GGUF...");
 		let ggufCtx;
 		let parsed;
 		try {
-			ggufCtx = GgufParser.parse(modelBuffer);
-			parsed = ModelLoader.parseModel(modelBuffer);
+			const fullView = modelDataAt(0, modelByteLength);
+			ggufCtx = GgufParser.parse(fullView);
+			parsed = ModelLoader.parseModel(fullView);
 			parsedModel = parsed;
 			const hp = parsed.hyperparams;
 			const subtitleContextLength =
@@ -166,10 +206,11 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				`${pageCopy.subtitle} · Model: ${modelId} · arch=${hp.architecture} · ctx=${subtitleContextLength}`;
 			log(
 				"pass",
-				`[2/8] GGUF parsed: arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount}/${hp.headCountKv} layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`,
+				`[3/8] GGUF parsed: arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount}/${hp.headCountKv} layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`,
 			);
 		} catch (e) {
-			log("fail", `[2/8] Parse failed: ${e.message}\n${e.stack || ""}`);
+			log("fail", `[3/8] Parse failed: ${e.message}\n${e.stack || ""}`);
+			wasm.free(modelPtr);
 			return;
 		}
 
@@ -191,6 +232,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					`thinking flag (or use the "switch off" link above) and reload.`,
 			);
 			setProgress(0);
+			wasm.free(modelPtr);
 			return;
 		}
 
@@ -202,14 +244,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// exists on causal models.
 		const isEncoderModel = parsed.hyperparams.architecture === "bert";
 
-		log("running", "[3/8] Initializing WebGPU backend...");
+		log("running", "[4/8] Loading weights into GPU...");
+		let loadFailed = false;
 		try {
-			const wasm = new GgmlWasm();
-			wasmInstance = wasm;
-			await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
-			log("pass", "[3/8] WebGPU backend initialized");
-
-			log("running", "[4/8] Loading weights into GPU...");
 			setProgress(35);
 			if (isEncoderModel) {
 				inference = new EncoderInference(wasm, parsed.hyperparams);
@@ -221,14 +258,22 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				}
 			}
 			const t1 = performance.now();
-			inference.loadWeights(ggufCtx, modelBuffer);
+			inference.loadWeights(ggufCtx, modelDataAt);
 			const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
 			log("pass", `[4/8] Weights loaded in ${weightTime}s`);
 			setProgress(80);
 		} catch (e) {
-			log("fail", `[3/8-4/8] Init/load failed: ${e.message}\n${e.stack || ""}`);
-			return;
+			loadFailed = true;
+			log("fail", `[4/8] Load failed: ${e.message}\n${e.stack || ""}`);
+		} finally {
+			// Weights are uploaded to GPU buffers; the staging copy in
+			// the WASM heap is no longer needed. Freeing immediately
+			// reclaims ~model-file-size of WASM memory before the KV
+			// cache and graph buffers get allocated.
+			wasm.free(modelPtr);
+			modelPtr = 0;
 		}
+		if (loadFailed) return;
 
 		if (isEncoderModel) {
 			log(
