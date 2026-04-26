@@ -210,13 +210,15 @@ export class ModelInference {
 		if (this.kvLayers) return;
 
 		const { hp, wasm } = this;
-		// NOTE: KV cache is F32. F16 was tried (see git history + TODO.md
-		// item 6) and measured -7.7% on short-context benchmarks — the
-		// F16×F32 mul_mat path plus F32->F16 conversion on writes outweigh
-		// the bandwidth savings until context gets much longer (~1000+ tokens).
-		// Left as F32; revisit when real long-context workloads become the
-		// perf target.
-		const perLayerBytes = hp.embeddingHeadLength * maxContextLength * 4;
+		// KV cache type F16. F16 is the prerequisite for the ggml-webgpu
+		// FLASH_ATTN_EXT VEC/TILE paths to engage on decode shapes (see
+		// `flash_attn_get_decisions::kv_vec_type_supported` in
+		// ggml-webgpu-shader-lib.hpp). With FA engaging via opFlashAttn,
+		// the K read + softmax + V read sequence collapses into one fused
+		// dispatch per layer per token. opCpy handles the F32->F16 write
+		// conversion; FA reads F16 directly. The §6 short-context -7.7%
+		// measurement was made BEFORE FA could engage and no longer applies.
+		const perLayerBytes = hp.embeddingHeadLength * maxContextLength * 2;
 		const totalBytes = hp.layerCount * 2 * perLayerBytes;
 		const memSize = hp.layerCount * 2 * 16384 + totalBytes + (1 << 20);
 
@@ -227,14 +229,14 @@ export class ModelInference {
 			this.kvLayers.push({
 				// K: [headDim, maxCtx, nKvHeads]
 				k: wasm.tensorNew3d(
-					GgmlType.F32,
+					GgmlType.F16,
 					hp.embeddingHeadLength,
 					maxContextLength,
 					hp.headCountKv,
 				),
 				// V: [maxCtx, headDim, nKvHeads] for ggml_mul_mat compatibility
 				v: wasm.tensorNew3d(
-					GgmlType.F32,
+					GgmlType.F16,
 					maxContextLength,
 					hp.embeddingHeadLength,
 					hp.headCountKv,
@@ -1113,8 +1115,8 @@ export class ModelInference {
 	//   // K / V cache contents after a forward pass (use a probe prefill first)
 	//   window.inference.resetKVCache();
 	//   await window.inference.forward(new Int32Array([22172]), new Int32Array([0]));
-	//   const k = await window.inference.debugReadKCache(0, 64*4, 0);
-	//   const v = await window.inference.debugReadVCache(0, 64*4, 0);
+	//   const k = await window.inference.debugReadKCache(0, 64*2, 0);
+	//   const v = await window.inference.debugReadVCache(0, 64*2, 0);
 	//
 	//   // First N floats of any F32 norm weight after loadWeights()
 	//   const g = await window.inference.debugReadNormWeight("attn0", 8);
@@ -1123,28 +1125,31 @@ export class ModelInference {
 	//   // and return the hidden state. Great for "where does it diverge?".
 	//   const h = await window.inference.debugLayerOutput(1, /* layerIdx= */ 0);
 
-	/** DEBUG: read back a slice of kv.k for a given layer. */
+	/** DEBUG: read back a slice of kv.k for a given layer.
+	 *  Returns Uint16Array of raw IEEE-754 binary16 values. Decode with
+	 *  e.g. https://github.com/petamoriken/float16 if you need Float32 values. */
 	async debugReadKCache(
 		layerIdx: number,
 		nBytes: number,
 		offset = 0,
-	): Promise<Float32Array> {
+	): Promise<Uint16Array> {
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const tensor = this.kvLayers[layerIdx].k;
 		const bytes = await this.wasm.downloadFromTensor(tensor, nBytes, offset);
-		return new Float32Array(bytes.buffer, bytes.byteOffset, nBytes / 4);
+		return new Uint16Array(bytes.buffer, bytes.byteOffset, nBytes / 2);
 	}
 
-	/** DEBUG: read back a slice of kv.v for a given layer. */
+	/** DEBUG: read back a slice of kv.v for a given layer.
+	 *  Returns Uint16Array of raw IEEE-754 binary16 values. */
 	async debugReadVCache(
 		layerIdx: number,
 		nBytes: number,
 		offset = 0,
-	): Promise<Float32Array> {
+	): Promise<Uint16Array> {
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const tensor = this.kvLayers[layerIdx].v;
 		const bytes = await this.wasm.downloadFromTensor(tensor, nBytes, offset);
-		return new Float32Array(bytes.buffer, bytes.byteOffset, nBytes / 4);
+		return new Uint16Array(bytes.buffer, bytes.byteOffset, nBytes / 2);
 	}
 
 	/**
