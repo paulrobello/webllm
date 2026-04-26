@@ -212,7 +212,11 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "balanced",
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/mlc-ai/Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
-		ggufUrl: "https://huggingface.co/NousResearch/Hermes-3-Llama-3.2-3B-GGUF",
+		// NousResearch's mirror has only K-quants + Q8_0, no Q4_0; switched
+		// to bartowski for wave-1 quant parity. Pin "Q4_0." with trailing
+		// dot to skip the ARM repack variants (same as llama-3.2-3b).
+		ggufUrl: "https://huggingface.co/bartowski/Hermes-3-Llama-3.2-3B-GGUF",
+		ggufFilePattern: "Q4_0.",
 	},
 
 	{

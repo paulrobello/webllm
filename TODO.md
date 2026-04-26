@@ -78,7 +78,7 @@
 > 3B+ scale (memory pressure, KV cache size, dispatch counts may
 > reshape the profile in ways that change which lever matters).
 >
-> **Wave 1 progress (2026-04-26):** 5/10 done · 2 deferred.
+> **Wave 1 progress (2026-04-26):** 6/10 done · 2 deferred.
 > - smollm2-360m-q4f16: 106 tok/s steady-state Q4_0 / 24/36 (62%).
 > - qwen2.5-1.5b-q4f16: 84 tok/s / 29/36 (81%). Run uncovered
 >   bug #25 — qwen2 attention biases were silently dropped
@@ -93,6 +93,11 @@
 > - llama-3.2-3b-q4f16: 58 tok/s / 27/36 (76%). 28 layers, GQA
 >   3:1, KV 896 MB. 29% faster than qwen2.5-3b at same scale.
 >   Encode overhead 15.5% — new fleet low.
+> - hermes-3-llama-3.2-3b-q4f16: 60 tok/s / 27/36 (74%).
+>   Identical arch to base llama-3.2-3b (572 dispatches/token,
+>   exact match); tool-calling advantage invisible at warm
+>   temp (gate at 0.4). Sanity-check entry confirming the
+>   fine-tune doesn't change inference cost profile.
 > - DEFERRED: gemma-2-2b (pre+post norm pairs, logit/attn
 >   soft-cap, sliding-window, (1+w) RMSNorm), phi-3.5-mini
 >   (fused QKV).
@@ -1040,7 +1045,57 @@ needs to be collected.
      | qwen2.5-3b         |     36 |      841 |  45.1 |     86%  |
      | llama-3.2-3b       |     28 |      572 |  58.2 |     76%  |
 
-8. **Gemma 2 + Phi 3 deferred from wave 1 — architectural gaps
+8. **§10 wave 1, model 6: hermes-3-llama-3.2-3b-q4f16 registered
+   + benched.** Llama-3.2-3B fine-tune by NousResearch with
+   tool-calling and structured-output capabilities; same arch
+   as base llama-3.2-3b so no new arch work needed.
+   - **Profile registered:** `hermes-3-llama-3.2-3b-warm`
+     (temp 0.6, `DEFAULT_PROMPT`); added to
+     `SMOKE_PROFILE_SETS.full`. Switched ggufUrl to bartowski
+     mirror — NousResearch's mirror has only K-quants + Q8_0,
+     no Q4_0. Pinned `ggufFilePattern: "Q4_0."` matching the
+     base llama-3.2-3b convention.
+   - **Architecture (llama / 28 layers):** identical to base
+     llama-3.2-3b (n_head 24, n_head_kv 8 GQA 3:1, embedding
+     3072, head_dim 128, ffn 8192, KV @ 4096 = 896 MB).
+     Confirmed via dispatch count = 572 — exact match with base.
+   - **Speed (3-trial median):**
+     - Steady-state **60.4 tok/s** (runs: 56.6 / 60.4 / 62.0) —
+       within 4% of base llama-3.2-3b's 58.2; the difference is
+       run-to-run variance, not arch. Confirms fine-tuning a
+       model doesn't change the inference cost profile.
+     - Profile-mode 42.8 tok/s (perturbation -29%).
+   - **Profile-mode backend attribution (138-step decode):**
+     - `backendMatmulMs` 8.13 / 39.0% (vs base 8.28 / 34.9% —
+       within noise; the % delta is from a slightly faster
+       graph compute on this run).
+     - `backendEncodeOverheadMs` 3.75 / 18.0%.
+     - `backendAttentionMs` 0.49 / 2.3%.
+     - `backendDispatchCount` **572** — exactly matches base
+       llama-3.2-3b, as expected for a fine-tune.
+   - **Smoke chat regression:** PASSED. Output: `"I told the
+     ref I mixed up my shoes. He said, 'I don't care how you
+     do it in your bedroom, just do it right!'"` — coherent,
+     finish=eos, 47 tokens.
+   - **Accuracy (`bench-full --profiles hermes-3-llama-3.2-3b-warm`):**
+     **27/36 passing · overall 74%** — 2 points below base
+     llama-3.2-3b's 76% at the same profile.  **Hermes's tool-
+     calling advantage is invisible at warm temp** because the
+     `tool-calling` dimension auto-skips above temp 0.4 (the
+     gate on rigid JSON output). To see Hermes's specialized
+     contribution, run with a cold profile or
+     `--dimension tool-calling` override; deferred as a follow-
+     up since cold/temp-sweep profiles were not part of the
+     wave-1 campaign scope.
+   - **Wave-1 finding:** the 3B band has **two empirically
+     interchangeable llama-arch entries** (base + Hermes
+     fine-tune) that produce statistically tied throughput on
+     identical prompts — useful as a sanity check on the
+     bench-full harness, less useful as a fleet diversification
+     point. If a future campaign cares about tool-calling, run
+     hermes-3 cold separately.
+
+9. **Gemma 2 + Phi 3 deferred from wave 1 — architectural gaps
    identified.** Both families need substantially more
    inference-path work than the qwen2 bias fix did. Documented
    here so future work has a clear scope.
@@ -1088,24 +1143,24 @@ needs to be collected.
 ### Resumption checklist (start a fresh session here)
 
 **Next target: Active Step §10 — large-model test campaign,
-wave 1 model 6.** Wave 1 progress: 5/10 + 2 deferred. Five
-landed (smollm2-360m, qwen2.5-1.5b, smollm2-1.7b, qwen2.5-3b,
-llama-3.2-3b — see "Completed on 2026-04-26 §1, §2, §5, §6,
-§7"); two deferred for arch gaps (gemma-2-2b, phi-3.5-mini —
-see "Completed on 2026-04-26 §8"). Cross-family speed/accuracy
-pattern (Llama fast/lower-accuracy vs Qwen slow/higher-accuracy)
-is robust across the 1.5-3B span.
+wave 1 model 7 (final supported).** Wave 1 progress: 6/10 + 2
+deferred. The final supported wave-1 entry is
+**`qwen3-4b-q4f16` (4.0B)** — largest registered model and the
+stress test for the current WASM/GPU memory budget at Q4. Same
+arch as qwen3-1.7b (qwen3 with q/k norm). KV cache size will
+likely land in the 600-1000 MB range depending on GQA ratio;
+weights at Q4 should be ~2.4 GB so well within the 4 GB WASM
+cap with headroom for KV + activations.
 
-The next unprofiled supported entry by ascending size is
-**`hermes-3-llama-3.2-3b-q4f16` (3.21B)** — Hermes fine-tune
-of Llama-3.2-3B, useful for tool-calling eval contrast (Hermes
-is specifically tool-tuned). Same arch as llama-3.2-3b so no
-new arch work needed. After that the final supported wave-1
-entry is **`qwen3-4b-q4f16` (4.0B)** — largest registered, the
-stress test for the current WASM/GPU memory budget at Q4.
-`qwen2.5-coder-1.5b` is also available (qwen2 arch, supported)
-if a code-gen eval task is in scope. No 7B+ model is registered
-yet (wave 2).
+After qwen3-4b, wave 1 is complete: 7/10 supported entries
+landed, 2 deferred for arch gaps (gemma-2-2b, phi-3.5-mini),
+and 1 optional skipped (qwen2.5-coder-1.5b — only worth running
+if a code-gen eval task is in scope; same arch as qwen2.5-1.5b
+already covered).
+
+No 7B+ model is registered yet (wave 2). Q4_0 7B = ~3.94 GB —
+sits right at the WASM cap; will probably need Q3_K_M (~3.0 GB)
+or smaller. Candidates listed in §10's wave-2 block above.
 
 **Decode tuning is paused at the current scale** — §6/§7/§8/§9
 showed the bandwidth-bound fraction is ~40% of matmul on Q8 /
@@ -1619,9 +1674,12 @@ investigating "the engine."
       dispatches/token / 27/36 = 76% accuracy. 28 layers, GQA
       3:1, KV 896 MB. 29% faster than qwen2.5-3b at same param
       scale. See "Completed on 2026-04-26 §7" above.
-    - `hermes-3-llama-3.2-3b-q4f16` (3.21B) — Hermes fine-tune
-      of Llama 3.2 3B; useful for tool-calling eval contrast.
-      Same arch as llama-3.2-3b — no new arch work needed.
+    - [x] `hermes-3-llama-3.2-3b-q4f16` (3.21B) — DONE 2026-04-26.
+      Steady-state 60.4 tok/s / profile-mode 42.8 / 572
+      dispatches/token (matches base) / 27/36 = 74% accuracy.
+      Tool-calling advantage invisible at warm temp (gate at
+      0.4); rerun cold for that signal. See "Completed on
+      2026-04-26 §8" above.
     - [-] `phi-3.5-mini-q4f16` (3.82B) — DEFERRED 2026-04-26.
       Architectural gap: needs fused QKV projection unpacking
       and FFN gate_up split. Inventory in §8 above.
