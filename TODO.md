@@ -173,6 +173,25 @@
 >   (Q4_K_S → IQ3_M halves speed; same-quant family
 >   swap moves throughput <1%).
 >
+> **§A closed 2026-04-26 (Completed §17):** lever 1
+> (THREADS_PER_BLOCK 4→2 in `mul_mat_vec.wgsl`) measured
+> against the canonical 4-baseline. Only TinyLlama Q4_0
+> benefited (sub-trigger -2.9% matmul / +0.6% tok/s,
+> noise). The ~26-28% wave-2 ceiling estimate above was
+> an upper bound on a lever that turned out to be
+> **structurally inapplicable to the 7B+ fleet**: Q4_K_S
+> (Mistral) is a K-quant with TPB=16 and a different
+> block layout, explicitly excluded from §A's lever-1
+> design; IQ3_M (both 8Bs) has no `mul_mat_vec.wgsl`
+> path and routes through general `mul_mat.wgsl` instead.
+> Levers 2 (vec4-packed loads) and 3 (`d`-scale lifting)
+> face the same applicability constraint. Shader
+> reverted; no patches landed. **Next lever with
+> meaningful headroom is §C drafter-based speculative
+> decoding** — qwen3-0.6b ↔ qwen3-8b is a same-family
+> draft pair with shared tokenizer (theoretical 2-3×
+> wall-clock for chat).
+>
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -1796,6 +1815,109 @@ needs to be collected.
       `qwen3-sizes`. `make checkall` clean (393/5/0
       pre-bench, no engine changes).
 
+17. **§A lever 1 (THREADS_PER_BLOCK 4→2 in mul_mat_vec.wgsl)
+    measured + closed for the production fleet.** Followed
+    the §1994 harness against the canonical 4-baseline
+    (`tinyllama-1.1b-chat-q4_0`, `mistral-7b-instruct-v0.3-q4ks`,
+    `llama-3.1-8b-instruct-iq3m`, `qwen3-8b-iq3m`) to test the
+    one viable replacement lever from the rejected
+    subgroup-broadcast premise.
+    - **Pre-change baselines (3-trial median):**
+      | Model              | bench-inf tok/s | smoke-bench tok/s | matmul ms (median) | %graph | dispatches |
+      |--------------------|----------------:|------------------:|-------------------:|-------:|-----------:|
+      | tinyllama-q4_0     |          105.7  |              68.5 |               4.46 |  34.3% |        450 |
+      | mistral-7b-q4ks    |           34.5  |              27.3 |              17.50 |  49.3% |        650 |
+      | llama-3.1-8b-iq3m  |           16.8  |              15.3 |              45.35 |  71.2% |        652 |
+      | qwen3-8b-iq3m      |           15.1  |              14.3 |              48.04 |  70.5% |        805 |
+    - **Lever applied to `MUL_ACC_Q4_0` only**
+      (`~/Repos/llama.cpp/.../mul_mat_vec.wgsl` line 131-166):
+      `THREADS_PER_BLOCK 4 → 2`, `ELEMS_PER_THREAD 8 → 16`,
+      `thread_within_block * 4 → * 8u`, x_block load doubled
+      (8 lo + 8 hi instead of 4+4), q_packed split into
+      `q_packed_a` + `q_packed_b` (two consecutive 4-byte
+      `load_u32_at_src0` instead of one), inner reduction
+      doubled with `byte_idx + 8u` / `byte_idx + 12u` for
+      the b-half x-block offsets. WG_SIZE=64 confirmed
+      integer-divisible by both 4 and 2.
+    - **Post-change measurements:**
+      - tinyllama-q4_0: bench-inf **106.3 tok/s** (+0.6%,
+        noise), smoke-bench **74.3 tok/s** (+8.5%), matmul
+        **4.33 ms** (-2.9%). Coherence verified via smoke
+        page `[8/8]` (105.5 tok/s on the live page,
+        grammatically clean English — TinyLlama's "share a
+        joke from Facebook" off-topic answer is its known
+        small-model weakness, not a shader bug).
+      - mistral-7b-q4ks: bench-inf **34.9 tok/s** (+1.2%,
+        noise) — sanity-check confirming the Q4_0 `#ifdef`
+        block doesn't bleed into Q4_K_S codegen. Other 3
+        models skipped: lever doesn't apply.
+    - **Why the lever doesn't apply to the rest of the fleet
+      (root cause for closure):**
+      - **Q4_K_S (Mistral) and other K-quants** all use
+        `THREADS_PER_BLOCK 16` with a completely different
+        block structure (BLOCK_SIZE 256, complex `lane`/
+        `phase`/`iq`/`ir` indexing, per-block scale-pair
+        unpack via `load_u32_at_src0_aligned` masks). §A
+        explicitly excluded these ("Q2_K-class uses 16,
+        leave alone"). Lever 1's "halve TPB to coarsen
+        per-thread work" semantics don't translate.
+      - **IQ3_M (both 8B models) has no `mul_mat_vec.wgsl`
+        path at all.** IQ-family code lives only in
+        `mul_mat.wgsl` (the general matmul shader, used
+        for prefill) and `get_rows.wgsl`. There is no
+        `MUL_ACC_IQ3_S` block. The decode-path mat-vec
+        for IQ3_M routes through the general matmul kernel,
+        not the simple-block path that lever 1 modifies.
+        This is the structural reason matmul is 71% of
+        graph on these models — the general matmul shader
+        is heavier per-element than the per-block specialized
+        kernels.
+    - **Verdict:** the only model that benefited
+      (TinyLlama Q4_0) gained a sub-trigger -2.9% matmul /
+      noise-level +0.6% steady-state tok/s. The
+      `smoke-bench` +8.5% is real but came from
+      profile-mode perturbation overhead (`backendEncode-
+      OverheadMs` 2.46 → 2.50 ms is flat, but
+      `graphComputeMs` median 11.90 → 11.30 dropped 5%
+      because dispatch overhead shrinks slightly with the
+      doubled per-thread payload). Per the §1994 decision
+      rule ("revert if any regresses >3%, ship only if
+      matmul drops 5%+ on at least one quant"), the change
+      did not clear the 5% matmul threshold even on its
+      one applicable quant, and provides zero benefit to
+      the production 7B/8B fleet. **Reverted the shader
+      to HEAD** (`git diff` clean post-revert; rebuilt WASM
+      to match — bytes 2205378, identical to pre-change).
+    - **§A is closed for our model fleet.** Levers 2
+      (vec4-packed loads) and 3 (`d`-scale lifting) are
+      subject to the same constraint — they only apply to
+      `mul_mat_vec.wgsl`'s simple-block path which doesn't
+      serve any of our 7B/8B production models. Pursuing
+      either at this point would optimize Q4_0/Q5/Q8
+      legacy paths that only TinyLlama-class models use.
+      The kernel-tuning ceiling at 7B+ is now structurally
+      gated on either (a) extending lever-1-style coarsening
+      to K-quants (a substantial rewrite — different block
+      layout, scale unpack, threading) or (b) accelerating
+      the general `mul_mat.wgsl` path for IQ-family quants
+      (also substantial). Neither is in scope without a
+      much larger commitment.
+    - **Recommended next move:** §C drafter-based
+      speculative decoding. Wave-2 closed the 8B+
+      drafter/target pair: qwen3-0.6b ↔ qwen3-8b is a
+      same-family draft pair with shared tokenizer.
+      Theoretical 2-3× wall-clock decode for chat-style
+      workloads. Larger project but the only remaining
+      lever with meaningful headroom that doesn't require
+      a kernel rewrite. §B FA shape-routing is the
+      secondary option (helps prefill/TTFT, not steady-
+      state decode).
+    - **Code state:** no engine changes landed; no
+      llama.cpp commits added. `make checkall` clean
+      (393/5/0). WASM artifacts in `smoke-test/` rebuilt
+      against unchanged tree as a hygiene step (mtime
+      12:20 Apr 26).
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
@@ -1877,25 +1999,15 @@ A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done —
    qwen3-4b thinking-on; effectively tied with Llama-
    3.1-8B on speed despite +23% dispatches.**
 
-B. **§A subgroup-cooperative loading — premise REJECTED
-   on inspection 2026-04-26. See updated §A entry below
-   for the kernel walk-through.** Subgroup-broadcast
-   cannot help: the existing kernel already partitions
-   src0 perfectly across threads (every weight byte read
-   by exactly one thread per pass). §7's Stub B speedup
-   was load-latency-bound, not bandwidth-bound.
-   **Viable replacement levers (in §A): (1) coarsen
-   THREADS_PER_BLOCK from 4 → 2 to halve load-issue rate;
-   (2) vec4-packed loads for consecutive-address
-   sequences (Q8/Q5/Q4_K_S/IQ inner loops); (3) lift
-   per-row `d` fp16 scale loads out of the OUTPUTS_PER_WG
-   row loop.** Predicted combined ceiling ~8-14% of total
-   decode at 8B IQ3_M (lower than the 26-28% pre-analysis
-   ceiling but still meaningful). **Recommended starting
-   point:** lever (1) on the 4-baseline harness — a
-   one-line change per quant. If it pays, layer in (2)
-   and (3). If it doesn't, the kernel is deeper-pipelined
-   than expected and §A is closed.
+B. ~~§A subgroup-cooperative loading / replacement
+   levers.~~ **CLOSED 2026-04-26 — see §17 above.** Lever 1
+   (THREADS_PER_BLOCK 4→2) measured against the 4-baseline
+   harness; only TinyLlama Q4_0 benefited (sub-trigger
+   -2.9% matmul / +0.6% tok/s noise). Q4_K_S is a K-quant
+   (TPB=16, structurally excluded from §A); IQ3_M has no
+   `mul_mat_vec.wgsl` path (routes through general matmul).
+   Levers 2 + 3 face the same applicability constraint
+   and don't help the production fleet. Shader reverted.
 
 C. ~~Fix the Q3_K shader (#28).~~ **Done — see §14.**
 
@@ -1985,11 +2097,24 @@ Boot sequence for a fresh session:
    prior session, force-reload — SSE doesn't broadcast
    deletes.
 
-**Recommended first move:** option B (§A revised lever 1
-— THREADS_PER_BLOCK 4→2). Cheapest and most diagnostic
-of the three new levers; tells us whether the kernel is
-load-latency-bound (lever pays) or already-pipelined
-(lever neutral or negative → §A is closed).
+**Recommended first move:** option E.§C — drafter-based
+speculative decoding. **§A is now closed (see §17 above)** —
+lever 1 measured against the 4-baseline harness on
+2026-04-26; only TinyLlama Q4_0 benefited (sub-trigger
+-2.9% matmul / noise +0.6% tok/s) because the 7B/8B fleet
+uses K-quants (Q4_K_S, TPB=16, structurally excluded) or
+IQ3_M (no `mul_mat_vec.wgsl` path — routes through general
+`mul_mat.wgsl`). Levers 2 + 3 in §A are subject to the
+same applicability constraint and are not worth pursuing.
+With kernel-tuning now exhausted at 7B+ without a major
+rewrite, §C (drafter-based speculative decoding) is the
+remaining lever with meaningful headroom. Wave 2 closed
+the natural draft pair: qwen3-0.6b ↔ qwen3-8b (same
+family, shared tokenizer, ~13× param spread). Larger
+project but theoretical 2-3× wall-clock decode for
+chat-style workloads. §B FA shape-routing is the
+secondary option (helps prefill/TTFT, not steady-state
+decode).
 
 #### How to test §A lever 1 — THREADS_PER_BLOCK 4→2
 
@@ -2648,8 +2773,26 @@ bump via `-sMEMORY64=1`) becomes a prerequisite.
 
 ### Deferred kernel-tuning targets (behind §10 in priority)
 
-§A. **Subgroup-cooperative loading — premise REJECTED on
-    inspection 2026-04-26.** Walked the kernel
+§A. **CLOSED 2026-04-26 (see "Completed on 2026-04-26"
+    §17 for the measurement and shader-walk closure
+    write-up).** Lever 1 (THREADS_PER_BLOCK 4→2) was the
+    one viable replacement after the original subgroup-
+    broadcast premise was rejected; tested on the canonical
+    4-baseline. TinyLlama Q4_0 (the only model whose decode
+    path goes through `mul_mat_vec.wgsl`'s simple-block
+    code) showed sub-trigger -2.9% matmul / +0.6% tok/s.
+    The 7B/8B fleet doesn't benefit because Q4_K_S is a
+    K-quant (TPB=16, different block structure — explicitly
+    excluded from §A) and IQ3_M has no `mul_mat_vec.wgsl`
+    path at all (routes through general `mul_mat.wgsl`).
+    Levers 2 + 3 are subject to the same applicability
+    constraint and are not worth pursuing for the
+    production fleet. Shader reverted; no patches landed.
+    Original analysis preserved below for archive.
+
+    ---
+
+    Walked the kernel
     (`~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`)
     in detail. Conclusion: **subgroup-broadcast cannot
     reduce src0 reads here** because the existing kernel
