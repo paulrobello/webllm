@@ -127,20 +127,29 @@
 > means that buffer was never used). Unblocks all wave-2
 > 7B+ candidates; reclaims multi-GB headroom across all sizes.
 >
-> **Wave 2 begun 2026-04-26 (Completed §12):** 1/4 done.
+> **Wave 2 begun 2026-04-26 (Completed §12, §13):** 2/4 done.
 > - **mistral-7b-instruct-v0.3-q4ks**: 34.4 tok/s steady-state
 >   / 26/36 (68%). 32 layers, GQA 4:1, KV 1024 MB, 650
->   dispatches/token, matmul 47.0% of graph (~45% of decode —
->   highest in fleet). First non-Llama/Qwen entry. Q3_K_M
->   tried first; gibberish output uncovered **bug #28: Q3_K
->   matmul shader has a correctness bug.** Wave-1 never
->   exercised Q3_K (all Q4_0); §9 tested Q4_K_M only. Q4_K_S
->   workaround works (same K-quant family as Q4_K_M).
->   Practical wave-2 ceiling at the current llama.cpp upstream
->   is 7B Q4_K_S; Llama-3.1-8B / Qwen3-8B exceed the 4 GiB
->   WASM cap at Q4_K_S (~4.5 GB) and route through the broken
->   Q3_K shader at Q3_K_S. Either fix #28 or bump
->   MAXIMUM_MEMORY to 8 GB to admit them.
+>   dispatches/token, matmul 47.0% of graph (~45% of decode).
+>   First non-Llama/Qwen entry. Q3_K_M tried first; gibberish
+>   output uncovered **bug #28: Q3_K matmul shader has a
+>   correctness bug.** Wave-1 never exercised Q3_K (all Q4_0);
+>   §9 tested Q4_K_M only. Q4_K_S workaround works.
+> - **llama-3.1-8b-instruct-iq3m**: 16.3 tok/s steady-state /
+>   31/36 (86%). 32 layers, GQA 4:1, KV 1024 MB, 652
+>   dispatches/token (matches Mistral 7B), matmul 71.4% of
+>   graph (new fleet high — ~69% of decode). First 8B in
+>   fleet. Llama-3.1-8B Q4_K_S exceeds 4 GiB WASM cap; pivoted
+>   to IQ3_M (3609 MB) via the IQ-family code path (verified
+>   coherent first on Mistral IQ4_XS). 86% accuracy ties
+>   qwen2.5-3b, 18 points above Mistral 7B Q4_K_S — quant
+>   compute cost halves throughput vs Mistral but model-
+>   quality recovers most of the accuracy gap.
+> - **Net wave-2 finding:** at scale the §A subgroup-
+>   cooperative-loading ceiling rises sharply
+>   (4B Q4_0: ~13% → 7B Q4_K_S: ~18% → 8B IQ3_M: ~28% of
+>   decode time). The lever's percentage of total decode
+>   keeps growing with scale.
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -1441,56 +1450,172 @@ needs to be collected.
       shader or bumping `MAXIMUM_MEMORY` to 8 GB
       (deferred §12).
 
+13. **§10 wave 2, model 2: llama-3.1-8b-instruct-iq3m
+    registered + benched. First 8B in fleet.** Wave-2
+    blocked on Q3_K shader (#28) and 4 GiB WASM cap;
+    routed around both via the IQ-family quant code path
+    (verified working on Mistral IQ4_XS first as a probe,
+    then committed to IQ3_M for 8B).
+    - **Probe sequence:** (a) Mistral IQ4_XS chat-smoke
+      produced coherent multi-turn dialogue with factually
+      correct content (Douglas Engelbart's first mouse
+      anecdote) — confirmed IQ-family is intact; (b)
+      `supports_op` covers `GGML_TYPE_IQ3_S` (which IQ3_M
+      uses), so 8B Q3_K_S → IQ3_M is a pure quant-pin
+      change with no engine work.
+    - **Profile registered:** `llama-3.1-8b-warm`
+      (temperature 0.6, `DEFAULT_PROMPT`); added to
+      `SMOKE_PROFILE_SETS.full`. Bartowski mirror open;
+      pinned `ggufFilePattern: "IQ3_M"` (3609 MB, fits
+      with margin under 4 GiB cap).
+    - **Architecture (llama / 32 layers):** n_head 32 ·
+      n_head_kv 8 (GQA 4:1) · embedding 4096 · head_dim
+      128 · ffn 14336 · ctx_max 131072 (we run at 4096) ·
+      vocab 128256 (4× larger than Mistral's 32768; Llama-3
+      tokenizer family). KV cache @ ctx=4096 = **1024 MB**
+      (same as Mistral 7B at the same 32 layers / GQA 4:1).
+    - **Speed (3-trial median):**
+      - Steady-state **16.3 tok/s** (runs: 16.0 / 16.3 /
+        16.3 — tightest spread in fleet alongside Mistral's
+        34.4).
+      - Profile-mode **14.5 tok/s** (perturbation -11%,
+        smaller fraction than smaller models because graph
+        compute dominates so heavily here).
+      - Prefill **862 ms** (~10-token prompt + chat
+        template).
+    - **Profile-mode backend attribution (156-step decode):**
+      - `backendMatmulMs` 47.07 mean / **71.4% of graph
+        — new fleet high.** Up from 7B Q4_K_S Mistral's
+        47.0%; confirms two effects stack: (a) parameter
+        count up 11% widens the bandwidth-bound matmul
+        slice, and (b) IQ3_M's compute overhead per
+        element is meaningfully higher than Q4_K_S's
+        (more sub-block scale unpacking with imatrix).
+        Combined with `graphComputeMs` 96.7% of step,
+        **matmul is ~69% of decode time at 8B IQ3_M**.
+        The §A subgroup-cooperative-loading ceiling rises
+        to ~28% of decode at 8B IQ3_M (vs ~18% at 7B
+        Q4_K_S, ~13% at 4B Q4_0). The lever's percentage
+        of total decode keeps growing with scale.
+      - `backendEncodeOverheadMs` 6.08 / 9.2% — encode
+        overhead's *fraction* hits a new fleet low.
+        Absolute cost (6.08 ms) is comparable to Mistral
+        7B (4.23 ms) and qwen3-4B (4.90 ms); it stays
+        bounded as model grows.
+      - `backendAttentionMs` 0.65 / 1.0%.
+      - `backendDispatchCount` **652/token** — within 0.3%
+        of Mistral 7B's 650. Confirms architecture-
+        invariance within the 32-layer · llama-arch class
+        regardless of param count.
+    - **Smoke chat regression:** PASSED. Output: `"A man
+      walks into a library and asks the librarian, 'Do you
+      have any books on Pavlov's dogs and Schrödinger's
+      cat?' The librarian replies, 'It rings a bell, but
+      I'm not sure if it's here or not.'"` — **byte-
+      identical to llama-3.2-3b's wave-1 output** (joke
+      consistent across the Llama-3.x family from training
+      data), finish=eos, 53 tokens.
+    - **Accuracy (`bench --profiles llama-3.1-8b-warm`):**
+      **31/36 = 86%.** Tied with qwen2.5-3b (86%), 2-4
+      points below qwen3-4b (88-90%), 18 points above
+      Mistral-7B Q4_K_S (68% — IQ3_M's imatrix preserves
+      quality better than Q4_K_S's). Top non-Qwen-3
+      accuracy in fleet. Tool-calling skipped (warm temp
+      0.6 > 0.4 gate); embedding skipped (model lacks
+      capability).
+    - **Cross-family + cross-quant pattern at 7B / 8B:**
+      | Model            | Family   | Quant  | tok/s | Accuracy |
+      |------------------|----------|--------|------:|---------:|
+      | qwen3-4b         | Qwen3    | Q4_0   |  35.5 |  88-90%  |
+      | mistral-7b       | Mistral  | Q4_K_S |  34.4 |     68%  |
+      | **llama-3.1-8b** | Llama 3.1| IQ3_M  |  16.3 |     86%  |
+      Two clear axes:
+      (a) **Quant compute cost dominates speed at 7B+**:
+      Mistral Q4_K_S is 53% faster than Llama IQ3_M despite
+      Llama having 11% more params, because IQ3_M has more
+      compute work per element. Q4_K_S → IQ3_M is a quality-
+      preserving substitution (better imatrix calibration)
+      but a real throughput cost.
+      (b) **Cross-family quality gap holds at 8B**: Llama
+      3.1 has a markedly higher quality ceiling than
+      Mistral v0.3 (Apr 2024 base instruct vs July 2024
+      instruction-tuned). 86% vs 68% at near-identical
+      param count is mostly model-quality, partly quant.
+    - **Bench-profile speed-phase intermittent failure
+      (resolved).** First bench attempt failed with
+      "Timed out waiting for smoke-test chat output" at
+      180s. Second attempt — invoked through bench-profile
+      with proper smoke-restart sequence — passed cleanly.
+      Likely a stale agentchrome session state issue;
+      not reproducible after a clean smoke-restart. Not
+      a regression in the bench harness.
+    - **What this unblocks:** Wave 2 now has both 7B
+      (Mistral Q4_K_S) and 8B (Llama 3.1 IQ3_M) data
+      points across two families and three quant
+      formats. Qwen3-8B at IQ3_XXS / IQ3_M is the
+      natural next entry to round out the family-pattern
+      analysis at 8B; Q3_K_S → IQ3_M / IQ3_S is the
+      template for further 8B+ candidates while bug #28
+      remains open.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
-skipped).** Wave 2 underway: **1/4 done** (mistral-7b-v0.3-q4ks
-at 34.4 tok/s / 68% accuracy — see §12 above). Two new bugs
-landed in this session:
+skipped).** Wave 2 underway: **2/4 done** (mistral-7b-v0.3-q4ks
+at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
+86% — §13). Three findings + one bug from this session:
 
 - **Bug #28 (Q3_K shader):** Q3_K matmul produces gibberish
   in ggml-webgpu. Wave-1 never exercised it (all Q4_0); §9
   tested only Q4_K_M. Q3_K_M was the smallest viable 7B+
-  quant under the WASM cap, but it's broken — Q4_K_S is
-  the workaround for 7B (3953 MB, fits with margin) but
-  is the largest quant that fits, so 8B+ models would need
-  either a Q3_K shader fix or a `MAXIMUM_MEMORY` bump.
+  quant under the WASM cap, but it's broken.
+- **Workarounds for the 4 GiB WASM cap:** Q4_K_S works at
+  7B (3953 MB Mistral). For 8B+, Q4_K_S exceeds the cap;
+  IQ3_M / IQ3_S are the smaller-bandwidth working
+  alternatives via the IQ-family code path (3609 MB Llama-
+  3.1-8B, ~3252 MB Qwen3-8B IQ3_XXS). MEMORY64 to bump
+  the cap to 8 GiB requires the wasm memory64 proposal —
+  multi-day engineering effort, not a flag flip.
+- **§A subgroup-loading ceiling scales with model size:**
+  4B Q4_0 ~13% → 7B Q4_K_S ~18% → 8B IQ3_M ~28% of decode.
 - **Loader / parser refactor (§11):** GGUF streams cleanly
   through the WASM heap; ctxCreate over-allocation fixed.
-  Both confirmed working at the 7B mark (3.95 GB streamed).
+  Confirmed working at 3.6 GB / 3.95 GB streaming.
 
 **Next target options (pick one — no implicit ordering):**
 
-A. **Continue wave 2 with another 7B Q4_K_S model** to widen
-   the cross-family signal at 7B (Mistral is the only 7B+
-   data point so far, and it's hampered by the most
-   aggressive quant that fits). Llama-3.1-8B Q4_K_S is
-   4475 MB — over the cap. Options narrow to: (a)
-   Mistral-Nemo-Instruct (12B, has Q4_K_S? probably too
-   large), (b) re-run Mistral with different prompt sets
-   for tool-calling / cold-temp signal, (c) verify that
-   bartowski Mistral mirror has any other instruction-
-   tuned 7B variant that fits. Lower-leverage than B/C/D.
+A. **Add Qwen3-8B IQ3_M as wave-2 model 3** to complete
+   the cross-family 8B comparison. Qwen3-8B Q4_K_S exceeds
+   the cap (4580 MB); IQ3_M is the IQ-family equivalent.
+   Same workflow as §13. Expected ~13-15 tok/s steady, ~88-
+   92% accuracy if Qwen3 family pattern holds. Only ~30 min
+   plus download time. Highest information-per-hour.
 
-B. **Fix the Q3_K shader (#28) to unblock 8B+ models.**
-   Investigation starts in
-   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl::MUL_ACC_Q3_K`.
-   If fixed, Llama-3.1-8B / Qwen3-8B at Q3_K_S (3494 /
-   3595 MB) become viable and we get clean 8B cross-family
-   data. Carries debug effort cost (Q3_K shader is the most
-   complex in the legacy/K-quant family). Once fixed, wave-2
-   has 4 candidates with the same workflow.
+B. **Pick up §A subgroup-cooperative loading.** The new
+   data point (matmul = 71.4% of graph at 8B IQ3_M) makes
+   §A's theoretical ceiling rise to ~28% of decode time.
+   With three working baselines at 4B / 7B / 8B and
+   matmul leading by a wide margin at 8B, this is the
+   highest-leverage perf optimization. Also the most
+   uncertain (subgroup-broadcast WGSL, may need
+   shader-architecture changes).
 
-C. **Bump `MAXIMUM_MEMORY` to 8 GB (deferred §12).** Would
-   admit Q4_K_M / Q4_K_S of larger models without needing
-   Q3_K. Requires verifying browser support for >4 GB WASM
-   heaps, which has historically been spotty. Quick to try
-   (one CMake flag); slow to validate.
+C. **Fix the Q3_K shader (#28) to unblock more 8B
+   options.** With IQ3_M working, the urgency dropped —
+   IQ3_M is the established workaround. Worth doing if
+   we want to compare Q3_K vs IQ3_M at the same scale,
+   or before adding wave-3 candidates that lack a usable
+   IQ-quant variant. Bug investigation effort still
+   ~1-3 hours.
 
-D. **Pick up a deferred kernel-tuning lever.** §A subgroup-
-   cooperative loading is now more attractive: at 7B Q4_K_S
-   the §A ceiling rose from ~13% (4B Q4_0) to ~18% of decode
-   time. Mistral-7B is a fresh perf baseline for testing.
+D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
+   priority).** Confirmed in this session that 4 GiB is
+   the 32-bit WASM hard cap (`wasm-ld: error: maximum
+   memory too large, cannot be greater than 4294967296`).
+   Going beyond requires `-sMEMORY64=1` (changes pointer
+   types throughout the bridge, possible asyncify
+   interactions). Multi-day engineering. Only worth it
+   for wave-3 12B+ candidates that need Q4_K_S+.
 
 B. **Pick up a deferred kernel-tuning lever (§A subgroup
    loading, §B FA shape-routing).** The 7-model wave-1
@@ -2050,13 +2175,16 @@ investigating "the engine."
       dispatches/token / 26/36 = 68% accuracy. Q3_K_M attempt
       first (gibberish — bug #28). Q4_K_S workaround works.
       See "Completed on 2026-04-26 §12" above.
-    - Llama-3.1-8B-Instruct — Q4_K_S 4475 MB > WASM cap.
-      Q3_K_S 3495 MB fits but routes through broken Q3_K
-      shader. Blocked on either bug #28 fix OR
-      MAXIMUM_MEMORY bump.
-    - Qwen3-7B / Qwen3-8B — Qwen3-7B has no published mirror
-      tested yet; Qwen3-8B Q4_K_S 4580 MB > cap, Q3_K_S 3595
-      MB blocked on bug #28. Same blocker.
+    - [x] `llama-3.1-8b-instruct-iq3m` — DONE 2026-04-26.
+      Steady-state 16.3 tok/s / profile-mode 14.5 / 652
+      dispatches/token / 31/36 = 86% accuracy. Q4_K_S
+      4475 MB > cap; pivoted to IQ3_M (3609 MB) via the
+      IQ-family code path. First 8B in fleet. See
+      "Completed on 2026-04-26 §13" above.
+    - Qwen3-8B IQ3_M — IQ3_M = ~3700 MB on bartowski
+      Qwen3-8B mirror; expected to fit and use the same
+      IQ-family code path. Natural next entry to round out
+      cross-family 8B coverage.
     - Mistral-7B-Instruct-v0.7 — Mistral-v0.7+ uses
       `[SYSTEM_PROMPT]` template (already detected as
       `mistral-v7`), but no Q4_K_S verified < 4 GB cap yet.

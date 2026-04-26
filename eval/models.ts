@@ -434,6 +434,57 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
 		ggufFilePattern: "Q4_K_S",
 	},
+
+	// IQ-family probe (kept as a working data point alongside the
+	// Q4_K_S canonical entry above). IQ4_XS verified coherent
+	// output on 2026-04-26 after the Q3_K shader (#28) blocked
+	// the cleaner Q3_K_M path; this confirmed the IQ-family code
+	// path is intact and unblocks 8B+ candidates via IQ3_M /
+	// IQ3_XS quants.
+	{
+		id: "mistral-7b-instruct-v0.3-iq4xs",
+		name: "Mistral 7B Instruct v0.3 (IQ4_XS)",
+		family: "Mistral",
+		architecture: "mistral",
+		paramsB: 7.25,
+		vramMB: 4200,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3",
+		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+		ggufFilePattern: "IQ4_XS",
+	},
+
+	// First 8B candidate (wave 2 model 2). Q4_K_S 8B = 4475 MB
+	// exceeds the 4 GiB WASM cap; Q3_K_S would fit but routes
+	// through the broken Q3_K shader (#28). IQ3_M (3609 MB) uses
+	// GGML_TYPE_IQ3_S tensors which `supports_op` covers and the
+	// IQ4_XS Mistral probe verified working in this branch on
+	// 2026-04-26. Bartowski mirror is open with the full IQ
+	// ladder.
+	{
+		id: "llama-3.1-8b-instruct-iq3m",
+		name: "Llama 3.1 8B Instruct",
+		family: "Llama 3.1",
+		architecture: "llama",
+		paramsB: 8.03,
+		vramMB: 4500,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: true, structuredOutput: true, vision: false, embedding: false },
+		license: "Llama-3.1",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct",
+		ggufUrl: "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+		ggufFilePattern: "IQ3_M",
+	},
 ];
 
 /** Tier display order and labels. */
