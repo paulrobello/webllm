@@ -30,6 +30,12 @@ export const RopeMode = {
 	NEOX: 2,
 } as const;
 
+/** Precision hint for ggml_flash_attn_ext_set_prec. */
+export const enum GgmlPrec {
+	DEFAULT = 0,
+	F32 = 10,
+}
+
 /** Opaque handle to a ggml tensor (WASM heap pointer). */
 export type TensorPtr = number;
 /** Opaque handle to a ggml computation graph. */
@@ -664,6 +670,56 @@ export class GgmlWasm {
 		maxBias: number,
 	): TensorPtr {
 		return this.m._op_soft_max_ext(x, mask, scale, maxBias);
+	}
+
+	/**
+	 * Fused scaled-dot-product attention (FLASH_ATTN_EXT).
+	 *
+	 * Replaces the manual opMulMat(K,Q) + opSoftMaxExt + opMulMat(V,attn) chain
+	 * with a single fused op. The ggml-webgpu backend will route this to its
+	 * VEC or TILE shader path at decode shapes (N=1, head_dim%32==0, K F16
+	 * with vec4-aligned data offset) — `flash_attn_get_decisions` in
+	 * ggml-webgpu-shader-lib.hpp picks the path.
+	 *
+	 * @param q     Query  [head_dim, n_tokens,    n_head]    F32
+	 * @param k     Key    [head_dim, n_kv,        n_head_kv] F16 / Q4_0 / Q8_0
+	 * @param v     Value  [head_dim, n_kv,        n_head_kv] same dtype as k
+	 * @param mask  F32 [n_kv_padded, n_tokens] broadcast over heads (-inf masked,
+	 *              0 visible). Pass 0 (null) for no mask.
+	 * @param scale Typically 1/sqrt(head_dim).
+	 * @param maxBias ALiBi max bias; 0 for standard causal attention.
+	 * @param logitSoftcap Gemma-style soft-cap; 0 for standard models.
+	 * @returns [head_dim, n_head, n_tokens] — caller must permute/reshape to
+	 *          merge heads back into the residual stream.
+	 */
+	opFlashAttn(
+		q: TensorPtr,
+		k: TensorPtr,
+		v: TensorPtr,
+		mask: TensorPtr,
+		scale: number,
+		maxBias: number,
+		logitSoftcap: number,
+	): TensorPtr {
+		return this.m._op_flash_attn_ext(
+			q,
+			k,
+			v,
+			mask,
+			scale,
+			maxBias,
+			logitSoftcap,
+		);
+	}
+
+	/** Pin the FA accumulator precision (e.g. GgmlPrec.F32 for higher precision). */
+	opFlashAttnSetPrec(a: TensorPtr, prec: GgmlPrec): void {
+		this.m._op_flash_attn_ext_set_prec(a, prec);
+	}
+
+	/** Attach attention sinks (used by some Phi-3 / Qwen variants). Pass 0 for none. */
+	opFlashAttnAddSinks(a: TensorPtr, sinks: TensorPtr): void {
+		this.m._op_flash_attn_ext_add_sinks(a, sinks);
 	}
 
 	opScale(x: TensorPtr, s: number): TensorPtr {
