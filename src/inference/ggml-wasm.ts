@@ -31,10 +31,11 @@ export const RopeMode = {
 } as const;
 
 /** Precision hint for ggml_flash_attn_ext_set_prec. */
-export const enum GgmlPrec {
-	DEFAULT = 0,
-	F32 = 10,
-}
+export const GgmlPrec = {
+	DEFAULT: 0,
+	F32: 10,
+} as const;
+export type GgmlPrec = (typeof GgmlPrec)[keyof typeof GgmlPrec];
 
 /** Opaque handle to a ggml tensor (WASM heap pointer). */
 export type TensorPtr = number;
