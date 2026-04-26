@@ -685,7 +685,7 @@ export class GgmlWasm {
 	 * @param q     Query  [head_dim, n_tokens,    n_head]    F32
 	 * @param k     Key    [head_dim, n_kv,        n_head_kv] F16 / Q4_0 / Q8_0
 	 * @param v     Value  [head_dim, n_kv,        n_head_kv] same dtype as k
-	 * @param mask  F32 [n_kv_padded, n_tokens] broadcast over heads (-inf masked,
+	 * @param mask  F16 [n_kv_padded, n_tokens] broadcast over heads (-inf masked,
 	 *              0 visible). Pass 0 (null) for no mask.
 	 * @param scale Typically 1/sqrt(head_dim).
 	 * @param maxBias ALiBi max bias; 0 for standard causal attention.

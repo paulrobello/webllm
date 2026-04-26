@@ -454,8 +454,8 @@ export class ModelInference {
 				0.0, // logit_softcap (Gemma-style; not used by Llama/Qwen/Mistral)
 			);
 
-			// Merge heads: FA returns contiguous [headDim, nHeads, nTokens];
-			// reshape directly to [embDim, nTokens] for oProj.
+			// ggml_flash_attn_ext allocates a new contiguous output tensor, so we
+			// can reshape directly without an opCont copy.
 			const merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
 
 			const oProj = wasm.opMulMat(lw.oProj, merged);
@@ -770,6 +770,8 @@ export class ModelInference {
 				0.0,
 				0.0,
 			);
+			// ggml_flash_attn_ext allocates a new contiguous output tensor, so we
+			// can reshape directly without an opCont copy.
 			const merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
@@ -1369,6 +1371,8 @@ export class ModelInference {
 					0,
 					0,
 				);
+				// ggml_flash_attn_ext allocates a new contiguous output tensor, so we
+				// can reshape directly without an opCont copy.
 				const merged = wasm.opReshape2d(
 					attnOut,
 					hp.headCount * hp.embeddingHeadLength,
