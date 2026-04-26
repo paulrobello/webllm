@@ -210,15 +210,13 @@ export class ModelInference {
 		if (this.kvLayers) return;
 
 		const { hp, wasm } = this;
-		// KV cache type F16. F16 is the prerequisite for the ggml-webgpu
-		// FLASH_ATTN_EXT VEC/TILE paths to engage on decode shapes (see
-		// `flash_attn_get_decisions::kv_vec_type_supported` in
-		// ggml-webgpu-shader-lib.hpp). With FA engaging via opFlashAttn,
-		// the K read + softmax + V read sequence collapses into one fused
-		// dispatch per layer per token. opCpy handles the F32->F16 write
-		// conversion; FA reads F16 directly. The §6 short-context -7.7%
-		// measurement was made BEFORE FA could engage and no longer applies.
-		const perLayerBytes = hp.embeddingHeadLength * maxContextLength * 2;
+		// NOTE: KV cache is F32. F16 was tried (see git history + TODO.md
+		// item 6) and measured -7.7% on short-context benchmarks — the
+		// F16×F32 mul_mat path plus F32->F16 conversion on writes outweigh
+		// the bandwidth savings until context gets much longer (~1000+ tokens).
+		// Left as F32; revisit when real long-context workloads become the
+		// perf target.
+		const perLayerBytes = hp.embeddingHeadLength * maxContextLength * 4;
 		const totalBytes = hp.layerCount * 2 * perLayerBytes;
 		const memSize = hp.layerCount * 2 * 16384 + totalBytes + (1 << 20);
 
@@ -229,20 +227,16 @@ export class ModelInference {
 			this.kvLayers.push({
 				// K: [headDim, maxCtx, nKvHeads]
 				k: wasm.tensorNew3d(
-					GgmlType.F16,
+					GgmlType.F32,
 					hp.embeddingHeadLength,
 					maxContextLength,
 					hp.headCountKv,
 				),
-				// V: [headDim, maxCtx, nKvHeads] — same layout as K, FA-ready.
-				// Reading a slice as opView3d(kv.v, headDim, totalLen, nKvHeads,
-				// nb1, nb2, 0) gives [headDim, totalLen, nKvHeads] with nb[1]=headDim*2
-				// (stride headDim in elements), exactly what ggml_flash_attn_ext
-				// expects (stride_v1 = headDim in the WGSL shader).
+				// V: [maxCtx, headDim, nKvHeads] for ggml_mul_mat compatibility
 				v: wasm.tensorNew3d(
-					GgmlType.F16,
-					hp.embeddingHeadLength,
+					GgmlType.F32,
 					maxContextLength,
+					hp.embeddingHeadLength,
 					hp.headCountKv,
 				),
 			});
@@ -301,10 +295,8 @@ export class ModelInference {
 		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
-		// ggml_flash_attn_ext requires the mask to be F16 (ggml.c:5330).
-		// opSoftMaxExt also accepts F16, so F16 works for both paths.
 		const maskTensor = needsMask
-			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
+			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
 			: 0;
 
 		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
@@ -393,27 +385,29 @@ export class ModelInference {
 			// Expand into the graph NOW so the cpy node precedes attention reads.
 			wasm.graphBuildForwardExpand(graph, kWrite);
 
-			// Write V to cache: v3 is [headDim, nKvHeads, nTokens] and the new
-			// cache layout is [headDim, maxCtx, nKvHeads]. Map
-			// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(headDim=0, nTokens=1, nKvHeads=2)
-			// by passing (0, 2, 1, 3) to opPermute.
+			// Write V to cache: v3 is [headDim, nKvHeads, nTokens] and the cache
+			// layout is [nTokens, headDim, nKvHeads]. In ggml_permute the axisN
+			// argument is the DESTINATION axis for source dim N, so to map
+			// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(nTokens=0, headDim=1, nKvHeads=2)
+			// we pass (1, 2, 0, 3).
+			const vNb0 = wasm.tensorNb(kv.v, 0);
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			const v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
 			const vWriteView = wasm.opView3d(
 				kv.v,
-				headDim,
 				nTokens,
+				headDim,
 				hp.headCountKv,
 				vNb1,
 				vNb2,
-				pastLen * vNb1,
+				pastLen * vNb0,
 			);
 			// opCpy handles strided src — opCont skipped (see K write above).
 			const vWrite = wasm.opCpy(v3P, vWriteView);
 			wasm.graphBuildForwardExpand(graph, vWrite);
 
-			// Read K from cache: [headDim, totalLen, nKvHeads] — FA-ready
+			// Read K from cache: [headDim, totalLen, nKvHeads]
 			const fullK = wasm.opView3d(
 				kv.k,
 				headDim,
@@ -423,14 +417,11 @@ export class ModelInference {
 				kNb2,
 				0,
 			);
-			// Read V from cache: [headDim, totalLen, nKvHeads] with nb[1]=headDim*2
-			// (stride headDim in F16 elements). Exactly what FA's stride_v1 expects
-			// — no opCont needed since the new V cache layout is already in the
-			// right contiguous form.
+			// Read V from cache: [totalLen, headDim, nKvHeads]
 			const fullV = wasm.opView3d(
 				kv.v,
-				headDim,
 				totalLen,
+				headDim,
 				hp.headCountKv,
 				vNb1,
 				vNb2,
@@ -440,23 +431,26 @@ export class ModelInference {
 			// Permute Q: [headDim, nHeads, nTokens] -> [headDim, nTokens, nHeads]
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
 
-			// Fused FA: Q=[headDim, nTokens, nHeads], K/V=[headDim, totalLen, nKvHeads]
-			// -> [headDim, nHeads, nTokens]. The ggml-webgpu backend will pick
-			// VEC/TILE shader if F16 K/V + head_dim%32==0 + supports_subgroups
-			// (see flash_attn_get_decisions in ggml-webgpu-shader-lib.hpp).
-			const attnOut = wasm.opFlashAttn(
-				qp,
-				fullK,
-				fullV,
+			// QK^T: K=[headDim, totalLen, nKvHeads], Q=[headDim, nTokens, nHeads] -> [totalLen, nTokens, nHeads]
+			const qk = wasm.opMulMat(fullK, qp);
+			// Fused scale + causal mask + softmax via ggml_soft_max_ext — same
+			// op llama.cpp uses. Replaces a buggy custom diag_mask_inf shader.
+			const attnW = wasm.opSoftMaxExt(
+				qk,
 				maskTensor,
 				1.0 / Math.sqrt(headDim),
-				0.0, // max_bias (ALiBi disabled)
-				0.0, // logit_softcap (Gemma-style; not used by Llama/Qwen/Mistral)
+				0.0,
 			);
 
-			// ggml_flash_attn_ext allocates a new contiguous output tensor, so we
-			// can reshape directly without an opCont copy.
-			const merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
+			// V * attn: V=[totalLen, headDim, nKvHeads], attn=[totalLen, nTokens, nHeads] -> [headDim, nTokens, nHeads]
+			const attnOut = wasm.opMulMat(fullV, attnW);
+
+			// Merge heads: [headDim, nTokens, nHeads] -> permute -> [headDim, nHeads, nTokens] -> [embDim, nTokens]
+			const merged = wasm.opReshape2d(
+				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+				nHeads * headDim,
+				nTokens,
+			);
 
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
@@ -497,8 +491,7 @@ export class ModelInference {
 		{
 			const posBytes = nTokens * 4;
 			const idsBytes = nTokens * 4;
-			// maskTensor is F16 (2 bytes/elem); ggml_flash_attn_ext requires F16 mask.
-			const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
+			const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
 			const totalBytes = posBytes + idsBytes + maskBytes;
 
 			const heap = wasm.malloc(totalBytes);
@@ -517,18 +510,17 @@ export class ModelInference {
 				if (needsMask) {
 					// Causal mask: mask[key, query] = -Infinity if key > pastLen + query,
 					// else 0. Shape [totalLen, nTokensPadded] stored row-major.
-					// Written as F16 half-precision values (0x0000 = 0.0, 0xFC00 = -Inf).
-					const mask = new Uint16Array(
+					const mask = new Float32Array(
 						wasm.heapU8.buffer,
 						maskPtr,
 						totalLen * maskPaddedCols,
 					);
-					const F16_NEG_INF = 0xfc00;
+					const NEG_INF = -Infinity;
 					for (let q = 0; q < nTokens; q++) {
 						const rowBase = q * totalLen;
 						const visibleUpTo = pastLen + q;
 						for (let k = 0; k < totalLen; k++) {
-							mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
+							mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
 						}
 					}
 					// Padding rows past nTokens: zero (unused but keeps buffer defined).
@@ -645,9 +637,8 @@ export class ModelInference {
 		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
-		// FA requires F16 mask (ggml.c:5330). F16 works for all paths.
 		const maskTensor = needsMask
-			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
+			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
 			: 0;
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
@@ -721,19 +712,18 @@ export class ModelInference {
 			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
 			wasm.graphBuildForwardExpand(graph, wasm.opCpy(kRopeP, kWriteView));
 
-			// V cache is now [headDim, maxCtx, nKvHeads] — same layout as K.
+			const vNb0 = wasm.tensorNb(kv.v, 0);
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			// Write V: permute v3=[headDim, nKvHeads, nTokens] to [headDim, nTokens, nKvHeads]
-			const v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
 			const vWriteView = wasm.opView3d(
 				kv.v,
-				headDim,
 				nTokens,
+				headDim,
 				hp.headCountKv,
 				vNb1,
 				vNb2,
-				pastLen * vNb1,
+				pastLen * vNb0,
 			);
 			wasm.graphBuildForwardExpand(graph, wasm.opCpy(v3P, vWriteView));
 
@@ -746,33 +736,30 @@ export class ModelInference {
 				kNb2,
 				0,
 			);
-			// V cache [headDim, maxCtx, nKvHeads]; view gives [headDim, totalLen, nKvHeads]
-			// with nb[1]=headDim*2 — correct for both mul_mat (after permute) and FA.
 			const fullV = wasm.opView3d(
 				kv.v,
-				headDim,
 				totalLen,
+				headDim,
 				hp.headCountKv,
 				vNb1,
 				vNb2,
 				0,
 			);
 
-			// Fused FA: fullV is already [headDim, totalLen, nKvHeads] with the
-			// new V cache layout — no opCont needed.
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-			const attnOut = wasm.opFlashAttn(
-				qp,
-				fullK,
-				fullV,
+			const qk = wasm.opMulMat(fullK, qp);
+			const attnW = wasm.opSoftMaxExt(
+				qk,
 				maskTensor,
 				1.0 / Math.sqrt(headDim),
 				0.0,
-				0.0,
 			);
-			// ggml_flash_attn_ext allocates a new contiguous output tensor, so we
-			// can reshape directly without an opCont copy.
-			const merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
+			const attnOut = wasm.opMulMat(fullV, attnW);
+			const merged = wasm.opReshape2d(
+				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+				nHeads * headDim,
+				nTokens,
+			);
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
 
@@ -1057,8 +1044,7 @@ export class ModelInference {
 	): void {
 		const posBytes = nTokens * 4;
 		const idsBytes = nTokens * 4;
-		// maskTensor is F16 (2 bytes/elem); FA requires F16 mask.
-		const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
+		const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
 		const totalBytes = posBytes + idsBytes + maskBytes;
 
 		const heap = wasm.malloc(totalBytes);
@@ -1075,18 +1061,17 @@ export class ModelInference {
 			}
 
 			if (needsMask) {
-				// Write F16 mask: 0x0000 = 0.0, 0xFC00 = -Infinity.
-				const mask = new Uint16Array(
+				const mask = new Float32Array(
 					wasm.heapU8.buffer,
 					maskPtr,
 					totalLen * maskPaddedCols,
 				);
-				const F16_NEG_INF = 0xfc00;
+				const NEG_INF = -Infinity;
 				for (let q = 0; q < nTokens; q++) {
 					const rowBase = q * totalLen;
 					const visibleUpTo = pastLen + q;
 					for (let k = 0; k < totalLen; k++) {
-						mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
+						mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
 					}
 				}
 				for (let q = nTokens; q < maskPaddedCols; q++) {
@@ -1128,8 +1113,8 @@ export class ModelInference {
 	//   // K / V cache contents after a forward pass (use a probe prefill first)
 	//   window.inference.resetKVCache();
 	//   await window.inference.forward(new Int32Array([22172]), new Int32Array([0]));
-	//   const k = await window.inference.debugReadKCache(0, 64*2, 0);
-	//   const v = await window.inference.debugReadVCache(0, 64*2, 0);
+	//   const k = await window.inference.debugReadKCache(0, 64*4, 0);
+	//   const v = await window.inference.debugReadVCache(0, 64*4, 0);
 	//
 	//   // First N floats of any F32 norm weight after loadWeights()
 	//   const g = await window.inference.debugReadNormWeight("attn0", 8);
@@ -1138,31 +1123,28 @@ export class ModelInference {
 	//   // and return the hidden state. Great for "where does it diverge?".
 	//   const h = await window.inference.debugLayerOutput(1, /* layerIdx= */ 0);
 
-	/** DEBUG: read back a slice of kv.k for a given layer.
-	 *  Returns Uint16Array of raw IEEE-754 binary16 values. Decode with
-	 *  e.g. https://github.com/petamoriken/float16 if you need Float32 values. */
+	/** DEBUG: read back a slice of kv.k for a given layer. */
 	async debugReadKCache(
 		layerIdx: number,
 		nBytes: number,
 		offset = 0,
-	): Promise<Uint16Array> {
+	): Promise<Float32Array> {
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const tensor = this.kvLayers[layerIdx].k;
 		const bytes = await this.wasm.downloadFromTensor(tensor, nBytes, offset);
-		return new Uint16Array(bytes.buffer, bytes.byteOffset, nBytes / 2);
+		return new Float32Array(bytes.buffer, bytes.byteOffset, nBytes / 4);
 	}
 
-	/** DEBUG: read back a slice of kv.v for a given layer.
-	 *  Returns Uint16Array of raw IEEE-754 binary16 values. */
+	/** DEBUG: read back a slice of kv.v for a given layer. */
 	async debugReadVCache(
 		layerIdx: number,
 		nBytes: number,
 		offset = 0,
-	): Promise<Uint16Array> {
+	): Promise<Float32Array> {
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const tensor = this.kvLayers[layerIdx].v;
 		const bytes = await this.wasm.downloadFromTensor(tensor, nBytes, offset);
-		return new Uint16Array(bytes.buffer, bytes.byteOffset, nBytes / 2);
+		return new Float32Array(bytes.buffer, bytes.byteOffset, nBytes / 4);
 	}
 
 	/**
@@ -1225,9 +1207,7 @@ export class ModelInference {
 		try {
 			const posTensor = wasm.tensorNew1d(GgmlType.I32, 1);
 			const idsTensor = wasm.tensorNew1d(GgmlType.I32, 1);
-			// Single-token debug path — mask is trivially all-zeros; pass 0
-			// (null) so FA doesn't need a mask tensor (avoids F16 mask alloc).
-			const maskTensor = 0 as TensorPtr;
+			const maskTensor = wasm.tensorNew2d(GgmlType.F32, 1, 32);
 			const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 			let cur = wasm.opGetRows(weights.tokEmb, idsTensor);
@@ -1323,15 +1303,16 @@ export class ModelInference {
 					graph,
 					wasm.opCpy(wasm.opCont(kRopeP), kWriteView),
 				);
-				// V cache is now [headDim, maxCtx, nKvHeads].
+				const vNb0 = wasm.tensorNb(kv.v, 0);
 				const vNb1 = wasm.tensorNb(kv.v, 1);
 				const vNb2 = wasm.tensorNb(kv.v, 2);
-				// Write: permute v3=[headDim, nKvHeads, 1] -> [headDim, 1, nKvHeads]
-				const v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+				// Same V-permute fix as in forward(): (1, 2, 0, 3) maps
+				// src(headDim, nKvHeads, nTokens) -> dst(nTokens, headDim, nKvHeads).
+				const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
 				const vWriteView = wasm.opView3d(
 					kv.v,
-					hp.embeddingHeadLength,
 					1,
+					hp.embeddingHeadLength,
 					hp.headCountKv,
 					vNb1,
 					vNb2,
@@ -1350,31 +1331,26 @@ export class ModelInference {
 					kNb2,
 					0,
 				);
-				// fullV = [headDim, 1, nKvHeads] with nb[1]=headDim*2 — FA-ready.
 				const fullV = wasm.opView3d(
 					kv.v,
-					hp.embeddingHeadLength,
 					1,
+					hp.embeddingHeadLength,
 					hp.headCountKv,
 					vNb1,
 					vNb2,
 					0,
 				);
 				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-				// Debug path uses FA (nTokens=1, maskTensor=0 → no mask).
-				const attnOut = wasm.opFlashAttn(
-					qp,
-					fullK,
-					fullV,
+				const qk = wasm.opMulMat(fullK, qp);
+				const attnW = wasm.opSoftMaxExt(
+					qk,
 					maskTensor,
 					1 / Math.sqrt(hp.embeddingHeadLength),
 					0,
-					0,
 				);
-				// ggml_flash_attn_ext allocates a new contiguous output tensor, so we
-				// can reshape directly without an opCont copy.
+				const attnOut = wasm.opMulMat(fullV, attnW);
 				const merged = wasm.opReshape2d(
-					attnOut,
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
 					hp.headCount * hp.embeddingHeadLength,
 					1,
 				);
@@ -1420,6 +1396,8 @@ export class ModelInference {
 				if (il === layerIdx && checkpoint === "layer_output") {
 					returnTensor = cur;
 				}
+				// Reset vNb0 to silence lint
+				void vNb0;
 			}
 
 			wasm.graphBuildForwardExpand(graph, returnTensor);
@@ -1437,7 +1415,13 @@ export class ModelInference {
 			} finally {
 				wasm.stackRestore(sp);
 			}
-			// No mask upload needed — maskTensor is 0 (null) for single-token path.
+			const maskHeap = wasm.malloc(32 * 4);
+			try {
+				new Float32Array(wasm.heapU8.buffer, maskHeap, 32).fill(0);
+				wasm.backendTensorSet(maskTensor, maskHeap, 0, 32 * 4);
+			} finally {
+				wasm.free(maskHeap);
+			}
 			await wasm.graphCompute(graph);
 
 			const bytes = await wasm.downloadFromTensor(returnTensor, nbytes, 0);

@@ -423,20 +423,19 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					new Int32Array(probeTokens),
 					new Int32Array(probeTokens.map((_, i) => i)),
 				);
-				// KV cache is now F16; debugRead* returns Uint16Array of raw binary16.
-				const k0 = await inference.debugReadKCache(0, 64 * 2, 0);
-				const nzK = Array.from(k0).filter((v) => v !== 0).length;
-				const sumAbsK = Array.from(k0).reduce((sum, v) => sum + v, 0);
+				const k0 = await inference.debugReadKCache(0, 64 * 4, 0);
+				const nzK = Array.from(k0).filter((v) => Math.abs(v) > 1e-9).length;
+				const sumAbsK = Array.from(k0).reduce((sum, v) => sum + Math.abs(v), 0);
 				log(
 					"running",
-					`  kv.k[layer=0][pos=0][head=0] nonzero=${nzK}/64 sumRaw=${sumAbsK}`,
+					`  kv.k[layer=0][pos=0][head=0] nonzero=${nzK}/64 sumAbs=${sumAbsK.toFixed(4)}`,
 				);
-				const v0 = await inference.debugReadVCache(0, 64 * 2, 0);
-				const nzV = Array.from(v0).filter((v) => v !== 0).length;
-				const sumAbsV = Array.from(v0).reduce((sum, v) => sum + v, 0);
+				const v0 = await inference.debugReadVCache(0, 64 * 4, 0);
+				const nzV = Array.from(v0).filter((v) => Math.abs(v) > 1e-9).length;
+				const sumAbsV = Array.from(v0).reduce((sum, v) => sum + Math.abs(v), 0);
 				log(
 					"running",
-					`  kv.v[layer=0][pos=0..63][dim=0][head=0] nonzero=${nzV}/64 sumRaw=${sumAbsV} first4=[${Array.from(v0.slice(0, 4)).join(",")}]`,
+					`  kv.v[layer=0][pos=0..63][dim=0][head=0] nonzero=${nzV}/64 sumAbs=${sumAbsV.toFixed(4)} first4=[${Array.from(v0.slice(0, 4)).map((v) => v.toFixed(4)).join(",")}]`,
 				);
 			} catch (e) {
 				log("fail", `[7-debug] KV probe failed: ${e.message}\n${e.stack || ""}`);

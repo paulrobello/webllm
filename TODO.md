@@ -192,6 +192,22 @@
 > draft pair with shared tokenizer (theoretical 2-3×
 > wall-clock for chat).
 >
+> **§4 closed 2026-04-26 (Completed §18):** `ggml_flash_attn_ext`
+> integrated into all three attention branches (MLA/GQA/MHA)
+> with F16 KV cache and transposed V layout. Measured on the
+> canonical 4-baseline: FA engaged on all 4 models (dispatch
+> counts -10-13%, matmul -2 to -16%), but the new
+> `backendAttentionMs` overhead (1.3-3.3 ms/step) exceeds
+> the savings at single-token decode (N=1). Mistral-7B
+> regressed -5.8% (blocking — exceeds 3% gate); no model
+> gained ≥2%. FA's main wins are prefill (long prompts) and
+> longer decode batches (>256 tokens) — neither is exercised
+> by the bench-inf gate. Bridge wrappers (`33f10eb`), TS
+> bindings (`4692bce`+`d26d736`), and surface test (`068ef84`)
+> retained as future-work infrastructure; implementation
+> reverted via `git checkout 068ef84 --`. **Next lever:
+> §C drafter speculative decoding** (qwen3-0.6b ↔ qwen3-8b).
+>
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -1917,6 +1933,65 @@ needs to be collected.
       (393/5/0). WASM artifacts in `smoke-test/` rebuilt
       against unchanged tree as a hygiene step (mtime
       12:20 Apr 26).
+
+18. **§4 Flash Attention enable measured + closed.**
+    Followed `docs/superpowers/plans/2026-04-26-fa-enable.md`
+    to integrate `ggml_flash_attn_ext` into the
+    model-inference attention path (F16 KV cache, V-cache
+    layout transposed, all three attention branches —
+    MLA/GQA/MHA — routed through `opFlashAttn`).
+    Measured against the canonical 4-baseline using the
+    §1994 ship gate (bench-inf 3-trial median, ±3% threshold).
+    - **4-baseline measurement (post-FA, vs. pre-Task-4
+      baselines):**
+      | Model              | bench-inf Δ% | smoke-bench Δ% | matmul Δ% | dispatches  | FA engaged? |
+      |--------------------|-------------:|---------------:|----------:|-------------|-------------|
+      | tinyllama-q4_0     |       +1.3%  |         +5.1%  |   -16.1%  | 450 → 403   | ✓           |
+      | mistral-7b-q4ks    |   **-5.8%**  |         -2.9%  |    -5.6%  | 650 → 586   | ✓           |
+      | llama-3.1-8b-iq3m  |       -3.0%  |         -3.3%  |    -2.3%  | 652 → 588   | ✓           |
+      | qwen3-8b-iq3m      |       -0.7%  |         -4.2%  |    -2.8%  | 805 → 697   | ✓           |
+    - **FA did engage** on all 4 models: dispatch counts
+      dropped 10-13% and matmul latency improved in 3 of
+      4 models (including -16.1% for TinyLlama). The
+      mechanism is working correctly.
+    - **Why it still fails the gate:** the WebGPU FA
+      path introduces a new `backendAttentionMs` overhead
+      of 1.3-3.3 ms per decode step (measured via
+      `smoke-bench` profile). At single-token decode
+      (N=1), this per-step overhead exceeds the savings
+      from removing the manual attention dispatches.
+      FA's primary wins are (a) prefill on long prompts
+      (sequential attention → one tiled kernel, O(N)
+      HBM reads instead of O(N²)) and (b) longer decode
+      batches (>256 tokens). Neither scenario is exercised
+      by the bench-inf steady-state gate, which measures
+      decode throughput at batch=1, sequence=1. Mistral
+      -5.8% is the blocking signal; it exceeds the 3%
+      regression threshold and no model gains ≥2%.
+      **Ship gate FAILS.**
+    - **Code state:** C bridge wrappers (`33f10eb`),
+      TypeScript bindings (`4692bce` + `d26d736`), and
+      surface test (`068ef84`) **retained** as
+      infrastructure for future investigation. The
+      implementation commits (`baad612` F16 KV cache,
+      `1f1a9da` opFlashAttn integration, `d4988a0`
+      JSDoc cleanup) reverted via:
+      ```
+      git checkout 068ef84 -- src/inference/model-inference.ts \
+                               smoke-test/real-model-page.js
+      ```
+      `make checkall` clean post-revert (394/5/0).
+      TinyLlama coherence verified at 101.7 tok/s.
+    - **Plan reference:**
+      `docs/superpowers/plans/2026-04-26-fa-enable.md`.
+    - **Recommended next move:** §C drafter-based
+      speculative decoding (qwen3-0.6b ↔ qwen3-8b
+      same-family draft pair with shared tokenizer —
+      theoretical 2-3× wall-clock for chat). FA closure
+      doesn't change which lever has remaining headroom:
+      §C remains the only path to a step-change in
+      steady-state decode throughput on the 7B/8B fleet
+      without a kernel rewrite.
 
 ### Resumption checklist (start a fresh session here)
 
