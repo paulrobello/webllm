@@ -1620,7 +1620,8 @@ needs to be collected.
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
 skipped).** Wave 2 underway: **2/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
-86% — §13). Three findings + one bug fix from this session:
+86% — §13). Three findings, one bug fix, one upstream rebase
+from this session:
 
 - **Bug #28 (Q3_K shader) FIXED — see §14.** Root cause was
   UB shift-by-32 in `load_u32_at_src{,0}` u32 loader helpers
@@ -1628,9 +1629,17 @@ at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
   aligned read through these helpers. Q3_K mul_mat_vec and
   Q3_K get_rows are the user-visible victims; Q4_K_S happened
   to use unaligned reads and was unaffected. Patch 11 on
-  `webllm-browser-patches` (`391c59f39`). Q3_K_M now coherent
-  at 24.4 tok/s on Mistral-7B; Q4_K_S regression-safe at 36.0
-  tok/s.
+  `webllm-browser-patches` (`a536df4f4` after rebase, was
+  `391c59f39` pre-rebase). Q3_K_M now coherent at 24.4 tok/s
+  on Mistral-7B; Q4_K_S regression-safe at 36.0 tok/s.
+- **llama.cpp rebased to upstream `78433f606` (2026-04-26).**
+  6-commit gap from prior base `b760272f1`; zero conflicts.
+  None of the 6 commits touch `ggml-webgpu/`, WGSL shaders,
+  ASYNCIFY, or the graph-visit code we patched. Upstream
+  delta was: backend-meta recurrent state fix (we don't use
+  recurrent state); CUDA/CPU/OpenCL backend changes (we
+  build none of them); CODEOWNERS update. Safety branch
+  preserved at `webllm-browser-patches-pre-rebase-2026-04-26`.
 - **Workarounds for the 4 GiB WASM cap:** Q4_K_S works at
   7B (3953 MB Mistral). For 8B+, Q4_K_S exceeds the cap;
   IQ3_M / IQ3_S are the smaller-bandwidth working
@@ -1644,7 +1653,8 @@ at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
   through the WASM heap; ctxCreate over-allocation fixed.
   Confirmed working at 3.6 GB / 3.95 GB streaming.
 
-**Next target options (pick one — no implicit ordering):**
+**Next target options (pick one — recommended order: A → B
+or A → F, then everything else as appetite allows):**
 
 A. **Add Qwen3-8B IQ3_M as wave-2 model 3** to complete
    the cross-family 8B comparison. Qwen3-8B Q4_K_S exceeds
@@ -1652,6 +1662,7 @@ A. **Add Qwen3-8B IQ3_M as wave-2 model 3** to complete
    Same workflow as §13. Expected ~13-15 tok/s steady, ~88-
    92% accuracy if Qwen3 family pattern holds. Only ~30 min
    plus download time. Highest information-per-hour.
+   **Recommended first.**
 
 B. **Pick up §A subgroup-cooperative loading.** The new
    data point (matmul = 71.4% of graph at 8B IQ3_M) makes
@@ -1663,15 +1674,23 @@ B. **Pick up §A subgroup-cooperative loading.** The new
    shader-architecture changes).
 
 C. ~~Fix the Q3_K shader (#28).~~ **Done — see §14.**
-   Q3_K mul_mat_vec is now correct on Tint/Dawn after the
-   UB-safe loader fix (patch 11). Q3_K_M is a viable
-   wave-2 quant again. Promote
-   `mistral-7b-instruct-v0.3-q3km` from a test entry to a
-   registered wave-2 candidate, or remove it from
-   `eval/models.ts` if the fleet doesn't want Q3_K
-   coverage in the cross-family table. A Q3_K vs IQ3_M
-   comparison at 8B is now possible via Llama-3.1-8B
-   Q3_K_M (~3.4 GB, under the WASM cap).
+
+F. **Promote or retire the Q3_K_M test entry.** Bug #28
+   is fixed and `mistral-7b-instruct-v0.3-q3km` is sitting
+   in `eval/models.ts` as a verification entry. Decide:
+   (1) **promote** — register as wave-2 model 4 alongside
+   Q4_K_S, run a full bench-profile cycle (~20 min) to log
+   tok/s + accuracy in the cross-family table; gives a
+   clean Q3_K vs Q4_K_S vs IQ3_M comparison at the same
+   7B Mistral param count. Or (2) **retire** — remove the
+   entry; bug #28 closure note in §14 is enough on its
+   own. Promotion is the higher-information call (we know
+   from §12 that Q3_K_M was 21.4 tok/s in profile mode
+   when it was emitting noise, so steady-state should now
+   be ≥ Q4_K_S's 34.4 since Q3_K_M is the cheaper quant
+   on the same model). Cheap to do; ~20 min wall-clock.
+   **Either A or F is a good 30-minute win; B is the
+   hours-long perf push.**
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in this session that 4 GiB is
@@ -1682,7 +1701,7 @@ D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    interactions). Multi-day engineering. Only worth it
    for wave-3 12B+ candidates that need Q4_K_S+.
 
-E. **Other deferred items** (lower priority than A/B):
+E. **Other deferred items** (lower priority than A/B/F):
    - **§B FA shape-routing** for prefill/TTFT (§5 path a).
      FA's main win is seq>1; long-prompt latency lever.
      Becomes more attractive at 8B+ where K-dimension grows.
@@ -1709,19 +1728,39 @@ existing baselines before extending the fleet.
 Boot sequence for a fresh session:
 
 1. `make checkall` — confirm 393 pass / 5 skip / 0 fail.
-2. `git log --oneline -5` — confirm `0b863f5` (wave-2 model
-   2 — Llama-3.1-8B IQ3_M) and `83dc890` (wave-2 model 1
-   + bug #28 discovery) at the tip; this session's TODO/docs
-   update lands on top.
-3. `git -C ~/Repos/llama.cpp log --oneline -11 webllm-browser-patches`
-   — confirm the **11-patch stack** is intact (tip
-   `391c59f39 ggml-webgpu: fix UB shift-by-32 in
-   load_u32_at_src{,0}` is patch 11, the bug #28 fix).
-4. Read "Completed on 2026-04-26" §12 (Mistral 7B Q4_K_S +
+2. `git log --oneline -5` — top of `main` should include
+   `69f3c86 docs(bug#28): close Q3_K shader bug` (this
+   session's TODO/docs update); below that `0b863f5`
+   (wave-2 model 2 — Llama-3.1-8B IQ3_M) and `83dc890`
+   (wave-2 model 1 + bug #28 discovery).
+3. `git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`
+   — confirm the **11-patch stack** is intact and the base
+   is upstream `78433f606 Fix recurrent state serialization`
+   (rebased 2026-04-26). Tip is `a536df4f4 ggml-webgpu: fix
+   UB shift-by-32 in load_u32_at_src{,0}` — patch 11, the
+   bug #28 fix. Safety branch
+   `webllm-browser-patches-pre-rebase-2026-04-26` preserves
+   the pre-rebase tip if needed.
+4. **Verify the WASM build still matches the rebased
+   patches:** `make wasm-build && bun build src/index.ts
+   --outfile smoke-test/webllm-bundle.js --target browser
+   && cp src/wasm/build/webllm-wasm.{js,wasm} smoke-test/
+   && make smoke-restart`. Then run
+   `tests/q3km-smoke-test.sh` (or navigate the smoke-test
+   page to `model=mistral-7b-instruct-v0.3-q3km`) — Q3_K_M
+   coherent at ≥20 tok/s confirms the rebase didn't break
+   patch 11.
+5. Read "Completed on 2026-04-26" §12 (Mistral 7B Q4_K_S +
    bug #28 discovery), §13 (Llama 3.1 8B IQ3_M + IQ-family
    workaround), and §14 (bug #28 fix: UB-safe u32 loaders).
    The full cross-family table at the end of §13 is the
    headline; §14 is the diagnosis-and-fix narrative.
+
+**Recommended first move:** option A (Qwen3-8B IQ3_M) or
+option F (promote/retire the Q3_K_M test entry). Both are
+~30-minute wins and tighten the cross-family fleet
+characterization. Option B (subgroup-cooperative loading)
+is the bigger perf lever but uncertain and hours-long.
 
 If continuing wave 2 (option A): GGUF mirror probe FIRST
 via `curl -s "https://huggingface.co/api/models/<repo>/tree/main" | python3 -c "..."`.

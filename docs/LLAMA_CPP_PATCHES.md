@@ -37,10 +37,13 @@ binary that crashes the page during inference.
 The branch currently carries eleven commits on top of upstream `master`,
 in the order shown (oldest first). Commit 7 and its revert (commit 8)
 are kept as a pair pending a proper replacement; treat them as a no-op
-until you hear otherwise. Last rebased onto upstream master 2026-04-25
-to a tip at-or-after `13d36cf89` ("ggml-webgpu: enable FLASH_ATTN_EXT
-on browser without subgroup matrix") — see notes below patch 9 for the
-status of the FA enablement on browser decode.
+until you hear otherwise. Last rebased onto upstream master 2026-04-26
+to tip `78433f606` ("Fix recurrent state serialization for partial
+reads and writes (#22362)"). The 2026-04-25 → 2026-04-26 delta was
+6 commits, all in backends we don't build (CUDA / CPU / OpenCL),
+admin-only (CODEOWNERS), or in code paths we don't exercise (recurrent
+state serialization) — zero conflicts on rebase. See notes below patch 9
+for the status of FA enablement on browser decode (unchanged).
 
 ### 1. ggml: iterative `ggml_visit_parents_graph` for WASM stack safety
 
