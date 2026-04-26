@@ -435,15 +435,14 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "Q4_K_S",
 	},
 
-	// Q3_K_M verification entry — proves the UB-safe u32 loader fix
-	// (llama.cpp `webllm-browser-patches` patch 11) restores Q3_K
-	// correctness on Tint/Dawn. The original optimized Q3_K
-	// mul_mat_vec / get_rows kernels are unchanged. Local file is on
-	// disk from the §12 attempt. Verified coherent at 24.4 tok/s on
-	// 2026-04-26; see "Completed on 2026-04-26 §14" in TODO.md.
+	// Q3_K_M wave-2 fleet entry — the UB-safe u32 loader fix
+	// (llama.cpp `webllm-browser-patches` patch 11) restored Q3_K
+	// correctness on Tint/Dawn. Original optimized Q3_K mul_mat_vec
+	// / get_rows kernels are unchanged. Provides a Q3_K vs Q4_K_S
+	// vs IQ4_XS three-way at the same Mistral-7B param count.
 	{
 		id: "mistral-7b-instruct-v0.3-q3km",
-		name: "Mistral 7B Instruct v0.3 (Q3_K_M, bug #28 verified)",
+		name: "Mistral 7B Instruct v0.3 (Q3_K_M)",
 		family: "Mistral",
 		architecture: "mistral",
 		paramsB: 7.25,

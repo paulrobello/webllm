@@ -127,7 +127,7 @@
 > means that buffer was never used). Unblocks all wave-2
 > 7B+ candidates; reclaims multi-GB headroom across all sizes.
 >
-> **Wave 2 begun 2026-04-26 (Completed §12, §13):** 2/4 done.
+> **Wave 2 begun 2026-04-26 (Completed §12, §13, §15):** 3/4 done.
 > - **mistral-7b-instruct-v0.3-q4ks**: 34.4 tok/s steady-state
 >   / 26/36 (68%). 32 layers, GQA 4:1, KV 1024 MB, 650
 >   dispatches/token, matmul 47.0% of graph (~45% of decode).
@@ -145,6 +145,14 @@
 >   qwen2.5-3b, 18 points above Mistral 7B Q4_K_S — quant
 >   compute cost halves throughput vs Mistral but model-
 >   quality recovers most of the accuracy gap.
+> - **mistral-7b-instruct-v0.3-q3km** (§15, bug #28 fix
+>   verified under sustained load): 19.7 tok/s steady-state
+>   / 26/36 (69%). Same Mistral base as Q4_K_S; 43% slower
+>   despite 15% smaller file (3360 vs 3953 MB). K-quant
+>   compute overhead defeats bandwidth savings — tied
+>   accuracy with Q4_K_S. **Q3_K is not a useful speed
+>   lever even when the file fits the cap;** Q4_K_S
+>   remains the throughput default at 7B.
 > - **Net wave-2 finding:** at scale the §A subgroup-
 >   cooperative-loading ceiling rises sharply
 >   (4B Q4_0: ~13% → 7B Q4_K_S: ~18% → 8B IQ3_M: ~28% of
@@ -1528,6 +1536,7 @@ needs to be collected.
       |------------------|----------|--------|------:|---------:|
       | qwen3-4b         | Qwen3    | Q4_0   |  35.5 |  88-90%  |
       | mistral-7b       | Mistral  | Q4_K_S |  34.4 |     68%  |
+      | mistral-7b       | Mistral  | Q3_K_M |  19.7 |     69%  |
       | **llama-3.1-8b** | Llama 3.1| IQ3_M  |  16.3 |     86%  |
       Two clear axes:
       (a) **Quant compute cost dominates speed at 7B+**:
@@ -1611,17 +1620,73 @@ needs to be collected.
       remains valid and is still the path of choice for 8B+
       where Q4_K_S exceeds the cap. Q3_K_M test entry left in
       `eval/models.ts` as `mistral-7b-instruct-v0.3-q3km` for
-      cross-quant comparison; can be promoted to a registered
-      wave-2 candidate or removed depending on whether the
-      fleet wants Q3_K vs Q4_K_S vs IQ3_M coverage at 7B.
+      cross-quant comparison; promoted to a wave-2 fleet
+      member in §15.
+
+15. **Wave 2 model 4 — Mistral 7B Instruct v0.3 Q3_K_M
+    promoted (option F closed).** Bench-profile cycle on
+    `mistral-7b-v0.3-q3km-warm` produced **19.7 tok/s
+    steady-state / 26/36 = 69% accuracy** (oneShot speed-
+    phase reported 21 tok/s on the 64-token prefill+decode;
+    interactive 1024-token steady-state landed at 19.7).
+    Output coherent throughout: speed phase produced an AI/
+    ML topic cascade, finishReason=max-tokens. Confirms the
+    §14 patch (UB-safe u32 loaders) holds under sustained
+    full-graph load — not just the smoke-bench burst that
+    §14 verified at 24.4 tok/s.
+    - **Q3_K vs Q4_K_S at 7B (same Mistral base, same
+      32-layer arch, same llama2 chat template):**
+      | Quant   | tok/s | Accuracy | File MB |
+      |---------|------:|---------:|--------:|
+      | Q4_K_S  |  34.4 |  26/36 (68%) | 3953 |
+      | Q3_K_M  |  19.7 |  26/36 (69%) | 3360 |
+      Q3_K_M is **43% slower** despite being 15% smaller on
+      disk. K-quant compute overhead dominates bandwidth
+      savings at this size — the same direction as §9
+      observed on Qwen3-1.7B (Q4_K_M -4% vs Q8) but with a
+      much wider gap. Accuracy is statistically tied (same
+      26/36 raw count, 1-pp dimension-weighted delta, well
+      inside variance) — Q3_K_M does not visibly hurt model
+      quality at 7B Mistral, the cost is purely throughput.
+      **Verdict: Q3_K is not a useful speed lever even when
+      the file fits the cap; Q4_K_S is the correct default
+      for 7B.** Q3_K_M remains useful only for memory-bound
+      scenarios where the 593-MB-on-disk savings actually
+      matter (8B-12B Q4_K_S that exceeds the 4 GiB cap is
+      better served by IQ3_M anyway, per §13).
+    - **Updated cross-family + cross-quant table at 7B / 8B:**
+      | Model            | Family   | Quant  | tok/s | Accuracy |
+      |------------------|----------|--------|------:|---------:|
+      | qwen3-4b         | Qwen3    | Q4_0   |  35.5 |  88-90%  |
+      | mistral-7b       | Mistral  | Q4_K_S |  34.4 |     68%  |
+      | mistral-7b       | Mistral  | Q3_K_M |  19.7 |     69%  |
+      | **llama-3.1-8b** | Llama 3.1| IQ3_M  |  16.3 |     86%  |
+      Three quant code paths now exercised at 7B+: Q4_K
+      family (Q4_K_S), Q3_K family (Q3_K_M), IQ family
+      (IQ3_M). Q4_K_S remains the throughput default;
+      IQ3_M the path-of-choice for 8B+ where Q4_K_S
+      exceeds the cap.
+    - **Registration changes:** entry name in `eval/models.ts`
+      cleaned up from "Q3_K_M, bug #28 verified" to plain
+      "Q3_K_M"; comment block updated from verification
+      probe to fleet member; new profile
+      `mistral-7b-v0.3-q3km-warm` added in
+      `eval/smoke-profiles.ts`; profile added to the `full`
+      set so `make bench-full` now runs it alongside the
+      Q4_K_S baseline. `make checkall` clean (393/5/0).
+    - **Wave 2: 3/4 done.** Remaining slot is the cross-
+      family 8B tie-break — Qwen3-8B IQ3_M is the natural
+      next entry to round out the family-pattern analysis
+      (Qwen accuracy ceiling vs Llama 3.1 IQ3_M's 86%).
 
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
-skipped).** Wave 2 underway: **2/4 done** (mistral-7b-v0.3-q4ks
+skipped).** Wave 2 underway: **3/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
-86% — §13). Three findings, one bug fix, one upstream rebase
-from this session:
+86% — §13; mistral-7b-v0.3-q3km at 19.7 tok/s / 69% — §15).
+Findings, one bug fix, one upstream rebase, one quant-promotion
+from these sessions:
 
 - **Bug #28 (Q3_K shader) FIXED — see §14.** Root cause was
   UB shift-by-32 in `load_u32_at_src{,0}` u32 loader helpers
@@ -1653,16 +1718,16 @@ from this session:
   through the WASM heap; ctxCreate over-allocation fixed.
   Confirmed working at 3.6 GB / 3.95 GB streaming.
 
-**Next target options (pick one — recommended order: A → B
-or A → F, then everything else as appetite allows):**
+**Next target options (pick one — recommended order: A → B,
+then everything else as appetite allows):**
 
-A. **Add Qwen3-8B IQ3_M as wave-2 model 3** to complete
-   the cross-family 8B comparison. Qwen3-8B Q4_K_S exceeds
-   the cap (4580 MB); IQ3_M is the IQ-family equivalent.
-   Same workflow as §13. Expected ~13-15 tok/s steady, ~88-
-   92% accuracy if Qwen3 family pattern holds. Only ~30 min
-   plus download time. Highest information-per-hour.
-   **Recommended first.**
+A. **Add Qwen3-8B IQ3_M as wave-2 model 4** (final wave-2
+   slot) to complete the cross-family 8B comparison.
+   Qwen3-8B Q4_K_S exceeds the cap (4580 MB); IQ3_M is
+   the IQ-family equivalent. Same workflow as §13.
+   Expected ~13-15 tok/s steady, ~88-92% accuracy if
+   Qwen3 family pattern holds. Only ~30 min plus download
+   time. Highest information-per-hour. **Recommended.**
 
 B. **Pick up §A subgroup-cooperative loading.** The new
    data point (matmul = 71.4% of graph at 8B IQ3_M) makes
@@ -1675,22 +1740,10 @@ B. **Pick up §A subgroup-cooperative loading.** The new
 
 C. ~~Fix the Q3_K shader (#28).~~ **Done — see §14.**
 
-F. **Promote or retire the Q3_K_M test entry.** Bug #28
-   is fixed and `mistral-7b-instruct-v0.3-q3km` is sitting
-   in `eval/models.ts` as a verification entry. Decide:
-   (1) **promote** — register as wave-2 model 4 alongside
-   Q4_K_S, run a full bench-profile cycle (~20 min) to log
-   tok/s + accuracy in the cross-family table; gives a
-   clean Q3_K vs Q4_K_S vs IQ3_M comparison at the same
-   7B Mistral param count. Or (2) **retire** — remove the
-   entry; bug #28 closure note in §14 is enough on its
-   own. Promotion is the higher-information call (we know
-   from §12 that Q3_K_M was 21.4 tok/s in profile mode
-   when it was emitting noise, so steady-state should now
-   be ≥ Q4_K_S's 34.4 since Q3_K_M is the cheaper quant
-   on the same model). Cheap to do; ~20 min wall-clock.
-   **Either A or F is a good 30-minute win; B is the
-   hours-long perf push.**
+F. ~~Promote or retire the Q3_K_M test entry.~~ **Done —
+   see §15. Promoted; finding is that Q3_K is not a
+   useful speed lever (43% slower than Q4_K_S at 7B with
+   tied accuracy).**
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in this session that 4 GiB is
@@ -1752,15 +1805,16 @@ Boot sequence for a fresh session:
    patch 11.
 5. Read "Completed on 2026-04-26" §12 (Mistral 7B Q4_K_S +
    bug #28 discovery), §13 (Llama 3.1 8B IQ3_M + IQ-family
-   workaround), and §14 (bug #28 fix: UB-safe u32 loaders).
-   The full cross-family table at the end of §13 is the
+   workaround), §14 (bug #28 fix: UB-safe u32 loaders), and
+   §15 (Q3_K_M promotion — wave 2 model 4, finding that
+   K-quant compute overhead defeats bandwidth savings at 7B).
+   The full cross-family table at the end of §15 is the
    headline; §14 is the diagnosis-and-fix narrative.
 
-**Recommended first move:** option A (Qwen3-8B IQ3_M) or
-option F (promote/retire the Q3_K_M test entry). Both are
-~30-minute wins and tighten the cross-family fleet
-characterization. Option B (subgroup-cooperative loading)
-is the bigger perf lever but uncertain and hours-long.
+**Recommended first move:** option A (Qwen3-8B IQ3_M) —
+the only ~30-minute win left. Option F (Q3_K_M promotion)
+closed in §15. Option B (subgroup-cooperative loading) is
+the bigger perf lever but uncertain and hours-long.
 
 If continuing wave 2 (option A): GGUF mirror probe FIRST
 via `curl -s "https://huggingface.co/api/models/<repo>/tree/main" | python3 -c "..."`.

@@ -222,6 +222,12 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	{
+		name: "mistral-7b-v0.3-q3km-warm",
+		model: "mistral-7b-instruct-v0.3-q3km",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Llama 3.1 8B Instruct (wave 2 model 2) ────────────────
 	{
 		name: "llama-3.1-8b-warm",
@@ -310,6 +316,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen3-4b-warm",
 		"qwen3-4b-thinking-warm",
 		"mistral-7b-v0.3-warm",
+		"mistral-7b-v0.3-q3km-warm",
 		"llama-3.1-8b-warm",
 		"arctic-embed-s",
 		"arctic-embed-m",
