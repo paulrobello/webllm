@@ -127,6 +127,21 @@
 > means that buffer was never used). Unblocks all wave-2
 > 7B+ candidates; reclaims multi-GB headroom across all sizes.
 >
+> **Wave 2 begun 2026-04-26 (Completed §12):** 1/4 done.
+> - **mistral-7b-instruct-v0.3-q4ks**: 34.4 tok/s steady-state
+>   / 26/36 (68%). 32 layers, GQA 4:1, KV 1024 MB, 650
+>   dispatches/token, matmul 47.0% of graph (~45% of decode —
+>   highest in fleet). First non-Llama/Qwen entry. Q3_K_M
+>   tried first; gibberish output uncovered **bug #28: Q3_K
+>   matmul shader has a correctness bug.** Wave-1 never
+>   exercised Q3_K (all Q4_0); §9 tested Q4_K_M only. Q4_K_S
+>   workaround works (same K-quant family as Q4_K_M).
+>   Practical wave-2 ceiling at the current llama.cpp upstream
+>   is 7B Q4_K_S; Llama-3.1-8B / Qwen3-8B exceed the 4 GiB
+>   WASM cap at Q4_K_S (~4.5 GB) and route through the broken
+>   Q3_K shader at Q3_K_S. Either fix #28 or bump
+>   MAXIMUM_MEMORY to 8 GB to admit them.
+>
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
 ---
@@ -188,6 +203,7 @@
 25. **Qwen2 / Qwen2.5 attention biases were silently dropped, producing random-token output.** Discovered while running §10 wave-1 model 2 (`qwen2.5-1.5b-q4f16`): the smoke chat regression "passed" structurally but emitted gibberish (`"ña！" szerǃ yaboler...`) and accuracy collapsed to 1/36 = 4%. `eval/models.ts` resolved to `qwen2.5-1.5b-instruct-q4_0.gguf`, which carries `blk.<i>.attn_q.bias`, `attn_k.bias`, `attn_v.bias` tensors that **only the qwen2 architecture uses** (Llama, Qwen3, Mistral, etc. all leave Q/K/V projections unbiased). `ModelInference.loadWeights` only requested the `.weight` tensors, so Q/K/V values were off by a constant shift in every layer, polluting attention scores from the first prefill step. Fix: added `qBias`/`kBias`/`vBias: TensorPtr | null` to `LayerWeights`, conditionally loaded mirroring the existing `qNorm`/`kNorm` pattern (lines 140-145), and wrapped every `opMulMat` of qProj/kProj/vProj with `opAdd(bias)` when present in all three forward branches (prefill, decode, debug-checkpoint). Verified post-fix: same model produces `"Why don't scientists trust atoms? Because they're always splitting up!"`, finish=eos, accuracy 29/36 = **81%**. Dispatch count went from 573 to 657 (+84 = 3 ops × 28 layers, exactly matches the per-layer bias add). Regression coverage is the smoke chat regression itself — a unit-level test would have to mock 15+ wasm methods and only test mechanical wiring; the live bench output is the higher-signal check.
 26. **Dashboard "Accuracy & tool-calling" panel listed embedding-only models with empty/zero rows.** `renderEvalDimensions()` and `renderEvalsTable()` in `smoke-test/dashboard.js` iterated over every eval, including embedding evals whose only dimension is `"embedding"`. The result: each arctic-embed run rendered as either a single embedding bar surrounded by null space (cards) or a row whose only dimension chip read `embedding: 1/1 · 100%` (table) — not the panel's intent, and duplicative against the dedicated Embeddings section that already shows cosine + latency + throughput. Same convention already existed in `renderDimGroupedChart()` at line 785 (`if (dims.length === 1 && dims[0] === "embedding") continue`); applied that pattern in `renderEvalDimensions`, `renderEvalsTable`, and the header `eval-count` badge in `renderEvals()` so all three reflect accuracy/tool-calling evals only.
 27. **Smoke page silently mis-bucketed `?thinking=1` runs on non-thinking models.** Llama, SmolLM2, Qwen2/2.5, etc. don't have `<think>`/`</think>` token IDs and don't reference `enable_thinking` in their chat templates. With `?thinking=1` set, the smoke page's `thinkingEnabled` flag still flowed through to: (a) `maxTokens 1024` instead of 64 (16× the decode budget for runs that can't terminate via `</think>`), (b) the run's recorded `thinking: "on"` field which polluted the dashboard's thinking-on/off comparison panels with non-thinking runs, and (c) the `assistantText` display path. The engine itself was safe — `isQwenChatml` gating in `engine.ts:240-296` plus `shouldCloseThinkBlock` gating in `chat-template.ts:107` meant no thinking-mask wiring or `<think>` template injection actually ran for non-qwen3 models. But the cosmetic and dashboard-level effects were still wrong, and the mis-routed runs were hard to spot. Fixed by adding `modelSupportsThinking(parsed)` to `smoke-test/real-model-smoke.js` (returns true iff the chat template references both `enable_thinking` and `<think>`, mirroring the engine's gate; encoders short-circuit to false). The smoke page checks this immediately after [2/8] parse and rejects with a clear error message before any GPU/WASM init happens — fail-fast, no wasted work. Verified end-to-end via agentchrome on tinyllama (rejects after [2/8] with the new error) and qwen3-0.6b (still progresses to [7/8] with thinking enabled). Regression test in `tests/real-model-smoke.test.ts` covers Qwen3 (true), Qwen2/Llama/BERT (false), partial-marker templates (false), and missing-field defensiveness.
+28. **Q3_K matmul kernel produces gibberish output in ggml-webgpu.** Discovered while bringing up the first wave-2 model (`mistral-7b-instruct-v0.3-q3km`, 3.36 GB Q3_K_M). Loader path streamed the GGUF cleanly through the §11 WASM-heap callback, speed numbers came out clean (profile-mode 21.4 tok/s · steady-state 25.2 tok/s · matmul 26.91 ms / 59.3% of graph · 650 dispatches/token), but assistant text was pure noise from token 1 (`�t2rhtt […]hetttilh […]ttttshttttttttlugusus…`) — same structural symptom as bug #25 (qwen2 missing biases) but Mistral has no biases. Verified non-causes: GGUF metadata reads cleanly (`llama.rope.freq_base = 1000000.0`, vocab 32768, RMS eps 1e-5, file_type 12 = LLAMA_FTYPE_MOSTLY_Q3_K_M); `supports_op` covers `GGML_TYPE_Q3_K` for both MUL_MAT and GET_ROWS in upstream `ggml-webgpu.cpp`; `ggmlTypeSize` table correctly reports `110/256` bytes/elem; `MUL_ACC_Q3_K` shader exists in `mul_mat_vec.wgsl`. Architecture is data-driven (`general.architecture = "llama"`, no Mistral-specific branch needed; chat template detects as `llama2` for [INST]/[/INST]). Repeated the same model at Q4_K_S (3953 MB, same K-quant family that §9 verified works via Q4_K_M): output is fully coherent with correct factual answers — Q4_K_S inference runs at steady-state 34.4 tok/s with 62% faster matmul (16.21 ms / 47.0% of graph) and 26/36 = 68% accuracy on bench-full. **The Q3_K shader has a correctness bug**, not the loader, parser, model arch, tokenizer, or chat template. Wave-1 never exercised this code path (all entries pinned to Q4_0); §9's K-quant test was Q4_K_M only. Q3_K_M skipped as a wave-2 quant; if a future workload needs it, the bug investigation starts in `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl::MUL_ACC_Q3_K` (110-byte super-block, 16-thread cooperative load, scale unpack via `s_shift1`/`s_shift2` masks `0x0F0F0F0Fu` | `0x30303030u`). The Q3_K_M GGUF still on disk at `smoke-test/models/mistral-7b-instruct-v0.3-q3km.gguf` (3.5 GB) can be re-pinned later without re-downloading. **Workaround: pin Q4_K_S or Q4_K_M for 7B+ entries** (Q4_0 is over the 4 GiB WASM cap at 7B+, so K-quants are forced).
 
 ---
 
@@ -1313,39 +1329,168 @@ needs to be collected.
       with KV ≈ 256 MB at ctx=4096, total ≈ 3.5 GB
       committed during load — close but possible.
 
+12. **§10 wave 2, model 1: mistral-7b-instruct-v0.3-q4ks
+    registered + benched.** First wave-2 entry; first 7B+ in
+    fleet; first non-Llama/Qwen family. Two-attempt landing
+    that uncovered Q3_K shader bug (#28).
+    - **First attempt: Q3_K_M failed.** Pinned `Q3_K_M`
+      (3.36 GB) for size headroom under the 4 GiB WASM cap.
+      Loader streamed cleanly via §11; speed metrics looked
+      normal (profile-mode 21.4 tok/s · steady-state 25.2 tok/s
+      · 650 dispatches/token); but smoke chat regression
+      "passed" structurally with **pure-noise output from
+      token 1** (`�t2rhtt […]hetttilh […]…`). Same symptom
+      shape as bug #25 (qwen2 biases) but Mistral has none.
+      Triaged: GGUF metadata clean, `supports_op` covers
+      Q3_K, `ggmlTypeSize` correct, `MUL_ACC_Q3_K` shader
+      exists. Q3_K matmul kernel has a correctness bug —
+      see bug #28 above. Wave-1 never exercised Q3_K (all
+      Q4_0); §9 verified Q4_K_M only.
+    - **Second attempt: Q4_K_S succeeded.** Re-pinned
+      `Q4_K_S` (3953 MB, same K-quant family that §9 verified
+      via Q4_K_M). Output coherent with correct factual answers
+      (chemistry quiz: Al, Fe, Si, S — all correct).
+    - **Profile registered:** `mistral-7b-v0.3-warm`
+      (temperature 0.6, `DEFAULT_PROMPT`); added to
+      `SMOKE_PROFILE_SETS.full`.
+    - **Architecture (llama / 32 layers):** n_head 32 ·
+      n_head_kv 8 (GQA 4:1) · embedding 4096 (widest in
+      fleet) · head_dim 128 · ffn 14336 · ctx_max 32768 (we
+      run at 4096) · vocab 32768 · `rope.freq_base = 1000000`
+      (Mistral's higher base, vs Llama's 10000). KV cache @
+      ctx=4096 = **1024 MB** (4× larger than Llama-3.2-3B's
+      896 MB at the same n_head_kv=8 due to twice the layer
+      count and embedding width).
+    - **Speed (3-trial median):**
+      - Steady-state **34.4 tok/s** (runs: 34.6 / 34.3 / 34.4
+        — tightest spread in fleet).
+      - Profile-mode **28.0 tok/s** (perturbation -19%,
+        smaller than wave-1's typical -28% to -35%; graph
+        compute dominates so much that profile overhead is a
+        smaller relative slice at this scale).
+      - Prefill **824 ms** (~10-token prompt + chat template).
+    - **Profile-mode backend attribution (189-step decode):**
+      - `backendMatmulMs` 16.21 mean / **47.0% of graph** —
+        wave-1 ended at "matmul = 33-35% of graph"; at 7B
+        Q4_K_S matmul jumps significantly. Combined with
+        `graphComputeMs` 95% of step, **matmul is ~45% of
+        decode time at 7B Q4_K_S**, vs wave-1's max ~33% at
+        4B Q4_0. The §6–§9 bandwidth-bound matmul
+        characterization holds qualitatively at scale, but
+        the lever's percentage of total decode keeps growing.
+      - `backendEncodeOverheadMs` 4.23 / 12.3% — encode
+        overhead's *fraction* keeps shrinking (smollm2-360m
+        33% → qwen2.5-3b 22% → qwen3-4b 16% → mistral-7b
+        12%). Absolute cost stays nearly flat across fleet.
+      - `backendAttentionMs` 0.62 / 1.8% (lowest in fleet).
+      - `backendDispatchCount` **650/token** — 32 layers ×
+        ~20 ops/layer matches; lower than qwen3-4b's 805
+        despite +75% params, because Mistral has no
+        biases / no per-head Q/K-norms.
+    - **Smoke chat regression:** PASSED. Q4_K_S output
+      includes coherent jokes (`Why was the math book sad?
+      Because it had too many problems.`, `What do you call
+      a fake noodle? An impasta!`, etc.) and factually
+      correct chemistry-quiz answers in interactive mode.
+      Cosmetic note: model emits stray `<</SYS>>` markers
+      between turns (Llama-2 separator hallucination — the
+      [INST]/[/INST] template detected as `llama2` lacks
+      `<<SYS>>` for Mistral, but the model has clearly seen
+      training data with both formats). Doesn't affect
+      correctness; not a blocker.
+    - **Accuracy (`bench --profiles mistral-7b-v0.3-warm`):**
+      **26/36 = 68%** — below qwen3-4b's 88%, qwen2.5-3b's
+      86%, llama-3.2-3b's 76%. Two factors stack: (a) Q4_K_S
+      is more aggressive quantization than Q4_0 with measurable
+      quality loss; (b) Mistral-7B-Instruct-v0.3 (Apr 2024)
+      isn't as polished as Llama-3.x or Qwen3 — it's a
+      first-generation instruct release. Tool-calling skipped
+      (warm temp 0.6 > 0.4 gate); embedding skipped (model
+      lacks capability).
+    - **Lever-ceiling implication for §A subgroup-cooperative
+      loading.** §9 measured matmul as ≈40% bandwidth-bound
+      on Q8 (Stub B) at 1.7B scale; that's the fraction
+      addressable by pure-bandwidth levers. At 4B the §A
+      ceiling was ~13% of decode time; at 7B Q4_K_S, with
+      matmul = 45% of decode and ~40% of that bandwidth-bound,
+      the ceiling rises to ~18% of decode time. **Subgroup-
+      cooperative loading becomes more attractive at 7B+
+      scale.** Whether it's worth the engineering cost is
+      still open until measured against actual workload mix.
+    - **Cross-family scaling at 7B (Mistral vs all others):**
+      | Model              | Layers | Disp/tok | tok/s | Accuracy | Quant |
+      |--------------------|-------:|---------:|------:|---------:|-------|
+      | qwen2.5-3b         |     36 |      841 |  45.1 |     86%  | Q4_0  |
+      | llama-3.2-3b       |     28 |      572 |  58.2 |     76%  | Q4_0  |
+      | qwen3-4b           |     36 |      805 |  35.5 |  88-90%  | Q4_0  |
+      | **mistral-7b**     |     32 |      650 |  34.4 |     68%  | Q4_K_S |
+      Mistral-7B Q4_K_S sits at qwen3-4b's speed but with
+      88% → 68% accuracy. Quant aggressiveness is real
+      cost. To get a clean 7B speed/accuracy claim we'd
+      need a 7B Q4_0, which doesn't fit the WASM cap;
+      Q4_K_M (4170 MB) is also over the cap. Q4_K_S is
+      the largest quant that fits.
+    - **What this unblocks:** §10 wave-2 has a working
+      reference at the 7B mark with the §11 loader and
+      Q4_K_S quant. Llama-3.1-8B / Qwen3-8B at Q4_K_S
+      (~4500 MB) are over the cap; would need Q3_K_S
+      (3494 / 3595 MB) which routes through the broken
+      Q3_K kernel. Practical wave-2 ceiling at the
+      current llama.cpp upstream is **7B Q4_K_S**.
+      Bigger models require either fixing the Q3_K
+      shader or bumping `MAXIMUM_MEMORY` to 8 GB
+      (deferred §12).
+
 ### Resumption checklist (start a fresh session here)
 
-**Wave 1 is complete (7/10 done · 2 deferred · 1 optional
-skipped).** All 7 supported wave-1 entries have steady-state
-tok/s, profile-mode backend attribution, accuracy from
-bench-full, and dashboard dots. Cross-family scaling pattern
-holds across the 0.6B → 4B span.
+**Wave 1 complete (7/10 done · 2 deferred · 1 optional
+skipped).** Wave 2 underway: **1/4 done** (mistral-7b-v0.3-q4ks
+at 34.4 tok/s / 68% accuracy — see §12 above). Two new bugs
+landed in this session:
 
-A side-quest landed during the qwen3-4b bench (Completed on
-2026-04-26 §11): the smoke loader now streams GGUF into the
-WASM heap, parser API takes `Uint8Array` (with sub-view
-support), and `loadWeights` accepts a callback source for
-WASM-heap-backed bytes. This unblocks all wave-2 candidates
-(7B+ at Q3_K_M / Q3_K_S) which would otherwise hit the JS
-2 GiB single-allocation cap. Plus a separately-discovered
-ctxCreate over-allocation bug (`+ ggufCtx.totalDataSize`
-when `no_alloc=true`) was reclaiming a multi-GB unused
-buffer — fix benefits all sizes, was load-bearing for 4B+.
+- **Bug #28 (Q3_K shader):** Q3_K matmul produces gibberish
+  in ggml-webgpu. Wave-1 never exercised it (all Q4_0); §9
+  tested only Q4_K_M. Q3_K_M was the smallest viable 7B+
+  quant under the WASM cap, but it's broken — Q4_K_S is
+  the workaround for 7B (3953 MB, fits with margin) but
+  is the largest quant that fits, so 8B+ models would need
+  either a Q3_K shader fix or a `MAXIMUM_MEMORY` bump.
+- **Loader / parser refactor (§11):** GGUF streams cleanly
+  through the WASM heap; ctxCreate over-allocation fixed.
+  Both confirmed working at the 7B mark (3.95 GB streamed).
 
 **Next target options (pick one — no implicit ordering):**
 
-A. **Pivot to wave 2 (7B+ models).** §11 cleared the JS
-   loader cap. Candidates listed in §10's wave-2 block:
-   Llama-3.1-8B / Qwen3-7B / Qwen3-8B / Mistral-7B-v0.3.
-   Q4_0 7B = ~3.94 GB sits right at the WASM 4 GB cap so
-   start with Q3_K_M / Q3_K_S (~3.0–3.4 GB). Tests will
-   reveal whether the bandwidth-bound matmul characterization
-   from §6–§9 holds at 7B+; family-pattern scaling slope
-   (Llama-faster vs Qwen-higher-accuracy) is the second
-   question to answer. **Do verify the mirror has a small
-   enough quant before running** — check unsloth/bartowski
-   trees via `curl -s "https://huggingface.co/api/models/
-   <repo>/tree/main"`.
+A. **Continue wave 2 with another 7B Q4_K_S model** to widen
+   the cross-family signal at 7B (Mistral is the only 7B+
+   data point so far, and it's hampered by the most
+   aggressive quant that fits). Llama-3.1-8B Q4_K_S is
+   4475 MB — over the cap. Options narrow to: (a)
+   Mistral-Nemo-Instruct (12B, has Q4_K_S? probably too
+   large), (b) re-run Mistral with different prompt sets
+   for tool-calling / cold-temp signal, (c) verify that
+   bartowski Mistral mirror has any other instruction-
+   tuned 7B variant that fits. Lower-leverage than B/C/D.
+
+B. **Fix the Q3_K shader (#28) to unblock 8B+ models.**
+   Investigation starts in
+   `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl::MUL_ACC_Q3_K`.
+   If fixed, Llama-3.1-8B / Qwen3-8B at Q3_K_S (3494 /
+   3595 MB) become viable and we get clean 8B cross-family
+   data. Carries debug effort cost (Q3_K shader is the most
+   complex in the legacy/K-quant family). Once fixed, wave-2
+   has 4 candidates with the same workflow.
+
+C. **Bump `MAXIMUM_MEMORY` to 8 GB (deferred §12).** Would
+   admit Q4_K_M / Q4_K_S of larger models without needing
+   Q3_K. Requires verifying browser support for >4 GB WASM
+   heaps, which has historically been spotty. Quick to try
+   (one CMake flag); slow to validate.
+
+D. **Pick up a deferred kernel-tuning lever.** §A subgroup-
+   cooperative loading is now more attractive: at 7B Q4_K_S
+   the §A ceiling rose from ~13% (4B Q4_0) to ~18% of decode
+   time. Mistral-7B is a fresh perf baseline for testing.
 
 B. **Pick up a deferred kernel-tuning lever (§A subgroup
    loading, §B FA shape-routing).** The 7-model wave-1
@@ -1895,12 +2040,28 @@ investigating "the engine."
 
     **Wave 2: register 7B+ candidates with small quants if the
     WASM 4 GB cap allows.** Q4_0 7B = ~3.94 GB just for weights —
-    sits right at the WASM cap; will probably need Q3_K_M (~3.0 GB)
-    or smaller. Candidates to register:
-    - Llama-3.1-8B-Instruct (or Llama-3.2-equivalent)
-    - Qwen3-7B / Qwen3-8B
-    - Mistral-7B-Instruct-v0.3
-    - Gemma-2-9B (probably won't fit)
+    sits right at the WASM cap; would need Q3_K_M (~3.4 GB) or
+    smaller. **Q3_K shader is broken (bug #28)** so K-quants are
+    forced to Q4_K_S/Q4_K_M; only Q4_K_S (3953 MB Mistral) fits.
+    Practical wave-2 ceiling at the current llama.cpp upstream is
+    7B Q4_K_S. Candidates:
+    - [x] `mistral-7b-instruct-v0.3-q4ks` — DONE 2026-04-26.
+      Steady-state 34.4 tok/s / profile-mode 28.0 / 650
+      dispatches/token / 26/36 = 68% accuracy. Q3_K_M attempt
+      first (gibberish — bug #28). Q4_K_S workaround works.
+      See "Completed on 2026-04-26 §12" above.
+    - Llama-3.1-8B-Instruct — Q4_K_S 4475 MB > WASM cap.
+      Q3_K_S 3495 MB fits but routes through broken Q3_K
+      shader. Blocked on either bug #28 fix OR
+      MAXIMUM_MEMORY bump.
+    - Qwen3-7B / Qwen3-8B — Qwen3-7B has no published mirror
+      tested yet; Qwen3-8B Q4_K_S 4580 MB > cap, Q3_K_S 3595
+      MB blocked on bug #28. Same blocker.
+    - Mistral-7B-Instruct-v0.7 — Mistral-v0.7+ uses
+      `[SYSTEM_PROMPT]` template (already detected as
+      `mistral-v7`), but no Q4_K_S verified < 4 GB cap yet.
+    - Gemma-2-9B (probably won't fit; deferred per §9
+      architecture gap above for the 2B variant).
 
     **Per-model action sequence:**
     1. Register a smoke profile in `eval/smoke-profiles.ts` —

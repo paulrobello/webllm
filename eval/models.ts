@@ -406,6 +406,34 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		downloadUrl: "https://huggingface.co/mlc-ai/gemma-2-2b-it-q4f16_1-MLC",
 		ggufUrl: "https://huggingface.co/bartowski/gemma-2-2b-it-GGUF",
 	},
+
+	// --- Wave 2 (7B+) ---
+	// Q4_0 7B = ~4.46 GB exceeds the WASM 4 GiB streaming cap. Q3_K_M
+	// (3.36 GB) was tried first and produced gibberish output — the Q3_K
+	// matmul kernel has a correctness bug not exercised by wave-1
+	// (which pinned to Q4_0 / Q8_0 across the fleet; §9 tested Q4_K_M
+	// briefly). Q4_K_S (3.95 GB) fits with margin and uses the same
+	// Q4_K shader family that §9 verified works. Mistral architecture
+	// reports as "llama" in GGUF and uses the [INST]/[/INST] llama2-
+	// style chat template. Bartowski mirror is open.
+	{
+		id: "mistral-7b-instruct-v0.3-q4ks",
+		name: "Mistral 7B Instruct v0.3",
+		family: "Mistral",
+		architecture: "mistral",
+		paramsB: 7.25,
+		vramMB: 4400,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3",
+		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+		ggufFilePattern: "Q4_K_S",
+	},
 ];
 
 /** Tier display order and labels. */
