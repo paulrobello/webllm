@@ -1617,72 +1617,72 @@ D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    interactions). Multi-day engineering. Only worth it
    for wave-3 12B+ candidates that need Q4_K_S+.
 
-B. **Pick up a deferred kernel-tuning lever (§A subgroup
-   loading, §B FA shape-routing).** The 7-model wave-1
-   baseline is now a strong regression-detection harness.
-   §A's realistic ceiling at the current scale is ~13% of
-   decode time (per §6–§9 analysis); §B helps prefill TTFT
-   and matters more for longer prompts. §B may also become
-   more attractive at 7B+ where K-dimension grows further.
+E. **Other deferred items** (lower priority than A/B):
+   - **§B FA shape-routing** for prefill/TTFT (§5 path a).
+     FA's main win is seq>1; long-prompt latency lever.
+     Becomes more attractive at 8B+ where K-dimension grows.
+   - **§C drafter-based speculative decoding.** Large
+     project; 2-3× wall-clock potential. Drafter could be
+     wave-1 small (smollm2-360m, qwen3-0.6b) paired with a
+     7B-8B target.
+   - **§D encoder/embedding perf pass.** Untouched since
+     §21 dashboard.
+   - **Deferred wave-1 architectures** (Gemma 2, Phi 3) —
+     5+ gaps for Gemma; mostly fused-QKV for Phi 3. See
+     "Completed on 2026-04-26" §9.
 
-C. **Implement one of the deferred architectures (Gemma 2
-   or Phi 3).** §9 in "Completed on 2026-04-26" has the
-   feature inventory for both. Gemma 2 is more work
-   (5 distinct gaps); Phi 3 is mostly fused-QKV unpacking.
+**Net characterization at 8B IQ3_M (post-§13):** matmul =
+71% of graph × 97% of step ≈ **69% of decode time** —
+dominant bucket by a wide margin. §A subgroup-cooperative
+loading ceiling is ~28% of decode at 8B IQ3_M (matmul
+fraction × ~40% bandwidth-bound fraction from §9 Stub B).
+That's 2× the lever's 4B Q4_0 ceiling; §A becomes
+markedly more attractive at the new scale. Whether it pays
+its theoretical ceiling is still open — measure on the
+existing baselines before extending the fleet.
 
-D. **`qwen2.5-coder-1.5b` / Hermes-3 cold-temp follow-ups**
-   only matter if a code-gen task or tool-calling comparison
-   becomes load-bearing for the dashboard.
+Boot sequence for a fresh session:
 
-**Decode tuning at the current scale remains characterized
-as bottomed out** — §6/§7/§8/§9 measured the bandwidth-bound
-fraction at ~40% of matmul on Q8 / ~20% on Q4, ceiling for
-any pure-bandwidth lever ~13% of decode time. The 4B data
-point in §10 #10 is consistent: matmul leads decisively
-(35.6%) but the absolute bandwidth budget per matmul keeps
-growing with hidden size, so percentage-of-decode for any
-matmul lever stays in the 10-13% range. Whether subgroup-
-cooperative loading actually pays its 13% ceiling is open.
-
-Boot sequence (any of A-D):
-
-1. `make checkall` — confirm 393 pass / 5 skip / 0 fail
-   (was 392 before §11's sub-view regression test).
-2. `git -C ~/Repos/llama.cpp log --oneline -10 webllm-browser-patches`
+1. `make checkall` — confirm 393 pass / 5 skip / 0 fail.
+2. `git log --oneline -5` — confirm `0b863f5` (wave-2 model
+   2 — Llama-3.1-8B IQ3_M) and `83dc890` (wave-2 model 1
+   + bug #28) at the tip.
+3. `git -C ~/Repos/llama.cpp log --oneline -10 webllm-browser-patches`
    — confirm the 10-patch stack is intact.
-3. Read the "Completed on 2026-04-26" section, especially
-   §10 (qwen3-4b headline + cross-family pattern) and §11
-   (loader/parser API change — important if your work
-   touches `GgufParser`/`ModelLoader`/`loadWeights`).
+4. Read "Completed on 2026-04-26" §12 (Mistral 7B Q4_K_S +
+   bug #28 discovery) and §13 (Llama 3.1 8B IQ3_M + IQ-
+   family workaround). The full cross-family table at the
+   end of §13 is the headline.
 
-Verify GGUF mirrors *before* running smoke-bench — wave 1
-hit three bad mirrors (smollm2-360m's huggingface-quants
-→ 401, hermes-3's NousResearch → no Q4_0, qwen3-4b's
-official Qwen mirror → only K-quants). Unsloth and
-bartowski have been the reliable fallbacks. Probe via
-`curl -s "https://huggingface.co/api/models/<repo>/tree/main"`
-filtered through `python3` to list `.gguf` files + sizes.
+If continuing wave 2 (option A): GGUF mirror probe FIRST
+via `curl -s "https://huggingface.co/api/models/<repo>/tree/main" | python3 -c "..."`.
+Wave 1 hit three bad mirrors and wave-2's Mistral mirror
+also lacked Q4_0. Unsloth and bartowski have been the
+reliable fallbacks. Pin `ggufFilePattern` in `eval/models.ts`
+and verify the chosen quant's code path is supported (Q3_K
+broken; Q4_K_S/M working; IQ-family working including
+IQ3_M / IQ3_S / IQ3_XXS / IQ4_XS).
 
-Old kernel-tuning targets remain available as **deferred** items:
+If picking up §A subgroup-cooperative loading (option B):
+the kernel lives at
+`~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`.
+The §6–§9 stub diagnostics (TODO §6 / §7 / §8 in this file)
+characterized matmul as bandwidth-bound on Q4_0 / Q8_0 with
+src0 (weights) the dominant cost. §A's design is to share
+src0 reads across subgroup threads via `subgroupBroadcast` /
+`subgroupShuffle`. Validate against the 3-baseline regression
+harness: TinyLlama Q4_0 / Mistral 7B Q4_K_S / Llama 3.1 8B
+IQ3_M.
 
-- **§A — subgroup-cooperative `q_packed` loading** (last
-  bandwidth lever; realistic ceiling ~13% decode; was the prior
-  §10 entry, now demoted).
-- **§B — FA shape-routing for prefill/TTFT** (§5 path a;
-  higher-impact for long prompts; FA's main win is seq>1).
-- **§C — drafter-based speculative decoding** (large project;
-  2-3× wall-clock potential).
-- **§D — encoder/embedding perf pass** (untouched since §21).
+Note: the smoke page does a shader-cache warmup after [6/8]
+engine adoption. If you see "1.0 tok/s" on the smoke page
+after a fresh WASM rebuild, the warmup didn't run —
+investigate before investigating "the engine."
 
-These deferred targets are below the size campaign in priority,
-not abandoned — pick them up after wave 1 lands or if the
-campaign hits a blocker (e.g., WASM cap forces a quant rewrite
-for 7B+).
-
-Note: the smoke page now does a shader-cache warmup after [6/8]
-engine adoption. If you see "1.0 tok/s" on the smoke page after
-a fresh WASM rebuild, the warmup didn't run — investigate before
-investigating "the engine."
+Bench-profile speed-phase intermittent failure: if chat-
+smoke times out at 180s on 8B+ models, run `make smoke-stop
+&& make smoke-restart` to clear stale agentchrome state,
+then retry. Not a regression in the bench harness.
 
 ### Historical context (for archive — do not action again)
 
