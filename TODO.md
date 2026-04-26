@@ -78,7 +78,8 @@
 > 3B+ scale (memory pressure, KV cache size, dispatch counts may
 > reshape the profile in ways that change which lever matters).
 >
-> **Wave 1 progress (2026-04-26):** 6/10 done · 2 deferred.
+> **Wave 1 complete (2026-04-26):** 7/10 done · 2 deferred ·
+> 1 optional skipped.
 > - smollm2-360m-q4f16: 106 tok/s steady-state Q4_0 / 24/36 (62%).
 > - qwen2.5-1.5b-q4f16: 84 tok/s / 29/36 (81%). Run uncovered
 >   bug #25 — qwen2 attention biases were silently dropped
@@ -88,8 +89,7 @@
 >   GQA, KV 1536 MB (largest). 31% faster than Qwen3-1.7B at
 >   same params.
 > - qwen2.5-3b-q4f16: 45 tok/s / 32/36 (86%). 36 layers, GQA
->   8:1. Highest non-qwen3 accuracy in fleet. Bias path (#25)
->   generalizes cleanly to 3B.
+>   8:1. Bias path (#25) generalizes cleanly to 3B.
 > - llama-3.2-3b-q4f16: 58 tok/s / 27/36 (76%). 28 layers, GQA
 >   3:1, KV 896 MB. 29% faster than qwen2.5-3b at same scale.
 >   Encode overhead 15.5% — new fleet low.
@@ -98,15 +98,34 @@
 >   exact match); tool-calling advantage invisible at warm
 >   temp (gate at 0.4). Sanity-check entry confirming the
 >   fine-tune doesn't change inference cost profile.
+> - **qwen3-4b-q4f16: 35.5 tok/s / 32-33/36 (88-90%).** 36 layers,
+>   GQA 4:1, KV 144 MB, 805 dispatches/token (matched §10
+>   prediction within 1%). **Highest accuracy in fleet** (90%
+>   thinking-on; 88% off — beats prior leader qwen2.5-3b's 86%).
+>   Required new GGUF-streaming-into-WASM-heap loader path
+>   (Completed 2026-04-26 §11) to fit through Chrome's 2 GiB
+>   single-allocation cap.
 > - DEFERRED: gemma-2-2b (pre+post norm pairs, logit/attn
 >   soft-cap, sliding-window, (1+w) RMSNorm), phi-3.5-mini
 >   (fused QKV).
 >
-> Cross-family speed/accuracy pattern is robust across the
-> 1.5-3B span: **Llama family fastest/lower-accuracy → Qwen
-> family slower/higher-accuracy**. Speed delta tracks
-> dispatch count (layer count + arch-specific extras), not
-> param count.
+> Cross-family speed/accuracy pattern is now confirmed across
+> the full 0.6B → 4B span: **Llama family fastest/lower-
+> accuracy → Qwen family slower/higher-accuracy**. Speed delta
+> tracks dispatch count (layer count + arch-specific extras),
+> not param count. Within Qwen, accuracy keeps climbing into
+> 4B (qwen3-1.7B 82-89% → qwen3-4B 88-90%).
+>
+> **Loader / parser refactor 2026-04-26 (Completed §11):**
+> smoke loader streams GGUF directly into WASM heap; parser
+> API takes `Uint8Array` (sub-view aware); `loadWeights`
+> accepts a callback source for HEAPU8-backed bytes;
+> `uploadRangeChunked` re-derives source views per-chunk after
+> scratch malloc to survive heap-grow detachment;
+> `ctxCreate` memSize no longer over-allocates by
+> `ggufCtx.totalDataSize` (pre-existing bug — `no_alloc=true`
+> means that buffer was never used). Unblocks all wave-2
+> 7B+ candidates; reclaims multi-GB headroom across all sizes.
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -1141,99 +1160,236 @@ needs to be collected.
    of HF bandwidth per attempt. Adding either family is now a
    concrete future task with the inventory above as the spec.
 
+10. **§10 wave 1, model 7 (final supported): qwen3-4b-q4f16
+    registered + benched — wave 1 complete.** Largest model
+    in fleet (4.0B, 36 layers, qwen3 arch with q/k norm).
+    First model to require the GGUF-streaming-into-WASM-heap
+    path (see §11 below). Highest accuracy in fleet at the
+    cost of throughput.
+    - **Profiles registered:** `qwen3-4b-warm` and
+      `qwen3-4b-thinking-warm` (qwen3 family gets both modes
+      per 0.6B/1.7B convention) in `eval/smoke-profiles.ts`;
+      added to `SMOKE_PROFILE_SETS.full` and `qwen3-sizes`.
+    - **Repo + quant:** `Qwen/Qwen3-4B-GGUF` (the official
+      mirror) carries only K-quants + Q5/Q6/Q8 (no Q4_0).
+      Switched to `unsloth/Qwen3-4B-GGUF` and pinned
+      `ggufFilePattern: "Q4_0."` (trailing dot, llama-3.2-3b
+      style — defensive against any future ARM-repack
+      variants). File 2375.8 MB (Q4_0).
+    - **Architecture (qwen3 / GGUF metadata):** 36 layers ·
+      n_head 32 · n_head_kv 8 (GQA 4:1) · embedding 2560 ·
+      head_dim 128 · ctx_max 40960 (we run at 4096) · vocab
+      151936. KV cache @ ctx=4096 ≈ 144 MB
+      (`2 × 36 × 8 × 128 × 4096 × 4 / 1048576 = 144`).
+    - **Speed (3-trial median, `eval/perf.ts`):**
+      - **Steady-state 35.5 tok/s** (runs: 35.3 / 35.5 / 37.9).
+        Cleanest 3-trial spread in fleet.
+      - **Profile-mode ~32 tok/s** (single trial, perturbation
+        ~10% — much smaller fraction than smaller models since
+        graph compute dominates more thoroughly here).
+    - **Profile-mode backend attribution (18-step decode):**
+      - `backendMatmulMs`: 10.54 mean / **35.6% of graph** —
+        matmul leads decisively, consistent with the §6–§9
+        bandwidth-bound matmul characterization at scale.
+      - `backendEncodeOverheadMs`: 4.90 mean / 16.5% of graph
+        — encode overhead's *fraction* keeps shrinking as
+        scale grows (smollm2-360m 33% → qwen2.5-3b 18% →
+        qwen3-4b 16.5%); *absolute* cost stays roughly flat
+        across the fleet. Encode-overhead dominance is a
+        sub-1B-class concern.
+      - `backendAttentionMs`: 0.71 mean / 2.4% of graph
+        (lowest fraction in fleet).
+      - `backendDispatchCount`: **805/token** — matches the
+        TODO §10 prediction ("a 4B model with ~36 layers
+        would hit ~810/token"). Within 1% of the projection.
+    - **Smoke chat regression:** PASSED. Output (off):
+      `"Why don't skeletons fight each other? Because they
+      don't have the guts! 😄"` — finish=eos, 19 tokens, no
+      console errors. Thinking-on output also coherent with
+      `<think>` block (~200 reasoning tokens) → punchline.
+    - **Accuracy (`bench-full --profiles qwen3-4b-warm
+      qwen3-4b-thinking-warm`):**
+      - **Off: 32/36 = 88%.** Highest non-thinking accuracy
+        in fleet (qwen2.5-3b held the prior record at 86%).
+      - **Thinking: 33/36 = 90%.** Highest overall in fleet.
+      Tool-calling skipped (temp 0.6 > 0.4 gate); embedding
+      skipped (model lacks the capability). Both dots
+      ingested into the live dashboard via SSE; verified
+      `qwen3-4b-warm thinking=off overall=0.88 /
+      qwen3-4b-thinking-warm thinking=on overall=0.90` via
+      `/evals` API.
+    - **Cross-family scaling pattern confirmed at 4B.**
+      Wave-1 evidence is now consistent across 0.6B → 4B:
+      Llama family fastest/lower-accuracy → Qwen family
+      slower/higher-accuracy. qwen3-4b at 35 tok/s sits
+      ~22% below qwen2.5-3b's 45 tok/s for ~30% more params,
+      with comparable dispatch counts (805 vs 841). Speed
+      delta tracks **matmul bandwidth** (qwen3-4b hidden=2560
+      vs qwen2.5-3b hidden=2048; ~25% more bytes per matmul).
+      Accuracy +2-4 points over qwen2.5-3b.
+    - **Wave 1 final tally: 7/10 done · 2 deferred (gemma-2-2b,
+      phi-3.5-mini per §9) · 1 optional skipped
+      (qwen2.5-coder-1.5b — code-gen eval not in scope).
+      Wave 1 complete.**
+
+11. **GGUF streaming into WASM heap — unblocks all 4B+ models.**
+    Discovered while attempting wave-1 model 7: a JS-side
+    `new Uint8Array(N)` allocation caps at ~2 GiB on this
+    Chrome (probed: 2000 MB OK, 2147 MB fails with "Array
+    buffer allocation failed"). Q4_0 4B is 2266 MB — exceeded
+    the cap before we even reached WASM. The previous fetch
+    pattern also peaked at 2× file size (chunks-array +
+    flat-buffer concat) which would OOM Chrome at ~1 GiB
+    files due to memory pressure even when the single
+    allocation would fit.
+    - **Fix landed (this session):**
+      1. **Parser API change.** `GgufParser.parse` and
+         `ModelLoader.parseModel` now accept `Uint8Array`
+         instead of `ArrayBuffer`. The parser uses
+         `new DataView(data.buffer, data.byteOffset, data.
+         byteLength)` so a sub-view at non-zero offset works
+         correctly — guarded by a new sub-view regression
+         test in `tests/gguf-parser.test.ts`.
+      2. **`loadWeights` accepts a callback source.**
+         `ModelInference.loadWeights` and
+         `EncoderInference.loadWeights` accept either a
+         `Uint8Array` (existing path) or a
+         `(srcOffset, byteLength) => Uint8Array` callback.
+         Required because `wasm.ctxCreate` and
+         `backendAllocCtxTensors` can grow WASM memory,
+         which detaches any pre-existing JS view of HEAPU8;
+         the callback re-derives a fresh view from the live
+         heap on each access.
+      3. **`uploadRangeChunked` added to `GgmlWasm`.** New
+         method takes the same callback. The internal 4 MiB
+         scratch malloc inside the chunk loop can also
+         trigger growth (and detach the source view between
+         construction and `set`); `uploadRangeChunked`
+         resolves the callback *after* the malloc, once per
+         chunk, so the slice is always derived from the
+         current HEAPU8.
+      4. **Smoke loader streams into WASM heap.** Reordered
+         steps: [1/8] WebGPU init → [2/8] Fetch
+         (malloc model region in heap, stream chunks via
+         `wasm.heapU8.set(chunk, ptr+off)`) → [3/8] Parse →
+         [4/8] Load weights via the callback path. After
+         loadWeights, `wasm.free(modelPtr)` reclaims the
+         staging copy before KV cache + graph buffers
+         allocate. View can exceed 2 GiB because views over
+         a backing ArrayBuffer ≥ 2 GiB are allowed even
+         when allocations aren't.
+    - **Second fix: `ctxCreate` memSize was over-allocating.**
+      Both `ModelInference.loadWeights` and
+      `EncoderInference.loadWeights` were calling
+      `wasm.ctxCreate(tensors.length * 16384 + ggufCtx.
+      totalDataSize + 1MB)`. But `ctx_create` in
+      `webgpu-bridge.cpp` sets `no_alloc=true`, so the
+      ggml mempool only holds tensor *metadata* — actual
+      tensor data lives in GPU buffers via
+      `backendAllocCtxTensors`. Adding `totalDataSize`
+      reserved a multi-GB unused buffer. For Q4_0 4B that
+      was 2267 MB on top of the 2376 MB model staging copy,
+      pushing total WASM allocation past the 4 GB cap.
+      Removed `+ ggufCtx.totalDataSize` from both call
+      sites; verified no regression on qwen3-0.6b
+      (629 dispatches, matmul 3.78 ms — within noise of
+      pre-fix). This fix likely also helps headroom on
+      wave-2 7B+ entries.
+    - **Verification:** all 393 unit tests pass (added 1 for
+      sub-view parsing). qwen3-0.6b streams through the new
+      path with no regression. qwen3-4b passed end-to-end
+      smoke + 2 bench-full profiles. The `loadWeights`
+      callback path is wired through to `uploadRangeChunked`
+      only when invoked from the smoke loader; the
+      `Uint8Array` path (engine.ts, tests, smoke-test/index.html
+      synthetic-GGUF flow) still uses the original
+      `uploadToTensorChunked` so the existing static-buffer
+      callers are unaffected.
+    - **What this unblocks:** all wave-2 candidates (7B+ at
+      Q3_K_M, ~3 GB; 8B at Q3_K_S, ~3.4 GB) are now within
+      the loader's reach. Remaining ceiling is the WASM
+      4 GB cap itself, which gates how big a model + KV +
+      activation working set can coexist. For an 8B Q3_K_M
+      with KV ≈ 256 MB at ctx=4096, total ≈ 3.5 GB
+      committed during load — close but possible.
+
 ### Resumption checklist (start a fresh session here)
 
-**Next target: Active Step §10 — large-model test campaign,
-wave 1 model 7 (final supported).** Wave 1 progress: 6/10 + 2
-deferred. The final supported wave-1 entry is
-**`qwen3-4b-q4f16` (4.0B)** — largest registered model and the
-stress test for the current WASM/GPU memory budget at Q4. Same
-arch as qwen3-1.7b (qwen3 with q/k norm). KV cache size will
-likely land in the 600-1000 MB range depending on GQA ratio;
-weights at Q4 should be ~2.4 GB so well within the 4 GB WASM
-cap with headroom for KV + activations.
+**Wave 1 is complete (7/10 done · 2 deferred · 1 optional
+skipped).** All 7 supported wave-1 entries have steady-state
+tok/s, profile-mode backend attribution, accuracy from
+bench-full, and dashboard dots. Cross-family scaling pattern
+holds across the 0.6B → 4B span.
 
-After qwen3-4b, wave 1 is complete: 7/10 supported entries
-landed, 2 deferred for arch gaps (gemma-2-2b, phi-3.5-mini),
-and 1 optional skipped (qwen2.5-coder-1.5b — only worth running
-if a code-gen eval task is in scope; same arch as qwen2.5-1.5b
-already covered).
+A side-quest landed during the qwen3-4b bench (Completed on
+2026-04-26 §11): the smoke loader now streams GGUF into the
+WASM heap, parser API takes `Uint8Array` (with sub-view
+support), and `loadWeights` accepts a callback source for
+WASM-heap-backed bytes. This unblocks all wave-2 candidates
+(7B+ at Q3_K_M / Q3_K_S) which would otherwise hit the JS
+2 GiB single-allocation cap. Plus a separately-discovered
+ctxCreate over-allocation bug (`+ ggufCtx.totalDataSize`
+when `no_alloc=true`) was reclaiming a multi-GB unused
+buffer — fix benefits all sizes, was load-bearing for 4B+.
 
-No 7B+ model is registered yet (wave 2). Q4_0 7B = ~3.94 GB —
-sits right at the WASM cap; will probably need Q3_K_M (~3.0 GB)
-or smaller. Candidates listed in §10's wave-2 block above.
+**Next target options (pick one — no implicit ordering):**
 
-**Decode tuning is paused at the current scale** — §6/§7/§8/§9
-showed the bandwidth-bound fraction is ~40% of matmul on Q8 /
-~20% on Q4, ceiling for any further pure-bandwidth lever ~13%
-of decode time. Whether that picture holds at 3B–4B scale is the
-first thing the campaign needs to answer; the kernel-tuning
-levers (subgroup-cooperative loading, FA shape-routing) are
-deferred behind that.
+A. **Pivot to wave 2 (7B+ models).** §11 cleared the JS
+   loader cap. Candidates listed in §10's wave-2 block:
+   Llama-3.1-8B / Qwen3-7B / Qwen3-8B / Mistral-7B-v0.3.
+   Q4_0 7B = ~3.94 GB sits right at the WASM 4 GB cap so
+   start with Q3_K_M / Q3_K_S (~3.0–3.4 GB). Tests will
+   reveal whether the bandwidth-bound matmul characterization
+   from §6–§9 holds at 7B+; family-pattern scaling slope
+   (Llama-faster vs Qwen-higher-accuracy) is the second
+   question to answer. **Do verify the mirror has a small
+   enough quant before running** — check unsloth/bartowski
+   trees via `curl -s "https://huggingface.co/api/models/
+   <repo>/tree/main"`.
 
-Boot sequence:
+B. **Pick up a deferred kernel-tuning lever (§A subgroup
+   loading, §B FA shape-routing).** The 7-model wave-1
+   baseline is now a strong regression-detection harness.
+   §A's realistic ceiling at the current scale is ~13% of
+   decode time (per §6–§9 analysis); §B helps prefill TTFT
+   and matters more for longer prompts. §B may also become
+   more attractive at 7B+ where K-dimension grows further.
 
-1. `make checkall` — confirm 392 pass / 5 skip / 0 fail (was 391
-   before bug-fix #27 added the `modelSupportsThinking` test).
+C. **Implement one of the deferred architectures (Gemma 2
+   or Phi 3).** §9 in "Completed on 2026-04-26" has the
+   feature inventory for both. Gemma 2 is more work
+   (5 distinct gaps); Phi 3 is mostly fused-QKV unpacking.
+
+D. **`qwen2.5-coder-1.5b` / Hermes-3 cold-temp follow-ups**
+   only matter if a code-gen task or tool-calling comparison
+   becomes load-bearing for the dashboard.
+
+**Decode tuning at the current scale remains characterized
+as bottomed out** — §6/§7/§8/§9 measured the bandwidth-bound
+fraction at ~40% of matmul on Q8 / ~20% on Q4, ceiling for
+any pure-bandwidth lever ~13% of decode time. The 4B data
+point in §10 #10 is consistent: matmul leads decisively
+(35.6%) but the absolute bandwidth budget per matmul keeps
+growing with hidden size, so percentage-of-decode for any
+matmul lever stays in the 10-13% range. Whether subgroup-
+cooperative loading actually pays its 13% ceiling is open.
+
+Boot sequence (any of A-D):
+
+1. `make checkall` — confirm 393 pass / 5 skip / 0 fail
+   (was 392 before §11's sub-view regression test).
 2. `git -C ~/Repos/llama.cpp log --oneline -10 webllm-browser-patches`
-   — confirm the 10-patch stack is intact (last rebase landed
-   2026-04-25, no new patches in 2026-04-26 work).
-3. Read the "Completed on 2026-04-26" section §1-§8 for the
-   six wave-1 model results + dashboard improvements + the two
-   architectural deferrals (gemma-2-2b, phi-3.5-mini). Cross-
-   family pattern across the 1.5-3B span is well-established:
-   **Llama family fastest/lower-accuracy → Qwen family slower/
-   higher-accuracy**. Speed delta tracks dispatch count, not
-   param count. Wave-1 progress preamble at the top of TODO.md
-   carries the headline tok/s + accuracy table.
-4. **Primary action: bench qwen3-4b-q4f16 (final supported
-   wave-1 entry).** Register `qwen3-4b-warm` and
-   `qwen3-4b-thinking-warm` (qwen3 family gets both modes —
-   mirroring qwen3-0.6b/1.7b convention) in
-   `eval/smoke-profiles.ts`. Pin `ggufFilePattern: "Q4_0"` on
-   the eval/models.ts entry (default picker would fall through
-   to Q4_K_M). Verify `Qwen/Qwen3-4B-GGUF` (or unsloth/bartowski
-   mirror) is open before running smoke-bench. Run:
-   - `make smoke-bench PERF_MODEL=qwen3-4b-q4f16 PERF_RUNS=3`
-     for profile-mode + `bun run eval/perf.ts --model qwen3-4b
-     -q4f16 --runs 3` for steady-state.
-   - `bun run eval/bench.ts --profiles qwen3-4b-warm
-     qwen3-4b-thinking-warm --fail-fast` with
-     `WEBLLM_LIVE_BENCH_URL=http://localhost:8033` set.
-   - Watch for: WASM memory exhaustion on load (Q4_0 4B should
-     be ~2.4 GB weights, well under cap), GPU buffer allocation
-     failures, KV-cache size at the model's default GQA ratio
-     (likely 600-1000 MB at ctx=4096), dispatch-count growth
-     (qwen3-1.7b reports 629/token; qwen3-4b is likely 36-40
-     layers × ~22 ops/layer ≈ 800-880).
-   - Update TODO with Completed-on §9 entry: tok/s steady-state
-     + profile-mode, matmul ms / fraction, encode%, dispatch
-     count, KV cache size, accuracy. If qwen3-4b accuracy
-     surpasses qwen2.5-3b (86%), the cross-family pattern's
-     scaling slope is confirmed.
-5. **After qwen3-4b lands, wave 1 is complete.** Decide at that
-   point whether to:
-   - Pivot to **wave 2** (register 7B+ candidates with
-     Q3_K_M/Q3_K_S quants — Q4_0 7B at 3.94 GB sits right at
-     the WASM cap so a smaller quant is needed). The §6-§9
-     bandwidth-bound matmul characterization plus the wave-1
-     family pattern can predict 7B speed; bench-full can
-     measure it.
-   - Pick up a **deferred kernel-tuning lever** (§A subgroup
-     loading, §B FA shape-routing) using the 6-7 model wave-1
-     baseline as the regression-detection harness.
-   - Implement one of the **deferred architectures**
-     (Gemma 2 — see "Completed on 2026-04-26 §9" for the
-     5-feature inventory; or Phi 3 — fused QKV + FFN fused
-     gate_up).
-   - Address the **`qwen2.5-coder-1.5b` / Hermes-3 cold-temp
-     follow-ups** if a code-gen task or tool-calling
-     comparison becomes load-bearing for the dashboard.
+   — confirm the 10-patch stack is intact.
+3. Read the "Completed on 2026-04-26" section, especially
+   §10 (qwen3-4b headline + cross-family pattern) and §11
+   (loader/parser API change — important if your work
+   touches `GgufParser`/`ModelLoader`/`loadWeights`).
 
 Verify GGUF mirrors *before* running smoke-bench — wave 1
-hit two bad mirrors (smollm2-360m's huggingface-quants → 401,
-hermes-3's NousResearch → no Q4_0). Bartowski has been the
-reliable fallback for both. Probe the model tree via
+hit three bad mirrors (smollm2-360m's huggingface-quants
+→ 401, hermes-3's NousResearch → no Q4_0, qwen3-4b's
+official Qwen mirror → only K-quants). Unsloth and
+bartowski have been the reliable fallbacks. Probe via
 `curl -s "https://huggingface.co/api/models/<repo>/tree/main"`
 filtered through `python3` to list `.gguf` files + sizes.
 
@@ -1728,9 +1884,14 @@ investigating "the engine."
     - [-] `phi-3.5-mini-q4f16` (3.82B) — DEFERRED 2026-04-26.
       Architectural gap: needs fused QKV projection unpacking
       and FFN gate_up split. Inventory in §8 above.
-    - `qwen3-4b-q4f16` (4.0B) — **largest registered**; the
-      stress test for current WASM/GPU memory budget at Q4.
-      Same arch as qwen3-1.7b (qwen3 with q/k norm) — supported.
+    - [x] `qwen3-4b-q4f16` (4.0B) — DONE 2026-04-26.
+      Steady-state 35.5 tok/s / profile-mode 32 / 805
+      dispatches/token (matched §10 prediction within 1%) /
+      32/36 = 88% off, 33/36 = 90% thinking-on. **Highest
+      accuracy in fleet.** 36 layers, GQA 4:1, KV 144 MB.
+      Required loader refactor (§11 below) to fit through
+      JS 2 GiB allocation cap. See "Completed on 2026-04-26
+      §10" above.
 
     **Wave 2: register 7B+ candidates with small quants if the
     WASM 4 GB cap allows.** Q4_0 7B = ~3.94 GB just for weights —
