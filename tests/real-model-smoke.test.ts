@@ -6,6 +6,7 @@ import {
 	getSmokeChatOptions,
 	getSmokePageCopy,
 	getSmokePageShellMarkup,
+	modelSupportsThinking,
 	shouldAutoInsertBos,
 	shouldRunSmokeDiagnostics,
 } from "../smoke-test/real-model-smoke.js";
@@ -134,4 +135,71 @@ test("prefill comparison helper logs batch versus sequential diagnostics", async
 		cls: "running",
 		msg: '  chat seq   top5: 0:"tok0"(0.45), 1:"tok1"(0.25), 2:"tok2"(0.10)',
 	});
+});
+
+test("modelSupportsThinking gates real thinking models from chat-template-only chatml", () => {
+	// Qwen3-style template references both `enable_thinking` and `<think>`.
+	expect(
+		modelSupportsThinking({
+			hyperparams: { architecture: "qwen3" },
+			tokenizerConfig: {
+				chatTemplate:
+					"{%- if enable_thinking is not defined %}{%- set enable_thinking = true %}{%- endif %}<|im_start|>assistant\n<think>\n",
+			},
+		}),
+	).toBe(true);
+
+	// Qwen2.5 chatml template lacks both markers.
+	expect(
+		modelSupportsThinking({
+			hyperparams: { architecture: "qwen2" },
+			tokenizerConfig: { chatTemplate: "<|im_start|>assistant\n" },
+		}),
+	).toBe(false);
+
+	// Llama-3.2 default template — no thinking markers.
+	expect(
+		modelSupportsThinking({
+			hyperparams: { architecture: "llama" },
+			tokenizerConfig: {
+				chatTemplate: "<|start_header_id|>assistant<|end_header_id|>\n\n",
+			},
+		}),
+	).toBe(false);
+
+	// BERT encoders never support thinking, even if their (non-existent)
+	// template happened to mention `<think>`.
+	expect(
+		modelSupportsThinking({
+			hyperparams: { architecture: "bert" },
+			tokenizerConfig: {
+				chatTemplate: "enable_thinking <think> trap",
+			},
+		}),
+	).toBe(false);
+
+	// Templates with only one marker don't qualify (defensive against
+	// templates that mention `<think>` in passing without wiring it up).
+	expect(
+		modelSupportsThinking({
+			hyperparams: { architecture: "qwen3" },
+			tokenizerConfig: { chatTemplate: "<think> only" },
+		}),
+	).toBe(false);
+	expect(
+		modelSupportsThinking({
+			hyperparams: { architecture: "qwen3" },
+			tokenizerConfig: { chatTemplate: "enable_thinking only" },
+		}),
+	).toBe(false);
+
+	// Defensive: missing fields don't throw.
+	expect(modelSupportsThinking(null)).toBe(false);
+	expect(modelSupportsThinking(undefined)).toBe(false);
+	expect(
+		modelSupportsThinking({
+			hyperparams: { architecture: "qwen3" },
+			tokenizerConfig: {},
+		}),
+	).toBe(false);
 });

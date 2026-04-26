@@ -28,6 +28,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		getSmokeSamplingConfig,
 		getSmokeSamplingOverridesFromParams,
 		getThinkingModeFromParams,
+		modelSupportsThinking,
 		shouldAutoInsertBos,
 	} = await import(`./real-model-smoke.js${assetSuffix}`);
 
@@ -169,6 +170,27 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			);
 		} catch (e) {
 			log("fail", `[2/8] Parse failed: ${e.message}\n${e.stack || ""}`);
+			return;
+		}
+
+		// Reject upfront if `?thinking=1` was set on a model whose chat
+		// template doesn't actually wire up thinking. Without this guard
+		// the engine silently runs with non-thinking semantics but the
+		// dashboard records `thinking: "on"`, polluting thinking-on/off
+		// comparison panels with runs that aren't real thinking. Encoder
+		// models also can't think (no generative loop). Fail fast — we
+		// haven't loaded weights to GPU yet so the abort is cheap.
+		if (thinkingEnabled && !modelSupportsThinking(parsed)) {
+			const archLabel = parsed.hyperparams.architecture;
+			log(
+				"fail",
+				`Thinking mode requested (?thinking=1) but model "${modelId}" ` +
+					`(arch=${archLabel}) does not support thinking. Only Qwen3-family ` +
+					`models with chat templates that reference both \`enable_thinking\` ` +
+					`and \`<think>\` are real thinking models. Remove the ` +
+					`thinking flag (or use the "switch off" link above) and reload.`,
+			);
+			setProgress(0);
 			return;
 		}
 

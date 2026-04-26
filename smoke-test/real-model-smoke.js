@@ -53,6 +53,24 @@ export function getThinkingModeFromParams(params) {
 	return v === "1" || v === "on" || v === "true";
 }
 
+/**
+ * Returns true iff the parsed model has a chat template that wires up
+ * thinking-block control. This matches the engine's gate in
+ * `chat-template.ts::shouldCloseThinkBlock` (template must reference
+ * both `enable_thinking` and `<think>`) and is the canonical signal
+ * for "this model is actually a thinking model". Llama, Mistral,
+ * Qwen2/2.5, SmolLM2, etc. all return false here. Qwen3 returns true.
+ *
+ * BERT-arch encoders never support thinking — they have no
+ * generative loop at all. Catch them up front for a cleaner error.
+ */
+export function modelSupportsThinking(parsed) {
+	if (!parsed?.hyperparams || !parsed.tokenizerConfig) return false;
+	if (parsed.hyperparams.architecture === "bert") return false;
+	const tmpl = parsed.tokenizerConfig.chatTemplate ?? "";
+	return tmpl.includes("enable_thinking") && tmpl.includes("<think>");
+}
+
 export function getSmokeSamplingConfig(
 	parsed,
 	detectChatTemplate,

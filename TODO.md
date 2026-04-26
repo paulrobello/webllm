@@ -168,6 +168,7 @@
 24. **`Generator.generate` computed `gpuMode` once, statically, before the decode loop** — `requiresFullLogitsSteering = (any qwen3 mask set configured)` forced `gpuMode = "full"` for the entire run. Once the smoke loop migrated onto the library, qwen3 thinking-off ran at ~17 tok/s on the full path instead of ~83 tok/s on the topk path, even on steps where no steering state was active. Replaced with per-step dynamic selection: `greedy` if sampler is greedy + no penalty; `topk` if `sampler.topK > 0` AND no current steering state (`thinkDepth === 0 && !waitingForVisibleAnswer && !hasVisibleAnswerText`); else `full`. The smoke loop's old code had this dynamic check inline; the library now matches.
 25. **Qwen2 / Qwen2.5 attention biases were silently dropped, producing random-token output.** Discovered while running §10 wave-1 model 2 (`qwen2.5-1.5b-q4f16`): the smoke chat regression "passed" structurally but emitted gibberish (`"ña！" szerǃ yaboler...`) and accuracy collapsed to 1/36 = 4%. `eval/models.ts` resolved to `qwen2.5-1.5b-instruct-q4_0.gguf`, which carries `blk.<i>.attn_q.bias`, `attn_k.bias`, `attn_v.bias` tensors that **only the qwen2 architecture uses** (Llama, Qwen3, Mistral, etc. all leave Q/K/V projections unbiased). `ModelInference.loadWeights` only requested the `.weight` tensors, so Q/K/V values were off by a constant shift in every layer, polluting attention scores from the first prefill step. Fix: added `qBias`/`kBias`/`vBias: TensorPtr | null` to `LayerWeights`, conditionally loaded mirroring the existing `qNorm`/`kNorm` pattern (lines 140-145), and wrapped every `opMulMat` of qProj/kProj/vProj with `opAdd(bias)` when present in all three forward branches (prefill, decode, debug-checkpoint). Verified post-fix: same model produces `"Why don't scientists trust atoms? Because they're always splitting up!"`, finish=eos, accuracy 29/36 = **81%**. Dispatch count went from 573 to 657 (+84 = 3 ops × 28 layers, exactly matches the per-layer bias add). Regression coverage is the smoke chat regression itself — a unit-level test would have to mock 15+ wasm methods and only test mechanical wiring; the live bench output is the higher-signal check.
 26. **Dashboard "Accuracy & tool-calling" panel listed embedding-only models with empty/zero rows.** `renderEvalDimensions()` and `renderEvalsTable()` in `smoke-test/dashboard.js` iterated over every eval, including embedding evals whose only dimension is `"embedding"`. The result: each arctic-embed run rendered as either a single embedding bar surrounded by null space (cards) or a row whose only dimension chip read `embedding: 1/1 · 100%` (table) — not the panel's intent, and duplicative against the dedicated Embeddings section that already shows cosine + latency + throughput. Same convention already existed in `renderDimGroupedChart()` at line 785 (`if (dims.length === 1 && dims[0] === "embedding") continue`); applied that pattern in `renderEvalDimensions`, `renderEvalsTable`, and the header `eval-count` badge in `renderEvals()` so all three reflect accuracy/tool-calling evals only.
+27. **Smoke page silently mis-bucketed `?thinking=1` runs on non-thinking models.** Llama, SmolLM2, Qwen2/2.5, etc. don't have `<think>`/`</think>` token IDs and don't reference `enable_thinking` in their chat templates. With `?thinking=1` set, the smoke page's `thinkingEnabled` flag still flowed through to: (a) `maxTokens 1024` instead of 64 (16× the decode budget for runs that can't terminate via `</think>`), (b) the run's recorded `thinking: "on"` field which polluted the dashboard's thinking-on/off comparison panels with non-thinking runs, and (c) the `assistantText` display path. The engine itself was safe — `isQwenChatml` gating in `engine.ts:240-296` plus `shouldCloseThinkBlock` gating in `chat-template.ts:107` meant no thinking-mask wiring or `<think>` template injection actually ran for non-qwen3 models. But the cosmetic and dashboard-level effects were still wrong, and the mis-routed runs were hard to spot. Fixed by adding `modelSupportsThinking(parsed)` to `smoke-test/real-model-smoke.js` (returns true iff the chat template references both `enable_thinking` and `<think>`, mirroring the engine's gate; encoders short-circuit to false). The smoke page checks this immediately after [2/8] parse and rejects with a clear error message before any GPU/WASM init happens — fail-fast, no wasted work. Verified end-to-end via agentchrome on tinyllama (rejects after [2/8] with the new error) and qwen3-0.6b (still progresses to [7/8] with thinking enabled). Regression test in `tests/real-model-smoke.test.ts` covers Qwen3 (true), Qwen2/Llama/BERT (false), partial-marker templates (false), and missing-field defensiveness.
 
 ---
 
@@ -1172,25 +1173,69 @@ deferred behind that.
 
 Boot sequence:
 
-1. `make checkall` — confirm 391 pass / 5 skip / 0 fail.
+1. `make checkall` — confirm 392 pass / 5 skip / 0 fail (was 391
+   before bug-fix #27 added the `modelSupportsThinking` test).
 2. `git -C ~/Repos/llama.cpp log --oneline -10 webllm-browser-patches`
    — confirm the 10-patch stack is intact (last rebase landed
-   2026-04-25).
-3. Read the "Inference Performance Optimizations" preamble for
-   §6–§9 background and the "Completed on 2026-04-26 §1" entry
-   for wave-1 model-1 numbers + the GGUF-mirror lesson, then
-   jump to Active Step §10 for the wave plan.
-4. Action: register `qwen2.5-1.5b-warm` (temperature 0.6,
-   `DEFAULT_PROMPT`) in `eval/smoke-profiles.ts`, add to
-   `SMOKE_PROFILE_SETS.full`, then `make smoke-bench
-   PERF_MODEL=qwen2.5-1.5b-q4f16 PERF_RUNS=3` followed by
-   `bun run eval/bench.ts --profiles qwen2.5-1.5b-warm
-   --fail-fast` (with `WEBLLM_LIVE_BENCH_URL` set). Verify the
-   `Qwen/Qwen2.5-1.5B-Instruct-GGUF` repo isn't gated *before*
-   running smoke-bench (smollm2-360m's first registered URL
-   was 401 — bartowski mirror fixed it). Watch for: WASM
-   memory exhaustion on load, GPU buffer allocation failures,
-   KV-cache-size scaling, dispatch-count growth.
+   2026-04-25, no new patches in 2026-04-26 work).
+3. Read the "Completed on 2026-04-26" section §1-§8 for the
+   six wave-1 model results + dashboard improvements + the two
+   architectural deferrals (gemma-2-2b, phi-3.5-mini). Cross-
+   family pattern across the 1.5-3B span is well-established:
+   **Llama family fastest/lower-accuracy → Qwen family slower/
+   higher-accuracy**. Speed delta tracks dispatch count, not
+   param count. Wave-1 progress preamble at the top of TODO.md
+   carries the headline tok/s + accuracy table.
+4. **Primary action: bench qwen3-4b-q4f16 (final supported
+   wave-1 entry).** Register `qwen3-4b-warm` and
+   `qwen3-4b-thinking-warm` (qwen3 family gets both modes —
+   mirroring qwen3-0.6b/1.7b convention) in
+   `eval/smoke-profiles.ts`. Pin `ggufFilePattern: "Q4_0"` on
+   the eval/models.ts entry (default picker would fall through
+   to Q4_K_M). Verify `Qwen/Qwen3-4B-GGUF` (or unsloth/bartowski
+   mirror) is open before running smoke-bench. Run:
+   - `make smoke-bench PERF_MODEL=qwen3-4b-q4f16 PERF_RUNS=3`
+     for profile-mode + `bun run eval/perf.ts --model qwen3-4b
+     -q4f16 --runs 3` for steady-state.
+   - `bun run eval/bench.ts --profiles qwen3-4b-warm
+     qwen3-4b-thinking-warm --fail-fast` with
+     `WEBLLM_LIVE_BENCH_URL=http://localhost:8033` set.
+   - Watch for: WASM memory exhaustion on load (Q4_0 4B should
+     be ~2.4 GB weights, well under cap), GPU buffer allocation
+     failures, KV-cache size at the model's default GQA ratio
+     (likely 600-1000 MB at ctx=4096), dispatch-count growth
+     (qwen3-1.7b reports 629/token; qwen3-4b is likely 36-40
+     layers × ~22 ops/layer ≈ 800-880).
+   - Update TODO with Completed-on §9 entry: tok/s steady-state
+     + profile-mode, matmul ms / fraction, encode%, dispatch
+     count, KV cache size, accuracy. If qwen3-4b accuracy
+     surpasses qwen2.5-3b (86%), the cross-family pattern's
+     scaling slope is confirmed.
+5. **After qwen3-4b lands, wave 1 is complete.** Decide at that
+   point whether to:
+   - Pivot to **wave 2** (register 7B+ candidates with
+     Q3_K_M/Q3_K_S quants — Q4_0 7B at 3.94 GB sits right at
+     the WASM cap so a smaller quant is needed). The §6-§9
+     bandwidth-bound matmul characterization plus the wave-1
+     family pattern can predict 7B speed; bench-full can
+     measure it.
+   - Pick up a **deferred kernel-tuning lever** (§A subgroup
+     loading, §B FA shape-routing) using the 6-7 model wave-1
+     baseline as the regression-detection harness.
+   - Implement one of the **deferred architectures**
+     (Gemma 2 — see "Completed on 2026-04-26 §9" for the
+     5-feature inventory; or Phi 3 — fused QKV + FFN fused
+     gate_up).
+   - Address the **`qwen2.5-coder-1.5b` / Hermes-3 cold-temp
+     follow-ups** if a code-gen task or tool-calling
+     comparison becomes load-bearing for the dashboard.
+
+Verify GGUF mirrors *before* running smoke-bench — wave 1
+hit two bad mirrors (smollm2-360m's huggingface-quants → 401,
+hermes-3's NousResearch → no Q4_0). Bartowski has been the
+reliable fallback for both. Probe the model tree via
+`curl -s "https://huggingface.co/api/models/<repo>/tree/main"`
+filtered through `python3` to list `.gguf` files + sizes.
 
 Old kernel-tuning targets remain available as **deferred** items:
 
