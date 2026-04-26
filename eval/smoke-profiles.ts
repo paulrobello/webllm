@@ -172,6 +172,13 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── SmolLM2 1.7B ───────────────────────────────────────────
+	{
+		name: "smollm2-1.7b-warm",
+		model: "smollm2-1.7b-q4f16",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Snowflake Arctic Embed (encoder-only) ──────────────────
 	// Embedding profiles don't generate; the temperature / thinking /
 	// prompt fields are intentionally absent. Bench harnesses key on
@@ -244,6 +251,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"tinyllama-warm",
 		"smollm2-360m-warm",
 		"qwen2.5-1.5b-warm",
+		"smollm2-1.7b-warm",
 		"arctic-embed-s",
 		"arctic-embed-m",
 	],

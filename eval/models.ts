@@ -161,7 +161,12 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "fast",
 		requiresShaderF16: true,
 		downloadUrl: "https://huggingface.co/mlc-ai/SmolLM2-1.7B-Instruct-q4f16_1-MLC",
+		// Mungert mirror is open; Q4_0 (920 MB) keeps the cross-family
+		// GEMV comparison clean against tinyllama-1.1b-chat-q4_0,
+		// smollm2-360m-q4f16, and qwen2.5-1.5b-q4f16 — all wave-1 entries
+		// pinned to Q4_0 so absolute matmul ms are honest cross-family.
 		ggufUrl: "https://huggingface.co/Mungert/SmolLM2-1.7B-Instruct-GGUF",
+		ggufFilePattern: "Q4_0",
 	},
 
 	// --- Balanced tier (2-3GB VRAM, 30+ tok/s) ---

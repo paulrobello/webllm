@@ -78,7 +78,7 @@
 > 3B+ scale (memory pressure, KV cache size, dispatch counts may
 > reshape the profile in ways that change which lever matters).
 >
-> **Wave 1 progress (2026-04-26):** 2/10 done.
+> **Wave 1 progress (2026-04-26):** 3/10 done.
 > - smollm2-360m-q4f16: 106 tok/s steady-state Q4_0; 32 layers /
 >   651 dispatches/token; encode 33% > matmul 28% — first profile
 >   where encode leads. 24/36 accuracy (62%, lowest in fleet).
@@ -89,6 +89,13 @@
 >   4% pre-fix); fix lands `attn_{q,k,v}.bias` loaders + opAdd
 >   wires in all 3 forward branches. Unblocks qwen2.5-coder-1.5b
 >   and qwen2.5-3b for the rest of wave 1.
+> - smollm2-1.7b-q4f16: 86 tok/s steady-state Q4_0 / 24 layers
+>   (fewest 1.5B+) / no GQA (n_head_kv=32, KV cache 1536 MB —
+>   largest in fleet) / 491 dispatches/token (lowest 1.5B+).
+>   27/36 accuracy (74%). 31% faster than Qwen3-1.7B at same
+>   params — fewer layers + no per-head norm + Q4 vs Q8 stacks.
+>   Cross-family pattern at 1.5B-1.7B: SmolLM2 fastest/lowest-
+>   accuracy → Qwen2 mid/mid → Qwen3 slowest/highest-accuracy.
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -844,21 +851,93 @@ needs to be collected.
    in the dedicated Embeddings section (cosine + latency +
    throughput).
 
+4. **Dashboard sort/filter persisted to localStorage.** Sort and
+   filter selections were lost on every reload. Added a small
+   persistence layer keyed at `webllm-dashboard-filters/v1`:
+   `loadPersistedFilters()` restores `sortKey`/`sortDir`,
+   `evalSortKey`/`evalSortDir`, `thinkingFilter`, `textFilter`;
+   `syncFilterControlsToState()` reflects loaded values into the
+   `<select>` and `<input>` after restore; `persistFilters()`
+   saves on every mutation site (4 in total). Defensive try/catch
+   on both read and write — private-mode browsers / quota errors
+   fall back to defaults silently. Verified end-to-end via
+   agentchrome: set sortKey=oneShotTokensPerSec/asc + thinking=on
+   + text=qwen → reload → all three restore (active sort header
+   still shows `.sort-asc`, dropdown still reads "on", search
+   input still reads "qwen"). No console errors.
+
+5. **§10 wave 1, model 3: smollm2-1.7b-q4f16 registered + benched.**
+   Same scale as Qwen3-1.7B but different family (llama arch)
+   for a clean cross-family contrast at the 1.7B mark.
+   - **Profile registered:** `smollm2-1.7b-warm` (temperature 0.6,
+     `DEFAULT_PROMPT`); added to `SMOKE_PROFILE_SETS.full`.
+     Mungert mirror is open; `ggufFilePattern: "Q4_0"` pinned for
+     family parity (TinyLlama, SmolLM2-360M, Qwen2.5-1.5B all
+     wave-1-pinned to Q4_0).
+   - **Architecture (llama / GGUF metadata):** 24 layers (fewest
+     among 1.5B+ entries) · n_head 32 · n_head_kv 32 (**no GQA!**
+     full multi-head — one of the few in fleet) · embedding 2048
+     · head_dim 64 (small/many heads, opposite design from
+     Qwen2.5's wide GQA at 128/2). ffn 8192 · ctx_max 8192. File
+     size 920.1 MB. **KV cache @ ctx=4096 = 1536 MB** —  by far
+     the largest in fleet (vs 320 MB for SmolLM2-360M, 224 MB for
+     Qwen2.5-1.5B). Direct consequence of `n_head_kv = 32`.
+   - **Speed (3-trial median):**
+     - Steady-state **86.3 tok/s** (runs: 86.8 / 86.3 / 83.7) —
+       **31% faster than Qwen3-1.7B** (~66 steady) at identical
+       1.7B params. Three reasons stack: 24 layers vs 28 (-14%),
+       no per-head Q-norm/K-norm (-56 dispatches/token), and Q4_0
+       vs Qwen3's Q8_0 (lower bandwidth). Net dispatch count 491
+       vs Qwen3's 629 = -22%.
+     - Profile-mode 57.7 tok/s (perturbation -33%, in-line with
+       the fleet pattern).
+   - **Profile-mode backend attribution (48-step decode):**
+     - `backendMatmulMs`: 5.18 mean / 35.4% — comparable to
+       Qwen2.5-1.5B (40.1%) despite the very different
+       attention/KV shape. The 1.5B–1.7B class clusters at
+       matmul = 35-40% of graph time.
+     - `backendEncodeOverheadMs`: 2.96 mean / **20.2%** —
+       **lowest in fleet** (TinyLlama 28%, SmolLM2-360M 33%,
+       Qwen2.5-1.5B 31%, Qwen3-1.7B 22%). Few-but-heavy layers
+       amortize encode overhead better than many-thin-layers.
+     - `backendAttentionMs`: 0.46 mean / 3.2%.
+     - `backendDispatchCount`: **491/token** — only +41 over
+       TinyLlama's 450 despite 56% more params. The architectural
+       win is clear: 24 layers × ~20 dispatches/layer ≈ 480, plus
+       a few global ops, matches the 491 observed.
+   - **Smoke chat regression:** PASSED. Output: `"Why did the
+     bicycle fall over? Because it was tired of being flat!"` —
+     finish=eos, 17 tokens.
+   - **Accuracy (`bench-full --profiles smollm2-1.7b-warm`):**
+     **27/36 passing · overall 74%**. Mid-range: above
+     SmolLM2-360M (62%) and below Qwen2.5-1.5B (81%) /
+     Qwen3-1.7B (82-89%). Consistent with public SmolLM2
+     benchmarks — family trades quality for size/speed.
+   - **Wave-1 cross-family pattern emerging:** at 1.5B-1.7B the
+     llama/qwen2/qwen3 families cluster as: **SmolLM2 fastest +
+     lowest accuracy → Qwen2 mid speed + mid accuracy → Qwen3
+     slowest + highest accuracy**. Speed delta tracks dispatch
+     count (-14% layers + per-head norm overhead in Qwen3) more
+     than parameter count.
+
 ### Resumption checklist (start a fresh session here)
 
 **Next target: Active Step §10 — large-model test campaign,
-wave 1 model 3.** Wave 1 is in progress: `smollm2-360m-q4f16`
-and `qwen2.5-1.5b-q4f16` landed 2026-04-26 (see "Completed on
-2026-04-26 §1, §2"). The qwen2.5-1.5b run uncovered a real
-correctness bug (qwen2 attention biases — bug-fix #25) that
-unblocks `qwen2.5-coder-1.5b` and `qwen2.5-3b` as well. The
-next unprofiled entry by ascending size is
-**`qwen2.5-coder-1.5b-q4f16` (1.54B)** if a code-generation
-eval task is in scope, otherwise **`smollm2-1.7b-q4f16`
-(1.71B)** — same size as Qwen3-1.7B for a cross-family
-contrast at the 1.7B scale. Remaining wave-1 fleet after that:
-gemma-2-2b, qwen2.5-3b, llama-3.2-3b, hermes-3-llama-3.2-3b,
-phi-3.5-mini, qwen3-4b. No 7B+ model is registered yet (wave 2).
+wave 1 model 4.** Wave 1 is in progress: `smollm2-360m-q4f16`,
+`qwen2.5-1.5b-q4f16`, and `smollm2-1.7b-q4f16` landed 2026-04-26
+(see "Completed on 2026-04-26 §1, §2, §5"). The qwen2.5-1.5b
+run uncovered bug #25 (qwen2 attention biases) which unblocks
+`qwen2.5-coder-1.5b` and `qwen2.5-3b`. SmolLM2-1.7B confirmed
+that the qwen-family per-head Q/K-norm + extra layers cost is
+real — SmolLM2 came in 31% faster than Qwen3-1.7B at the same
+param count. The next unprofiled entry by ascending size is
+**`gemma-2-2b-q4f16` (2.61B)** — first Gemma family member;
+expect different RoPE / norm conventions worth verifying as a
+correctness gate before pushing into 3B+ territory. Remaining
+wave-1 fleet after gemma-2-2b: qwen2.5-coder-1.5b (or skip
+without code-gen eval task), qwen2.5-3b, llama-3.2-3b,
+hermes-3-llama-3.2-3b, phi-3.5-mini, qwen3-4b. No 7B+ model is
+registered yet (wave 2).
 
 **Decode tuning is paused at the current scale** — §6/§7/§8/§9
 showed the bandwidth-bound fraction is ~40% of matmul on Q8 /
@@ -1348,6 +1427,12 @@ investigating "the engine."
       tok/s / profile-mode 57.6 / 657 dispatches/token / 29/36
       = 81% accuracy. Matmul leads at 40.1% (highest in fleet).
       See "Completed on 2026-04-26 §2" above.
+    - [x] `smollm2-1.7b-q4f16` (1.71B) — DONE 2026-04-26.
+      Steady-state 86.3 tok/s / profile-mode 57.7 / 491
+      dispatches/token / 27/36 = 74% accuracy. 24 layers, no
+      GQA (n_head_kv=32), KV cache 1536 MB at ctx=4096 (largest
+      in fleet). 31% faster than Qwen3-1.7B at same params. See
+      "Completed on 2026-04-26 §5" above.
     - `qwen2.5-1.5b-q4f16` (1.54B) — Qwen2.5 1.5B for a
       family/version comparison vs Qwen3-1.7B already profiled.
     - `qwen2.5-coder-1.5b-q4f16` (1.54B) — code-tuned variant;
