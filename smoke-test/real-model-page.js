@@ -279,6 +279,51 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			return;
 		}
 
+		// Shader-cache warmup. Cold WebGPU pipelines compile on first dispatch,
+		// which on Apple Metal can take ~15s for a transformer graph and
+		// dominates any subsequent tok/s measurement. Run a tiny generation /
+		// embedding here so [7/8], the bench harness, and the interactive chat
+		// box all measure steady-state numbers. Result is discarded; KV cache
+		// is reset automatically by the next `chatCompletion` call.
+		//
+		// Uses realistic sampling (temperature 0.6, topK 40, repetition
+		// penalty 1.05) so the topk decode pipeline compiles here. A
+		// `temperature: 0` warmup would only compile the greedy/full pipeline
+		// and the first realistic-sampler measurement would still pay topk
+		// shader-compile cost. Two warmup tokens are enough — first decode
+		// step covers compile, second confirms steady state.
+		try {
+			const warmupStart = performance.now();
+			if (isEncoderModel) {
+				await smokeEngine.embed(smokeEngineHandleId, "warmup");
+			} else {
+				const stream = smokeEngine.chatCompletion(
+					smokeEngineHandleId,
+					[{ role: "user", content: "hi" }],
+					{
+						maxTokens: 2,
+						temperature: 0.6,
+						topK: 40,
+						repetitionPenalty: 1.05,
+					},
+				);
+				// Drain the async iterator so all decode steps run.
+				// biome-ignore lint/suspicious/noEmptyBlockStatements: drain
+				for await (const _ of stream) {
+				}
+			}
+			const warmupMs = performance.now() - warmupStart;
+			log("pass", `[6/8] Shader-cache warmup complete in ${warmupMs.toFixed(0)}ms`);
+		} catch (e) {
+			// Warmup failure is non-fatal — log and continue. The downstream
+			// timed steps will still run; they'll just include cold-shader
+			// compilation cost in their tok/s.
+			log(
+				"running",
+				`[6/8] Shader-cache warmup failed (continuing): ${e.message}`,
+			);
+		}
+
 		if (debugMode) {
 			log("running", "[debug] Deep diagnostics enabled");
 
