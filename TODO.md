@@ -2127,7 +2127,7 @@ worth a measurement pass before declaring closed.
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 393 pass / 5 skip / 0 fail.
+1. **`make checkall`** — confirm 394 pass / 5 skip / 0 fail.
 2. **`git log --oneline -5`** — top of `main` should
    reflect the §16 / §A-revision landing
    (`feat(eval): §16 wave-2 model 4 — qwen3-8b-iq3m
