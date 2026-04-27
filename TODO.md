@@ -2254,6 +2254,94 @@ needs to be collected.
       §4 hypothesis at scale is the priority — both are blocking the same
       class of measurements.
 
+### Completed on 2026-04-27
+
+21. **§D encoder/embedding perf cycle measured + closed.** First dedicated
+    perf cycle on the encoder fleet (arctic-embed-s 33M / arctic-embed-m
+    109M, both F16). Produced harness infra + diagnostic finding rather than
+    a shipped lever; mirrors §17 / §19's measure-and-close pattern. Branch:
+    `feat/encoder-perf`. Plan / spec at
+    `docs/superpowers/plans/2026-04-27-encoder-perf-pass.md` /
+    `docs/superpowers/specs/2026-04-27-encoder-perf-pass-design.md`
+    (Phase 2.5 closure addendum carries the full lever portfolio).
+
+    **Headline finding (Phase 2.5 diagnostic):** `graphCompute` is **95.6%**
+    of `embed()` wall time on arctic-embed-s short. A 33M F16 model has
+    ~66 MB of weights — at Apple Silicon's ~200 GB/s memory bandwidth the
+    actual compute is <1 ms. The remaining ~31 ms is dispatch /
+    kernel-launch overhead: encoder graph has ~390 ops × ~80 µs/dispatch
+    ≈ 31 ms (matches measurement exactly). Per-call ctx + graph rebuild
+    is <1 ms total; download is ~1 ms; pool is <0.1 ms. **Bottleneck is
+    dispatch count, not memory bandwidth or arithmetic.**
+
+    **L1 ctx/graph reuse measured + reverted.** Implemented at `5eb1f73`
+    (private graphCache field, ensureGraphCache(N), dispose pops graph
+    ctx then weight ctx). Single-text p50 wall ms vs Phase 1 baseline:
+    arctic-embed-s short +0.6%, long +2.3%; arctic-embed-m short +2.7%,
+    long −9.5%. Three slight regressions plus one bimodal-noise reading
+    on m-long (~34 ms cluster + ~38 ms cluster, 50/50 split — not a real
+    effect). G1 strict reading: no model dropped ≥10%. Reverted at
+    `3a6a366` per gate rule. Cosine 0.76 preserved (G3 part 1) throughout.
+
+    **Lever re-ranking against the Phase 2.5 data:**
+    - L1 ctx/graph reuse: targets <1% bucket → measured + reverted.
+    - L2 GPU-side pool / readback shrink: targets ~3% bucket → not worth
+      shipping for ~1 ms.
+    - L3 embedBatch sequential loop: zero amortization on dispatch count
+      → no-op on the dominant bucket.
+    - L4 concat-graph batched compute: only lever with structural headroom
+      (potentially 4-8× via dispatch amortization at K≤8). Was explicitly
+      listed as non-goal in the spec; correctness-risky (block-diagonal
+      mask up to ~85 MB at K=64 batchMixed; or full 4D padded batch
+      refactor of `buildGraph`); deferred to future cycle gated on a real
+      use-case for batch encoder throughput.
+
+    **Cycle closes per the spec's stop rule:** "a lever's measured impact
+    is in the noise AND nothing else profiles as a hotspot → close early;
+    document what was tried." L1's null result + Phase 2.5's
+    dispatch-overhead characterization rules out L2 / L3-sequential
+    without measurement; L4 is out of scope.
+
+    **What ships on `main` from this cycle:**
+    - `eval/embed-perf.ts` harness CLI + `EmbedPerfTrace` /
+      `waitForEmbedPerfResult` in `eval/browser-smoke.ts`.
+    - `eval/fixtures/embed-prompts.ts` pinned text fixtures (short / long
+      / batchMixed).
+    - `smoke-test/real-model-page.js` `?embedPerf=<single|batch>&embedReps=<N>&embedFixture=<id>`
+      URL-param hooks (causal-LM and encoder branches; default off).
+    - `Makefile` `embed-perf` + `embed-perf-baseline` targets.
+    - `tests/encoder-cosine-parity.test.ts` G3 baseline guard
+      (`eval/reports/embed-perf-baseline-cosine.json`, 0.76 ±0.005).
+    - `eval/reports/embed-perf-2026-04-27-baseline/` (Phase 1) +
+      `eval/reports/embed-perf-2026-04-27-L1/` (L1 negative result)
+      raw measurement logs.
+
+    **What's reverted:** `feat(encoder): L1 same-graph-cache across
+    embed() calls` (`5eb1f73` reverted by `3a6a366`).
+
+    **Future-cycle resurrection paths:**
+    - **Concat-graph batched compute** (deferred L4). Open if a real
+      use-case for batch encoder throughput emerges. Implementation
+      options at that point: (a) flat concat + block-diagonal mask at
+      K≤8 (4-8× ceiling); (b) padded 4D batch dim (cleaner; full
+      `buildGraph` rewrite). Harness from this cycle is ready to measure
+      against G2.
+    - **Larger encoder registration** (deferred wave-2). If `bge-m3` or
+      `gte-large-en-v1.5` lands, single-text p50 may flip from
+      dispatch-bound to compute/bandwidth-bound — at which point L1
+      (and possibly L2) regain relevance. Re-measure then.
+    - **Backend-side dispatch coalescing** in upstream `ggml-webgpu`. If
+      that ever lands, addresses the §D bucket for free; re-run this
+      cycle's harness on a future llama.cpp rebase to spot it.
+
+    **Net characterization of the encoder fleet at this scale:** the
+    encoder embed loop is **dispatch-bound, not compute-bound**. Single-
+    text levers are exhausted; the only structural lever is dispatch
+    amortization across multiple texts in one graph. For deployments that
+    don't need batch encoder throughput, no perf work is justified at
+    this scale; current numbers (34-52 ms p50) are the practical floor
+    until either a use-case emerges or upstream `ggml-webgpu` improves.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
@@ -2589,11 +2677,19 @@ the §20 hypothesis (FA wins on prefill TTFT once the
 seq² / dispatch-overhead crossover is reached) becomes
 testable on the canonical 4-baseline.
 
-**Secondary option:** **§D encoder/embedding perf pass.**
-Untouched since §21 dashboard work. Smaller scope; quick
-wins likely on `arctic-embed-s` / `arctic-embed-m` if any
-caller uses `engine.embed()` at throughput. No design
-exists yet — needs a brainstorming pass first.
+**~~Secondary option:~~ §D encoder/embedding perf pass — CLOSED 2026-04-27 (see §21).**
+Measured, characterized, closed. Single-text levers (L1 ctx/graph
+reuse measured + reverted; L2 readback shrink projected at <3% based
+on Phase 2.5 diagnostic; L3 sequential embedBatch projected at 0% on
+the dispatch-bound bottleneck) are exhausted; the only structural
+lever (concat-graph batched compute) was non-goal in this cycle and
+is deferred until a real use-case for batch encoder throughput
+emerges. Net characterization: encoder embed is **dispatch-bound
+(95.6% of step time is `graphCompute` and ~31 ms of that is ~390
+dispatches × ~80 µs)**, not memory-bound or compute-bound. The
+harness (`eval/embed-perf.ts` + smoke-page `?embedPerf=…` URL params)
+is shipped infra; re-run after any future llama.cpp rebase to spot
+free wins from upstream `ggml-webgpu` dispatch coalescing.
 
 **Recommended path (any option):** invoke
 `superpowers:writing-plans` with the chosen scope, then
