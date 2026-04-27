@@ -205,7 +205,9 @@
 > **§4 reclosed 2026-04-26 (Completed §20):** FA revisit
 > at prefill / long-decode scope re-landed `ggml_flash_attn_ext`
 > behind a `flashAttn?: boolean` config gate (default off)
-> with F16 K + F16 V cache and a long-prompt harness. **6 of
+> with F16 K + F16 V cache and a long-prompt harness.
+> Branch `feat/fa-revisit-prefill-long-decode` fast-forward
+> merged to `main` (top commit `b872b5f`). **6 of
 > 32 planned cells captured.** TinyLlama 1.1B Q4_0 covered
 > full 4-cell matrix: FA wins everywhere (short-short -6.6%
 > TTFT / +4.9% decode; long-short -10.0% TTFT / +16.4%
@@ -2140,8 +2142,8 @@ needs to be collected.
     harness, and run a measurement matrix at the workload §18 explicitly
     flagged as out of scope (prefill TTFT + long-decode batches). **Status:
     CLOSED — gate retained as opt-in infra, not shipped default-on.**
-    - **Code shipped (commits `91d8e26`..`f1b19ab`, branch
-      `feat/fa-revisit-prefill-long-decode`):**
+    - **Code shipped (commits `91d8e26`..`b872b5f`,
+      fast-forward merged to `main`):**
       `ModelInference` constructor takes `{ flashAttn?: boolean }`; F16 K +
       F16 V cache layout selected at init when `flashAttn=true` (matches
       `flash_attn_get_decisions::kv_vec_type_supported`); F16 causal mask
@@ -2419,33 +2421,32 @@ Boot sequence for a fresh session:
    pinning the `flashAttn` constructor contract (413 → 418). Skip
    count is still 10 — the WebGPU-gated integration tests skip
    under Bun (no `navigator.gpu`).
-2. **`git log --oneline -25`** — §20 work lives on the
-   `feat/fa-revisit-prefill-long-decode` branch (not yet
-   merged to `main`). Branch head is the §20 docs commit;
-   below it on the branch are the implementation commits
-   `91d8e26` (flashAttn option + dual V-cache), `4138232`
-   (F16 mask), `4bfa6f4` (gated FA in `forward()`),
-   `faccb8e` (gated FA in the other three branches),
-   `ddc6e39` (smoke `?fa=on` + F16 KV fix), `f1b19ab`
-   (long-prompt fixtures + perf.ts flags). On `main` the
-   top commits are still `9984fa4 docs(TODO): §19 — §C
-   drafter spec-decode measured + reverted`, then
-   `aac7080 revert(engine): replace spec-decode dispatch
-   with reserved-in-v1 throw`, `1b23ca8 fix(smoke): pass
-   drafter handle id (not name) into spec-decode config`
-   (the bug surfaced during the gate-1 ship measurement).
-   Below those: the §19 implementation commits (`bbd1dff`
-   smoke-page + Makefile, `1b6fd72`+`81e3df0` engine
-   routing, `1c2db1b` integration test, `87e732a`+
-   `5572bd4`+`efa094c`+`dd84729` driver, `183b99f`+
-   `90ecf37`+`cf85756`+`9d7c258` rejection sampler,
-   `d7e8605`+`11fe3f7` sampler helpers, `3fdd347`+
-   `433252b` model-inference primitives) — all retained
-   except the engine routing block. Below those:
-   `d680371`/`ffd7276` (§18 §4 FA closure),
-   `068ef84`/`d26d736`/`4692bce`/`33f10eb` (FA
-   infrastructure that survived), then `bebed0c` (§17 §A
-   closure) and `c98d0a7` (§16 qwen3-8b register).
+2. **`git log --oneline -25`** — §20 was fast-forward merged
+   to `main`. Top of `main` is `b872b5f docs(TODO): §20 —
+   §4 FA revisit measured + CLOSED`. Below it the §20
+   implementation commits: `f1b19ab` (long-prompt fixtures
+   + perf.ts flags), `ddc6e39` (smoke `?fa=on` + F16 KV
+   fix), `faccb8e` (gated FA in `forwardDecode` /
+   `forwardVerify` / `debugLayerOutput`), `4bfa6f4` (gated
+   FA in `forward()`), `4138232` (F16 mask),
+   `91d8e26` (flashAttn ctor option + dual V-cache).
+   Below those: `a3df85d` (post-§19 next-step refresh),
+   `9984fa4` (§19 docs), `aac7080` (engine spec-decode
+   revert), `1b23ca8` (drafter handle-id fix). Below those
+   the §19 implementation commits (`bbd1dff` smoke-page +
+   Makefile, `1b6fd72`+`81e3df0` engine routing, `1c2db1b`
+   integration test, `87e732a`+`5572bd4`+`efa094c`+
+   `dd84729` driver, `183b99f`+`90ecf37`+`cf85756`+
+   `9d7c258` rejection sampler, `d7e8605`+`11fe3f7`
+   sampler helpers, `3fdd347`+`433252b` model-inference
+   primitives) — all retained except the engine routing
+   block. Below those: `d680371`/`ffd7276` (§18 §4 FA
+   closure), `068ef84`/`d26d736`/`4692bce`/`33f10eb`
+   (FA infrastructure that survived), then `bebed0c` (§17
+   §A closure) and `c98d0a7` (§16 qwen3-8b register).
+   The merged branch `feat/fa-revisit-prefill-long-decode`
+   can be deleted (`git branch -d` is safe — it points at
+   `b872b5f` already on `main`).
 3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
    — confirm the **11-patch stack** is intact and the base
    is upstream `78433f606 Fix recurrent state serialization`
@@ -2453,15 +2454,20 @@ Boot sequence for a fresh session:
    UB shift-by-32 in load_u32_at_src{,0}` — patch 11, the
    bug #28 fix. Safety branch
    `webllm-browser-patches-pre-rebase-2026-04-26` preserves
-   the pre-rebase tip if needed. **§17 and §18 added zero
-   patches** — the `__EMSCRIPTEN__` guard around FA was
-   already removed in the 2026-04-25 rebase.
-4. **WASM build state.** `smoke-test/webllm-wasm.{js,wasm}`
-   mtimes from this session are fresh (Apr 26 ~14:00); they
-   match the §18 closure state (no FA call sites — the
-   wrappers are present but unused). If the artifacts look
-   stale, run: `source ~/emsdk/emsdk_env.sh && make wasm-build
-   && bun build src/index.ts --outfile
+   the pre-rebase tip if needed. **§17, §18, §19, and §20
+   added zero patches** — the `__EMSCRIPTEN__` guard around
+   FA was already removed in the 2026-04-25 rebase, and §20
+   re-uses the bridge wrappers from §18 with no new shader
+   work.
+4. **WASM build state.** `smoke-test/webllm-bundle.js` mtime
+   is 2026-04-26 ~20:15 (post-§20 — contains the gated FA
+   path); `smoke-test/webllm-wasm.{js,wasm}` mtimes are
+   2026-04-26 ~19:50 (last rebuild during §20). The bundle
+   includes §20's `flashAttn` ctor option and the dual
+   V-cache layout; the WASM is the §18-era build with the
+   bridge wrappers (no shader changes in §20). If the
+   artifacts look stale, run: `source ~/emsdk/emsdk_env.sh
+   && make wasm-build && bun build src/index.ts --outfile
    smoke-test/webllm-bundle.js --target browser && cp
    src/wasm/build/webllm-wasm.{js,wasm} smoke-test/ && make
    smoke-restart`. Then navigate the smoke page to
@@ -2493,8 +2499,9 @@ Boot sequence for a fresh session:
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
    should return **29 runs / 30 evals** (unchanged through
-   §17 and §18 — neither closure produced new dashboard
-   data, only TODO writeups). The live dashboard SSE counter
+   §17/§18/§19/§20 — none of the four closures produced new
+   dashboard data, only TODO writeups and § perf.ts logs).
+   The live dashboard SSE counter
    shows higher numbers (~52/53) because it accumulates
    streaming events without DB persistence; both views are
    correct but independent. If the dashboard tab is open
