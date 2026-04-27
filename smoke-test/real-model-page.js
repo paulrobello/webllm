@@ -148,12 +148,28 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// the offending buffer size.
 	const diagnoseAlloc = params.get("diagnoseAlloc") === "1";
 	// §22 prefill-tiling gate: ?prefillTile=N enables auto-chunking of long
-	// forward calls. Default 0 = disabled (bit-identical to pre-§22).
-	const prefillTileRaw = Number(params.get("prefillTile"));
-	const prefillTileSize =
-		Number.isFinite(prefillTileRaw) && prefillTileRaw > 0
-			? Math.floor(prefillTileRaw)
-			: 0;
+	// forward calls. When the URL param is absent, fall back to the
+	// per-model auto-default below — 7B+ entries unblock long-prefill
+	// graphs by defaulting to tile=128; sub-7B entries stay on the
+	// single-graph fast path. Mirror `recommendedPrefillTile` in
+	// `eval/models.ts` when changing this map. Pass `?prefillTile=0`
+	// to force-disable on a 7B+ model.
+	const RECOMMENDED_PREFILL_TILE = {
+		"mistral-7b-instruct-v0.3-q4ks": 128,
+		"mistral-7b-instruct-v0.3-q3km": 128,
+		"mistral-7b-instruct-v0.3-iq4xs": 128,
+		"llama-3.1-8b-instruct-iq3m": 128,
+		"qwen3-8b-iq3m": 128,
+	};
+	const prefillTileParam = params.get("prefillTile");
+	let prefillTileSize = 0;
+	if (prefillTileParam !== null) {
+		const raw = Number(prefillTileParam);
+		prefillTileSize =
+			Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+	} else if (RECOMMENDED_PREFILL_TILE[modelId] !== undefined) {
+		prefillTileSize = RECOMMENDED_PREFILL_TILE[modelId];
+	}
 	// §D embed-perf measurement loop (driven by eval/embed-perf.ts harness).
 	// `embedPerf` enables the hook; null = no-op (existing smoke unaffected).
 	const embedPerfMode = params.get("embedPerf"); // null | "single" | "batch"

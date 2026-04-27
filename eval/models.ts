@@ -52,6 +52,17 @@ export interface BenchmarkModel {
 	 * `q0f32`; setting `ggufFilePattern: "f16"` pins the verified file.
 	 */
 	ggufFilePattern?: string;
+	/**
+	 * §22 default-on auto-tile: when set, the harness threads
+	 * `prefillTileSize: <n>` through to `ModelInference` whenever no
+	 * explicit override is provided. 7B+ entries set this to 128 to
+	 * sidestep the host-side ggml graph-allocator abort at long
+	 * prefills (`ggml-alloc.c:82`); sub-7B entries leave it unset so
+	 * the single-graph fast path (and TinyLlama's measured TTFT) are
+	 * preserved. Mirror the smoke page's `RECOMMENDED_PREFILL_TILE`
+	 * map when changing this value.
+	 */
+	recommendedPrefillTile?: number;
 }
 
 /**
@@ -433,6 +444,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		downloadUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3",
 		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
 		ggufFilePattern: "Q4_K_S",
+		recommendedPrefillTile: 128,
 	},
 
 	// Q3_K_M wave-2 fleet entry — the UB-safe u32 loader fix
@@ -457,6 +469,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		downloadUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3",
 		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
 		ggufFilePattern: "Q3_K_M",
+		recommendedPrefillTile: 128,
 	},
 
 	// IQ-family probe (kept as a working data point alongside the
@@ -482,6 +495,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		downloadUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3",
 		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
 		ggufFilePattern: "IQ4_XS",
+		recommendedPrefillTile: 128,
 	},
 
 	// First 8B candidate (wave 2 model 2). Q4_K_S 8B = 4475 MB
@@ -508,6 +522,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		downloadUrl: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct",
 		ggufUrl: "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
 		ggufFilePattern: "IQ3_M",
+		recommendedPrefillTile: 128,
 	},
 
 	// Wave 2 model 4 — Qwen3-8B at IQ3_M to round out the cross-
@@ -534,6 +549,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		downloadUrl: "https://huggingface.co/Qwen/Qwen3-8B",
 		ggufUrl: "https://huggingface.co/bartowski/Qwen_Qwen3-8B-GGUF",
 		ggufFilePattern: "IQ3_M",
+		recommendedPrefillTile: 128,
 	},
 ];
 

@@ -175,6 +175,18 @@ async function run(
 	// Trigger N page reloads with cache busting and collect tok/s from each.
 	const perfRuns: PerfRun[] = [];
 	const allTraces: DecodeTrace[] = [];
+	// §22 default-on auto-tile: when --prefill-tile is omitted, fall back
+	// to the registry's `recommendedPrefillTile` so 7B+ entries unblock
+	// long-prefill graphs by default while sub-7B entries stay on the
+	// single-graph fast path. Explicit `--prefill-tile <n>` wins;
+	// `--prefill-tile 0` opts out.
+	const effectivePrefillTile =
+		opts.prefillTile !== undefined
+			? opts.prefillTile
+			: model.recommendedPrefillTile !== undefined
+				? String(model.recommendedPrefillTile)
+				: undefined;
+
 	for (let i = 0; i < nRuns; i++) {
 		process.stdout.write(`Run ${i + 1}/${nRuns}...`);
 		const url = buildSmokeTestUrl(model.id, model.contextLength, {
@@ -184,7 +196,9 @@ async function run(
 				...(opts.thinking ? { thinking: 1 } : {}),
 				...(opts.drafter ? { drafter: opts.drafter } : {}),
 				...(opts.fa ? { fa: opts.fa } : {}),
-				...(opts.prefillTile ? { prefillTile: opts.prefillTile } : {}),
+				...(effectivePrefillTile !== undefined
+					? { prefillTile: effectivePrefillTile }
+					: {}),
 				...(fixturePrompt ? { prompt: fixturePrompt } : {}),
 				...(opts.decodeTokens ? { max: opts.decodeTokens } : {}),
 			},
