@@ -124,15 +124,34 @@ export class ModelInference {
 	 * (regression). Set once and treat as immutable.
 	 */
 	readonly flashAttn: boolean;
+	/**
+	 * When > 0, `forward()` automatically chunks long inputs into tiles of
+	 * this many tokens. Each tile is a separate ctxCreate → graph build →
+	 * graph compute → ctxFree cycle; KV cache accumulates across tiles via
+	 * the existing `nCached = totalLen` advance.
+	 *
+	 * Default 0 = disabled (single-call forward, bit-identical to pre-§22).
+	 *
+	 * Used to unblock long-prefill on 7B+ models that otherwise abort in
+	 * the host-side ggml graph allocator at `backend_alloc_ctx_tensors`.
+	 * See TODO §22 for the per-model recommended tile size and rationale.
+	 */
+	readonly prefillTileSize: number;
 
 	constructor(
 		wasm: GgmlWasm,
 		hyperparams: ModelHyperparams,
-		opts: { flashAttn?: boolean } = {},
+		opts: { flashAttn?: boolean; prefillTileSize?: number } = {},
 	) {
 		this.wasm = wasm;
 		this.hp = hyperparams;
 		this.flashAttn = opts.flashAttn ?? false;
+		this.prefillTileSize = opts.prefillTileSize ?? 0;
+		if (this.prefillTileSize < 0) {
+			throw new Error(
+				`prefillTileSize must be >= 0; got ${this.prefillTileSize}`,
+			);
+		}
 	}
 
 	loadWeights(
@@ -305,7 +324,53 @@ export class ModelInference {
 		return this.nCached;
 	}
 
+	/**
+	 * Run a forward pass for the given tokens. When `prefillTileSize > 0`
+	 * and `tokenIds.length > prefillTileSize`, the call is automatically
+	 * chunked into tiles. Returns the **last** position's logits (matching
+	 * the legacy single-call contract).
+	 *
+	 * KV cache accumulates across tiles via the existing
+	 * `this.nCached = totalLen` advance at the end of `forwardSingle()`.
+	 * Intermediate-tile readbacks are tiny (`vocabSize * 4 B` per tile,
+	 * last position only) and are discarded.
+	 */
 	async forward(
+		tokenIds: Int32Array,
+		positions: Int32Array,
+	): Promise<Float32Array> {
+		const tileSize = this.prefillTileSize;
+		if (tileSize === 0 || tokenIds.length <= tileSize) {
+			return await this.forwardSingle(tokenIds, positions);
+		}
+		if (tokenIds.length !== positions.length) {
+			throw new Error(
+				`forward: tokenIds.length (${tokenIds.length}) !== positions.length (${positions.length})`,
+			);
+		}
+		let lastLogits: Float32Array | undefined;
+		for (let off = 0; off < tokenIds.length; off += tileSize) {
+			const end = Math.min(off + tileSize, tokenIds.length);
+			const tileIds = tokenIds.subarray(off, end);
+			const tilePos = positions.subarray(off, end);
+			lastLogits = await this.forwardSingle(tileIds, tilePos);
+		}
+		// `lastLogits` is defined because the loop runs at least once
+		// (tokenIds.length > tileSize >= 1).
+		return lastLogits as Float32Array;
+	}
+
+	/**
+	 * Single-call forward pass: one ctxCreate → graph build → graph compute →
+	 * ctxFree cycle for the given tokens. **Do not call directly** — public
+	 * callers go through `forward()`, which dispatches to either this or the
+	 * tiled loop based on `prefillTileSize`.
+	 *
+	 * The graph build invariants documented inline below are load-bearing —
+	 * see comments around `no_alloc=true` rationale, V-cache permute axes,
+	 * and last-position-only readback. Do not refactor the body.
+	 */
+	private async forwardSingle(
 		tokenIds: Int32Array,
 		positions: Int32Array,
 	): Promise<Float32Array> {
