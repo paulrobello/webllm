@@ -1993,6 +1993,113 @@ needs to be collected.
       steady-state decode throughput on the 7B/8B fleet
       without a kernel rewrite.
 
+19. **§C drafter speculative decoding measured + reverted.**
+    Implemented Leviathan-style speculative decoding end-
+    to-end (drafter proposes K=4, target verifies in one
+    parallel forward, rejection sampler preserves target
+    distribution) and measured against the §C ship gate.
+    **Status: REVERTED** (engine routing); driver, sampler
+    helpers, `forwardVerify`, `truncateKVCache`, and tests
+    remain in tree.
+    - **Spec / plan:**
+      `docs/superpowers/specs/2026-04-26-speculative-
+      decoding-design.md` (491 lines, 14 §) +
+      `docs/superpowers/plans/2026-04-26-speculative-
+      decoding.md` (11 tasks across 3 phases).
+    - **Code shipped (commits `11fe3f7`..`bbd1dff`):**
+      `src/inference/sampler.ts` gained `rand`,
+      `computeDistribution`, `sampleFromDistribution`.
+      `src/inference/model-inference.ts` gained
+      `forwardVerify(tokenIds, positions): Promise<
+      Float32Array>` (multi-position logits readback) and
+      `truncateKVCache(n)` (counter-only rollback).
+      `src/inference/speculative.ts` (~330 LOC) holds
+      `acceptPrefix` (rejection math + EOS / stop /
+      maxTokens truncation, per-stream degenerate-residual
+      warning) and `SpeculativeGenerator.generate` (KV
+      rollback + abort, first-token EOS short-circuit,
+      penalty-window hoisting). 19 new tests:
+      `tests/sampler.test.ts` (7),
+      `tests/speculative-rejection.test.ts` (11), and 1
+      engagement-gate test in
+      `tests/speculative-integration.test.ts` (the WebGPU
+      integration tests in that file skip under Bun).
+    - **Code reverted (commit `aac7080`):**
+      `src/core/engine.ts::generateStream` engagement
+      block + `SpeculativeGenerator` dispatch replaced
+      with a single `throw "reserved in v1"` on
+      `config.drafter`. `CompletionConfig.drafter` /
+      `draftLength` retained as reserved fields with
+      docstrings pointing at this entry.
+    - **Pre-§C baselines (drift check, 2026-04-26):**
+      tinyllama-1.1b 101.0 tok/s (plan expected 106 → -5%
+      drift, within tolerance), qwen3-0.6b-q4f16 81.9
+      tok/s (expected ~85 → -4%), qwen3-8b-iq3m 15.3
+      tok/s (expected 16.2 → -5.5%). All within the 10%
+      drift tolerance.
+    - **Gate 1 (drafted speedup) — FAILS:**
+      `make smoke-bench PERF_MODEL=qwen3-8b-iq3m
+      PERF_DRAFTER=qwen3-0.6b-q4f16 PERF_RUNS=3` →
+      **3.0 tok/s steady-state** (3 runs: 3.0 / 3.0 /
+      3.0; decode 7877–8024 ms for 24 tokens) vs 15.3
+      baseline = **0.20× ratio**. Gate 1 required ≥1.5×
+      (≥22.95 tok/s); we got a 5× regression. Gates 2
+      (accuracy parity) and 3 (non-drafted regression)
+      not run — gate 1 failure makes them moot.
+    - **Output is functionally correct.** Smoke page
+      log captured: `User: Tell one short joke. /
+      Assistant: Why don't skeletons fight each other?
+      Because they don't have the *guts*! 😄`. Leviathan
+      rejection sampling preserves the target's
+      distribution as designed.
+    - **Diagnosis (predicted in plan, confirmed by
+      measurement).** Per spec step the spec path runs
+      4 drafter forwards (each does a full-vocab readback
+      of ~152 K floats ≈ 0.6 MB) plus 1 K-position target
+      verify (4 × 152 K floats ≈ 2.4 MB readback) plus
+      CPU-side softmax + rejection roll on 4 distros.
+      Baseline runs 1 target `forwardDecode` per token
+      with top-K readback (~0.4 KB). Even at perfect
+      acceptance (all K accept → 4 emitted tokens / step)
+      the readback bandwidth alone overwhelms the
+      savings, and at typical α the lever pays K
+      drafter steps + K-position verify per emitted
+      token — exactly the failure mode §11 of the spec
+      called out.
+    - **What v2 would need to win.** GPU-resident
+      verify (no per-step full-vocab readback —
+      compare drafted ids against argmax on-device,
+      only read the rejection mask), or a
+      meaningfully cheaper drafter (sub-1B at <2 ms /
+      step, currently qwen3-0.6b is ~12 ms / forward
+      at full vocab readback), or dynamic K that
+      collapses to K=1 when α drops. Multi-tokenizer
+      drafters were also discussed in the spec but
+      add re-tokenization cost on every accept and
+      are unlikely to help unless the verify-readback
+      bottleneck is solved first.
+    - **Plumbing retained.** Smoke page
+      `?drafter=<id>` URL param, `PERF_DRAFTER`
+      Makefile var, and `eval/perf.ts --drafter` flag
+      are inert when the engine throws and useful as-is
+      when v2 measurement happens. Drafter loader in
+      `smoke-test/real-model-page.js` exercises the
+      per-model-WASM-heap pattern correctly (caught
+      one bug during ship-gate run: `loadModel` mints
+      a synthetic handle id so the smoke page must
+      pass `handle.id`, not the user-facing name, into
+      `CompletionConfig.drafter` — fixed in `1b23ca8`,
+      relevant when v2 lands).
+    - **Recommended next move:** **§4 FA revisit at
+      long-decode / prefill scope** (the §18 closure
+      explicitly noted that bench-inference's batch=1
+      seq=1 measurement is the wrong scope to
+      characterize FA wins; long-decode and prefill
+      benches would surface them). Or **§D encoder
+      perf pass** if encoder embedding throughput is
+      the next priority. §C v2 (GPU-resident verify)
+      is feasible but a larger investment than either.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
@@ -2087,14 +2194,16 @@ sessions:
   reload required to see the cleanup (live-server SSE doesn't
   broadcast deletes).
 
-**Next target options (pick one — recommended: §C drafter,
-with A/B/C/F/§4 all closed):**
+**Next target options (pick one — recommended: §4 FA at
+prefill/long-decode scope, with A/B/C/F/§4-decode/§C-v1 all
+closed):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
 B. ~~§A subgroup-cooperative loading.~~ **CLOSED 2026-04-26 — §17.**
 C. ~~Fix the Q3_K shader (#28).~~ **Done — §14.**
 F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §4. ~~Flash Attention enable for decode.~~ **CLOSED 2026-04-26 — §18.**
+§C. ~~Drafter-based speculative decoding (v1).~~ **CLOSED 2026-04-26 — §19** (measured 0.20× regression; verify-readback dominates).
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -2105,19 +2214,9 @@ D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    that need Q4_K_S+.
 
 E. **Remaining deferred items (in rough priority):**
-   - **§C drafter-based speculative decoding** *(recommended
-     first move for next session).* Large project; theoretical
-     2-3× wall-clock decode for chat-style workloads. Drafter
-     could be wave-1 small (smollm2-360m, qwen3-0.6b) paired
-     with a 7B-8B target. **The qwen3-0.6b → qwen3-8b draft
-     pair is the obvious match** (same family, shared
-     tokenizer, ~13× param spread). Memory budget: 0.6B Q8_0
-     (~640 MB) + 8B IQ3_M (~3.7 GB) = ~4.3 GB total weights
-     plus 2× KV cache — tight against the 4 GiB WASM cap;
-     option D (MEMORY64) may become a prerequisite. Warrants
-     `writing-plans` + `subagent-driven-development` sequence
-     like §17 + §18 did.
-   - **§4 FA revisit at long-decode / prefill-TTFT scope.**
+   - **§4 FA revisit at long-decode / prefill-TTFT scope**
+     *(recommended first move for next session, with §C v1
+     closed at §19).*
      The §18 closure measured FA at decode N=1 only; FA's
      real wins (prefill + decode batches >256 tokens) were
      never tested. Bridge infrastructure is already in place
@@ -2131,6 +2230,20 @@ E. **Remaining deferred items (in rough priority):**
      §21 dashboard. Smaller scope; quick wins likely on
      arctic-embed-s/m if anyone uses `engine.embed()` at
      throughput.
+   - **§C v2 drafter speculative decoding (deferred,
+     blocked on GPU-resident verify).** §19 closed v1
+     because per-step verify readback (~9.6 MB / step at
+     K=4 × 152 K vocab) and full-vocab drafter forwards
+     dominated. v2 would need either (a) GPU-resident
+     verify (compare drafted ids against argmax on-device,
+     read back only a rejection mask), (b) a meaningfully
+     cheaper drafter (< 2 ms / step — qwen3-0.6b is ~12
+     ms / forward), or (c) dynamic K that collapses to 1
+     when α drops. Driver, sampler helpers,
+     `forwardVerify`, `truncateKVCache`, smoke + Makefile
+     plumbing, and tests remain in tree — re-enabling is
+     a deliberate edit at `src/core/engine.ts`'s
+     reserved-throw block.
    - **Deferred wave-1 architectures** (Gemma 2, Phi 3) —
      5+ gaps for Gemma; mostly fused-QKV for Phi 3. See
      "Completed on 2026-04-26" §9.
@@ -2138,14 +2251,16 @@ E. **Remaining deferred items (in rough priority):**
 **Net characterization at 8B IQ3_M (post-§16, both
 families):** matmul ≈ 65-69% of decode (Llama-3.1 71%,
 Qwen3 67% × graph 97% of step). **All single-token decode
-kernel-tuning levers are now closed without ship.** §17 ruled
-out matmul-kernel rework (§A); §18 ruled out FA fusion at
-N=1 decode. The remaining headroom is at a different scope:
-(1) algorithmic — §C drafter speculative decoding amortizes
-the matmul cost across draft+verify steps; (2) workload —
-§4 FA revisit at prefill/long-decode where the kernel
-overhead pays back. Both are documented above under
-"Remaining deferred items".
+kernel-tuning AND algorithmic-amortization levers are now
+closed without ship at v1.** §17 ruled out matmul-kernel
+rework (§A); §18 ruled out FA fusion at N=1 decode; §19
+ruled out drafter speculative decoding at K=4 (verify-
+readback dominates). The remaining headroom is at a
+different scope: (1) workload — §4 FA revisit at prefill
+/ long-decode where the kernel overhead pays back; (2)
+infrastructure — §C v2 with GPU-resident verify (skips the
+2.4 MB / step readback that sank v1). Both are documented
+above under "Remaining deferred items".
 
 Boot sequence for a fresh session:
 
@@ -2188,7 +2303,8 @@ Boot sequence for a fresh session:
    `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M coherent
    at ≥20 tok/s confirms patch 11 is healthy.
 5. **Read for context:** "Completed on 2026-04-26" §17 (§A
-   closure) and §18 (§4 FA closure). Both follow the same
+   closure), §18 (§4 FA closure), and §19 (§C drafter
+   spec-decode closure). All three follow the same
    "measure-and-close" pattern — useful templates if §C
    drafter or §4 FA-revisit produces a similar outcome.
    The §18 plan at `docs/superpowers/plans/2026-04-26-fa-enable.md`
