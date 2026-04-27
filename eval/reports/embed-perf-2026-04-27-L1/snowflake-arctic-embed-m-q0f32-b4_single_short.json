@@ -1,0 +1,190 @@
+{
+  "modelId": "snowflake-arctic-embed-m-q0f32-b4",
+  "mode": "single",
+  "fixture": "short",
+  "traces": [
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 0,
+      "wallMs": 51.799999952316284
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 1,
+      "wallMs": 52.299999952316284
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 2,
+      "wallMs": 53.10000002384186
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 3,
+      "wallMs": 55.700000047683716
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 4,
+      "wallMs": 53.5
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 5,
+      "wallMs": 53.199999928474426
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 6,
+      "wallMs": 53.10000002384186
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 7,
+      "wallMs": 51.799999952316284
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 8,
+      "wallMs": 53.300000071525574
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 9,
+      "wallMs": 50.699999928474426
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 10,
+      "wallMs": 55.40000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 11,
+      "wallMs": 53.39999997615814
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 12,
+      "wallMs": 53.199999928474426
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 13,
+      "wallMs": 55.90000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 14,
+      "wallMs": 55.39999997615814
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 15,
+      "wallMs": 56.199999928474426
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 16,
+      "wallMs": 52.5
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 17,
+      "wallMs": 53.60000002384186
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 18,
+      "wallMs": 56.5
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 19,
+      "wallMs": 52.200000047683716
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 20,
+      "wallMs": 52.199999928474426
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 21,
+      "wallMs": 56.40000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 22,
+      "wallMs": 55
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 23,
+      "wallMs": 52.39999997615814
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 24,
+      "wallMs": 56.10000002384186
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 25,
+      "wallMs": 55.59999990463257
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 26,
+      "wallMs": 52.90000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 27,
+      "wallMs": 53.699999928474426
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 28,
+      "wallMs": 53.800000071525574
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 29,
+      "wallMs": 50.199999928474426
+    }
+  ],
+  "p50WallMs": 53.39999997615814,
+  "p90WallMs": 56.199999928474426,
+  "meanWallMs": 53.70333333015442
+}
