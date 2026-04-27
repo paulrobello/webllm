@@ -1,5 +1,11 @@
-import type { GenerationFinishReason } from "./generation.js";
+import type {
+	GenerationConfig,
+	GenerationFinishReason,
+	GenerationResult,
+} from "./generation.js";
+import type { ModelInference } from "./model-inference.js";
 import type { Sampler } from "./sampler.js";
+import { StreamingDecoder, type Tokenizer } from "./tokenizer.js";
 
 /**
  * Per-stream warn-once state. The driver constructs one of these per stream
@@ -204,3 +210,215 @@ function sampleResidual(
 	for (let i = 0; i < n; i++) q[i] /= sum;
 	return sampler.sampleFromDistribution(q);
 }
+
+/** Options passed to `SpeculativeGenerator.generate`. */
+export interface SpeculativeGenerateOptions {
+	/** Pre-tokenized prompt token IDs. */
+	promptTokenIds: number[];
+	/** Loaded target ModelInference. */
+	target: ModelInference;
+	/** Loaded drafter ModelInference (must share the target's tokenizer). */
+	drafter: ModelInference;
+	/** Tokenizer for streaming-text decoding. */
+	tokenizer: Tokenizer;
+	/** User's Sampler (seeded; both drafter and target draws + rejection rolls
+	 *  consume from this same instance for determinism). */
+	sampler: Sampler;
+	/** Generation config (maxTokens, temperature, topK, topP, repetitionPenalty,
+	 *  stopTokens). Steering fields must be empty — engagement gate at the
+	 *  engine level guarantees this. */
+	config: GenerationConfig;
+	/** EOS token id for the shared tokenizer. */
+	eosTokenId: number;
+	/** Draft-burst length K (≥ 2). */
+	draftLength: number;
+	/** Optional abort signal. Honored at three points per spec step (top of
+	 *  loop, after draft burst, mid-draft-burst). NOTE: Task 6 skeleton does
+	 *  not yet check this; Task 7 adds the checks. */
+	signal?: AbortSignal;
+}
+
+/**
+ * Speculative-decode generator: drafter proposes K tokens, target verifies
+ * them in one parallel forward, rejection-sampling accepts a prefix and
+ * emits a residual or bonus token.
+ *
+ * Yields each emitted token id one at a time, returns a `GenerationResult`
+ * with `tokens`, `text`, `tokenCount`, `tokensPerSecond`,
+ * `timeToFirstTokenMs`, `finishReason` — same shape as
+ * `Generator.generate`'s return so the engine adapter can treat both paths
+ * symmetrically.
+ *
+ * **Task-6 skeleton: KV rollback after partial accept, and abort-signal
+ * handling, are NOT yet implemented. Task 7 adds them. Until then, after a
+ * partial-accept spec step the drafter and target's `nCached` are left at
+ * `pastLen + K` instead of `pastLen + emitted` — so the next step would see
+ * stale KV. Do not call this function from production paths until Task 7
+ * lands.**
+ */
+export const SpeculativeGenerator = {
+	async *generate(
+		opts: SpeculativeGenerateOptions,
+	): AsyncGenerator<number, GenerationResult> {
+		const {
+			promptTokenIds,
+			target,
+			drafter,
+			tokenizer,
+			sampler,
+			config,
+			eosTokenId,
+			draftLength,
+		} = opts;
+		const K = draftLength;
+		if (K < 2) {
+			throw new Error(`SpeculativeGenerator: draftLength=${K} must be >= 2`);
+		}
+		const stopTokens = new Set(config.stopTokens ?? []);
+		const startTime = performance.now();
+		const warnState = newSpeculativeWarnState();
+
+		// === Prefill on target ===
+		const promptPositions = promptTokenIds.map((_, i) => i);
+		const targetPrefillLogits = await target.forward(
+			new Int32Array(promptTokenIds),
+			new Int32Array(promptPositions),
+		);
+
+		// Sample first emitted token from the target's prefill last-position
+		// logits, with repetition penalty applied first (mirrors
+		// Generator.generate's prefill path).
+		const recentTokens: number[] = [...promptTokenIds];
+		sampler.applyRepetitionPenalty(
+			targetPrefillLogits,
+			recentTokens.slice(-64),
+		);
+		const firstDistro = sampler.computeDistribution(targetPrefillLogits);
+		let lastEmittedId = sampler.sampleFromDistribution(firstDistro);
+
+		const firstTokenTime = performance.now();
+		yield lastEmittedId;
+		recentTokens.push(lastEmittedId);
+		const allTokens: number[] = [...promptTokenIds, lastEmittedId];
+		let generatedCount = 1;
+
+		// === Prefill on drafter ===
+		// Logits discarded — we only need its KV populated to match target's.
+		await drafter.forward(
+			new Int32Array(promptTokenIds),
+			new Int32Array(promptPositions),
+		);
+
+		let pastLen = promptTokenIds.length;
+		let finishReason: GenerationFinishReason | undefined;
+
+		// === Decode loop ===
+		while (true) {
+			if (generatedCount >= config.maxTokens) {
+				finishReason = "max-tokens";
+				break;
+			}
+
+			// --- Draft burst ---
+			const draftTokens: number[] = [];
+			const draftDistros: Float32Array[] = [];
+			let prev = lastEmittedId;
+			for (let k = 0; k < K; k++) {
+				const logits = await drafter.forward(
+					new Int32Array([prev]),
+					new Int32Array([pastLen + k]),
+				);
+				sampler.applyRepetitionPenalty(logits, recentTokens.slice(-64));
+				const distro = sampler.computeDistribution(logits);
+				const id = sampler.sampleFromDistribution(distro);
+				draftTokens.push(id);
+				draftDistros.push(distro);
+				prev = id;
+			}
+
+			// --- Verify on target ---
+			// Inputs at positions pastLen..pastLen+K-1 are
+			// [lastEmittedId, draftIds[0..K-2]] — the K tokens that go into
+			// the target's KV at those positions. The last drafted token
+			// (draftIds[K-1]) is what we want the target to predict at
+			// position pastLen+K.
+			const verifyInputs = new Int32Array(K);
+			verifyInputs[0] = lastEmittedId;
+			for (let k = 1; k < K; k++) verifyInputs[k] = draftTokens[k - 1];
+			const verifyPositions = new Int32Array(K);
+			for (let k = 0; k < K; k++) verifyPositions[k] = pastLen + k;
+			const targetLogitsAll = await target.forwardVerify(
+				verifyInputs,
+				verifyPositions,
+			);
+			const vocab = targetLogitsAll.length / K;
+			const targetDistros: Float32Array[] = [];
+			for (let k = 0; k < K; k++) {
+				const row = targetLogitsAll
+					.subarray(k * vocab, (k + 1) * vocab)
+					.slice();
+				sampler.applyRepetitionPenalty(row, recentTokens.slice(-64));
+				targetDistros.push(sampler.computeDistribution(row));
+			}
+
+			// --- Rejection sampling ---
+			const result = acceptPrefix({
+				draftTokens,
+				draftDistros,
+				targetDistros,
+				sampler,
+				warnState,
+				eosTokenId,
+				stopTokens,
+				maxTokens: config.maxTokens,
+				generatedCount,
+			});
+
+			// --- Yield accepted prefix + finalSampledId ---
+			for (let k = 0; k < result.acceptedCount; k++) {
+				const id = draftTokens[k];
+				yield id;
+				generatedCount++;
+				recentTokens.push(id);
+				allTokens.push(id);
+				lastEmittedId = id;
+			}
+			if (result.finalSampledId !== null) {
+				yield result.finalSampledId;
+				generatedCount++;
+				recentTokens.push(result.finalSampledId);
+				allTokens.push(result.finalSampledId);
+				lastEmittedId = result.finalSampledId;
+			}
+
+			pastLen +=
+				result.acceptedCount + (result.finalSampledId !== null ? 1 : 0);
+
+			if (result.finishReason !== null) {
+				finishReason = result.finishReason;
+				break;
+			}
+			if (generatedCount >= config.maxTokens) {
+				finishReason = "max-tokens";
+				break;
+			}
+		}
+
+		// === Build result ===
+		const decoder = new StreamingDecoder(tokenizer);
+		let text = "";
+		for (let i = promptTokenIds.length; i < allTokens.length; i++) {
+			text += decoder.push(allTokens[i]);
+		}
+		const decodeMs = performance.now() - firstTokenTime;
+		return {
+			tokens: allTokens,
+			text,
+			tokenCount: generatedCount,
+			tokensPerSecond:
+				generatedCount > 0 ? (generatedCount * 1000) / decodeMs : 0,
+			timeToFirstTokenMs: firstTokenTime - startTime,
+			finishReason: finishReason ?? "max-tokens",
+		};
+	},
+};
