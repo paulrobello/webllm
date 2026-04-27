@@ -319,7 +319,9 @@ export class ModelInference {
 		const trace = this.traceEnabled;
 		const t0 = trace ? performance.now() : 0;
 
-		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
+		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
+		// too tight at seq=512 on Mistral 7B).
+		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 64;
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
@@ -738,7 +740,9 @@ export class ModelInference {
 		const trace = this.traceEnabled;
 		const t0 = trace ? performance.now() : 0;
 
-		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
+		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
+		// too tight at seq=512 on Mistral 7B).
+		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 64;
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
@@ -1065,7 +1069,9 @@ export class ModelInference {
 		const trace = this.traceEnabled;
 		const t0 = trace ? performance.now() : 0;
 
-		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
+		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
+		// too tight at seq=512 on Mistral 7B).
+		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 64;
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;

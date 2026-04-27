@@ -411,7 +411,7 @@ export async function waitForSmokeTestResult(
 	port: string,
 	tab: string,
 ): Promise<SmokeTestResult> {
-	const deadline = Date.now() + 180_000;
+	const deadline = Date.now() + 360_000;
 	const script = `(() => {
 		const pattern = new RegExp("Generated (\\\\d+) tokens in ([0-9.]+)s \\\\(prefill: (\\\\d+)ms, decode: (\\\\d+)ms, ([0-9.]+) tok\\\\/s(?:, finish=([^)]+))?\\\\)");
 		const t = document.getElementById("log")?.textContent ?? "";
@@ -526,7 +526,7 @@ export async function runSmokeChatTurn(
 			return "started";
 		})()`,
 	]);
-	const deadline = Date.now() + 180_000;
+	const deadline = Date.now() + 360_000;
 	const parseScript = `(() => {
 		const output = document.getElementById("chat-output");
 		if (!output) {

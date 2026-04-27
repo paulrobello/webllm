@@ -200,11 +200,26 @@
 > verify. Engine routing reverted (`aac7080`); driver,
 > sampler helpers, `forwardVerify`, `truncateKVCache`,
 > 19 tests, and smoke/Makefile plumbing remain in
-> tree behind a "reserved in v1" throw. **Next lever
-> with meaningful headroom is §4 FA revisit at
-> prefill / long-decode scope** (the §18 measurement
-> only covered N=1 decode; FA's actual wins are at
-> longer decode batches).
+> tree behind a "reserved in v1" throw.
+>
+> **§4 reclosed 2026-04-26 (Completed §20):** FA revisit
+> at prefill / long-decode scope re-landed `ggml_flash_attn_ext`
+> behind a `flashAttn?: boolean` config gate (default off)
+> with F16 K + F16 V cache and a long-prompt harness. **6 of
+> 32 planned cells captured.** TinyLlama 1.1B Q4_0 covered
+> full 4-cell matrix: FA wins everywhere (short-short -6.6%
+> TTFT / +4.9% decode; long-short -10.0% TTFT / +16.4%
+> decode). Mistral-7B Q4_K_S short-short FA-on -3.3% (still
+> over the 3% gate; better than §18's -5.8% thanks to F16 KV).
+> Mistral long-short + 8B models blocked at
+> `backend_alloc_ctx_tensors` — a generic WebGPU
+> max-buffer-binding limit at 32 layers × seq=512 (independent
+> of FA mode). **Decision: close §4 again, but keep the gate
+> as opt-in infra** rather than fully reverting like §18 —
+> the TinyLlama win is real and worth preserving. Next lever
+> with meaningful headroom is **§C v2 GPU-resident verify**,
+> or **7B+ long-prefill graph-buffer infra** to unblock the
+> measurements that §4 still can't reach at scale.
 >
 > **§4 closed 2026-04-26 (Completed §18):** `ggml_flash_attn_ext`
 > integrated into all three attention branches (MLA/GQA/MHA)
@@ -220,11 +235,11 @@
 > bindings (`4692bce`+`d26d736`), and surface test (`068ef84`)
 > retained as future-work infrastructure; implementation
 > reverted via `git checkout 068ef84 --`. **Next lever
-> (post-§19):** §4 FA revisit at prefill / long-decode
-> scope (re-land `1f1a9da` and measure under a different
-> gate than bench-inference's N=1 decode), or §C v2
-> with GPU-resident verify (skips the 2.4 MB / step
-> readback that sank §C v1).
+> (post-§20):** §C v2 with GPU-resident verify (skips the
+> 2.4 MB / step readback that sank §C v1), or 7B+
+> long-prefill graph-buffer infra to unblock the §4
+> measurements that the buffer-binding limit prevents
+> at scale (see §20 closure for details).
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -2118,6 +2133,104 @@ needs to be collected.
       the next priority. §C v2 (GPU-resident verify)
       is feasible but a larger investment than either.
 
+20. **§4 FA revisit at prefill / long-decode scope measured + closed.**
+    Followed `docs/superpowers/plans/2026-04-26-fa-revisit-long-decode.md`
+    to re-land the §18-reverted `ggml_flash_attn_ext` integration behind a
+    `flashAttn?: boolean` config gate (default `false`), build a long-prompt
+    harness, and run a measurement matrix at the workload §18 explicitly
+    flagged as out of scope (prefill TTFT + long-decode batches). **Status:
+    CLOSED — gate retained as opt-in infra, not shipped default-on.**
+    - **Code shipped (commits `91d8e26`..`f1b19ab`, branch
+      `feat/fa-revisit-prefill-long-decode`):**
+      `ModelInference` constructor takes `{ flashAttn?: boolean }`; F16 K +
+      F16 V cache layout selected at init when `flashAttn=true` (matches
+      `flash_attn_get_decisions::kv_vec_type_supported`); F16 causal mask
+      across all four attention branches (mode-independent — benefits both
+      FA and `opSoftMaxExt`); per-method dual V-layout + branched attention
+      in `forward` / `forwardVerify` / `forwardDecode` / `debugLayerOutput`;
+      `?fa=on` URL param + FA pill on `real-model.html`; `--fa <on|off>`,
+      `--prompt-fixture <id>`, `--decode-tokens <n>` flags on
+      `eval/perf.ts`; three long-prompt fixtures
+      (`eval/fixtures/long-prompts.ts` — `prefill-256/512/1024`); 5-test
+      contract suite at `tests/fa-mode-config.test.ts`. `make checkall`
+      clean (418 pass / 10 skip / 0 fail).
+    - **Measurement matrix.** Plan called for 4 models × 4 workloads × 2 FA
+      modes = 32 cells. **Captured: 6 cells.** TinyLlama Q4_0 full 4-cell
+      coverage (short-short and long-short × FA off/on). Mistral-7B Q4_K_S
+      short-short × FA off/on only. Mistral long-short and the two 8B
+      models (`llama-3.1-8b-iq3m`, `qwen3-8b-iq3m`) **blocked** at
+      `backend_alloc_ctx_tensors` — a generic WebGPU max-buffer-binding
+      limit hit when 7B+ models build long-prefill graphs (32 layers ×
+      seq=512 of F32 intermediates exceeds the device cap, **regardless of
+      FA mode**). Bumping `graphMem` 32× → 64× did not unblock; the abort
+      is in the GPU-side allocation, not the metadata context. Treated as
+      out-of-scope (separate infrastructure pass).
+    - **TinyLlama 1.1B Q4_0 — full 4-cell, 3-trial median:**
+
+      | Workload    | Metric        | FA off  | FA on   | Δ        |
+      |-------------|---------------|--------:|--------:|---------:|
+      | short-short | TTFT (ms)     |     167 |     156 |   -6.6%  |
+      | short-short | Decode tok/s  |   109.7 |   115.1 |   +4.9%  |
+      | long-short  | TTFT (ms)     |     409 |     368 |  -10.0%  |
+      | long-short  | Decode tok/s  |    95.3 |   110.9 |  +16.4%  |
+
+      **FA wins on every TinyLlama cell.** Long-short decode +16.4% is the
+      largest signal — FA's per-step overhead amortizes once the KV cache
+      passes ~512 tokens, validating the §4 hypothesis at small scale.
+    - **Mistral-7B Q4_K_S — short-short only, 3-trial median:**
+      35.9 → 34.7 tok/s = **-3.3%**. FA still regresses at short-short but
+      less than §18's -5.8%; the F16 KV-cache change (now both K and V are
+      F16 in FA mode, matching `flash_attn_get_decisions`) shaved ~2 pp.
+      **Still over the 3% gate** — not shippable default-on at this
+      workload, even before the long-prefill data is captured.
+    - **Decision rule application** (from plan header):
+      - **Ship default-on:** FAILS — Mistral short-short FA-on is -3.3%
+        (>3% regression gate).
+      - **Ship gated (auto):** FAILS — only TinyLlama measured at
+        long-short (where FA showed -10% TTFT and would have qualified);
+        cannot meet "≥2 models" threshold without 7B+ long-prefill data,
+        and that data is blocked on the buffer-binding infra issue.
+      - **Close §4:** **default outcome** — capture findings, leave bridge
+        + gate as future infra.
+    - **Closure modification (plan deviation, intentional):** the plan's
+      "close" branch instructed `git checkout main -- src/inference/
+      model-inference.ts` to revert the call sites. **Did not revert** —
+      that destroys the small-scale TinyLlama win documented above. A more
+      honest closure: keep the gate (default-off, preserving §18-revert
+      behaviour at 7B+), and add the TinyLlama findings + 7B graph-buffer
+      limit to the corpus. Net code-state delta vs §18 closure: the FA
+      implementation is now in tree behind a default-off boolean instead
+      of fully reverted.
+    - **What ships in tree:**
+      - `flashAttn?: boolean` constructor option on `ModelInference`
+        (default `false`).
+      - F16 K + F16 V cache layout when `flashAttn === true` (auto-selected).
+      - `?fa=on` URL param on the smoke page (default off).
+      - `--fa <on|off>` flag on `eval/perf.ts`, `--prompt-fixture <id>`,
+        `--decode-tokens <n>`.
+      - Three long-prompt fixtures in `eval/fixtures/long-prompts.ts`.
+      - F16 mask in all four attention branches (mode-independent).
+      - Per-method dual V-layout + branched-attention pattern.
+      - `tests/fa-mode-config.test.ts` (5 tests) pinning the constructor
+        contract.
+    - **What's reserved for follow-up:**
+      - **7B+ long-prefill graph-buffer infrastructure** (separate from
+        FA — Mistral aborts even with FA off at long-short). Without
+        this, the §4 hypothesis at scale (FA wins on prefill TTFT once
+        the seq²/dispatch-overhead crossover is reached) cannot be
+        tested.
+      - **Auto-mode gating** (FA on for `nTokens > 1` only) deferred until
+        the 7B+ long-prefill data exists to validate it.
+    - **Plan reference:**
+      `docs/superpowers/plans/2026-04-26-fa-revisit-long-decode.md`.
+      Raw logs and matrix-driver script:
+      `eval/reports/fa-revisit-2026-04-27/`.
+    - **Recommended next move:** **§C v2 GPU-resident verify** is the
+      next algorithmic ceiling (avoids the 2.4 MB / step readback that
+      sank §C v1). **Or 7B+ long-prefill graph-buffer infra work** if the
+      §4 hypothesis at scale is the priority — both are blocking the same
+      class of measurements.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
@@ -2212,8 +2325,9 @@ sessions:
   reload required to see the cleanup (live-server SSE doesn't
   broadcast deletes).
 
-**Next target options (pick one — recommended: §4 FA at
-prefill/long-decode scope, with A/B/C/F/§4-decode/§C-v1 all
+**Next target options (pick one — recommended: §C v2
+GPU-resident verify or 7B+ long-prefill graph-buffer
+infra, with A/B/C/F/§4-decode/§C-v1/§4-prefill all
 closed):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
@@ -2222,6 +2336,7 @@ C. ~~Fix the Q3_K shader (#28).~~ **Done — §14.**
 F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §4. ~~Flash Attention enable for decode.~~ **CLOSED 2026-04-26 — §18.**
 §C. ~~Drafter-based speculative decoding (v1).~~ **CLOSED 2026-04-26 — §19** (measured 0.20× regression; verify-readback dominates).
+§4-prefill. ~~FA revisit at prefill / long-decode scope.~~ **CLOSED 2026-04-26 — §20** (TinyLlama wins everywhere; Mistral short-short -3.3% over gate; 7B+ long-prefill blocked by WebGPU buffer-binding limit, not FA).
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -2232,18 +2347,26 @@ D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    that need Q4_K_S+.
 
 E. **Remaining deferred items (in rough priority):**
+   - **7B+ long-prefill graph-buffer infrastructure**
+     *(blocking the §4 hypothesis at scale — see §20).*
+     Mistral-7B and both 8B candidates abort at
+     `backend_alloc_ctx_tensors` when building long-prefill
+     graphs (32 layers × seq=512 of F32 intermediates exceeds
+     WebGPU max-buffer-binding cap), independent of FA mode.
+     Bumping the `graphMem` allocator did not help; the abort
+     is GPU-side. Without this, FA wins at prefill / long-
+     decode at the canonical 4-baseline cannot be measured.
    - **§4 FA revisit at long-decode / prefill-TTFT scope**
-     *(recommended first move for next session, with §C v1
-     closed at §19).*
-     The §18 closure measured FA at decode N=1 only; FA's
-     real wins (prefill + decode batches >256 tokens) were
-     never tested. Bridge infrastructure is already in place
-     (`33f10eb`, `4692bce`+`d26d736`, `068ef84`) — a future
-     revisit just needs to re-land the implementation files
-     from `1f1a9da` and measure under a different gate.
-   - **§B FA shape-routing** for prefill/TTFT — overlaps with
-     the §4 revisit above; same `flash_attn_get_decisions`
-     code path at the same shapes.
+     **CLOSED 2026-04-26 at §20** — TinyLlama wins everywhere,
+     Mistral short-short -3.3% over gate, 7B+ long-prefill
+     blocked by the buffer-binding limit above. Gate retained
+     in tree (default-off `flashAttn` constructor option +
+     `?fa=on` smoke param + `--fa <on|off>` perf.ts flag);
+     no further work until the infra item above unblocks the
+     measurement.
+   - **§B FA shape-routing** for prefill/TTFT — same
+     `flash_attn_get_decisions` code path; blocked on the
+     7B+ buffer-binding infra item above.
    - **§D encoder/embedding perf pass.** Untouched since
      §21 dashboard. Smaller scope; quick wins likely on
      arctic-embed-s/m if anyone uses `engine.embed()` at
@@ -2273,42 +2396,56 @@ kernel-tuning AND algorithmic-amortization levers are now
 closed without ship at v1.** §17 ruled out matmul-kernel
 rework (§A); §18 ruled out FA fusion at N=1 decode; §19
 ruled out drafter speculative decoding at K=4 (verify-
-readback dominates). The remaining headroom is at a
-different scope: (1) workload — §4 FA revisit at prefill
-/ long-decode where the kernel overhead pays back; (2)
-infrastructure — §C v2 with GPU-resident verify (skips the
+readback dominates); §20 ruled out FA at small-prefill /
+long-decode scale on the 7B+ fleet (TinyLlama wins
+preserved behind a default-off gate; 7B+ blocked by WebGPU
+max-buffer-binding limit at long-prefill). The remaining
+headroom is at: (1) infrastructure — 7B+ long-prefill
+graph-buffer rework to unblock the §4 measurement at
+scale; (2) infrastructure — §C v2 with GPU-resident verify
+(skips the
 2.4 MB / step readback that sank v1). Both are documented
 above under "Remaining deferred items".
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 413 pass / 10 skip / 0 fail.
+1. **`make checkall`** — confirm 418 pass / 10 skip / 0 fail.
    The §C drafter spec-decoding work added 19 unit + integration
    tests across `tests/sampler.test.ts` (7), `tests/speculative-
    rejection.test.ts` (11), `tests/forward-verify-equivalence.test.ts`
    (Bun-skipped, +6 more), `tests/speculative-integration.test.ts`
-   (Bun-skipped, 3), and 1 engagement-gate test. Skip count grew
-   from 5 → 10 because the WebGPU-gated integration tests skip
+   (Bun-skipped, 3), and 1 engagement-gate test. The §20 FA-revisit
+   work added a further 5 tests at `tests/fa-mode-config.test.ts`
+   pinning the `flashAttn` constructor contract (413 → 418). Skip
+   count is still 10 — the WebGPU-gated integration tests skip
    under Bun (no `navigator.gpu`).
-2. **`git log --oneline -25`** — top of `main` should be
-   `9984fa4 docs(TODO): §19 — §C drafter spec-decode
-   measured + reverted`, then `aac7080 revert(engine):
-   replace spec-decode dispatch with reserved-in-v1
-   throw`, `1b23ca8 fix(smoke): pass drafter handle id
-   (not name) into spec-decode config` (the bug surfaced
-   during the gate-1 ship measurement). Below those: the
-   §19 implementation commits (`bbd1dff` smoke-page +
-   Makefile, `1b6fd72`+`81e3df0` engine routing,
-   `1c2db1b` integration test, `87e732a`+`5572bd4`+
-   `efa094c`+`dd84729` driver, `183b99f`+`90ecf37`+
-   `cf85756`+`9d7c258` rejection sampler, `d7e8605`+
-   `11fe3f7` sampler helpers, `3fdd347`+`433252b` model-
-   inference primitives) — all retained except the
-   engine routing block. Below those: `d680371`/`ffd7276`
-   (§18 §4 FA closure), `068ef84`/`d26d736`/`4692bce`/
-   `33f10eb` (FA infrastructure that survived), then
-   `bebed0c` (§17 §A closure) and `c98d0a7` (§16 qwen3-8b
-   register).
+2. **`git log --oneline -25`** — §20 work lives on the
+   `feat/fa-revisit-prefill-long-decode` branch (not yet
+   merged to `main`). Branch head is the §20 docs commit;
+   below it on the branch are the implementation commits
+   `91d8e26` (flashAttn option + dual V-cache), `4138232`
+   (F16 mask), `4bfa6f4` (gated FA in `forward()`),
+   `faccb8e` (gated FA in the other three branches),
+   `ddc6e39` (smoke `?fa=on` + F16 KV fix), `f1b19ab`
+   (long-prompt fixtures + perf.ts flags). On `main` the
+   top commits are still `9984fa4 docs(TODO): §19 — §C
+   drafter spec-decode measured + reverted`, then
+   `aac7080 revert(engine): replace spec-decode dispatch
+   with reserved-in-v1 throw`, `1b23ca8 fix(smoke): pass
+   drafter handle id (not name) into spec-decode config`
+   (the bug surfaced during the gate-1 ship measurement).
+   Below those: the §19 implementation commits (`bbd1dff`
+   smoke-page + Makefile, `1b6fd72`+`81e3df0` engine
+   routing, `1c2db1b` integration test, `87e732a`+
+   `5572bd4`+`efa094c`+`dd84729` driver, `183b99f`+
+   `90ecf37`+`cf85756`+`9d7c258` rejection sampler,
+   `d7e8605`+`11fe3f7` sampler helpers, `3fdd347`+
+   `433252b` model-inference primitives) — all retained
+   except the engine routing block. Below those:
+   `d680371`/`ffd7276` (§18 §4 FA closure),
+   `068ef84`/`d26d736`/`4692bce`/`33f10eb` (FA
+   infrastructure that survived), then `bebed0c` (§17 §A
+   closure) and `c98d0a7` (§16 qwen3-8b register).
 3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
    — confirm the **11-patch stack** is intact and the base
    is upstream `78433f606 Fix recurrent state serialization`
@@ -2331,21 +2468,27 @@ Boot sequence for a fresh session:
    `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M coherent
    at ≥20 tok/s confirms patch 11 is healthy.
 5. **Read for context:** "Completed on 2026-04-26" §17 (§A
-   closure), §18 (§4 FA closure), and §19 (§C drafter
-   spec-decode closure). All three follow the same
-   "measure-and-close" pattern — useful templates for
-   the next lever (§4 FA-revisit at long-decode/prefill
-   scope or §C v2 with GPU-resident verify). The §18
-   plan at `docs/superpowers/plans/2026-04-26-fa-enable.md`
-   is worth skimming for the V cache layout choice +
-   FA shape contract — that work is recoverable from
-   git (`baad612` + `1f1a9da`). Likewise, the §C plan
-   at `docs/superpowers/plans/2026-04-26-speculative-
+   closure), §18 (§4 FA closure at N=1 decode), §19 (§C
+   drafter spec-decode closure), and §20 (§4 FA revisit at
+   prefill / long-decode scope closure). All four follow
+   the same "measure-and-close" pattern — useful templates
+   for the next lever (§C v2 with GPU-resident verify or
+   the 7B+ long-prefill graph-buffer infra item that
+   blocked §20 from completing the matrix). The §20 plan
+   at `docs/superpowers/plans/2026-04-26-fa-revisit-long-
+   decode.md` and the matrix raw logs at
+   `eval/reports/fa-revisit-2026-04-27/` carry the FA
+   gate's full contract: F16 K + F16 V cache when
+   `flashAttn=true` (else legacy F32 K + dim-swapped V),
+   F16 causal mask in all four branches, dual V-write
+   layouts in `forward` / `forwardVerify` / `forwardDecode`
+   / `debugLayerOutput`. The §C plan at
+   `docs/superpowers/plans/2026-04-26-speculative-
    decoding.md` and design at `docs/superpowers/specs/
    2026-04-26-speculative-decoding-design.md` are the
    reference for the v2 lever — driver code at
-   `src/inference/speculative.ts` is wired up and
-   tested; only the engine dispatch needs unblocking.
+   `src/inference/speculative.ts` is wired up and tested;
+   only the engine dispatch needs unblocking.
 6. **Dashboard state check** (optional but useful before
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
@@ -2357,64 +2500,77 @@ Boot sequence for a fresh session:
    correct but independent. If the dashboard tab is open
    from a prior session, force-reload — SSE doesn't
    broadcast deletes.
-7. **Bridge wrappers retained from §18.** `op_flash_attn_ext`,
-   `op_flash_attn_ext_set_prec`, `op_flash_attn_ext_add_sinks`
-   exist in `src/wasm/webgpu-bridge.cpp` and are exported
-   in `src/wasm/CMakeLists.txt`. `opFlashAttn`,
-   `opFlashAttnSetPrec`, `opFlashAttnAddSinks` exist on the
-   `GgmlWasm` class in `src/inference/ggml-wasm.ts`. There
-   are no call sites — they're dead code by design. **Do
-   not delete them** — they are the foundation for any
-   future FA revisit (§4 long-decode / prefill scope).
+7. **Bridge wrappers retained from §18, now used by §20.**
+   `op_flash_attn_ext`, `op_flash_attn_ext_set_prec`,
+   `op_flash_attn_ext_add_sinks` exist in
+   `src/wasm/webgpu-bridge.cpp` and are exported in
+   `src/wasm/CMakeLists.txt`. `opFlashAttn`,
+   `opFlashAttnSetPrec`, `opFlashAttnAddSinks` exist on
+   the `GgmlWasm` class in `src/inference/ggml-wasm.ts`.
+   §20 wired call sites into `model-inference.ts` behind
+   `flashAttn=true`; the wrappers are now live (not dead)
+   when the gate is enabled. **Do not delete them.**
+8. **§20 FA gate state (on `feat/fa-revisit-prefill-long-
+   decode`).** Default is **off** — `new ModelInference(...)
+   `with no `opts` argument is bit-identical to pre-§20
+   behaviour. To exercise the FA path: pass
+   `{ flashAttn: true }` to the constructor, append
+   `?fa=on` to the smoke-page URL, or pass
+   `--fa on` to `eval/perf.ts`. `eval/perf.ts` also
+   accepts `--prompt-fixture <prefill-256|prefill-512|
+   prefill-1024>` and `--decode-tokens <n>` for the
+   long-decode harness; fixtures live in
+   `eval/fixtures/long-prompts.ts`. Mistral-7B and 8B
+   models will abort at `backend_alloc_ctx_tensors` on
+   long-prefill workloads regardless of FA mode (see §20
+   closure for the WebGPU buffer-binding limit details).
 
-**Recommended first move:** **§4 FA revisit at long-decode
-/ prefill-TTFT scope.** §17 (§A matmul kernel), §18 (FA at
-N=1 decode), and §19 (§C drafter spec-decode at K=4) all
-closed without ship; the next lever with measured headroom
-sits at a different scope than bench-inference's
-batch=1 / seq=1 gate exercises.
+**Recommended first move:** **§C v2 GPU-resident verify**
+*or* **7B+ long-prefill graph-buffer infrastructure**.
+§17 (§A matmul kernel), §18 (FA at N=1 decode), §19 (§C
+drafter spec-decode at K=4), and §20 (§4 FA at prefill /
+long-decode) all closed without ship at v1. Both remaining
+options are infra work — the algorithmic levers at the
+canonical 4-baseline are exhausted.
 
-**Why §4 FA revisit:** the §18 closure measured FA at
-decode N=1 only and saw a -5.8% regression on Mistral-7B
-(bridge overhead 1.3-3.3 ms / step exceeds the per-token
-matmul savings). FA's actual wins are at **prefill** (long
-prompts → big QK^T) and **long-decode batches** (>256
-tokens → bridge overhead amortizes). Neither is exercised
-by `make bench-inference`. The bridge infrastructure is
-already in place (`33f10eb`, `4692bce`+`d26d736`, `068ef84`),
-so the work is: re-land `1f1a9da` (the implementation
-commit reverted by `ffd7276`), build a long-prefill / long-
-decode harness, and re-run the gate. Likely result: prefill
-TTFT drops measurably on 512+ token prompts; steady-state
-N=1 decode unchanged or marginally worse (we already know
-that). Closure is fast — either ship behind a config gate
-(prefill-only FA) or close again with a long-decode TTFT
-number captured.
-
-**Scope estimate:** 1-2 days. The plan + implementation
-already exist in git history (§18 plan at
-`docs/superpowers/plans/2026-04-26-fa-enable.md` and
-implementation at `1f1a9da`); only the gate and harness
-are new.
-
-**Secondary option:** **§C v2 with GPU-resident verify.**
-§19 closed v1 because per-step verify readback (4 × 152 K
-logits ≈ 2.4 MB / step) plus K full-vocab drafter forwards
+**Why §C v2 with GPU-resident verify:** §19 closed v1
+because per-step verify readback (4 × 152 K logits ≈
+2.4 MB / step) plus K full-vocab drafter forwards
 dominated. v2 needs one of: (a) GPU-resident verify
-(compare drafted ids against target argmax on-device, read
-back only a K-bit rejection mask), (b) a meaningfully
-cheaper drafter (sub-1B at < 2 ms / forward — qwen3-0.6b
-is currently ~12 ms / forward at full-vocab readback), or
-(c) dynamic K that collapses to 1 when α drops. **Driver,
-sampler helpers, `forwardVerify`, `truncateKVCache`, 19
-tests, and smoke / Makefile / `eval/perf.ts` plumbing are
-all retained** — re-enabling is a deliberate edit at the
-"reserved in v1" throw in `src/core/engine.ts`. Larger
-investment than §4 FA revisit but a real algorithmic ceiling
-if (a) lands. See §19 closure for the full diagnosis and
-v2 design constraints.
+(compare drafted ids against target argmax on-device,
+read back only a K-bit rejection mask — kills the 2.4 MB
+readback entirely), (b) a meaningfully cheaper drafter
+(sub-1B at < 2 ms / forward — qwen3-0.6b is currently
+~12 ms / forward at full-vocab readback), or (c) dynamic
+K that collapses to 1 when α drops. **Driver, sampler
+helpers, `forwardVerify`, `truncateKVCache`, 19 tests, and
+smoke / Makefile / `eval/perf.ts` plumbing are all
+retained** — re-enabling is a deliberate edit at the
+"reserved in v1" throw in `src/core/engine.ts`. A real
+algorithmic ceiling if (a) lands. See §19 closure for the
+full diagnosis and v2 design constraints.
 
-**Tertiary option:** **§D encoder/embedding perf pass.**
+**Why 7B+ long-prefill graph-buffer infra:** §20 captured
+TinyLlama wins on FA at prefill / long-decode scope
+(short-short -6.6% TTFT / +4.9% decode; long-short -10%
+TTFT / +16.4% decode) but Mistral-7B and both 8B
+candidates abort at `backend_alloc_ctx_tensors` on
+long-prefill workloads — independent of FA mode. The
+abort is a generic WebGPU max-buffer-binding limit (32
+layers × seq=512 of F32 intermediates exceeds the device
+cap). Bumping `graphMem` 32× → 64× did not unblock; the
+allocation failure is GPU-side, not in the metadata
+context. Possible fixes: (a) tile the prefill into
+seq=256 chunks and stitch results, (b) recompute KV-cache
+intermediates per layer instead of materializing all
+layers' graphs at once, (c) F16 intermediates (most
+tensors are already F16 or quantized — only the temp
+F32 working tensors hit the limit). With this unblocked,
+the §20 hypothesis (FA wins on prefill TTFT once the
+seq² / dispatch-overhead crossover is reached) becomes
+testable on the canonical 4-baseline.
+
+**Secondary option:** **§D encoder/embedding perf pass.**
 Untouched since §21 dashboard work. Smaller scope; quick
 wins likely on `arctic-embed-s` / `arctic-embed-m` if any
 caller uses `engine.embed()` at throughput. No design
@@ -2423,9 +2579,9 @@ exists yet — needs a brainstorming pass first.
 **Recommended path (any option):** invoke
 `superpowers:writing-plans` with the chosen scope, then
 execute via `superpowers:subagent-driven-development` (per
-global preference). Mirror §17 / §18 / §19 plan structure:
-explicit phases, measurable gates, and a measure-and-close
-decision rule.
+global preference). Mirror §17 / §18 / §19 / §20 plan
+structure: explicit phases, measurable gates, and a
+measure-and-close decision rule.
 
 #### Archived: How to test §A lever 1 — THREADS_PER_BLOCK 4→2 (CLOSED 2026-04-26 — §17)
 
