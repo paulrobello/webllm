@@ -226,40 +226,49 @@ export class ModelInference {
 		if (this.kvLayers) return;
 
 		const { hp, wasm } = this;
-		// NOTE: KV cache is F32. F16 was tried (see git history + TODO.md
-		// item 6) and measured -7.7% on short-context benchmarks — the
-		// F16×F32 mul_mat path plus F32->F16 conversion on writes outweigh
-		// the bandwidth savings until context gets much longer (~1000+ tokens).
-		// Left as F32; revisit when real long-context workloads become the
-		// perf target.
-		const perLayerBytes = hp.embeddingHeadLength * maxContextLength * 4;
+		// KV cache dtype:
+		// - FA mode: F16 (2 bytes/elem). Required for ggml-webgpu's
+		//   FLASH_ATTN_EXT VEC/TILE paths to engage — see
+		//   flash_attn_get_decisions::kv_vec_type_supported in
+		//   ggml-webgpu-shader-lib.hpp. opCpy handles F32→F16 on KV writes;
+		//   FA reads F16 directly. The §6 -7.7% short-context measurement
+		//   was made BEFORE FA could engage and no longer applies.
+		// - Manual mode: F32 (4 bytes/elem). Legacy mul_mat-friendly default.
+		const kvElemBytes = this.flashAttn ? 2 : 4;
+		const perLayerBytes =
+			hp.embeddingHeadLength * maxContextLength * kvElemBytes;
 		const totalBytes = hp.layerCount * 2 * perLayerBytes;
 		const memSize = hp.layerCount * 2 * 16384 + totalBytes + (1 << 20);
 
 		wasm.ctxCreate(memSize);
 
+		// FA mode requires F16 K + F16 V (per §18 commit baad612 +
+		// flash_attn_get_decisions::kv_vec_type_supported). Manual mode
+		// keeps the legacy F32 layout. opCpy converts F32→F16 on writes.
+		const kvType = this.flashAttn ? GgmlType.F16 : GgmlType.F32;
 		this.kvLayers = [];
 		for (let i = 0; i < hp.layerCount; i++) {
 			this.kvLayers.push({
-				// K: [headDim, maxCtx, nKvHeads] — same layout in both modes.
+				// K: [headDim, maxCtx, nKvHeads] — same layout in both modes;
+				// dtype tracks FA mode.
 				k: wasm.tensorNew3d(
-					GgmlType.F32,
+					kvType,
 					hp.embeddingHeadLength,
 					maxContextLength,
 					hp.headCountKv,
 				),
-				// V layout depends on attention path:
-				// - FA mode: [headDim, maxCtx, nKvHeads] (matches K, FA-ready)
-				// - Manual mode: [maxCtx, headDim, nKvHeads] (mul_mat compatible)
+				// V layout depends on FA mode:
+				// - FA mode:     [headDim, maxCtx, nKvHeads] (FA-ready)
+				// - Manual mode: [maxCtx, headDim, nKvHeads] (mul_mat compat)
 				v: this.flashAttn
 					? wasm.tensorNew3d(
-							GgmlType.F32,
+							kvType,
 							hp.embeddingHeadLength,
 							maxContextLength,
 							hp.headCountKv,
 						)
 					: wasm.tensorNew3d(
-							GgmlType.F32,
+							kvType,
 							maxContextLength,
 							hp.embeddingHeadLength,
 							hp.headCountKv,

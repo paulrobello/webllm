@@ -61,6 +61,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		Number.isFinite(drafterDraftLengthParam) && drafterDraftLengthParam > 0
 			? Math.floor(drafterDraftLengthParam)
 			: null;
+	// §4 Flash Attention gate: ?fa=on toggles ggml_flash_attn_ext + the
+	// FA-ready V-cache layout. Default off — preserves §18-revert behavior.
+	const flashAttnEnabled = params.get("fa") === "on";
 	document.body.innerHTML = getSmokePageShellMarkup();
 
 	const logEl = document.getElementById("log");
@@ -94,6 +97,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	modeToggle.textContent = thinkingEnabled ? "switch off" : "switch on";
 	modeBar.appendChild(modePill);
 	modeBar.appendChild(modeToggle);
+	const faPill = document.createElement("span");
+	faPill.className = `mode-pill ${flashAttnEnabled ? "on" : "off"}`;
+	faPill.textContent = `FA: ${flashAttnEnabled ? "ON" : "OFF"}`;
+	modeBar.appendChild(faPill);
 	if (profileName) {
 		const profilePill = document.createElement("span");
 		profilePill.className = "mode-pill profile";
@@ -262,7 +269,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			if (isEncoderModel) {
 				inference = new EncoderInference(wasm, parsed.hyperparams);
 			} else {
-				inference = new ModelInference(wasm, parsed.hyperparams);
+				inference = new ModelInference(wasm, parsed.hyperparams, {
+					flashAttn: flashAttnEnabled,
+				});
 				if (profileMode) {
 					inference.traceEnabled = true;
 					window.__decodeTraces = [];
