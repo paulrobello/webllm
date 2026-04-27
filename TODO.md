@@ -186,11 +186,25 @@
 > path and routes through general `mul_mat.wgsl` instead.
 > Levers 2 (vec4-packed loads) and 3 (`d`-scale lifting)
 > face the same applicability constraint. Shader
-> reverted; no patches landed. **Next lever with
-> meaningful headroom is §C drafter-based speculative
-> decoding** — qwen3-0.6b ↔ qwen3-8b is a same-family
-> draft pair with shared tokenizer (theoretical 2-3×
-> wall-clock for chat).
+> reverted; no patches landed.
+>
+> **§C closed 2026-04-26 (Completed §19):** drafter
+> speculative decoding measured at K=4 on
+> qwen3-8b-iq3m via qwen3-0.6b-q4f16 → 0.20× ratio
+> (3.0 vs 15.3 tok/s baseline). Verify-readback (4 ×
+> 152K logits = ~2.4 MB/step) plus K full-vocab
+> drafter forwards dominate. Output is functionally
+> correct (Leviathan sampling preserves the target
+> distribution); the lever is just paying readback
+> overhead it can't earn back at v1's CPU-side
+> verify. Engine routing reverted (`aac7080`); driver,
+> sampler helpers, `forwardVerify`, `truncateKVCache`,
+> 19 tests, and smoke/Makefile plumbing remain in
+> tree behind a "reserved in v1" throw. **Next lever
+> with meaningful headroom is §4 FA revisit at
+> prefill / long-decode scope** (the §18 measurement
+> only covered N=1 decode; FA's actual wins are at
+> longer decode batches).
 >
 > **§4 closed 2026-04-26 (Completed §18):** `ggml_flash_attn_ext`
 > integrated into all three attention branches (MLA/GQA/MHA)
@@ -205,8 +219,12 @@
 > by the bench-inf gate. Bridge wrappers (`33f10eb`), TS
 > bindings (`4692bce`+`d26d736`), and surface test (`068ef84`)
 > retained as future-work infrastructure; implementation
-> reverted via `git checkout 068ef84 --`. **Next lever:
-> §C drafter speculative decoding** (qwen3-0.6b ↔ qwen3-8b).
+> reverted via `git checkout 068ef84 --`. **Next lever
+> (post-§19):** §4 FA revisit at prefill / long-decode
+> scope (re-land `1f1a9da` and measure under a different
+> gate than bench-inference's N=1 decode), or §C v2
+> with GPU-resident verify (skips the 2.4 MB / step
+> readback that sank §C v1).
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -2272,15 +2290,25 @@ Boot sequence for a fresh session:
    (Bun-skipped, 3), and 1 engagement-gate test. Skip count grew
    from 5 → 10 because the WebGPU-gated integration tests skip
    under Bun (no `navigator.gpu`).
-2. **`git log --oneline -10`** — top of `main` should be
-   `d680371 docs(TODO): bump resumption checkall count
-   393 -> 394`, then `ffd7276 docs(TODO): §18 — §4 FA
-   enable measured + closed`. Below those: the §18 plan
-   commits (`d4988a0` `1f1a9da` `baad612` — implementation
-   reverted by `ffd7276`'s `git checkout`), then the §18
-   infrastructure commits that survived (`068ef84`
-   `d26d736` `4692bce` `33f10eb`). Below that: `bebed0c`
-   (§17 §A closure) and `c98d0a7` (§16 qwen3-8b register).
+2. **`git log --oneline -25`** — top of `main` should be
+   `9984fa4 docs(TODO): §19 — §C drafter spec-decode
+   measured + reverted`, then `aac7080 revert(engine):
+   replace spec-decode dispatch with reserved-in-v1
+   throw`, `1b23ca8 fix(smoke): pass drafter handle id
+   (not name) into spec-decode config` (the bug surfaced
+   during the gate-1 ship measurement). Below those: the
+   §19 implementation commits (`bbd1dff` smoke-page +
+   Makefile, `1b6fd72`+`81e3df0` engine routing,
+   `1c2db1b` integration test, `87e732a`+`5572bd4`+
+   `efa094c`+`dd84729` driver, `183b99f`+`90ecf37`+
+   `cf85756`+`9d7c258` rejection sampler, `d7e8605`+
+   `11fe3f7` sampler helpers, `3fdd347`+`433252b` model-
+   inference primitives) — all retained except the
+   engine routing block. Below those: `d680371`/`ffd7276`
+   (§18 §4 FA closure), `068ef84`/`d26d736`/`4692bce`/
+   `33f10eb` (FA infrastructure that survived), then
+   `bebed0c` (§17 §A closure) and `c98d0a7` (§16 qwen3-8b
+   register).
 3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
    — confirm the **11-patch stack** is intact and the base
    is upstream `78433f606 Fix recurrent state serialization`
@@ -2305,13 +2333,19 @@ Boot sequence for a fresh session:
 5. **Read for context:** "Completed on 2026-04-26" §17 (§A
    closure), §18 (§4 FA closure), and §19 (§C drafter
    spec-decode closure). All three follow the same
-   "measure-and-close" pattern — useful templates if §C
-   drafter or §4 FA-revisit produces a similar outcome.
-   The §18 plan at `docs/superpowers/plans/2026-04-26-fa-enable.md`
-   is also worth skimming for the V cache layout choice +
+   "measure-and-close" pattern — useful templates for
+   the next lever (§4 FA-revisit at long-decode/prefill
+   scope or §C v2 with GPU-resident verify). The §18
+   plan at `docs/superpowers/plans/2026-04-26-fa-enable.md`
+   is worth skimming for the V cache layout choice +
    FA shape contract — that work is recoverable from
-   git (the implementation lived briefly on commits
-   `baad612` + `1f1a9da` before the closure revert).
+   git (`baad612` + `1f1a9da`). Likewise, the §C plan
+   at `docs/superpowers/plans/2026-04-26-speculative-
+   decoding.md` and design at `docs/superpowers/specs/
+   2026-04-26-speculative-decoding-design.md` are the
+   reference for the v2 lever — driver code at
+   `src/inference/speculative.ts` is wired up and
+   tested; only the engine dispatch needs unblocking.
 6. **Dashboard state check** (optional but useful before
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
@@ -2333,59 +2367,65 @@ Boot sequence for a fresh session:
    not delete them** — they are the foundation for any
    future FA revisit (§4 long-decode / prefill scope).
 
-**Recommended first move:** §C drafter-based speculative
-decoding using the **qwen3-0.6b → qwen3-8b draft pair**.
-Both kernel-tuning levers (§17 §A and §18 §4 FA) are now
-closed for single-token decode; §C is the remaining lever
-with real algorithmic headroom (theoretical 2-3× wall-clock
-decode on chat workloads where the drafter is mostly right).
+**Recommended first move:** **§4 FA revisit at long-decode
+/ prefill-TTFT scope.** §17 (§A matmul kernel), §18 (FA at
+N=1 decode), and §19 (§C drafter spec-decode at K=4) all
+closed without ship; the next lever with measured headroom
+sits at a different scope than bench-inference's
+batch=1 / seq=1 gate exercises.
 
-**Why this pair:** same Qwen3 family (shared tokenizer +
-chat template), ~13× param spread between drafter and
-target, both already registered + benched in §16. Both
-files cached locally (`smoke-test/models/qwen3-0.6b-q4f16.gguf`
-0.6 GB + `qwen3-8b-iq3m.gguf` 3.7 GB).
+**Why §4 FA revisit:** the §18 closure measured FA at
+decode N=1 only and saw a -5.8% regression on Mistral-7B
+(bridge overhead 1.3-3.3 ms / step exceeds the per-token
+matmul savings). FA's actual wins are at **prefill** (long
+prompts → big QK^T) and **long-decode batches** (>256
+tokens → bridge overhead amortizes). Neither is exercised
+by `make bench-inference`. The bridge infrastructure is
+already in place (`33f10eb`, `4692bce`+`d26d736`, `068ef84`),
+so the work is: re-land `1f1a9da` (the implementation
+commit reverted by `ffd7276`), build a long-prefill / long-
+decode harness, and re-run the gate. Likely result: prefill
+TTFT drops measurably on 512+ token prompts; steady-state
+N=1 decode unchanged or marginally worse (we already know
+that). Closure is fast — either ship behind a config gate
+(prefill-only FA) or close again with a long-decode TTFT
+number captured.
 
-**Scope estimate:** 2-3 days work. Touches:
-1. **Engine** — load two `ModelInference` instances
-   simultaneously (drafter + target). Check WASM heap
-   budget; 4.3 GB total weights + 2× KV caches will be
-   tight against the 4 GiB cap (option D MEMORY64 may
-   become a prerequisite at 8B target).
-2. **Inference layer** — add a `forward(K)` parallel
-   verify path on the target. Currently `forward` is
-   strictly N=1 in the decode branch; this needs to
-   accept K candidate tokens and return K logit
-   distributions in parallel.
-3. **Decode loop** — speculative driver that orchestrates
-   draft (run drafter K steps) → verify (target forward
-   on all K tokens at once) → accept (largest prefix
-   matching target's argmax / sampled output) → reset
-   draft state and resume from accept boundary.
-4. **Memory** — 2× KV cache management; on accept
-   boundary mismatch, draft KV must roll back.
-5. **Sampling** — must preserve target's distribution
-   exactly (rejection sampling with target's softmax)
-   so user-visible behavior matches non-drafted runs.
+**Scope estimate:** 1-2 days. The plan + implementation
+already exist in git history (§18 plan at
+`docs/superpowers/plans/2026-04-26-fa-enable.md` and
+implementation at `1f1a9da`); only the gate and harness
+are new.
 
-**Recommended path:** invoke `superpowers:writing-plans`
-with the above scope, then execute via
-`superpowers:subagent-driven-development` (per global
-preference). Mirror the §18 plan structure: explicit
-phases, gates, and a measure-and-close decision rule
-on a 2-3 model harness (qwen3-8b alone vs qwen3-8b
-drafted by qwen3-0.6b).
+**Secondary option:** **§C v2 with GPU-resident verify.**
+§19 closed v1 because per-step verify readback (4 × 152 K
+logits ≈ 2.4 MB / step) plus K full-vocab drafter forwards
+dominated. v2 needs one of: (a) GPU-resident verify
+(compare drafted ids against target argmax on-device, read
+back only a K-bit rejection mask), (b) a meaningfully
+cheaper drafter (sub-1B at < 2 ms / forward — qwen3-0.6b
+is currently ~12 ms / forward at full-vocab readback), or
+(c) dynamic K that collapses to 1 when α drops. **Driver,
+sampler helpers, `forwardVerify`, `truncateKVCache`, 19
+tests, and smoke / Makefile / `eval/perf.ts` plumbing are
+all retained** — re-enabling is a deliberate edit at the
+"reserved in v1" throw in `src/core/engine.ts`. Larger
+investment than §4 FA revisit but a real algorithmic ceiling
+if (a) lands. See §19 closure for the full diagnosis and
+v2 design constraints.
 
-**Secondary option:** §4 FA revisit at long-decode /
-prefill-TTFT scope. The §18 closure measured FA at decode
-N=1 only; FA's real wins (prefill + decode batches >256
-tokens) were never tested. Bridge infrastructure is
-already in place (`33f10eb`, `4692bce`+`d26d736`,
-`068ef84`) — a future revisit just needs to re-land the
-implementation files from `1f1a9da` and measure under a
-different gate (e.g., bench TTFT on a 512-token prompt;
-or bench steady-state at decode batch 256+). Smaller
-scope than §C but narrower upside ceiling.
+**Tertiary option:** **§D encoder/embedding perf pass.**
+Untouched since §21 dashboard work. Smaller scope; quick
+wins likely on `arctic-embed-s` / `arctic-embed-m` if any
+caller uses `engine.embed()` at throughput. No design
+exists yet — needs a brainstorming pass first.
+
+**Recommended path (any option):** invoke
+`superpowers:writing-plans` with the chosen scope, then
+execute via `superpowers:subagent-driven-development` (per
+global preference). Mirror §17 / §18 / §19 plan structure:
+explicit phases, measurable gates, and a measure-and-close
+decision rule.
 
 #### Archived: How to test §A lever 1 — THREADS_PER_BLOCK 4→2 (CLOSED 2026-04-26 — §17)
 
@@ -2396,7 +2436,8 @@ scope than §C but narrower upside ceiling.
 > `mul_mat_vec.wgsl` path) entirely. The shader change
 > was reverted. See §17 in the journal for the full
 > measurement and rationale. The next-move recommendation
-> is now §C drafter speculative decoding, not lever 2/3.
+> is now §4 FA revisit at long-decode / prefill scope (§C
+> v1 closed at §19); §A levers 2/3 are still off the table.
 
 **The change.** Edit
 `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec.wgsl`
