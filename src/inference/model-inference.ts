@@ -337,8 +337,11 @@ export class ModelInference {
 		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
+		// FA requires F16 mask (ggml.c:5330); opSoftMaxExt accepts F16 too,
+		// so this works for both attention paths. Causal mask values are
+		// written as F16 bit patterns: 0x0000 = 0.0, 0xFC00 = -Inf.
 		const maskTensor = needsMask
-			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
+			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
 
 		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
@@ -533,7 +536,7 @@ export class ModelInference {
 		{
 			const posBytes = nTokens * 4;
 			const idsBytes = nTokens * 4;
-			const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
+			const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
 			const totalBytes = posBytes + idsBytes + maskBytes;
 
 			const heap = wasm.malloc(totalBytes);
@@ -552,17 +555,17 @@ export class ModelInference {
 				if (needsMask) {
 					// Causal mask: mask[key, query] = -Infinity if key > pastLen + query,
 					// else 0. Shape [totalLen, nTokensPadded] stored row-major.
-					const mask = new Float32Array(
+					const mask = new Uint16Array(
 						wasm.heapU8.buffer,
 						maskPtr,
 						totalLen * maskPaddedCols,
 					);
-					const NEG_INF = -Infinity;
+					const F16_NEG_INF = 0xfc00;
 					for (let q = 0; q < nTokens; q++) {
 						const rowBase = q * totalLen;
 						const visibleUpTo = pastLen + q;
 						for (let k = 0; k < totalLen; k++) {
-							mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+							mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
 						}
 					}
 					// Padding rows past nTokens: zero (unused but keeps buffer defined).
@@ -711,7 +714,7 @@ export class ModelInference {
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
 		const maskTensor = needsMask
-			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
+			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
@@ -872,7 +875,7 @@ export class ModelInference {
 		{
 			const posBytes = nTokens * 4;
 			const idsBytes = nTokens * 4;
-			const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
+			const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
 			const totalBytes = posBytes + idsBytes + maskBytes;
 
 			const heap = wasm.malloc(totalBytes);
@@ -889,17 +892,17 @@ export class ModelInference {
 				}
 
 				if (needsMask) {
-					const mask = new Float32Array(
+					const mask = new Uint16Array(
 						wasm.heapU8.buffer,
 						maskPtr,
 						totalLen * maskPaddedCols,
 					);
-					const NEG_INF = -Infinity;
+					const F16_NEG_INF = 0xfc00;
 					for (let q = 0; q < nTokens; q++) {
 						const rowBase = q * totalLen;
 						const visibleUpTo = pastLen + q;
 						for (let k = 0; k < totalLen; k++) {
-							mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+							mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
 						}
 					}
 					for (let q = nTokens; q < maskPaddedCols; q++) {
@@ -1015,7 +1018,7 @@ export class ModelInference {
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
 		const maskTensor = needsMask
-			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
+			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
@@ -1421,7 +1424,7 @@ export class ModelInference {
 	): void {
 		const posBytes = nTokens * 4;
 		const idsBytes = nTokens * 4;
-		const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
+		const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
 		const totalBytes = posBytes + idsBytes + maskBytes;
 
 		const heap = wasm.malloc(totalBytes);
@@ -1438,17 +1441,17 @@ export class ModelInference {
 			}
 
 			if (needsMask) {
-				const mask = new Float32Array(
+				const mask = new Uint16Array(
 					wasm.heapU8.buffer,
 					maskPtr,
 					totalLen * maskPaddedCols,
 				);
-				const NEG_INF = -Infinity;
+				const F16_NEG_INF = 0xfc00;
 				for (let q = 0; q < nTokens; q++) {
 					const rowBase = q * totalLen;
 					const visibleUpTo = pastLen + q;
 					for (let k = 0; k < totalLen; k++) {
-						mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+						mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
 					}
 				}
 				for (let q = nTokens; q < maskPaddedCols; q++) {
@@ -1584,7 +1587,7 @@ export class ModelInference {
 		try {
 			const posTensor = wasm.tensorNew1d(GgmlType.I32, 1);
 			const idsTensor = wasm.tensorNew1d(GgmlType.I32, 1);
-			const maskTensor = wasm.tensorNew2d(GgmlType.F32, 1, 32);
+			const maskTensor = wasm.tensorNew2d(GgmlType.F16, 1, 32);
 			const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 			let cur = wasm.opGetRows(weights.tokEmb, idsTensor);
@@ -1792,10 +1795,10 @@ export class ModelInference {
 			} finally {
 				wasm.stackRestore(sp);
 			}
-			const maskHeap = wasm.malloc(32 * 4);
+			const maskHeap = wasm.malloc(32 * 2);
 			try {
-				new Float32Array(wasm.heapU8.buffer, maskHeap, 32).fill(0);
-				wasm.backendTensorSet(maskTensor, maskHeap, 0, 32 * 4);
+				new Uint16Array(wasm.heapU8.buffer, maskHeap, 32).fill(0);
+				wasm.backendTensorSet(maskTensor, maskHeap, 0, 32 * 2);
 			} finally {
 				wasm.free(maskHeap);
 			}
