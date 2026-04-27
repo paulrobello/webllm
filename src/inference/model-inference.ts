@@ -113,10 +113,26 @@ export class ModelInference {
 	traceEnabled = false;
 	/** Timing of the most recent `forward()` call, or null if never traced. */
 	lastTrace: ForwardTrace | null = null;
+	/**
+	 * When true, attention call sites use ggml_flash_attn_ext + an FA-ready
+	 * V cache layout ([headDim, maxCtx, nKvHeads]). When false, they use the
+	 * manual opMulMat(K,Q) → opSoftMaxExt → opMulMat(V,attn) chain + the
+	 * legacy V layout ([maxCtx, headDim, nKvHeads]).
+	 *
+	 * Pinned at construction. Switching at runtime would require either two
+	 * cached V tensors (memory bloat) or a per-step transpose copy
+	 * (regression). Set once and treat as immutable.
+	 */
+	readonly flashAttn: boolean;
 
-	constructor(wasm: GgmlWasm, hyperparams: ModelHyperparams) {
+	constructor(
+		wasm: GgmlWasm,
+		hyperparams: ModelHyperparams,
+		opts: { flashAttn?: boolean } = {},
+	) {
 		this.wasm = wasm;
 		this.hp = hyperparams;
+		this.flashAttn = opts.flashAttn ?? false;
 	}
 
 	loadWeights(
@@ -225,20 +241,29 @@ export class ModelInference {
 		this.kvLayers = [];
 		for (let i = 0; i < hp.layerCount; i++) {
 			this.kvLayers.push({
-				// K: [headDim, maxCtx, nKvHeads]
+				// K: [headDim, maxCtx, nKvHeads] — same layout in both modes.
 				k: wasm.tensorNew3d(
 					GgmlType.F32,
 					hp.embeddingHeadLength,
 					maxContextLength,
 					hp.headCountKv,
 				),
-				// V: [maxCtx, headDim, nKvHeads] for ggml_mul_mat compatibility
-				v: wasm.tensorNew3d(
-					GgmlType.F32,
-					maxContextLength,
-					hp.embeddingHeadLength,
-					hp.headCountKv,
-				),
+				// V layout depends on attention path:
+				// - FA mode: [headDim, maxCtx, nKvHeads] (matches K, FA-ready)
+				// - Manual mode: [maxCtx, headDim, nKvHeads] (mul_mat compatible)
+				v: this.flashAttn
+					? wasm.tensorNew3d(
+							GgmlType.F32,
+							hp.embeddingHeadLength,
+							maxContextLength,
+							hp.headCountKv,
+						)
+					: wasm.tensorNew3d(
+							GgmlType.F32,
+							maxContextLength,
+							hp.embeddingHeadLength,
+							hp.headCountKv,
+						),
 			});
 		}
 
