@@ -279,3 +279,121 @@ plans` for a phase-by-phase implementation plan keyed to the gates
 above. Per global preference, the writing-plans choice is Subagent-
 Driven (this session) — execute via `superpowers:subagent-driven-
 development`.
+
+## Phase 2 Implementation Choice (2026-04-27)
+
+**Picked option:** Same-graph-cache
+
+**Why:** The bridge (`src/wasm/webgpu-bridge.cpp`) maintains a *stack* of
+ggml contexts (`g_ctx_stack`), not a single global pointer. `ctx_create`
+pushes, `ctx_free` pops, and `current_ctx()` always returns the top.
+This means the existing layout already cleanly separates the weight
+ctx (pushed in `loadWeights`) from the per-call graph ctx (pushed
+inside `embed()`); the only reason embed() incurs the rebuild cost
+today is that it `ctx_free`s the graph ctx in its `finally` block.
+`backendAllocCtxTensors` calls `ggml_backend_alloc_ctx_tensors(current_ctx(), …)`
+— it allocates a GPU buffer for the tensors in the *top* ctx only, so
+keeping the graph ctx alive across calls reuses the same graph buffer
+and the same leaf/graph node pointers without touching the weight
+ctx underneath. This option therefore strictly dominates options 1
+and 2: no bridge change (option 1 was never required — split-ctx is
+already the de facto layout), and we avoid option 2's per-call graph
+rebuild and metadata leak. Largest expected speedup at the smallest
+blast radius.
+
+**Bridge changes:** None. The stack-based ctx API in
+`webgpu-bridge.cpp` already supports a long-lived graph ctx; no new
+`ctx_switch` / `ctx_reset` / `secondary_ctx` primitive is required.
+
+**API surface added/changed in `EncoderInference`:**
+
+- (private) `ensureGraphCache(N: number): void` — if no cached entry
+  matches `N`, tear down any existing cache (pop graph ctx, free graph
+  buf), then push a new graph ctx, run `buildGraph(N)`, `graphNew`,
+  `graphBuildForwardExpand`, and `backendAllocCtxTensors`, caching
+  `{ N, graphCtxIndex, graph, graphBuf, leaves, finalHidden }` on the
+  instance.
+- (private field) `private graphCache: { N, graph, graphBuf, leaves,
+  finalHidden } | null = null;` — single-entry cache; replace on N
+  change rather than keeping a multi-entry map (encoder workloads in
+  scope here all reuse a single padded-N).
+- `embed()` body shrinks to: `ensureGraphCache(N)` → upload leaves
+  via `backendTensorSet3` → `graphCompute(graph)` → readback +
+  pool/normalize. No `ctxCreate` / `graphNew` / `backendAllocCtxTensors`
+  / `backendBufferFree` / `ctxFree` per call.
+- `dispose()` extended to also free `graphCache.graphBuf` and pop the
+  graph ctx (one extra `ctxFree`) when the cache is non-null, before
+  freeing the weight buffer + popping the weight ctx. Order matters:
+  pop top of stack first.
+
+**Per-call invariant after L1 lands:**
+
+- `ctxCreate` is called exactly **twice** per `loadWeights` lifecycle:
+  once for the weight ctx (in `loadWeights`), once for the graph ctx
+  (lazily, on first `embed()` or first `embed()` after an N change).
+  It is called **zero** times in the steady-state `embed()` body.
+- `backendAllocCtxTensors` is called exactly twice per lifecycle for
+  the same reason; `backendBufferFree` is called twice (once per
+  buffer) at `dispose()` (or once for the graph buf when N changes
+  mid-lifecycle).
+- The steady-state `embed()` body is: `backendTensorSet3` (3 leaves)
+  → `await graphCompute(graph)` → `downloadFromTensor(finalHidden)`
+  → `poolAndNormalize`. No allocation, no graph rebuild.
+- The bridge ctx stack depth is exactly 2 in steady state (weight at
+  index 0, graph at index 1).
+
+**Open questions for the implementer:**
+
+- The graph ctx `memSize` is currently sized as
+  `hp.layerCount * 32768 + N * hp.embeddingLength * 24` — confirm this
+  budget is still correct when `buildGraph` runs only once per N
+  (not per call). It should be: nothing about the metadata footprint
+  scales with call count, only with N + layer count. Verify by
+  running with a large N (e.g. 256) and watching for `ggml_init`
+  failures in the bridge's stderr after several embeds.
+- `wasm.uploadRangeChunked` vs `backendTensorSet3` interaction with a
+  long-lived ctx: the weight upload path in `loadWeights` already
+  works against a ctx beneath a (transient) graph ctx in the current
+  code, so this should be a no-op concern, but confirm in the
+  N-change recreate path that re-pushing the graph ctx still leaves
+  weight tensor pointers valid (they should — they live in the lower
+  ctx).
+- Whether the WebGPU backend's profile counters
+  (`webgpu_last_graph_profile_*`) reset cleanly across repeat
+  `graph_compute` calls on the same graph. If not, the §D5 perf
+  measurements in `eval/embed-perf.ts` may need a one-time warmup
+  call before sampling.
+- Single-entry vs LRU-by-N cache: spec assumes single-entry (replace
+  on N mismatch). If real workloads pad to one of a small set of Ns
+  (e.g. 32/64/128/256), upgrade to a small `Map<N, CacheEntry>` —
+  but defer until profiling shows N-thrash.
+
+**Test strategy:**
+
+- `tests/encoder-inference.test.ts`: add a `GgmlWasm` mock (or extend
+  the existing one) that counts calls to `ctxCreate`, `ctxFree`,
+  `backendAllocCtxTensors`, `backendBufferFree`, `graphNew`, and
+  `graphBuildForwardExpand`. Drive 5 successive `embed()` calls with
+  the same N and assert each counter is **1** (post-`loadWeights`,
+  pre-`dispose`).
+- Same test, switch N mid-stream (e.g. 3 calls at N=64, 2 at N=128):
+  assert `ctxCreate` increments by exactly 1 on the N-switch boundary
+  and `backendBufferFree` is called exactly once for the old graph
+  buf at that boundary. Total counter at end: `ctxCreate` = 3
+  (weight + 2 graph ctxes), `ctxFree` = 0 until `dispose`,
+  `backendAllocCtxTensors` = 3, `backendBufferFree` = 1.
+- `dispose()` after a non-null cache: assert `ctxFree` is called
+  twice (graph then weight) and `backendBufferFree` is called twice
+  (graph buf then weight buf), in that order. Order is load-bearing
+  because the bridge stack pops top-down.
+- Numerical regression: run the existing
+  `tests/encoder-inference.test.ts` (or whichever covers
+  end-to-end embed correctness) before and after the change with the
+  same fixture; embeddings must match bit-for-bit (or within a tight
+  tolerance if FP non-determinism intrudes — should not, since the
+  graph and inputs are identical).
+- Browser smoke: re-run the embed smoke route after L1 lands and
+  confirm no console errors from a stale-buffer-pointer crash on
+  the second `embed()` call. This is the highest-risk failure mode
+  if the long-lived graph buf interacts badly with WebGPU's resource
+  lifetime.
