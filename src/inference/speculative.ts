@@ -1,5 +1,20 @@
 import type { Sampler } from "./sampler.js";
 
+/**
+ * Per-stream warn-once state. The driver constructs one of these per stream
+ * and passes it into every `acceptPrefix` call. The function mutates the
+ * `degenerateResidualWarned` flag so a degenerate residual emits exactly one
+ * warning per stream (matching spec §9.3) instead of once per process.
+ */
+export interface SpeculativeWarnState {
+	degenerateResidualWarned: boolean;
+}
+
+/** Construct fresh warn state for a new stream. */
+export function newSpeculativeWarnState(): SpeculativeWarnState {
+	return { degenerateResidualWarned: false };
+}
+
 /** Result of `acceptPrefix`. */
 export interface AcceptPrefixResult {
 	/** Number of drafted tokens accepted (0..K). */
@@ -8,13 +23,16 @@ export interface AcceptPrefixResult {
 	 * The next visible token to emit beyond the accepted prefix:
 	 * - On rejection: residual-distribution sample.
 	 * - On full accept (acceptedCount === K): bonus token from target row K-1.
-	 * Always non-null in this initial version; Task 5 adds the
-	 * finish-mid-burst case where this is set to null.
+	 *
+	 * Typed `number | null` to match Task 5's widening; in this Task-4
+	 * version the function always returns a non-null id. Task 5 introduces
+	 * the finish-mid-burst case where it can be null.
 	 */
-	finalSampledId: number;
+	finalSampledId: number | null;
 	/**
 	 * Set when the accept loop terminated due to a finish condition. Always
-	 * null in this initial version; populated in Task 5.
+	 * null in this Task-4 version; populated in Task 5 when EOS / stop /
+	 * maxTokens truncation lands.
 	 */
 	finishReason: null;
 }
@@ -24,23 +42,25 @@ interface AcceptPrefixArgs {
 	draftDistros: Float32Array[];
 	targetDistros: Float32Array[];
 	sampler: Sampler;
+	warnState: SpeculativeWarnState;
 }
 
 /**
  * Standard Leviathan-et-al rejection sampling for speculative decoding.
  *
  * For each drafted token id at position k, computes
- * `r = min(1, p_target[id] / p_draft[id])` and accepts iff a fresh uniform draw
- * `u < r`. On first rejection, samples a final visible token from the residual
- * distribution `q[i] = max(0, p_target[i] - p_draft[i])` normalized. If all K
- * accept, samples a bonus token from `targetDistros[K-1]` (free token from the
- * parallel verify).
+ * `r = min(1, p_target[id] / p_draft[id])` and accepts iff a fresh uniform
+ * draw `u < r`. On first rejection, samples a final visible token from the
+ * residual distribution `q[i] = max(0, p_target[i] - p_draft[i])`
+ * normalized. If all K accept, samples a bonus token from
+ * `targetDistros[K-1]` (free token from the parallel verify).
  *
- * Pure function. Reads RNG via `sampler.rand()`. Returns
- * `(acceptedCount, finalSampledId)` for the caller to yield in order.
+ * Pure modulo `warnState.degenerateResidualWarned`, which it sets to true
+ * the first time a degenerate residual is encountered in the stream so the
+ * fallback warning fires exactly once per stream.
  */
 export function acceptPrefix(args: AcceptPrefixArgs): AcceptPrefixResult {
-	const { draftTokens, draftDistros, targetDistros, sampler } = args;
+	const { draftTokens, draftDistros, targetDistros, sampler, warnState } = args;
 	const K = draftTokens.length;
 	if (K === 0) {
 		throw new Error("acceptPrefix: K=0 is invalid");
@@ -66,6 +86,7 @@ export function acceptPrefix(args: AcceptPrefixArgs): AcceptPrefixResult {
 			targetDistros[k],
 			draftDistros[k],
 			sampler,
+			warnState,
 		);
 		return { acceptedCount, finalSampledId, finishReason: null };
 	}
@@ -74,19 +95,17 @@ export function acceptPrefix(args: AcceptPrefixArgs): AcceptPrefixResult {
 }
 
 /**
- * Sample from the residual distribution `q[i] = max(0, p_target[i] - p_draft[i])`
- * normalized to sum to 1. If the residual is degenerate (Σq < 1e-9), fall back
- * to sampling from `p_target` and warn once per process.
+ * Sample from the residual distribution
+ * `q[i] = max(0, p_target[i] - p_draft[i])` normalized to sum to 1.
+ *
+ * If the residual is degenerate (Σq < 1e-9), fall back to sampling from
+ * `p_target` and emit one warning per stream via `warnState`.
  */
-let degenerateResidualWarned = false;
-export function _resetDegenerateResidualWarning(): void {
-	degenerateResidualWarned = false;
-}
-
 function sampleResidual(
 	pTarget: Float32Array,
 	pDraft: Float32Array,
 	sampler: Sampler,
+	warnState: SpeculativeWarnState,
 ): number {
 	const n = pTarget.length;
 	const q = new Float32Array(n);
@@ -97,11 +116,11 @@ function sampleResidual(
 		sum += v;
 	}
 	if (sum < 1e-9) {
-		if (!degenerateResidualWarned) {
+		if (!warnState.degenerateResidualWarned) {
 			console.warn(
 				"speculative: residual distribution degenerate (Σq < 1e-9); falling back to p_target sample",
 			);
-			degenerateResidualWarned = true;
+			warnState.degenerateResidualWarned = true;
 		}
 		return sampler.sampleFromDistribution(pTarget);
 	}
