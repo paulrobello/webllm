@@ -1,6 +1,6 @@
 # WebLLM Project Status & Roadmap
 
-> **Date:** 2026-04-26
+> **Date:** 2026-04-27
 > **Status:** End-to-end browser inference is working for both causal LMs and
 > BERT-style encoders (Arctic-Embed). `make bench-full` now drives the
 > generative profiles plus the embedding profiles end-to-end into the live
@@ -242,6 +242,27 @@
 > long-prefill graph-buffer infra to unblock the §4
 > measurements that the buffer-binding limit prevents
 > at scale (see §20 closure for details).
+>
+> **§C-v2-A closed 2026-04-27 on side branch
+> `feat/spec-decode-v2-greedy`:** greedy spec-decode + GPU-
+> resident K+1 verify (`forwardVerifyArgmax`, 16 B/step
+> readback vs v1's 2.4 MB) measured against the §22.5 ship
+> gates. Gate 1 (high-α speedup ≥1.5×): **0.36×** (5.7 vs
+> 16.0 tok/s on `qwen3-8b-iq3m` × `qwen3-0.6b-q4f16` K=4).
+> Gate 2 (low-α safety ≥0.95× on `creative-low-alpha` /
+> 200 tokens): **0.78×** (12.7 vs 16.2 tok/s). AdaptiveGate
+> sticky disengage works (no sustained gate-1-style collapse)
+> but per-step verify overhead at this scale (drafter 4×~12 ms
+> ≈ 48 ms + verify K+1 ≈ 70-80 ms = ~120 ms/step) caps even
+> the perfect-accept ceiling at ~33 tok/s vs 16 tok/s baseline
+> — and measured α ≈ 0.2-0.25 inverts the trade. Output
+> coherent on both gates (finish=stop-token). Branch retained
+> as side-branch infra; **do not merge to `main`** —
+> resurrection only worth it once a much larger target lands
+> (70B+ via MEMORY64) or 7B+ long-prefill graph-buffer work
+> cuts per-step verify cost. Next lever on `main`: 7B+ long-
+> prefill graph-buffer infrastructure (§20's deferred
+> dependency for FA-at-scale).
 >
 > **Plan files:** `docs/superpowers/plans/2026-04-20-webllm-implementation.md` (Phase 1)
 
@@ -2327,10 +2348,9 @@ sessions:
   reload required to see the cleanup (live-server SSE doesn't
   broadcast deletes).
 
-**Next target options (pick one — recommended: §C v2
-GPU-resident verify or 7B+ long-prefill graph-buffer
-infra, with A/B/C/F/§4-decode/§C-v1/§4-prefill all
-closed):**
+**Next target options (pick one — recommended: 7B+ long-prefill
+graph-buffer infra, with A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A
+all closed):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
 B. ~~§A subgroup-cooperative loading.~~ **CLOSED 2026-04-26 — §17.**
@@ -2339,6 +2359,7 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §4. ~~Flash Attention enable for decode.~~ **CLOSED 2026-04-26 — §18.**
 §C. ~~Drafter-based speculative decoding (v1).~~ **CLOSED 2026-04-26 — §19** (measured 0.20× regression; verify-readback dominates).
 §4-prefill. ~~FA revisit at prefill / long-decode scope.~~ **CLOSED 2026-04-26 — §20** (TinyLlama wins everywhere; Mistral short-short -3.3% over gate; 7B+ long-prefill blocked by WebGPU buffer-binding limit, not FA).
+§C-v2-A. ~~Greedy spec-decode + GPU-resident verify.~~ **CLOSED 2026-04-27 on side branch `feat/spec-decode-v2-greedy`** (gate 1: 0.36× vs ≥1.5× target; gate 2: 0.78× vs ≥0.95×; per-step verify overhead at 8B IQ3_M target × 0.6B Q8 drafter caps α at ~0.2-0.25, well below the K=4 ceiling needed to break even). Driver, K+1 verify, AdaptiveGate, contract gate, creative-low-alpha fixture, `--draft-length` flag, `forwardVerifyArgmax`, and ~30 unit/integration tests retained on side branch as resurrection-ready infra; **do not merge to `main`**. Resurrection paths: (a) much larger target via MEMORY64 shifts target/drafter ratio from 13× to 100×+, (b) faster K+1 verify via 7B+ long-prefill graph-buffer work cuts per-step verify cost. Measurement detail in side-branch TODO §22-§24; tip `646320c`.
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -2373,20 +2394,23 @@ E. **Remaining deferred items (in rough priority):**
      §21 dashboard. Smaller scope; quick wins likely on
      arctic-embed-s/m if anyone uses `engine.embed()` at
      throughput.
-   - **§C v2 drafter speculative decoding (deferred,
-     blocked on GPU-resident verify).** §19 closed v1
-     because per-step verify readback (~9.6 MB / step at
-     K=4 × 152 K vocab) and full-vocab drafter forwards
-     dominated. v2 would need either (a) GPU-resident
-     verify (compare drafted ids against argmax on-device,
-     read back only a rejection mask), (b) a meaningfully
-     cheaper drafter (< 2 ms / step — qwen3-0.6b is ~12
-     ms / forward), or (c) dynamic K that collapses to 1
-     when α drops. Driver, sampler helpers,
-     `forwardVerify`, `truncateKVCache`, smoke + Makefile
-     plumbing, and tests remain in tree — re-enabling is
-     a deliberate edit at `src/core/engine.ts`'s
-     reserved-throw block.
+   - **§C v2-A greedy spec-decode + GPU-resident verify.**
+     **CLOSED 2026-04-27 on side branch
+     `feat/spec-decode-v2-greedy`** — measured-and-closed
+     pattern. Eliminates v1's 2.4 MB / step readback via
+     `forwardVerifyArgmax` (16 B / step), but at qwen3-8b-
+     iq3m × qwen3-0.6b-q4f16 K=4 still fails both ship gates
+     (0.36× high-α speedup; 0.78× low-α safety). Per-step
+     drafter forwards (~48 ms) + target K+1 verify (~70-80
+     ms) ≈ 120 ms; even at perfect K=4 accept that's only
+     ~33 tok/s vs 16 tok/s baseline (~2×, tight at 1.5× spec
+     gate even at α=1). Measured α ≈ 0.2-0.25 inverts the
+     trade. Driver, AdaptiveGate, contract gate, K+1 verify,
+     ~30 tests, and tooling all retained on side branch.
+     Resurrection only worth it if (i) a much larger target
+     lands (70B+ via MEMORY64 → target/drafter ratio 100×+),
+     or (ii) faster K+1 verify via 7B+ long-prefill graph-
+     buffer work below cuts per-step verify cost.
    - **Deferred wave-1 architectures** (Gemma 2, Phi 3) —
      5+ gaps for Gemma; mostly fused-QKV for Phi 3. See
      "Completed on 2026-04-26" §9.
@@ -2394,20 +2418,24 @@ E. **Remaining deferred items (in rough priority):**
 **Net characterization at 8B IQ3_M (post-§16, both
 families):** matmul ≈ 65-69% of decode (Llama-3.1 71%,
 Qwen3 67% × graph 97% of step). **All single-token decode
-kernel-tuning AND algorithmic-amortization levers are now
-closed without ship at v1.** §17 ruled out matmul-kernel
-rework (§A); §18 ruled out FA fusion at N=1 decode; §19
-ruled out drafter speculative decoding at K=4 (verify-
+kernel-tuning AND algorithmic-amortization levers — including
+greedy spec-decode with GPU-resident verify — are now closed
+without ship.** §17 ruled out matmul-kernel rework (§A); §18
+ruled out FA fusion at N=1 decode; §19 ruled out drafter
+speculative decoding at K=4 with full-row verify (verify-
 readback dominates); §20 ruled out FA at small-prefill /
-long-decode scale on the 7B+ fleet (TinyLlama wins
-preserved behind a default-off gate; 7B+ blocked by WebGPU
-max-buffer-binding limit at long-prefill). The remaining
-headroom is at: (1) infrastructure — 7B+ long-prefill
-graph-buffer rework to unblock the §4 measurement at
-scale; (2) infrastructure — §C v2 with GPU-resident verify
-(skips the
-2.4 MB / step readback that sank v1). Both are documented
-above under "Remaining deferred items".
+long-decode scale on the 7B+ fleet (TinyLlama wins preserved
+behind a default-off gate; 7B+ blocked by WebGPU max-buffer-
+binding limit at long-prefill); §C-v2-A (side branch, 2026-04-27)
+ruled out greedy spec with GPU-resident K+1 verify at the
+canonical target/drafter ratio (per-step verify overhead caps
+α below the K=4 break-even ceiling). **The remaining headroom
+is infrastructure work:** 7B+ long-prefill graph-buffer rework
+to unblock §4 measurements at scale (and incidentally cut the
+verify cost that sank §C-v2-A). MEMORY64 to bring 70B targets
+into reach — multi-day, only worth it if a clear use-case
+emerges. §D encoder/embedding perf is the smaller-scope
+fallback.
 
 Boot sequence for a fresh session:
 
@@ -2532,30 +2560,14 @@ Boot sequence for a fresh session:
    long-prefill workloads regardless of FA mode (see §20
    closure for the WebGPU buffer-binding limit details).
 
-**Recommended first move:** **§C v2 GPU-resident verify**
-*or* **7B+ long-prefill graph-buffer infrastructure**.
-§17 (§A matmul kernel), §18 (FA at N=1 decode), §19 (§C
-drafter spec-decode at K=4), and §20 (§4 FA at prefill /
-long-decode) all closed without ship at v1. Both remaining
-options are infra work — the algorithmic levers at the
-canonical 4-baseline are exhausted.
-
-**Why §C v2 with GPU-resident verify:** §19 closed v1
-because per-step verify readback (4 × 152 K logits ≈
-2.4 MB / step) plus K full-vocab drafter forwards
-dominated. v2 needs one of: (a) GPU-resident verify
-(compare drafted ids against target argmax on-device,
-read back only a K-bit rejection mask — kills the 2.4 MB
-readback entirely), (b) a meaningfully cheaper drafter
-(sub-1B at < 2 ms / forward — qwen3-0.6b is currently
-~12 ms / forward at full-vocab readback), or (c) dynamic
-K that collapses to 1 when α drops. **Driver, sampler
-helpers, `forwardVerify`, `truncateKVCache`, 19 tests, and
-smoke / Makefile / `eval/perf.ts` plumbing are all
-retained** — re-enabling is a deliberate edit at the
-"reserved in v1" throw in `src/core/engine.ts`. A real
-algorithmic ceiling if (a) lands. See §19 closure for the
-full diagnosis and v2 design constraints.
+**Recommended first move:** **7B+ long-prefill graph-buffer
+infrastructure**. §17 (§A matmul kernel), §18 (FA at N=1
+decode), §19 (§C drafter spec-decode at K=4 with full-row
+verify), §20 (§4 FA at prefill / long-decode), and the side-
+branch §C-v2-A (greedy spec-decode + GPU-resident K+1 verify)
+have all closed without ship. The algorithmic levers at the
+canonical 4-baseline are exhausted; the next meaningful
+headroom is infra.
 
 **Why 7B+ long-prefill graph-buffer infra:** §20 captured
 TinyLlama wins on FA at prefill / long-decode scope
