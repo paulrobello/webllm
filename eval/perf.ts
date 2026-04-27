@@ -103,6 +103,8 @@ function main(): void {
 			fa: { type: "string" },
 			"prompt-fixture": { type: "string" },
 			"decode-tokens": { type: "string" },
+			// §22 prefill-tiling addition
+			"prefill-tile": { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -133,6 +135,7 @@ function main(): void {
 		fa: values.fa,
 		promptFixture: values["prompt-fixture"],
 		decodeTokens: values["decode-tokens"],
+		prefillTile: values["prefill-tile"],
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -153,6 +156,7 @@ async function run(
 		fa?: string;
 		promptFixture?: string;
 		decodeTokens?: string;
+		prefillTile?: string;
 	},
 ): Promise<void> {
 	await ensureSmokeServerReachable();
@@ -180,6 +184,7 @@ async function run(
 				...(opts.thinking ? { thinking: 1 } : {}),
 				...(opts.drafter ? { drafter: opts.drafter } : {}),
 				...(opts.fa ? { fa: opts.fa } : {}),
+				...(opts.prefillTile ? { prefillTile: opts.prefillTile } : {}),
 				...(fixturePrompt ? { prompt: fixturePrompt } : {}),
 				...(opts.decodeTokens ? { max: opts.decodeTokens } : {}),
 			},
@@ -468,6 +473,8 @@ Options:
                         Long-prompt fixture id (prefill-256, prefill-512, prefill-1024)
       --decode-tokens <n>
                         Override max-tokens for decode (sets ?max=<n>)
+      --prefill-tile <n>
+                        Enable §22 prefill-tile chunking with tile size n (default off)
   -h, --help            Show this help
 
 Prereqs:
