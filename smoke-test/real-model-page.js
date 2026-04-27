@@ -1,3 +1,81 @@
+// §D embed-perf measurement helper. No-op when `mode` is null/unrecognized,
+// so existing smoke runs (which never set ?embedPerf=...) are unaffected.
+// Driven externally by eval/embed-perf.ts via cache-busted page navigations
+// that scrape `window.__embedTraces` after the page settles.
+async function runEmbedPerfHook(engine, handleId, mode, reps, fixture, log) {
+	if (mode !== "single" && mode !== "batch") return;
+
+	const SHORT_TEXT = "happy";
+	const LONG_TEXT =
+		"Compilers translate human-readable source code into instructions a " +
+		"computer can execute. The translation usually runs in several stages: " +
+		"a lexer breaks the input into tokens, a parser assembles those tokens " +
+		"into a syntax tree, a semantic analyser checks the tree for meaning, " +
+		"and a code generator emits machine code or bytecode for some target " +
+		"architecture. Modern compilers add an optimiser between the analyser " +
+		"and the generator that reorders, inlines, and rewrites the program in " +
+		"ways that preserve its observable behaviour while reducing its runtime " +
+		"or code size.";
+	const batchMixed = [];
+	for (let i = 0; i < 32; i++) batchMixed.push(SHORT_TEXT);
+	for (let i = 0; i < 32; i++) batchMixed.push(LONG_TEXT);
+
+	const fixtureMap = {
+		short: [SHORT_TEXT],
+		long: [LONG_TEXT],
+		batchMixed: batchMixed,
+	};
+	const texts = fixtureMap[fixture] ?? [SHORT_TEXT];
+
+	window.__embedTraces = [];
+
+	if (mode === "single") {
+		const fixtureText = texts[0];
+		// 5-rep warmup
+		for (let i = 0; i < 5; i++) {
+			await engine.embed(handleId, fixtureText);
+		}
+		// Measured reps
+		for (let i = 0; i < reps; i++) {
+			const t0 = performance.now();
+			await engine.embed(handleId, fixtureText);
+			const t1 = performance.now();
+			window.__embedTraces.push({
+				mode: "single",
+				fixture: fixture,
+				rep: i,
+				wallMs: t1 - t0,
+			});
+		}
+	} else {
+		// batch mode — Phase 1 baseline runs sequentially via engine.embed.
+		// Phase 4 will swap this for engine.embedBatch when that lands.
+		for (const txt of texts) {
+			await engine.embed(handleId, txt);
+		}
+		const trials = Number.isFinite(reps) && reps > 0 ? reps : 3;
+		for (let trial = 0; trial < trials; trial++) {
+			const t0 = performance.now();
+			for (const txt of texts) {
+				await engine.embed(handleId, txt);
+			}
+			const t1 = performance.now();
+			window.__embedTraces.push({
+				mode: "batch",
+				fixture: fixture,
+				trial: trial,
+				count: texts.length,
+				wallMs: t1 - t0,
+			});
+		}
+	}
+
+	log(
+		"pass",
+		`[embedPerf] mode=${mode} fixture=${fixture} traces=${window.__embedTraces.length}`,
+	);
+}
+
 export async function runRealModelPage({ debugMode = false } = {}) {
 	const assetSuffix = window.location.search || "";
 	const {
@@ -64,6 +142,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// §4 Flash Attention gate: ?fa=on toggles ggml_flash_attn_ext + the
 	// FA-ready V-cache layout. Default off — preserves §18-revert behavior.
 	const flashAttnEnabled = params.get("fa") === "on";
+	// §D embed-perf measurement loop (driven by eval/embed-perf.ts harness).
+	// `embedPerf` enables the hook; null = no-op (existing smoke unaffected).
+	const embedPerfMode = params.get("embedPerf"); // null | "single" | "batch"
+	const embedRepsRaw = params.get("embedReps");
+	const embedReps = embedRepsRaw ? Number.parseInt(embedRepsRaw, 10) : 30;
+	const embedFixture = params.get("embedFixture") ?? "short";
 	document.body.innerHTML = getSmokePageShellMarkup();
 
 	const logEl = document.getElementById("log");
@@ -774,6 +858,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				"pass",
 				"[8/8] Reference encoder check: skipped (page is already running an encoder model)",
 			);
+			await runEmbedPerfHook(
+				smokeEngine,
+				smokeEngineHandleId,
+				embedPerfMode,
+				embedReps,
+				embedFixture,
+				log,
+			);
 		} else {
 		log(
 			"running",
@@ -842,6 +934,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			log(
 				"pass",
 				`[8/8] embed('happy') · embed('joyful') cosine=${cosine.toFixed(2)} (>=0.75 expected, ‖v‖=${norm.toFixed(2)})`,
+			);
+			await runEmbedPerfHook(
+				engine2,
+				embedHandle.id,
+				embedPerfMode,
+				embedReps,
+				embedFixture,
+				log,
 			);
 		} catch (e) {
 			log("fail", `[8/8] embed failed: ${e.message}\n${e.stack || ""}`);
