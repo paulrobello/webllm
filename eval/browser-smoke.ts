@@ -444,6 +444,54 @@ export async function waitForSmokeTestResult(
 	);
 }
 
+export interface EmbedPerfTrace {
+	mode: "single" | "batch";
+	fixture: string;
+	wallMs: number;
+	rep?: number;
+	trial?: number;
+	count?: number;
+}
+
+/**
+ * Wait for the smoke page's embedPerf loop to finish and return the
+ * collected traces. Distinguished from waitForSmokeTestResult by
+ * looking for the "[embedPerf] mode=…" log line and pulling
+ * window.__embedTraces.
+ */
+export async function waitForEmbedPerfResult(
+	port: string,
+	tab: string,
+): Promise<EmbedPerfTrace[]> {
+	const deadline = Date.now() + 360_000;
+	const doneScript = `(() => {
+		const t = document.getElementById("log")?.textContent ?? "";
+		return t.includes("[embedPerf] mode=") ? "1" : "";
+	})()`;
+	let lastError: unknown;
+	while (Date.now() < deadline) {
+		try {
+			const done = evalStringResult(port, tab, doneScript);
+			if (done === "1") {
+				const out = agentchrome(port, tab, [
+					"js",
+					"exec",
+					`(() => JSON.stringify(window.__embedTraces ?? []))()`,
+				]);
+				const resp = JSON.parse(out) as { result?: string; output_file?: string };
+				const payload = typeof resp.result === "string" ? resp.result : "";
+				return JSON.parse(payload || "[]") as EmbedPerfTrace[];
+			}
+		} catch (error) {
+			lastError = error;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+	}
+	throw new Error(
+		`Timed out waiting for embedPerf result line${lastError ? ` (${String(lastError)})` : ""}`,
+	);
+}
+
 export async function extractSmokeTestPrompt(
 	port: string,
 	tab: string,
