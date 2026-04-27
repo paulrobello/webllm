@@ -4,6 +4,7 @@ import {
 	type BufferPtr,
 	GgmlType,
 	type GgmlWasm,
+	type GraphPtr,
 	type TensorPtr,
 } from "./ggml-wasm.js";
 
@@ -49,6 +50,17 @@ export class EncoderInference {
 		tokenIdsTensor: TensorPtr;
 		posTensor: TensorPtr;
 		segTensor: TensorPtr;
+	} | null = null;
+	private graphCache: {
+		N: number;
+		graph: GraphPtr;
+		graphBuf: BufferPtr;
+		leaves: {
+			tokenIdsTensor: TensorPtr;
+			posTensor: TensorPtr;
+			segTensor: TensorPtr;
+		};
+		finalHidden: TensorPtr;
 	} | null = null;
 
 	constructor(wasm: GgmlWasm, hyperparams: ModelHyperparams) {
@@ -273,6 +285,42 @@ export class EncoderInference {
 	}
 
 	/**
+	 * Lazily build (and cache) the per-N graph ctx, leaf tensors, graph node,
+	 * and graph buffer. The bridge maintains a stack of ctxes — `ctxCreate`
+	 * pushes, `ctxFree` pops — so the graph ctx sits on top of the long-lived
+	 * weight ctx, and `backendAllocCtxTensors` operates on the top ctx only.
+	 *
+	 * Call sites: every `embed()` invocation. Steady-state (same N), this is
+	 * a single field comparison.
+	 */
+	private ensureGraphCache(N: number): void {
+		if (this.graphCache && this.graphCache.N === N) return;
+
+		// Tear down existing cache (N changed). Order matters: free buffer
+		// first, then pop the graph ctx off the bridge's ctx stack.
+		if (this.graphCache) {
+			this.wasm.backendBufferFree(this.graphCache.graphBuf);
+			this.wasm.ctxFree();
+			this.graphCache = null;
+		}
+
+		const { hp, wasm } = this;
+		// Graph memory budget — same formula as the original embed() body.
+		const graphMem = hp.layerCount * 32768 + N * hp.embeddingLength * 24;
+		wasm.ctxCreate(graphMem);
+
+		const finalHidden = this.buildGraph(N);
+		const graph = wasm.graphNew(hp.layerCount * 32 + 128);
+		wasm.graphBuildForwardExpand(graph, finalHidden);
+		const graphBuf = wasm.backendAllocCtxTensors();
+
+		const leaves = this.lastLeaves;
+		if (!leaves) throw new Error("buildGraph did not set leaves");
+
+		this.graphCache = { N, graph, graphBuf, leaves, finalHidden };
+	}
+
+	/**
 	 * Run the encoder forward pass over the provided token ids and return
 	 * a single L2-normalized embedding. The token id array must already
 	 * include any model-specific framing (e.g. [CLS] ... [SEP] for BERT)
@@ -286,82 +334,71 @@ export class EncoderInference {
 		const { hp, wasm } = this;
 		const N = tokenIds.length;
 
-		// Graph memory budget — sized off layer count + token count, similar
-		// to the causal-LM pattern in model-inference.ts but without KV cache
-		// allocations.
-		const graphMem = hp.layerCount * 32768 + N * hp.embeddingLength * 24;
-		wasm.ctxCreate(graphMem);
+		this.ensureGraphCache(N);
+		const cache = this.graphCache as NonNullable<typeof this.graphCache>;
+		const { graph, leaves, finalHidden } = cache;
 
-		const finalHidden = this.buildGraph(N);
-		const graph = wasm.graphNew(hp.layerCount * 32 + 128);
-		wasm.graphBuildForwardExpand(graph, finalHidden);
-		const graphBuf = wasm.backendAllocCtxTensors();
-
+		// Upload leaf inputs in one bundled FFI call. Mirrors the causal-LM
+		// pattern; mask slot is unused for the encoder, so segTensor takes
+		// its place.
+		const idsBytes = N * 4;
+		const posBytes = N * 4;
+		const segBytes = 4;
+		const totalBytes = idsBytes + posBytes + segBytes;
+		const heap = wasm.malloc(totalBytes);
 		try {
-			// Upload leaf inputs in one bundled FFI call. Mirrors the causal-LM
-			// pattern; mask slot is unused for the encoder, so segTensor takes
-			// its place.
-			const leaves = this.lastLeaves;
-			if (!leaves) throw new Error("buildGraph did not set leaves");
+			const idsPtr = heap;
+			const posPtr = heap + idsBytes;
+			const segPtr = heap + idsBytes + posBytes;
 
-			const idsBytes = N * 4;
-			const posBytes = N * 4;
-			const segBytes = 4;
-			const totalBytes = idsBytes + posBytes + segBytes;
-			const heap = wasm.malloc(totalBytes);
-			try {
-				const idsPtr = heap;
-				const posPtr = heap + idsBytes;
-				const segPtr = heap + idsBytes + posBytes;
-
-				const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
-				const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
-				const segView = new Int32Array(wasm.heapU8.buffer, segPtr, 1);
-				for (let i = 0; i < N; i++) {
-					idsView[i] = tokenIds[i];
-					posView[i] = i;
-				}
-				segView[0] = 0;
-
-				wasm.backendTensorSet3(
-					leaves.tokenIdsTensor,
-					idsPtr,
-					idsBytes,
-					leaves.posTensor,
-					posPtr,
-					posBytes,
-					leaves.segTensor,
-					segPtr,
-					segBytes,
-				);
-			} finally {
-				wasm.free(heap);
+			const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
+			const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
+			const segView = new Int32Array(wasm.heapU8.buffer, segPtr, 1);
+			for (let i = 0; i < N; i++) {
+				idsView[i] = tokenIds[i];
+				posView[i] = i;
 			}
+			segView[0] = 0;
 
-			await wasm.graphCompute(graph);
-
-			// Download `[E, N]` row-major hidden state.
-			const E = hp.embeddingLength;
-			const totalFloats = E * N;
-			const bytes = await wasm.downloadFromTensor(finalHidden, totalFloats * 4);
-			const hidden = new Float32Array(
-				bytes.buffer,
-				bytes.byteOffset,
-				totalFloats,
+			wasm.backendTensorSet3(
+				leaves.tokenIdsTensor,
+				idsPtr,
+				idsBytes,
+				leaves.posTensor,
+				posPtr,
+				posBytes,
+				leaves.segTensor,
+				segPtr,
+				segBytes,
 			);
-
-			const pooling = hp.poolingType ?? "cls";
-			return EncoderInference.poolAndNormalize(hidden, E, N, pooling);
 		} finally {
-			wasm.backendBufferFree(graphBuf);
-			wasm.ctxFree();
+			wasm.free(heap);
 		}
+
+		await wasm.graphCompute(graph);
+
+		// Download `[E, N]` row-major hidden state.
+		const E = hp.embeddingLength;
+		const totalFloats = E * N;
+		const bytes = await wasm.downloadFromTensor(finalHidden, totalFloats * 4);
+		const hidden = new Float32Array(
+			bytes.buffer,
+			bytes.byteOffset,
+			totalFloats,
+		);
+
+		const pooling = hp.poolingType ?? "cls";
+		return EncoderInference.poolAndNormalize(hidden, E, N, pooling);
 	}
 
 	async dispose(): Promise<void> {
-		// Mirror ModelInference.dispose: this class owns the weight buffer and
-		// the ctx that holds the weight tensors, so it must free both. (Forward
-		// graph teardown will land in Tasks 7-10 alongside the graph itself.)
+		// Pop in stack order: graph ctx (if cached) is on top, weight ctx is
+		// underneath. Free each ctx's buffer before popping the ctx itself.
+		if (this.graphCache) {
+			this.wasm.backendBufferFree(this.graphCache.graphBuf);
+			this.wasm.ctxFree();
+			this.graphCache = null;
+		}
 		if (this.weightBuf) {
 			this.wasm.backendBufferFree(this.weightBuf);
 			this.weightBuf = 0;
