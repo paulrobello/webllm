@@ -32,7 +32,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { getModelById, type BenchmarkModel } from "./models.js";
 import {
 	agentchrome,
 	buildSmokeTestUrl,
@@ -42,6 +41,8 @@ import {
 	resolveAgentchromeSession,
 	waitForSmokeTestResult,
 } from "./browser-smoke.js";
+import { LONG_PROMPTS } from "./fixtures/long-prompts.js";
+import { getModelById, type BenchmarkModel } from "./models.js";
 
 interface PerfRun {
 	tokensGenerated: number;
@@ -98,6 +99,10 @@ function main(): void {
 			baseline: { type: "string" },
 			profile: { type: "boolean" },
 			thinking: { type: "boolean" },
+			// §4 FA revisit additions
+			fa: { type: "string" },
+			"prompt-fixture": { type: "string" },
+			"decode-tokens": { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -125,6 +130,9 @@ function main(): void {
 		profile: values.profile ?? false,
 		thinking: values.thinking ?? false,
 		drafter: values.drafter,
+		fa: values.fa,
+		promptFixture: values["prompt-fixture"],
+		decodeTokens: values["decode-tokens"],
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -142,10 +150,21 @@ async function run(
 		profile: boolean;
 		thinking: boolean;
 		drafter?: string;
+		fa?: string;
+		promptFixture?: string;
+		decodeTokens?: string;
 	},
 ): Promise<void> {
 	await ensureSmokeServerReachable();
 	await ensureModelDownloaded(model);
+
+	const fixtureKey = opts.promptFixture;
+	const fixturePrompt = fixtureKey ? LONG_PROMPTS[fixtureKey] : undefined;
+	if (fixtureKey && !fixturePrompt) {
+		throw new Error(
+			`Unknown prompt fixture "${fixtureKey}"; valid keys: ${Object.keys(LONG_PROMPTS).join(", ")}`,
+		);
+	}
 
 	const { port, tab } = await resolveAgentchromeSession(opts.port, opts.tab);
 
@@ -160,6 +179,9 @@ async function run(
 				...(opts.profile ? { profile: 1 } : {}),
 				...(opts.thinking ? { thinking: 1 } : {}),
 				...(opts.drafter ? { drafter: opts.drafter } : {}),
+				...(opts.fa ? { fa: opts.fa } : {}),
+				...(fixturePrompt ? { prompt: fixturePrompt } : {}),
+				...(opts.decodeTokens ? { max: opts.decodeTokens } : {}),
 			},
 		});
 		agentchrome(port, tab, ["navigate", url]);
@@ -441,6 +463,11 @@ Options:
       --baseline <path> Baseline file path (default: ${BASELINE_PATH})
       --profile         Also print per-phase decode timing from browser traces
       --thinking        Run with qwen3 chain-of-thought thinking enabled
+      --fa <on|off>     Toggle ggml_flash_attn_ext (default off)
+      --prompt-fixture <id>
+                        Long-prompt fixture id (prefill-256, prefill-512, prefill-1024)
+      --decode-tokens <n>
+                        Override max-tokens for decode (sets ?max=<n>)
   -h, --help            Show this help
 
 Prereqs:
