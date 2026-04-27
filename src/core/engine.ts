@@ -303,11 +303,18 @@ export class WebLLM {
 			) {
 				throw new Error("Drafter EOS/BOS mismatch with target.");
 			}
+			// `isQwenChatml` already requires Array.isArray(input); a future
+			// refactor that loosens that condition would silently bypass this
+			// gate, so re-evaluate this guard if that happens.
 			if (isQwenChatml && config?.enableThinking !== false) {
 				throw new Error(
 					"Speculative decode does not support Qwen3 thinking-mode steering; pass enableThinking: false or use the non-drafted path.",
 				);
 			}
+			// Belt-and-suspenders: the only writer of these fields lives below
+			// in the Qwen mask-injection branch, so this probe is currently
+			// unreachable. It's cheap and turns a future regression (e.g.
+			// steering writes added above this block) into a loud throw.
 			const steeringFields: (keyof GenerationConfig)[] = [
 				"maskedTokensWhileThinking",
 				"maskedTokensAfterThinkingUntilAnswer",
@@ -358,7 +365,7 @@ export class WebLLM {
 			while (!res.done) {
 				const tokenId = res.value;
 				const text = decoder.push(tokenId);
-				yield { text, tokenId, done: false } as StreamChunk;
+				yield { text, tokenId, done: false };
 				res = await result.next();
 			}
 			const final = res.value;
@@ -373,7 +380,7 @@ export class WebLLM {
 					text: decoder.text,
 					finishReason: final.finishReason,
 				},
-			} as StreamChunk;
+			};
 			return;
 		}
 
