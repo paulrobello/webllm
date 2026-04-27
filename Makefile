@@ -1,7 +1,7 @@
 .PHONY: build test lint lint-fix fmt typecheck checkall clean install deps \
         wasm-build wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
-        bench-eval-models bench-inference bench-inference-save bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full bench-all \
+        bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full bench-all \
         smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench \
         dashboard-serve dashboard-stop dashboard-db-reset agentchrome-stop stop-all \
         run-all help
@@ -194,6 +194,12 @@ bench-inference: smoke-restart ## Run end-to-end inference perf (needs Chrome)
 
 bench-inference-save: smoke-restart ## Run inference perf and save baseline
 	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --save
+
+embed-perf: ## Run §D encoder perf harness; pass extra args via EMBED_PERF_ARGS
+	@bun run eval/embed-perf.ts $(EMBED_PERF_ARGS)
+
+embed-perf-baseline: ## Run §D encoder perf harness with timestamped baseline output dir
+	@bun run eval/embed-perf.ts --out eval/reports/embed-perf-baseline-$(shell date +%Y%m%d-%H%M%S)/
 
 bench-chat-smoke: smoke-restart ## Run browser-driven interactive chat smoke regression
 	bun run eval/chat-smoke.ts --model $(PERF_MODEL)
