@@ -301,6 +301,7 @@ export const SpeculativeGenerator = {
 		recentTokens.push(lastEmittedId);
 		const allTokens: number[] = [...promptTokenIds, lastEmittedId];
 		let generatedCount = 1;
+		let finishReason: GenerationFinishReason | undefined;
 
 		// === Prefill on drafter ===
 		// Logits discarded — we only need its KV populated to match target's.
@@ -310,14 +311,26 @@ export const SpeculativeGenerator = {
 		);
 
 		let pastLen = promptTokenIds.length;
-		let finishReason: GenerationFinishReason | undefined;
+
+		// First-token early stop: if the prefill sample is EOS / a stop token,
+		// short-circuit before running the drafter prefill / decode loop.
+		// Mirrors the corresponding check in Generator.generate.
+		if (lastEmittedId === eosTokenId || stopTokens.has(lastEmittedId)) {
+			finishReason = "stop-token";
+		}
 
 		// === Decode loop ===
-		while (true) {
+		while (finishReason === undefined) {
 			if (generatedCount >= config.maxTokens) {
 				finishReason = "max-tokens";
 				break;
 			}
+
+			// Hoist the recent-token window once per spec step. The
+			// 64-token slice is identical across the K drafter forwards and
+			// the K verify rows; allocating it 2K+1 times per step wastes
+			// ~9 array allocations + 9 Set constructions per step at K=4.
+			const penaltyWindow = recentTokens.slice(-64);
 
 			// --- Draft burst ---
 			const draftTokens: number[] = [];
@@ -328,7 +341,7 @@ export const SpeculativeGenerator = {
 					new Int32Array([prev]),
 					new Int32Array([pastLen + k]),
 				);
-				sampler.applyRepetitionPenalty(logits, recentTokens.slice(-64));
+				sampler.applyRepetitionPenalty(logits, penaltyWindow);
 				const distro = sampler.computeDistribution(logits);
 				const id = sampler.sampleFromDistribution(distro);
 				draftTokens.push(id);
@@ -357,7 +370,7 @@ export const SpeculativeGenerator = {
 				const row = targetLogitsAll
 					.subarray(k * vocab, (k + 1) * vocab)
 					.slice();
-				sampler.applyRepetitionPenalty(row, recentTokens.slice(-64));
+				sampler.applyRepetitionPenalty(row, penaltyWindow);
 				targetDistros.push(sampler.computeDistribution(row));
 			}
 
