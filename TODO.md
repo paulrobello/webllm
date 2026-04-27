@@ -2149,11 +2149,14 @@ overhead pays back. Both are documented above under
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 394 pass / 5 skip / 0 fail.
-   The 394th test is `tests/op-flash-attn-ext.test.ts`
-   (added by §18 — it pins the FA bridge wrapper presence
-   on `GgmlWasm.prototype` even though no caller uses them
-   post-revert).
+1. **`make checkall`** — confirm 413 pass / 10 skip / 0 fail.
+   The §C drafter spec-decoding work added 19 unit + integration
+   tests across `tests/sampler.test.ts` (7), `tests/speculative-
+   rejection.test.ts` (11), `tests/forward-verify-equivalence.test.ts`
+   (Bun-skipped, +6 more), `tests/speculative-integration.test.ts`
+   (Bun-skipped, 3), and 1 engagement-gate test. Skip count grew
+   from 5 → 10 because the WebGPU-gated integration tests skip
+   under Bun (no `navigator.gpu`).
 2. **`git log --oneline -10`** — top of `main` should be
    `d680371 docs(TODO): bump resumption checkall count
    393 -> 394`, then `ffd7276 docs(TODO): §18 — §4 FA
