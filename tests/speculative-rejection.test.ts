@@ -32,6 +32,10 @@ describe("acceptPrefix — core math", () => {
 				targetDistros: [dist, dist, dist, dist],
 				sampler,
 				warnState,
+				eosTokenId: -1,
+				stopTokens: new Set<number>(),
+				maxTokens: 100000,
+				generatedCount: 0,
 			});
 			totalAccepted += result.acceptedCount;
 		}
@@ -54,6 +58,10 @@ describe("acceptPrefix — core math", () => {
 				targetDistros: [target],
 				sampler,
 				warnState,
+				eosTokenId: -1,
+				stopTokens: new Set<number>(),
+				maxTokens: 100000,
+				generatedCount: 0,
 			});
 			totalAccepted += result.acceptedCount;
 			if (result.finalSampledId !== null)
@@ -77,6 +85,10 @@ describe("acceptPrefix — core math", () => {
 				targetDistros: [target],
 				sampler,
 				warnState,
+				eosTokenId: -1,
+				stopTokens: new Set<number>(),
+				maxTokens: 100000,
+				generatedCount: 0,
 			});
 			accepted += result.acceptedCount;
 		}
@@ -98,6 +110,10 @@ describe("acceptPrefix — core math", () => {
 				targetDistros: [target],
 				sampler,
 				warnState,
+				eosTokenId: -1,
+				stopTokens: new Set<number>(),
+				maxTokens: 100000,
+				generatedCount: 0,
 			});
 			if (result.finalSampledId !== null) counts[result.finalSampledId]++;
 		}
@@ -124,6 +140,10 @@ describe("acceptPrefix — core math", () => {
 				targetDistros: [matched, bonusTarget],
 				sampler,
 				warnState,
+				eosTokenId: -1,
+				stopTokens: new Set<number>(),
+				maxTokens: 100000,
+				generatedCount: 0,
 			});
 			expect(result.acceptedCount).toBe(2);
 			if (result.finalSampledId !== null) counts[result.finalSampledId]++;
@@ -145,6 +165,10 @@ describe("acceptPrefix — core math", () => {
 			targetDistros: [distB, distB],
 			sampler: samplerA,
 			warnState: newSpeculativeWarnState(),
+			eosTokenId: -1,
+			stopTokens: new Set<number>(),
+			maxTokens: 100000,
+			generatedCount: 0,
 		});
 		const r2 = acceptPrefix({
 			draftTokens: [0, 1],
@@ -152,7 +176,110 @@ describe("acceptPrefix — core math", () => {
 			targetDistros: [distB, distB],
 			sampler: samplerB,
 			warnState: newSpeculativeWarnState(),
+			eosTokenId: -1,
+			stopTokens: new Set<number>(),
+			maxTokens: 100000,
+			generatedCount: 0,
 		});
 		expect(r1).toEqual(r2);
+	});
+});
+
+describe("acceptPrefix — finish conditions", () => {
+	const dist = uniform(8);
+
+	test("EOS at draftIds[1] truncates accepted to 2 with stop-token", () => {
+		const sampler = new Sampler({ seed: 100 });
+		const result = acceptPrefix({
+			draftTokens: [3, 7, 5, 4],
+			draftDistros: [dist, dist, dist, dist],
+			targetDistros: [dist, dist, dist, dist],
+			sampler,
+			warnState: newSpeculativeWarnState(),
+			eosTokenId: 7,
+			stopTokens: new Set(),
+			maxTokens: 100,
+			generatedCount: 0,
+		});
+		expect(result.acceptedCount).toBe(2);
+		expect(result.finalSampledId).toBe(null);
+		expect(result.finishReason).toBe("stop-token");
+	});
+
+	test("stop-token in custom set truncates", () => {
+		const sampler = new Sampler({ seed: 101 });
+		const result = acceptPrefix({
+			draftTokens: [3, 6, 5, 4],
+			draftDistros: [dist, dist, dist, dist],
+			targetDistros: [dist, dist, dist, dist],
+			sampler,
+			warnState: newSpeculativeWarnState(),
+			eosTokenId: 0,
+			stopTokens: new Set([6]),
+			maxTokens: 100,
+			generatedCount: 0,
+		});
+		expect(result.acceptedCount).toBe(2);
+		expect(result.finishReason).toBe("stop-token");
+	});
+
+	test("maxTokens limit truncates accepted prefix", () => {
+		const sampler = new Sampler({ seed: 102 });
+		const result = acceptPrefix({
+			draftTokens: [3, 7, 5, 4],
+			draftDistros: [dist, dist, dist, dist],
+			targetDistros: [dist, dist, dist, dist],
+			sampler,
+			warnState: newSpeculativeWarnState(),
+			eosTokenId: -1,
+			stopTokens: new Set(),
+			maxTokens: 12,
+			generatedCount: 10,
+		});
+		expect(result.acceptedCount).toBe(2);
+		expect(result.finalSampledId).toBe(null);
+		expect(result.finishReason).toBe("max-tokens");
+	});
+
+	test("EOS as residual sample sets stop-token with non-null finalId", () => {
+		const sampler = new Sampler({ seed: 103 });
+		const draft = onehot(8, 0);
+		const target = onehot(8, 7);
+		const result = acceptPrefix({
+			draftTokens: [0],
+			draftDistros: [draft],
+			targetDistros: [target],
+			sampler,
+			warnState: newSpeculativeWarnState(),
+			eosTokenId: 7,
+			stopTokens: new Set(),
+			maxTokens: 100,
+			generatedCount: 0,
+		});
+		expect(result.acceptedCount).toBe(0);
+		expect(result.finalSampledId).toBe(7);
+		expect(result.finishReason).toBe("stop-token");
+	});
+
+	test("bonus token EOS sets stop-token after full accept", () => {
+		const sampler = new Sampler({ seed: 104 });
+		const matched = uniform(8);
+		// targetDistros[1] gives draft id 1 enough mass to always accept
+		// (pT=0.4, pD=0.125, r=1) while concentrating bonus mass on EOS=5.
+		const bonusFavorEos = new Float32Array([0, 0.4, 0, 0, 0, 0.6, 0, 0]);
+		const result = acceptPrefix({
+			draftTokens: [0, 1],
+			draftDistros: [matched, matched],
+			targetDistros: [matched, bonusFavorEos],
+			sampler,
+			warnState: newSpeculativeWarnState(),
+			eosTokenId: 5,
+			stopTokens: new Set(),
+			maxTokens: 100,
+			generatedCount: 0,
+		});
+		expect(result.acceptedCount).toBe(2);
+		expect(result.finalSampledId).toBe(5);
+		expect(result.finishReason).toBe("stop-token");
 	});
 });

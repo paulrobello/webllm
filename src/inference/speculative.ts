@@ -1,3 +1,4 @@
+import type { GenerationFinishReason } from "./generation.js";
 import type { Sampler } from "./sampler.js";
 
 /**
@@ -24,17 +25,18 @@ export interface AcceptPrefixResult {
 	 * - On rejection: residual-distribution sample.
 	 * - On full accept (acceptedCount === K): bonus token from target row K-1.
 	 *
-	 * Typed `number | null` to match Task 5's widening; in this Task-4
-	 * version the function always returns a non-null id. Task 5 introduces
-	 * the finish-mid-burst case where it can be null.
+	 * `null` when the accept loop terminated on a finish condition before
+	 * drawing a residual / bonus sample (the trigger was an accepted draft
+	 * token already included in the yielded prefix, or maxTokens was hit
+	 * before the residual / bonus sample could be drawn).
 	 */
 	finalSampledId: number | null;
 	/**
-	 * Set when the accept loop terminated due to a finish condition. Always
-	 * null in this Task-4 version; populated in Task 5 when EOS / stop /
-	 * maxTokens truncation lands.
+	 * Set when the accept loop terminated due to a finish condition (EOS,
+	 * custom stop-token id, or maxTokens exhaustion). `null` when the loop
+	 * terminated normally.
 	 */
-	finishReason: null;
+	finishReason: GenerationFinishReason | null;
 }
 
 interface AcceptPrefixArgs {
@@ -43,6 +45,10 @@ interface AcceptPrefixArgs {
 	targetDistros: Float32Array[];
 	sampler: Sampler;
 	warnState: SpeculativeWarnState;
+	eosTokenId: number;
+	stopTokens: ReadonlySet<number>;
+	maxTokens: number;
+	generatedCount: number;
 }
 
 /**
@@ -58,9 +64,26 @@ interface AcceptPrefixArgs {
  * Pure modulo `warnState.degenerateResidualWarned`, which it sets to true
  * the first time a degenerate residual is encountered in the stream so the
  * fallback warning fires exactly once per stream.
+ *
+ * Walks accepted tokens left-to-right and truncates on EOS, a custom
+ * stop-token id, or maxTokens exhaustion. On finish-condition truncation,
+ * `finalSampledId` is `null` when the trigger was an accepted draft token
+ * (already in the yielded prefix) or when maxTokens is hit before the
+ * residual / bonus sample. `finalSampledId` is non-null when the trigger
+ * was the residual or bonus sample itself.
  */
 export function acceptPrefix(args: AcceptPrefixArgs): AcceptPrefixResult {
-	const { draftTokens, draftDistros, targetDistros, sampler, warnState } = args;
+	const {
+		draftTokens,
+		draftDistros,
+		targetDistros,
+		sampler,
+		warnState,
+		eosTokenId,
+		stopTokens,
+		maxTokens,
+		generatedCount,
+	} = args;
 	const K = draftTokens.length;
 	if (K === 0) {
 		throw new Error("acceptPrefix: K=0 is invalid");
@@ -80,7 +103,30 @@ export function acceptPrefix(args: AcceptPrefixArgs): AcceptPrefixResult {
 		const u = sampler.rand();
 		if (u < r) {
 			acceptedCount++;
+			// Check finish conditions on the just-accepted token.
+			if (id === eosTokenId || stopTokens.has(id)) {
+				return {
+					acceptedCount,
+					finalSampledId: null,
+					finishReason: "stop-token",
+				};
+			}
+			if (generatedCount + acceptedCount >= maxTokens) {
+				return {
+					acceptedCount,
+					finalSampledId: null,
+					finishReason: "max-tokens",
+				};
+			}
 			continue;
+		}
+		// Reject: check max-tokens BEFORE drawing residual sample.
+		if (generatedCount + acceptedCount + 1 > maxTokens) {
+			return {
+				acceptedCount,
+				finalSampledId: null,
+				finishReason: "max-tokens",
+			};
 		}
 		const finalSampledId = sampleResidual(
 			targetDistros[k],
@@ -88,9 +134,26 @@ export function acceptPrefix(args: AcceptPrefixArgs): AcceptPrefixResult {
 			sampler,
 			warnState,
 		);
+		// The residual sample itself can be EOS / stop.
+		if (finalSampledId === eosTokenId || stopTokens.has(finalSampledId)) {
+			return { acceptedCount, finalSampledId, finishReason: "stop-token" };
+		}
+		if (generatedCount + acceptedCount + 1 >= maxTokens) {
+			return { acceptedCount, finalSampledId, finishReason: "max-tokens" };
+		}
 		return { acceptedCount, finalSampledId, finishReason: null };
 	}
+	// All K accepted: bonus sample.
+	if (generatedCount + acceptedCount + 1 > maxTokens) {
+		return { acceptedCount, finalSampledId: null, finishReason: "max-tokens" };
+	}
 	const finalSampledId = sampler.sampleFromDistribution(targetDistros[K - 1]);
+	if (finalSampledId === eosTokenId || stopTokens.has(finalSampledId)) {
+		return { acceptedCount, finalSampledId, finishReason: "stop-token" };
+	}
+	if (generatedCount + acceptedCount + 1 >= maxTokens) {
+		return { acceptedCount, finalSampledId, finishReason: "max-tokens" };
+	}
 	return { acceptedCount, finalSampledId, finishReason: null };
 }
 
