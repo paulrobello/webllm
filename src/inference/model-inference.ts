@@ -47,7 +47,7 @@ interface LayerKVCache {
  * Captured only when `traceEnabled` is true — the default is off so the
  * hot path pays nothing. Used by the profile harness in `eval/perf.ts`.
  */
-export type DecodeMode = "full" | "greedy" | "topk";
+export type DecodeMode = "full" | "greedy" | "topk" | "verify";
 
 export interface DecodeResult {
 	/** Full logits (mode='full'). */
@@ -579,6 +579,332 @@ export class ModelInference {
 		if (trace) {
 			this.recordTrace(
 				"full",
+				nTokens,
+				pastLen,
+				t0,
+				t1,
+				t2,
+				t3,
+				t4,
+				t5,
+				t6,
+				t7,
+				graphProfile,
+			);
+		}
+
+		return result;
+	}
+
+	/**
+	 * Multi-token forward pass that returns logits at **all** input positions.
+	 *
+	 * Same graph as `forward()` for `nTokens > 1`, but downloads the full logits
+	 * tensor instead of slicing the last row. Output is row-major:
+	 * `[k * vocabSize + i]` is the logit for the token-after-input-at-position-k,
+	 * vocab index i.
+	 *
+	 * Used by speculative decoding to verify K drafted tokens in one forward.
+	 * Caller must `truncateKVCache(pastLen + accepted)` after partial accept.
+	 */
+	async forwardVerify(
+		tokenIds: Int32Array,
+		positions: Int32Array,
+	): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		if (tokenIds.length < 2) {
+			throw new Error(
+				"forwardVerify requires nTokens >= 2; use forward() for prefill or forwardDecode() for single-step decode.",
+			);
+		}
+		if (tokenIds.length !== positions.length) {
+			throw new Error(
+				`forwardVerify: tokenIds.length (${tokenIds.length}) !== positions.length (${positions.length})`,
+			);
+		}
+		return this.forwardAllPositions(tokenIds, positions);
+	}
+
+	/**
+	 * Internal worker: same graph as `forward()` for `nTokens > 1`, but the
+	 * logits readback returns all `nTokens` rows instead of only the last.
+	 */
+	private async forwardAllPositions(
+		tokenIds: Int32Array,
+		positions: Int32Array,
+	): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		const { hp, wasm, weights } = this;
+		const nTokens = tokenIds.length;
+		const pastLen = this.nCached;
+		const totalLen = pastLen + nTokens;
+
+		const trace = this.traceEnabled;
+		const t0 = trace ? performance.now() : 0;
+
+		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 32;
+		wasm.ctxCreate(graphMem);
+
+		const t1 = trace ? performance.now() : 0;
+
+		const headDim = hp.embeddingHeadLength;
+		const nHeads = hp.headCount;
+		const ropeMode = getRopeModeForArchitecture(hp.architecture);
+
+		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
+		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
+
+		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
+		const needsMask = nTokens > 1;
+		const maskPaddedCols = padTo(nTokens, 32);
+		const maskTensor = needsMask
+			? wasm.tensorNew2d(GgmlType.F32, totalLen, maskPaddedCols)
+			: 0;
+
+		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+
+		const graph = wasm.graphNew(hp.layerCount * 64 + 128);
+
+		let cur = x;
+		for (let il = 0; il < hp.layerCount; il++) {
+			const lw = weights.layers[il];
+			const kv = this.kvLayers[il];
+
+			const normed = wasm.opMul(
+				wasm.opRmsNorm(cur, hp.normEpsilon),
+				lw.attnNorm,
+			);
+
+			const qRaw = wasm.opMulMat(lw.qProj, normed);
+			const kRaw = wasm.opMulMat(lw.kProj, normed);
+			const vRaw = wasm.opMulMat(lw.vProj, normed);
+			const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
+			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
+			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
+
+			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
+			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
+			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
+			const qReady = lw.qNorm
+				? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
+				: q3;
+			const kReady = lw.kNorm
+				? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
+				: k3;
+
+			const qRope = wasm.opRope(
+				qReady,
+				posTensor,
+				headDim,
+				ropeMode,
+				hp.contextLength,
+				hp.ropeFreqBase,
+				hp.ropeScale,
+				0.0,
+				1.0,
+				0.0,
+				0.0,
+			);
+			const kRope = wasm.opRope(
+				kReady,
+				posTensor,
+				headDim,
+				ropeMode,
+				hp.contextLength,
+				hp.ropeFreqBase,
+				hp.ropeScale,
+				0.0,
+				1.0,
+				0.0,
+				0.0,
+			);
+
+			const kNb1 = wasm.tensorNb(kv.k, 1);
+			const kNb2 = wasm.tensorNb(kv.k, 2);
+			const kWriteView = wasm.opView3d(
+				kv.k,
+				headDim,
+				nTokens,
+				hp.headCountKv,
+				kNb1,
+				kNb2,
+				pastLen * kNb1,
+			);
+			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
+			const kWrite = wasm.opCpy(kRopeP, kWriteView);
+			wasm.graphBuildForwardExpand(graph, kWrite);
+
+			const vNb0 = wasm.tensorNb(kv.v, 0);
+			const vNb1 = wasm.tensorNb(kv.v, 1);
+			const vNb2 = wasm.tensorNb(kv.v, 2);
+			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+			const vWriteView = wasm.opView3d(
+				kv.v,
+				nTokens,
+				headDim,
+				hp.headCountKv,
+				vNb1,
+				vNb2,
+				pastLen * vNb0,
+			);
+			const vWrite = wasm.opCpy(v3P, vWriteView);
+			wasm.graphBuildForwardExpand(graph, vWrite);
+
+			const fullK = wasm.opView3d(
+				kv.k,
+				headDim,
+				totalLen,
+				hp.headCountKv,
+				kNb1,
+				kNb2,
+				0,
+			);
+			const fullV = wasm.opView3d(
+				kv.v,
+				totalLen,
+				headDim,
+				hp.headCountKv,
+				vNb1,
+				vNb2,
+				0,
+			);
+
+			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+			const qk = wasm.opMulMat(fullK, qp);
+			const attnW = wasm.opSoftMaxExt(
+				qk,
+				maskTensor,
+				1.0 / Math.sqrt(headDim),
+				0.0,
+			);
+			const attnOut = wasm.opMulMat(fullV, attnW);
+
+			const merged = wasm.opReshape2d(
+				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+				nHeads * headDim,
+				nTokens,
+			);
+
+			const oProj = wasm.opMulMat(lw.oProj, merged);
+			const attnResidual = wasm.opAdd(oProj, cur);
+
+			const ffnNormed = wasm.opMul(
+				wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+				lw.ffnNorm,
+			);
+			const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
+			const up = wasm.opMulMat(lw.upProj, ffnNormed);
+			const ffnHidden = wasm.opSwigluSplit(gate, up);
+			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+
+			cur = wasm.opAdd(ffnOut, attnResidual);
+		}
+
+		const finalNorm = wasm.opMul(
+			wasm.opRmsNorm(cur, hp.normEpsilon),
+			weights.norm,
+		);
+		const logits = weights.output
+			? wasm.opMulMat(weights.output, finalNorm)
+			: wasm.opMulMat(weights.tokEmb, finalNorm);
+
+		wasm.graphBuildForwardExpand(graph, logits);
+
+		const t2 = trace ? performance.now() : 0;
+
+		const graphBuf = wasm.backendAllocCtxTensors();
+
+		const t3 = trace ? performance.now() : 0;
+
+		{
+			const posBytes = nTokens * 4;
+			const idsBytes = nTokens * 4;
+			const maskBytes = needsMask ? totalLen * maskPaddedCols * 4 : 0;
+			const totalBytes = posBytes + idsBytes + maskBytes;
+
+			const heap = wasm.malloc(totalBytes);
+			try {
+				const posPtr = heap;
+				const idsPtr = heap + posBytes;
+				const maskPtr = heap + posBytes + idsBytes;
+
+				const posView = new Int32Array(wasm.heapU8.buffer, posPtr, nTokens);
+				const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, nTokens);
+				for (let i = 0; i < nTokens; i++) {
+					posView[i] = positions[i];
+					idsView[i] = tokenIds[i];
+				}
+
+				if (needsMask) {
+					const mask = new Float32Array(
+						wasm.heapU8.buffer,
+						maskPtr,
+						totalLen * maskPaddedCols,
+					);
+					const NEG_INF = -Infinity;
+					for (let q = 0; q < nTokens; q++) {
+						const rowBase = q * totalLen;
+						const visibleUpTo = pastLen + q;
+						for (let k = 0; k < totalLen; k++) {
+							mask[rowBase + k] = k <= visibleUpTo ? 0 : NEG_INF;
+						}
+					}
+					for (let q = nTokens; q < maskPaddedCols; q++) {
+						const rowBase = q * totalLen;
+						for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
+					}
+				}
+
+				wasm.backendTensorSet3(
+					posTensor,
+					posPtr,
+					posBytes,
+					tokenIdsTensor,
+					idsPtr,
+					idsBytes,
+					needsMask ? maskTensor : 0,
+					maskPtr,
+					maskBytes,
+				);
+			} finally {
+				wasm.free(heap);
+			}
+		}
+
+		const t4 = trace ? performance.now() : 0;
+
+		const graphProfile = await this.computeGraphWithOptionalProfile(
+			trace,
+			graph,
+		);
+
+		const t5 = trace ? performance.now() : 0;
+
+		// All-positions readback: download full logits tensor (nTokens rows of
+		// vocabSize floats each) starting at offset 0, instead of slicing the
+		// last row like forward() does.
+		const logitsBytes = hp.vocabularySize * 4;
+		const totalBytes = nTokens * logitsBytes;
+		const resultBuf = await wasm.downloadFromTensor(logits, totalBytes, 0);
+		const result = new Float32Array(
+			resultBuf.buffer,
+			resultBuf.byteOffset,
+			nTokens * hp.vocabularySize,
+		).slice();
+
+		const t6 = trace ? performance.now() : 0;
+
+		wasm.backendBufferFree(graphBuf);
+		wasm.ctxFree();
+		this.nCached = totalLen;
+
+		const t7 = trace ? performance.now() : 0;
+
+		if (trace) {
+			this.recordTrace(
+				"verify",
 				nTokens,
 				pastLen,
 				t0,
