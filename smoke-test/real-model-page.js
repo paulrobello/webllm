@@ -122,6 +122,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	let interactiveRunCompletion = null;
 	let smokeEngine = null;
 	let smokeEngineHandleId = null;
+	let drafterHandleId = null;
 
 	async function loadAndTest() {
 		const t0 = performance.now();
@@ -429,11 +430,20 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// same reasoning as the target free at [4/8].
 				drafterWasm.free(drafterPtr);
 				drafterPtr = 0;
-				await smokeEngine.adoptPreloadedModel(drafterId, {
-					wasm: drafterWasm,
-					inference: drafterInference,
-					parsed: drafterParsed,
-				});
+				// `loadModel` (called inside `adoptPreloadedModel`) mints a
+				// synthetic handle id; that's the key under which the drafter
+				// gets registered in `inferenceEngines`. The user-facing
+				// drafter name is just a registry hint — pass `handle.id`
+				// (not `drafterId`) into `CompletionConfig.drafter` below.
+				const drafterHandle = await smokeEngine.adoptPreloadedModel(
+					drafterId,
+					{
+						wasm: drafterWasm,
+						inference: drafterInference,
+						parsed: drafterParsed,
+					},
+				);
+				drafterHandleId = drafterHandle.id;
 				log(
 					"pass",
 					`[drafter] ${drafterId} loaded (ctx=${drafterCtxLen}, draftLength=${drafterDraftLength ?? "default"})`,
@@ -709,7 +719,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// Optional spec-decode lever — `runCompletion` spreads the
 				// sampling config into `engine.chatCompletion`'s
 				// `CompletionConfig`, which already accepts these fields.
-				...(drafterId ? { drafter: drafterId } : {}),
+				// Use the synthetic handle id, not the user-facing name —
+				// the engine's drafter gate lives in `inferenceEngines`,
+				// keyed by handle id.
+				...(drafterHandleId ? { drafter: drafterHandleId } : {}),
 				...(drafterDraftLength !== null
 					? { draftLength: drafterDraftLength }
 					: {}),
