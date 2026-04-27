@@ -142,6 +142,11 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// §4 Flash Attention gate: ?fa=on toggles ggml_flash_attn_ext + the
 	// FA-ready V-cache layout. Default off — preserves §18-revert behavior.
 	const flashAttnEnabled = params.get("fa") === "on";
+	// §22 prefill-tiling diagnostic: ?diagnoseAlloc=1 dumps WebGPU device
+	// limits to #log at startup. No engine work — caller follows up with a
+	// long-prefill request and watches console for the abort to capture
+	// the offending buffer size.
+	const diagnoseAlloc = params.get("diagnoseAlloc") === "1";
 	// §D embed-perf measurement loop (driven by eval/embed-perf.ts harness).
 	// `embedPerf` enables the hook; null = no-op (existing smoke unaffected).
 	const embedPerfMode = params.get("embedPerf"); // null | "single" | "batch"
@@ -234,6 +239,25 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		} catch (e) {
 			log("fail", `[1/8] WebGPU init failed: ${e.message}\n${e.stack || ""}`);
 			return;
+		}
+
+		if (diagnoseAlloc && navigator.gpu) {
+			try {
+				const adapter = await navigator.gpu.requestAdapter();
+				const device = await adapter.requestDevice();
+				const lim = device.limits;
+				const dump = {
+					maxStorageBufferBindingSize: lim.maxStorageBufferBindingSize,
+					maxBufferSize: lim.maxBufferSize,
+					maxStorageBuffersPerShaderStage: lim.maxStorageBuffersPerShaderStage,
+					maxComputeWorkgroupStorageSize: lim.maxComputeWorkgroupStorageSize,
+					maxBindGroups: lim.maxBindGroups,
+				};
+				log("running", `[diagnoseAlloc] WebGPU device limits: ${JSON.stringify(dump)}`);
+				device.destroy();
+			} catch (e) {
+				log("fail", `[diagnoseAlloc] failed to query device: ${e.message}`);
+			}
 		}
 
 		log("running", "[2/8] Fetching model...");

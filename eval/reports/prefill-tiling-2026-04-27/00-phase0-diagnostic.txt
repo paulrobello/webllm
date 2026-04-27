@@ -1,0 +1,133 @@
+§22 Phase 0 — WebGPU buffer-binding cap probe
+==============================================
+
+Date:    2026-04-27
+Branch:  feat/prefill-tiling-22
+Model:   mistral-7b-instruct-v0.3-q4ks (32 layers, emb=4096, heads=32/8, vocab=32768)
+Probe:   ?diagnoseAlloc=1 + prefill-512 fixture (LONG_PROMPTS["prefill-512"], 1255 chars)
+Adapter: apple metal-3 (per `ggml_webgpu: adapter_info` console line)
+
+
+1. WebGPU device limits (verbatim from page #log)
+-------------------------------------------------
+[diagnoseAlloc] WebGPU device limits: {
+  "maxStorageBufferBindingSize":   134217728,   // 128 MiB
+  "maxBufferSize":                 268435456,   // 256 MiB
+  "maxStorageBuffersPerShaderStage": 8,
+  "maxComputeWorkgroupStorageSize":  16384,
+  "maxBindGroups":                   4
+}
+
+The binding cap (128 MiB) is the per-bind-slot limit any compute-graph
+tensor must fit into. `maxBufferSize` is 2× the binding cap — single
+buffers may be up to 256 MiB but only 128 MiB of any one buffer can be
+bound to a shader stage at a time.
+
+
+2. Failing-buffer signature (verbatim from console + page #log)
+---------------------------------------------------------------
+ggml_webgpu: adapter_info: vendor_id: 0 | vendor: apple | architecture: metal-3 | device_id: 0 | name:  | device_desc:
+ggml_tallocr_alloc: not enough space in the buffer to allocate node_510 (needed 8011776, available 475648)
+/Users/probello/Repos/llama.cpp/ggml/src/ggml-alloc.c:82: not enough space in the buffer
+Aborted()
+RuntimeError: Aborted(). Build with -sASSERTIONS for more info.
+    at __abort_js (webllm-wasm.js:1:54505)
+    at wasm-function[196]:0x12133
+    at wasm-function[81]:0x1b11
+    at wasm-function[533]:0x42bb9
+    at wasm-function[536]:0x43ca3
+    at wasm-function[814]:0x610a3
+    at GgmlWasm.backendAllocCtxTensors (webllm-bundle.js:987:19)
+    at ModelInference.forward (webllm-bundle.js:2814:27)
+
+Key numbers:
+  needed    = 8,011,776 bytes (≈ 7.64 MiB) — per-node tensor at node_510
+  available =   475,648 bytes (≈ 464 KiB) — remaining slack in graph buffer
+  call site = backend_alloc_ctx_tensors (ggml-alloc.c:82)
+
+
+3. Surprise: this is not the GPU binding cap
+--------------------------------------------
+The §20-era hypothesis was that prefill-512 hits `maxStorageBufferBindingSize`
+(128 MiB) directly. The captured signature contradicts that: the abort is in
+ggml's *host-side* graph allocator (`ggml_tallocr_alloc` at ggml-alloc.c:82),
+not the WebGPU device. The compute-graph backing buffer is sized too small —
+only ~464 KiB free when a single ~7.64 MiB node-510 tensor wants to be placed.
+Implication for Task 1:
+  - The work is partly buffer *sizing* (grow the ggml compute-graph buffer to
+    cover what tiled prefill actually needs), not only tile-size selection.
+  - The 128 MiB GPU cap is still the upper bound on how large any one buffer
+    can be bound, but well above the per-node need at prefill=512.
+
+
+4. Per-node arithmetic
+----------------------
+Mistral-7B activation node at sequence length N:
+  bytes = N × embeddingLength × sizeof(f32)
+        = N × 4096 × 4
+        = N × 16384
+
+Verify the captured number (node_510 at seq=512):
+  512 × 16384 = 8,388,608 bytes ≈ 8.0 MiB ≈ captured 8,011,776 bytes
+  (The 4% delta is alignment / inner-dim shaving — matches "per-token f32
+   activation" within rounding.)
+
+Maximum tile that fits one bind slot (128 MiB cap):
+  tileMax(no margin) = 134,217,728 / 16,384 = 8192 tokens
+  tileMax(20% margin) = 8192 × 0.80      = 6553 tokens
+
+Maximum tile that survives current graph-buffer slack (no Task-1 changes):
+  tileFit(asis) = 475,648 / 16,384 ≈ 29 tokens   ← why prefill-512 aborts
+
+Cumulative-graph projection (the §22 plan's `32 × N × 4096 × 4` form) is
+the *worst-case sum across all 32 layers* if every layer's output tensor
+co-resides in one binding (it does not, in llama.cpp's split-buffer
+scheme — see ggml-backend split). Treat it as a soft upper bound:
+  cumulative(N=512) = 32 × 512 × 4096 × 4 = 268,435,456 bytes (256 MiB)
+  cumulative(N=128) = 32 × 128 × 4096 × 4 =  67,108,864 bytes ( 64 MiB)
+  cumulative(N=256) = 32 × 256 × 4096 × 4 = 134,217,728 bytes (128 MiB)
+
+
+5. Recommended Phase-1 tileSize
+-------------------------------
+**Recommendation: tileSize = 128**
+
+Rationale:
+  (a) Per-node at tile=128 → 128 × 4096 × 4 = 2,097,152 B (2 MiB) — comfortably
+      under the 128 MiB binding cap (≈64× headroom).
+  (b) Cumulative-graph projection at tile=128 → 64 MiB — exactly 50% of the
+      128 MiB cap, leaving safe margin for KV-cache reads, weight rebinds,
+      and intermediate workspace tensors that share bind slots.
+  (c) Tile=128 is the largest power-of-two that keeps cumulative under
+      cap × 0.5 — a robust default for the first tiling pass. We can revisit
+      upward (256, 512) once Task 2 measures real per-tile timings.
+  (d) Aligns with common k-quant block sizes (Q4_K block=256 elements, super-
+      block multiple of 128) — avoids awkward partial-block tail handling.
+
+Forward-looking ceiling (for Task 2/3 to validate empirically):
+  tile=256 should fit (cumulative=128 MiB, exactly at cap — risky)
+  tile=512 will not fit cumulative — cap exceeded by 2×
+  Stay at tile=128 unless measurement says otherwise.
+
+Caveat: Task 1 must *also* grow the ggml compute-graph buffer to accommodate
+tile=128 worth of nodes. The current 475 KiB slack is the immediate blocker;
+without resizing the graph buffer, even tile=32 would abort on layer 2+ of
+a 32-layer prefill pass.
+
+
+6. Reproduction
+---------------
+URL (cache-busted; replace timestamp):
+  http://localhost:8031/real-model.html?model=mistral-7b-instruct-v0.3-q4ks
+    &diagnoseAlloc=1
+    &prompt=<URL_ENCODED LONG_PROMPTS["prefill-512"]>
+    &v=<unix-ts>
+
+Encode helper:
+  bun -e 'import("./eval/fixtures/long-prompts.ts").then(m =>
+    console.log(encodeURIComponent(m.LONG_PROMPTS["prefill-512"])))'
+
+Captured timestamps in this run:
+  bundle mtime: 2026-04-27 15:50 PDT (smoke-restart-rebuilt, post §22 patch)
+  page nav:     2026-04-27 22:50:25 UTC
+  abort:        2026-04-27 22:50:32.759 UTC (~7s after WebGPU init)
