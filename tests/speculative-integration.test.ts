@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { WebLLM } from "../src/core/engine.js";
 import {
 	type GenerationConfig,
 	Generator,
@@ -9,7 +10,13 @@ import { GgmlWasm } from "../src/inference/ggml-wasm.js";
 import { ModelInference } from "../src/inference/model-inference.js";
 import { Sampler } from "../src/inference/sampler.js";
 import { SpeculativeGenerator } from "../src/inference/speculative.js";
-import { Tokenizer } from "../src/inference/tokenizer.js";
+import {
+	TokenAttribute,
+	type TokenData,
+	Tokenizer,
+	type TokenizerConfig,
+	TokenizerType,
+} from "../src/inference/tokenizer.js";
 import { GgufParser } from "../src/models/gguf-parser.js";
 import { InferenceSession } from "../src/models/inference-session.js";
 import { ModelLoader } from "../src/models/model-loader.js";
@@ -168,5 +175,70 @@ describe.skipIf(SHOULD_SKIP)("SpeculativeGenerator integration", () => {
 		await wasmA.shutdown();
 		await drafter.dispose();
 		await wasmB.shutdown();
+	});
+});
+
+// Engagement-gate test: drafter routing is checked before any forward pass,
+// so we can exercise it without WebGPU using the same mock-engine pattern as
+// engine-streaming-api.test.ts.
+const ENGAGEMENT_TOKENS: TokenData[] = [
+	{ text: "<pad>", score: 0, attr: TokenAttribute.CONTROL },
+	{ text: "<s>", score: 0, attr: TokenAttribute.CONTROL },
+	{ text: "</s>", score: 0, attr: TokenAttribute.CONTROL },
+	{ text: "h", score: -1, attr: TokenAttribute.NORMAL },
+];
+
+function makeEngagementTokenizer(): Tokenizer {
+	const config: TokenizerConfig = {
+		type: TokenizerType.BPE,
+		tokens: ENGAGEMENT_TOKENS,
+		bpeRanks: new Map(),
+		addedTokens: new Map(),
+		eosTokenId: 2,
+		bosTokenId: 1,
+		padTokenId: 0,
+		vocabSize: ENGAGEMENT_TOKENS.length,
+	};
+	return new Tokenizer(config);
+}
+
+describe("WebLLM.generateStream drafter engagement", () => {
+	test("throws when drafter is not loaded", async () => {
+		const tokenizer = makeEngagementTokenizer();
+		const engine = Object.create(WebLLM.prototype) as WebLLM &
+			Record<string, unknown>;
+		engine.modelManager = {
+			get: (id: string) =>
+				id === "target"
+					? {
+							loaded: true,
+							tokenizer,
+							hyperparams: { architecture: "llama" },
+						}
+					: undefined,
+		};
+		engine.inferenceEngines = new Map([
+			[
+				"target",
+				{
+					forward: async () => new Float32Array(tokenizer.vocabSize),
+					cachedTokenCount: 0,
+					resetKVCache: () => {},
+				},
+			],
+		]);
+		engine.sessions = new Map();
+
+		await expect(
+			(async () => {
+				const stream = engine.generateStream("target", "hi", {
+					drafter: "nonexistent",
+					maxTokens: 4,
+				});
+				for await (const _ of stream) {
+					/* drain */
+				}
+			})(),
+		).rejects.toThrow("not loaded");
 	});
 });

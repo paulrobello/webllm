@@ -22,7 +22,8 @@ import {
 	ModelInference,
 } from "../inference/model-inference.js";
 import { Sampler } from "../inference/sampler.js";
-import { Tokenizer } from "../inference/tokenizer.js";
+import { SpeculativeGenerator } from "../inference/speculative.js";
+import { StreamingDecoder, Tokenizer } from "../inference/tokenizer.js";
 import { GgufParser } from "../models/gguf-parser.js";
 import type { GgufContext } from "../models/gguf-types.js";
 import { InferenceSession } from "../models/inference-session.js";
@@ -273,6 +274,109 @@ export class WebLLM {
 			repetitionPenalty: effectiveRepetitionPenalty,
 			stopTokens: config?.stopTokenIds,
 		};
+
+		// Speculative-decode routing. Runs before Qwen mask injection so the
+		// steering-fields probe sees a clean genConfig and can reject any
+		// caller-set steering, and so we can refuse Qwen3 thinking-mode
+		// requests explicitly (the engine would otherwise inject masks
+		// downstream that the spec driver doesn't support in v1).
+		if (config?.drafter !== undefined) {
+			const drafterId = config.drafter;
+			const drafterInf = this.inferenceEngines.get(drafterId);
+			if (!drafterInf) {
+				throw new Error(
+					`Drafter "${drafterId}" is not loaded; load it first via loadModel.`,
+				);
+			}
+			const drafterEntry = this.modelManager.get(drafterId);
+			if (!drafterEntry?.tokenizer) {
+				throw new Error(`Drafter "${drafterId}" tokenizer is not initialized.`);
+			}
+			if (drafterEntry.tokenizer.vocabSize !== tokenizer.vocabSize) {
+				throw new Error(
+					`Drafter vocab (${drafterEntry.tokenizer.vocabSize}) != target vocab (${tokenizer.vocabSize}); cross-tokenizer drafters are not supported in v1.`,
+				);
+			}
+			if (
+				drafterEntry.tokenizer.bosId !== tokenizer.bosId ||
+				drafterEntry.tokenizer.eosId !== tokenizer.eosId
+			) {
+				throw new Error("Drafter EOS/BOS mismatch with target.");
+			}
+			if (isQwenChatml && config?.enableThinking !== false) {
+				throw new Error(
+					"Speculative decode does not support Qwen3 thinking-mode steering; pass enableThinking: false or use the non-drafted path.",
+				);
+			}
+			const steeringFields: (keyof GenerationConfig)[] = [
+				"maskedTokensWhileThinking",
+				"maskedTokensAfterThinkingUntilAnswer",
+				"maskedTokensAfterAnswerStarts",
+				"requireVisibleAnswerAfterThinking",
+				"requireVisibleAnswerBeforeStop",
+				"requireLeadingWhitespaceAfterThinking",
+				"suppressWhitespaceOnlyAfterThinking",
+				"suppressWhitespaceOnlyUntilAnswer",
+				"enforceSingleThinkBlock",
+				"forbiddenReentryTokens",
+			];
+			const probe = genConfig as unknown as Record<string, unknown>;
+			for (const field of steeringFields) {
+				const v = probe[field];
+				const set = Array.isArray(v)
+					? v.length > 0
+					: v !== undefined && v !== false;
+				if (set) {
+					throw new Error(
+						`Speculative decode requires no steering; got ${String(field)} configured. Disable thinking mode or use the non-drafted path.`,
+					);
+				}
+			}
+			const draftLength = config.draftLength ?? 4;
+			if (draftLength < 2 || draftLength > 32) {
+				throw new Error(`draftLength must be in [2, 32], got ${draftLength}.`);
+			}
+
+			const promptTokensSpec = Array.isArray(input)
+				? this.prepareChatPrompt(modelId, input, tokenizer, inf, config)
+				: tokenizer.encode(input);
+
+			const result = SpeculativeGenerator.generate({
+				promptTokenIds: promptTokensSpec,
+				target: inf,
+				drafter: drafterInf,
+				tokenizer,
+				sampler,
+				config: genConfig,
+				eosTokenId: tokenizer.eosId,
+				draftLength,
+				signal: config?.signal,
+			});
+			const decoder = new StreamingDecoder(tokenizer);
+			const startTime = performance.now();
+			let res = await result.next();
+			while (!res.done) {
+				const tokenId = res.value;
+				const text = decoder.push(tokenId);
+				yield { text, tokenId, done: false } as StreamChunk;
+				res = await result.next();
+			}
+			const final = res.value;
+			yield {
+				text: "",
+				done: true,
+				stats: {
+					tokenCount: final.tokenCount,
+					tokensPerSecond: final.tokensPerSecond,
+					timeToFirstTokenMs: final.timeToFirstTokenMs,
+					totalMs: performance.now() - startTime,
+					text: decoder.text,
+					finishReason: final.finishReason,
+				},
+			} as StreamChunk;
+			return;
+		}
+
 		if (Array.isArray(input)) {
 			if (isQwenChatml) {
 				const imStartId = tokenizer.getId("<|im_start|>");

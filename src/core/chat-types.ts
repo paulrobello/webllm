@@ -51,6 +51,18 @@ export interface CompletionConfig {
 	 * Templates that don't support tool blocks ignore this.
 	 */
 	tools?: ChatToolSchema[];
+	/**
+	 * If set, route the generation through the speculative-decode driver
+	 * using the named drafter model (must already be loaded via
+	 * `loadModel`). The drafter must share the target's tokenizer (vocab
+	 * size, BOS, EOS) and the request must not configure any steering
+	 * fields (Qwen3 thinking masks etc.) — otherwise routing throws.
+	 *
+	 * See docs/superpowers/specs/2026-04-26-speculative-decoding-design.md.
+	 */
+	drafter?: string;
+	/** Speculative-decode draft burst length (default 4, range [2, 32]). */
+	draftLength?: number;
 }
 
 /** Input accepted by the public streaming API. */
