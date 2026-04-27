@@ -2348,13 +2348,20 @@ needs to be collected.
 skipped). Wave 2 complete: 4/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
 86% — §13; mistral-7b-v0.3-q3km at 19.7 tok/s / 69% — §15;
-qwen3-8b-iq3m at 16.2 tok/s / 90% off / 90% on — §16). **Two
-kernel-tuning levers measured + closed:** §A subgroup-cooperative
-loading (§17) and §4 Flash Attention enable (§18). With both
-closed, the next lever with real headroom is §C drafter-based
-speculative decoding. Findings, one bug fix, one upstream rebase,
-one quant-promotion, plus a dashboard hygiene pass from these
-sessions:
+qwen3-8b-iq3m at 16.2 tok/s / 90% off / 90% on — §16). **Five
+levers measured + closed:** §A subgroup-cooperative loading
+(§17), §4 FA at N=1 decode (§18), §C v1 drafter spec-decode
+(§19), §4 FA at prefill / long-decode (§20), §C v2-A greedy
+spec-decode + GPU-resident verify (side branch, 2026-04-27),
+and **§D encoder/embedding perf pass (§21, 2026-04-27 — closed
+on data: encoder embed is dispatch-bound at 95.6% graphCompute
+share, single-text levers all <5% headroom)**. With those
+five closed, the remaining headroom is **infrastructure work
+(7B+ long-prefill graph-buffer rework)** plus the deferred
+concat-graph batched compute lever for encoders if a use-case
+emerges. Findings, one bug fix, one upstream rebase, one
+quant-promotion, encoder perf characterization, plus a
+dashboard hygiene pass from these sessions:
 
 - **Bug #28 (Q3_K shader) FIXED — see §14.** Root cause was
   UB shift-by-32 in `load_u32_at_src{,0}` u32 loader helpers
@@ -2437,7 +2444,7 @@ sessions:
   broadcast deletes).
 
 **Next target options (pick one — recommended: 7B+ long-prefill
-graph-buffer infra, with A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A
+graph-buffer infra, with A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D
 all closed):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
@@ -2448,6 +2455,7 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §C. ~~Drafter-based speculative decoding (v1).~~ **CLOSED 2026-04-26 — §19** (measured 0.20× regression; verify-readback dominates).
 §4-prefill. ~~FA revisit at prefill / long-decode scope.~~ **CLOSED 2026-04-26 — §20** (TinyLlama wins everywhere; Mistral short-short -3.3% over gate; 7B+ long-prefill blocked by WebGPU buffer-binding limit, not FA).
 §C-v2-A. ~~Greedy spec-decode + GPU-resident verify.~~ **CLOSED 2026-04-27 on side branch `feat/spec-decode-v2-greedy`** (gate 1: 0.36× vs ≥1.5× target; gate 2: 0.78× vs ≥0.95×; per-step verify overhead at 8B IQ3_M target × 0.6B Q8 drafter caps α at ~0.2-0.25, well below the K=4 ceiling needed to break even). Driver, K+1 verify, AdaptiveGate, contract gate, creative-low-alpha fixture, `--draft-length` flag, `forwardVerifyArgmax`, and ~30 unit/integration tests retained on side branch as resurrection-ready infra; **do not merge to `main`**. Resurrection paths: (a) much larger target via MEMORY64 shifts target/drafter ratio from 13× to 100×+, (b) faster K+1 verify via 7B+ long-prefill graph-buffer work cuts per-step verify cost. Measurement detail in side-branch TODO §22-§24; tip `646320c`.
+§D. ~~Encoder/embedding perf pass.~~ **CLOSED 2026-04-27 — §21** (L1 ctx/graph reuse measured + reverted; Phase 2.5 diagnostic surfaced 95.6% graphCompute share = ~390 dispatches × ~80 µs each → encoder is dispatch-bound, not memory- or compute-bound at this scale; L2/L3-sequential project to <5% combined; only viable lever — concat-graph batched compute — is a non-goal in §D and deferred until a real batch-encoder-throughput use-case emerges). Harness (`eval/embed-perf.ts` + `?embedPerf=…` smoke URL params + `make embed-perf{,-baseline}`) shipped to main; cosine baseline pinned at 0.76 ±0.005 (`tests/encoder-cosine-parity.test.ts`).
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -2478,10 +2486,12 @@ E. **Remaining deferred items (in rough priority):**
    - **§B FA shape-routing** for prefill/TTFT — same
      `flash_attn_get_decisions` code path; blocked on the
      7B+ buffer-binding infra item above.
-   - **§D encoder/embedding perf pass.** Untouched since
-     §21 dashboard. Smaller scope; quick wins likely on
-     arctic-embed-s/m if anyone uses `engine.embed()` at
-     throughput.
+   - **§D encoder/embedding perf pass.** **CLOSED 2026-04-27 — §21.**
+     Single-text levers exhausted (L1 reverted; L2/L3-sequential <5%
+     combined headroom). The only structural lever is concat-graph
+     batched compute (was §D non-goal); reopen if a batch-encoder-
+     throughput use-case emerges. Harness (`eval/embed-perf.ts` +
+     smoke `?embedPerf=…`) and cosine pin (0.76 ±0.005) shipped.
    - **§C v2-A greedy spec-decode + GPU-resident verify.**
      **CLOSED 2026-04-27 on side branch
      `feat/spec-decode-v2-greedy`** — measured-and-closed
@@ -2517,29 +2527,45 @@ behind a default-off gate; 7B+ blocked by WebGPU max-buffer-
 binding limit at long-prefill); §C-v2-A (side branch, 2026-04-27)
 ruled out greedy spec with GPU-resident K+1 verify at the
 canonical target/drafter ratio (per-step verify overhead caps
-α below the K=4 break-even ceiling). **The remaining headroom
-is infrastructure work:** 7B+ long-prefill graph-buffer rework
-to unblock §4 measurements at scale (and incidentally cut the
-verify cost that sank §C-v2-A). MEMORY64 to bring 70B targets
-into reach — multi-day, only worth it if a clear use-case
-emerges. §D encoder/embedding perf is the smaller-scope
-fallback.
+α below the K=4 break-even ceiling); §21 closed §D on a
+diagnostic finding (encoder embed is dispatch-bound, single-text
+levers <5% headroom; only structural lever — concat-graph batched
+compute — is a non-goal until a use-case emerges). **The remaining
+headroom is infrastructure work:** 7B+ long-prefill graph-buffer
+rework to unblock §4 measurements at scale (and incidentally cut
+the verify cost that sank §C-v2-A). MEMORY64 to bring 70B targets
+into reach — multi-day, only worth it if a clear use-case emerges.
+§D's deferred concat-graph lever is the encoder-side fallback if a
+batch-throughput use-case appears.
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 418 pass / 10 skip / 0 fail.
+1. **`make checkall`** — confirm 419 pass / 10 skip / 0 fail.
    The §C drafter spec-decoding work added 19 unit + integration
    tests across `tests/sampler.test.ts` (7), `tests/speculative-
    rejection.test.ts` (11), `tests/forward-verify-equivalence.test.ts`
    (Bun-skipped, +6 more), `tests/speculative-integration.test.ts`
    (Bun-skipped, 3), and 1 engagement-gate test. The §20 FA-revisit
    work added a further 5 tests at `tests/fa-mode-config.test.ts`
-   pinning the `flashAttn` constructor contract (413 → 418). Skip
+   (413 → 418). The §21 §D cycle added 1 test at
+   `tests/encoder-cosine-parity.test.ts` (418 → 419). Skip
    count is still 10 — the WebGPU-gated integration tests skip
    under Bun (no `navigator.gpu`).
-2. **`git log --oneline -25`** — §20 was fast-forward merged
-   to `main`. Top of `main` is `b872b5f docs(TODO): §20 —
-   §4 FA revisit measured + CLOSED`. Below it the §20
+2. **`git log --oneline -25`** — §21 (§D encoder perf cycle)
+   was fast-forward merged to `main`. Top of `main` is
+   `b6a288c docs: generalize DOCUMENTATION_STYLE_GUIDE.md`.
+   Below it `5e24913` (§21 §D closure), `66bc603` (§D
+   Phase 2.5 diagnostic), `3a6a366` (revert L1 same-graph-
+   cache — gate failed), `f0d89f1` (Phase 2 L1 measurements),
+   `5eb1f73` (L1 implementation, reverted), `c24c628` (Phase 2
+   choice spec), `a92ca7e` (Phase 1 baseline), `4c237a3`
+   (cosine parity test), `582a3ba` (embed-perf Make targets),
+   `d51d2c5` (embed-perf harness CLI), `3315a88` (smoke-page
+   embedPerf hook), `4944209` (embed-prompts fixtures),
+   `670ba2e` (§D plan), `092248e` (§D design spec),
+   `a36ef48` (cosine baseline JSON). Before that:
+   `b872b5f docs(TODO): §20 — §4 FA revisit measured + CLOSED`,
+   then the §20
    implementation commits: `f1b19ab` (long-prompt fixtures
    + perf.ts flags), `ddc6e39` (smoke `?fa=on` + F16 KV
    fix), `faccb8e` (gated FA in `forwardDecode` /
@@ -2576,12 +2602,14 @@ Boot sequence for a fresh session:
    re-uses the bridge wrappers from §18 with no new shader
    work.
 4. **WASM build state.** `smoke-test/webllm-bundle.js` mtime
-   is 2026-04-26 ~20:15 (post-§20 — contains the gated FA
+   is 2026-04-27 ~14:57 (post-§21 — contains the embedPerf
+   hook + cosine-parity wiring on top of §20's gated FA
    path); `smoke-test/webllm-wasm.{js,wasm}` mtimes are
-   2026-04-26 ~19:50 (last rebuild during §20). The bundle
-   includes §20's `flashAttn` ctor option and the dual
-   V-cache layout; the WASM is the §18-era build with the
-   bridge wrappers (no shader changes in §20). If the
+   2026-04-27 ~10:12 (unchanged through §21 — no llama.cpp
+   patches and no shader work in the encoder cycle). The
+   bundle includes §20's `flashAttn` ctor option and the
+   dual V-cache layout plus §21's `runEmbedPerfHook` and
+   `?embedPerf=…` smoke-page wiring. If the
    artifacts look stale, run: `source ~/emsdk/emsdk_env.sh
    && make wasm-build && bun build src/index.ts --outfile
    smoke-test/webllm-bundle.js --target browser && cp
@@ -2589,14 +2617,21 @@ Boot sequence for a fresh session:
    smoke-restart`. Then navigate the smoke page to
    `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M coherent
    at ≥20 tok/s confirms patch 11 is healthy.
-5. **Read for context:** "Completed on 2026-04-26" §17 (§A
-   closure), §18 (§4 FA closure at N=1 decode), §19 (§C
-   drafter spec-decode closure), and §20 (§4 FA revisit at
-   prefill / long-decode scope closure). All four follow
-   the same "measure-and-close" pattern — useful templates
-   for the next lever (§C v2 with GPU-resident verify or
-   the 7B+ long-prefill graph-buffer infra item that
-   blocked §20 from completing the matrix). The §20 plan
+5. **Read for context:** §17 (§A closure), §18 (§4 FA
+   closure at N=1 decode), §19 (§C drafter spec-decode
+   closure), §20 (§4 FA revisit at prefill / long-decode
+   scope closure), and §21 (§D encoder perf cycle —
+   diagnostic close, no ship). All five follow the same
+   "measure-and-close" pattern — useful templates for the
+   next lever (the 7B+ long-prefill graph-buffer infra
+   item that blocked §20 from completing the matrix, or
+   §C v2 with GPU-resident verify). §21 is the cleanest
+   recent template for **closing on a diagnostic finding**
+   when the bottleneck profile invalidates the planned
+   levers — see `docs/superpowers/specs/2026-04-27-
+   encoder-perf-pass-design.md` (Phase 2.5 addendum) and
+   `docs/superpowers/plans/2026-04-27-encoder-perf-pass.md`.
+   The §20 plan
    at `docs/superpowers/plans/2026-04-26-fa-revisit-long-
    decode.md` and the matrix raw logs at
    `eval/reports/fa-revisit-2026-04-27/` carry the FA
