@@ -2342,24 +2342,112 @@ needs to be collected.
     this scale; current numbers (34-52 ms p50) are the practical floor
     until either a use-case emerges or upstream `ggml-webgpu` improves.
 
+22. **§22 7B+ long-prefill graph-buffer tiling — SHIP GATED.** First
+    direct attack on the §20 long-prefill abort; mirrors §17/§18/§19/§20/§21's
+    measure-and-close pattern. Branch: `feat/prefill-tiling-22`. Raw
+    matrix at `eval/reports/prefill-tiling-2026-04-27/SUMMARY.md`;
+    Phase 0 diagnostic at `00-phase0-diagnostic.txt` in the same dir.
+
+    **Headline finding (Phase 0 surprise):** the §20 abort is **not**
+    the WebGPU max-buffer-binding cap as that closure hypothesized.
+    It is the **host-side ggml graph allocator** at `ggml-alloc.c:82`
+    (`ggml_tallocr_alloc: not enough space … node_510 needed 8011776,
+    available 475648`). The cap is per-graph-buffer in the CPU-side
+    metadata context, not a GPU device limit. Tiling the prefill into
+    smaller chunks keeps each graph's working-set under the allocator's
+    available budget, which is why it works.
+
+    **Matrix (5 cells, prefill-512 for 7B+, prefill-256 for TinyLlama):**
+
+    | Cell | Model | Prefill | Tile | Prefill (ms) | Decode (tok/s) | Status |
+    |------|---|---:|---:|---:|---:|---|
+    | 1 | tinyllama-1.1b-chat-q4_0      | 256 |   0 |  289 | 101.9 | works (control) |
+    | 2 | tinyllama-1.1b-chat-q4_0      | 256 | 128 |  524 | 106.9 | works — Δ TTFT +81.3%, Δ decode +4.9% |
+    | 3 | mistral-7b-instruct-v0.3-q4ks | 512 |   0 |  —   |   —   | aborts (`node_510 needed 8011776, available 475648` — confirms §20) |
+    | 4 | mistral-7b-instruct-v0.3-q4ks | 512 | 128 | 4368 |  33.6 | works (unblock; matches §18's 34.5 baseline within noise) |
+    | 5 | qwen3-8b-iq3m                 | 512 | 128 | 4518 |  16.2 | works (unblock; matches §18's 15.1 baseline within noise) |
+
+    TinyLlama tile=0 vs tile=128 produced bytewise-identical output
+    (sampling-level equivalence holds). All 7B+ visible answers were
+    coherent on-topic English.
+
+    **Decision-rule evaluation:**
+    - TinyLlama TTFT regression at tile=128: **+81.3%** vs ≤3% gate → **FAIL**.
+    - TinyLlama decode at tile=128: +4.9% (improvement) → directionally pass.
+    - Mistral-7B unblock at tile=128: **YES** — exact §20 abort signature avoided.
+    - Qwen3-8B unblock at tile=128: **YES**.
+    - **Decision: ship gated** (default-off, opt-in for 7B+).
+
+    **What ships on `feat/prefill-tiling-22` (default-off plumbing):**
+    `prefillTileSize?: number` ctor option on `ModelInference`
+    (drafter accepts it too for symmetry; default `0` = legacy
+    single-graph prefill — Task 1 `c38fb8f`); tile dispatcher in
+    the prefill path that splits into `ceil(N/tile)` sequential
+    graph dispatches when the prompt exceeds the tile and an
+    equivalence test stub (Task 2 `f281ac3`); smoke-page
+    `?prefillTile=N` URL param (Task 3 `2fcc334`); `eval/perf.ts`
+    `--prefill-tile <n>` flag (Task 4 `18e1677`) plus a
+    placeholder Makefile harness target; Phase 0 diagnostic
+    capture under the original §20 hypothesis (Task 0 `8e21036`,
+    kept as evidence); 5-cell matrix raw logs (Task 5 `5b5705a`)
+    under `eval/reports/prefill-tiling-2026-04-27/`.
+
+    **Why default-off rather than default-on:** the TinyLlama
+    +81.3% TTFT regression at tile=128 is real, not noise. Each
+    prefill tile is one extra ggml graph build + dispatch +
+    post-pass; for a 1.1B model whose prefill-256 already fits in
+    a single graph the overhead dominates. The gate keeps the
+    small-model fast path untouched while letting 7B+ callers opt
+    into the unblock.
+
+    **Future-resurrection paths (not landed; reopen on demand):**
+    (a) **Per-model auto-default** — add `recommendedPrefillTile?:
+    number` to the model registry and select tile=128 automatically
+    for 7B+ entries; cheap follow-on, deliberately deferred per
+    this branch's ship-gated scope. (b) **tile=64 fallback** —
+    untested but cheap if a future model hits the same
+    `ggml_tallocr_alloc` abort at tile=128 (larger embedding-dim
+    or layer-count pushing per-tile working-set over budget) before
+    reopening the upstream allocator question. (c) **Revisit tile
+    size if upstream ggml's graph allocator becomes more
+    memory-efficient** — lifts the floor and may let the gate flip
+    to default-on without TinyLlama regression; track on the next
+    llama.cpp rebase.
+
+    **Interaction with §C-v2-A (side branch).** §22 partially
+    alleviates the verify-cost lever for short prefills, but the
+    K+1 verify cost on 8B+ at the canonical target/drafter ratio
+    was **not** measured here. §C-v2-A resurrection still needs
+    long-prefill graph-buffer rework that §22 sidesteps (per-tile
+    dispatch overhead) rather than fixes (per-graph allocator
+    headroom). Treat §22 as a partial unblock for §C-v2-A, not a
+    full resurrection trigger.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
 skipped). Wave 2 complete: 4/4 done** (mistral-7b-v0.3-q4ks
 at 34.4 tok/s / 68% — §12; llama-3.1-8b-iq3m at 16.3 tok/s /
 86% — §13; mistral-7b-v0.3-q3km at 19.7 tok/s / 69% — §15;
-qwen3-8b-iq3m at 16.2 tok/s / 90% off / 90% on — §16). **Five
+qwen3-8b-iq3m at 16.2 tok/s / 90% off / 90% on — §16). **Six
 levers measured + closed:** §A subgroup-cooperative loading
 (§17), §4 FA at N=1 decode (§18), §C v1 drafter spec-decode
 (§19), §4 FA at prefill / long-decode (§20), §C v2-A greedy
 spec-decode + GPU-resident verify (side branch, 2026-04-27),
-and **§D encoder/embedding perf pass (§21, 2026-04-27 — closed
+**§D encoder/embedding perf pass (§21, 2026-04-27 — closed
 on data: encoder embed is dispatch-bound at 95.6% graphCompute
-share, single-text levers all <5% headroom)**. With those
-five closed, the remaining headroom is **infrastructure work
-(7B+ long-prefill graph-buffer rework)** plus the deferred
-concat-graph batched compute lever for encoders if a use-case
-emerges. Findings, one bug fix, one upstream rebase, one
+share, single-text levers all <5% headroom)**, and **§22 7B+
+long-prefill graph-buffer tiling (2026-04-27 — SHIP GATED,
+default-off; tile=128 unblocks Mistral-7B-Q4_K_S at 33.6 tok/s
+and Qwen3-8B-IQ3_M at 16.2 tok/s but regresses TinyLlama TTFT
++81.3%; opt-in via `?prefillTile=N` and `--prefill-tile <n>`;
+Phase 0 disproved §20's GPU-cap hypothesis — actual failure is
+the host-side ggml graph allocator at `ggml-alloc.c:82`)**.
+With those six closed, the headroom that remains is the deferred
+concat-graph batched compute lever for encoders (only opens on a
+batch-throughput use-case) plus MEMORY64 for 70B-class targets.
+
+Findings, one bug fix, one upstream rebase, one
 quant-promotion, encoder perf characterization, plus a
 dashboard hygiene pass from these sessions:
 
@@ -2443,9 +2531,8 @@ dashboard hygiene pass from these sessions:
   reload required to see the cleanup (live-server SSE doesn't
   broadcast deletes).
 
-**Next target options (pick one — recommended: 7B+ long-prefill
-graph-buffer infra, with A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D
-all closed):**
+**Next target options (pick one — see "Recommended first move"
+below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22 all closed):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
 B. ~~§A subgroup-cooperative loading.~~ **CLOSED 2026-04-26 — §17.**
@@ -2456,6 +2543,7 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §4-prefill. ~~FA revisit at prefill / long-decode scope.~~ **CLOSED 2026-04-26 — §20** (TinyLlama wins everywhere; Mistral short-short -3.3% over gate; 7B+ long-prefill blocked by WebGPU buffer-binding limit, not FA).
 §C-v2-A. ~~Greedy spec-decode + GPU-resident verify.~~ **CLOSED 2026-04-27 on side branch `feat/spec-decode-v2-greedy`** (gate 1: 0.36× vs ≥1.5× target; gate 2: 0.78× vs ≥0.95×; per-step verify overhead at 8B IQ3_M target × 0.6B Q8 drafter caps α at ~0.2-0.25, well below the K=4 ceiling needed to break even). Driver, K+1 verify, AdaptiveGate, contract gate, creative-low-alpha fixture, `--draft-length` flag, `forwardVerifyArgmax`, and ~30 unit/integration tests retained on side branch as resurrection-ready infra; **do not merge to `main`**. Resurrection paths: (a) much larger target via MEMORY64 shifts target/drafter ratio from 13× to 100×+, (b) faster K+1 verify via 7B+ long-prefill graph-buffer work cuts per-step verify cost. Measurement detail in side-branch TODO §22-§24; tip `646320c`.
 §D. ~~Encoder/embedding perf pass.~~ **CLOSED 2026-04-27 — §21** (L1 ctx/graph reuse measured + reverted; Phase 2.5 diagnostic surfaced 95.6% graphCompute share = ~390 dispatches × ~80 µs each → encoder is dispatch-bound, not memory- or compute-bound at this scale; L2/L3-sequential project to <5% combined; only viable lever — concat-graph batched compute — is a non-goal in §D and deferred until a real batch-encoder-throughput use-case emerges). Harness (`eval/embed-perf.ts` + `?embedPerf=…` smoke URL params + `make embed-perf{,-baseline}`) shipped to main; cosine baseline pinned at 0.76 ±0.005 (`tests/encoder-cosine-parity.test.ts`).
+§22. ~~7B+ long-prefill graph-buffer tiling.~~ **CLOSED 2026-04-27 — see Completed §22.** Ship-gated default-off; tile=128 unblocks Mistral-7B-Q4_K_S (33.6 tok/s) and Qwen3-8B-IQ3_M (16.2 tok/s) at prefill-512, both within noise of §18 baselines. TinyLlama tile=128 regresses TTFT +81.3% (extra graph dispatches for single-graph-fit models), so the gate stays default-off. Opt in via `?prefillTile=N` (smoke) or `--prefill-tile <n>` (`eval/perf.ts`); ctor option `prefillTileSize` on `ModelInference`. Phase 0 disproved §20's GPU-cap hypothesis: actual abort is the host-side ggml graph allocator at `ggml-alloc.c:82` (not the WebGPU buffer-binding cap). Branch `feat/prefill-tiling-22` (default-off plumbing only — no `recommendedPrefillTile` registry metadata yet; deferred per ship-gated scope). Raw matrix at `eval/reports/prefill-tiling-2026-04-27/SUMMARY.md`.
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -2683,34 +2771,55 @@ Boot sequence for a fresh session:
    long-prefill workloads regardless of FA mode (see §20
    closure for the WebGPU buffer-binding limit details).
 
-**Recommended first move:** **7B+ long-prefill graph-buffer
-infrastructure**. §17 (§A matmul kernel), §18 (FA at N=1
-decode), §19 (§C drafter spec-decode at K=4 with full-row
-verify), §20 (§4 FA at prefill / long-decode), and the side-
-branch §C-v2-A (greedy spec-decode + GPU-resident K+1 verify)
-have all closed without ship. The algorithmic levers at the
-canonical 4-baseline are exhausted; the next meaningful
-headroom is infra.
+**Recommended first move:** **No obvious next lever — pick
+deliberately.** §17 (§A matmul kernel), §18 (FA at N=1 decode),
+§19 (§C drafter spec-decode at K=4 with full-row verify), §20
+(§4 FA at prefill / long-decode), the side-branch §C-v2-A
+(greedy spec-decode + GPU-resident K+1 verify), §21 (§D encoder
+perf pass), and §22 (7B+ long-prefill graph-buffer tiling) have
+all closed. §22 in particular shipped a default-off gate that
+unblocks 7B+ at long-prefill via tile chunking — which means the
+"7B+ long-prefill graph-buffer rework" item that §20/§C-v2-A
+flagged as the next infra need is now **partially landed** as a
+gated workaround. The algorithmic levers at the canonical
+4-baseline are exhausted; remaining options are deliberate
+strategic choices, not obvious wins.
 
-**Why 7B+ long-prefill graph-buffer infra:** §20 captured
-TinyLlama wins on FA at prefill / long-decode scope
-(short-short -6.6% TTFT / +4.9% decode; long-short -10%
-TTFT / +16.4% decode) but Mistral-7B and both 8B
-candidates abort at `backend_alloc_ctx_tensors` on
-long-prefill workloads — independent of FA mode. The
-abort is a generic WebGPU max-buffer-binding limit (32
-layers × seq=512 of F32 intermediates exceeds the device
-cap). Bumping `graphMem` 32× → 64× did not unblock; the
-allocation failure is GPU-side, not in the metadata
-context. Possible fixes: (a) tile the prefill into
-seq=256 chunks and stitch results, (b) recompute KV-cache
-intermediates per layer instead of materializing all
-layers' graphs at once, (c) F16 intermediates (most
-tensors are already F16 or quantized — only the temp
-F32 working tensors hit the limit). With this unblocked,
-the §20 hypothesis (FA wins on prefill TTFT once the
-seq² / dispatch-overhead crossover is reached) becomes
-testable on the canonical 4-baseline.
+**Candidate next levers (none are forced; pick on need):**
+
+- **§C-v2-A resurrection (conditional).** §22 partially
+  alleviates the per-step K+1 verify cost for short prefills
+  via tile chunking. The 8B+ K+1 verify cost at the canonical
+  target/drafter ratio was **not** measured in §22, so this
+  is a candidate, not a conclusion. Resurrection still hinges
+  on whether tiled-verify drops per-step cost enough to break
+  the K=4 even-α ceiling at 8B IQ3_M × 0.6B Q8. A new
+  measurement cycle on the side branch under
+  `prefillTileSize=128` would settle it. **Cheap to try; do
+  this first if speculative decoding is on the roadmap.**
+- **§22 default-on flip via per-model auto-default.** Add
+  `recommendedPrefillTile?: number` to the model registry,
+  flip 7B+ entries to tile=128 by default, leave smaller
+  models at tile=0. Single-file change once the registry
+  schema lands; preserves the TinyLlama fast path. **Cheap
+  follow-on to §22.**
+- **MEMORY64 for 70B-class targets.** Multi-day engineering
+  (pointer-type changes through the bridge, asyncify
+  interactions). Only worth it for a concrete 70B+ deployment
+  ask.
+- **§D concat-graph batched encoder compute.** Only opens on
+  a real batch-encoder-throughput use-case (was non-goal in
+  §21).
+- **§4 FA revisit at long-prefill on 7B+ now that §22
+  unblocks the path.** Run the §20 matrix again with
+  `prefillTileSize=128`; FA's win pattern (long-prefill TTFT,
+  long-decode batches) becomes testable on the 4-baseline
+  for the first time. **The most direct payoff from §22 if
+  any.**
+
+If none of those align with current priorities, the team
+should pick a direction explicitly — there is no obvious
+next perf lever waiting to be measured.
 
 **~~Secondary option:~~ §D encoder/embedding perf pass — CLOSED 2026-04-27 (see §21).**
 Measured, characterized, closed. Single-text levers (L1 ctx/graph
