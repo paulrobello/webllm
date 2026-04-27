@@ -147,6 +147,13 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// long-prefill request and watches console for the abort to capture
 	// the offending buffer size.
 	const diagnoseAlloc = params.get("diagnoseAlloc") === "1";
+	// §22 prefill-tiling gate: ?prefillTile=N enables auto-chunking of long
+	// forward calls. Default 0 = disabled (bit-identical to pre-§22).
+	const prefillTileRaw = Number(params.get("prefillTile"));
+	const prefillTileSize =
+		Number.isFinite(prefillTileRaw) && prefillTileRaw > 0
+			? Math.floor(prefillTileRaw)
+			: 0;
 	// §D embed-perf measurement loop (driven by eval/embed-perf.ts harness).
 	// `embedPerf` enables the hook; null = no-op (existing smoke unaffected).
 	const embedPerfMode = params.get("embedPerf"); // null | "single" | "batch"
@@ -190,6 +197,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	faPill.className = `mode-pill ${flashAttnEnabled ? "on" : "off"}`;
 	faPill.textContent = `FA: ${flashAttnEnabled ? "ON" : "OFF"}`;
 	modeBar.appendChild(faPill);
+	if (prefillTileSize > 0) {
+		const tilePill = document.createElement("span");
+		tilePill.className = "mode-pill on";
+		tilePill.textContent = `tile: ${prefillTileSize}`;
+		modeBar.appendChild(tilePill);
+	}
 	if (profileName) {
 		const profilePill = document.createElement("span");
 		profilePill.className = "mode-pill profile";
@@ -379,6 +392,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			} else {
 				inference = new ModelInference(wasm, parsed.hyperparams, {
 					flashAttn: flashAttnEnabled,
+					prefillTileSize,
 				});
 				if (profileMode) {
 					inference.traceEnabled = true;
@@ -533,6 +547,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				const drafterInference = new ModelInference(
 					drafterWasm,
 					drafterParsed.hyperparams,
+					{ prefillTileSize },
 				);
 				drafterInference.loadWeights(drafterGgufCtx, drafterDataAt);
 				const drafterCtxLen =
