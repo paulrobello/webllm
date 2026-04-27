@@ -74,4 +74,34 @@ describe.skipIf(SHOULD_SKIP)("ModelInference.forwardVerify", () => {
 		await inf.dispose();
 		await wasm.shutdown();
 	});
+
+	test("truncateKVCache decrements nCached", async () => {
+		const data = readFileSync(TINYLLAMA);
+		const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+		const parsed = ModelLoader.parseModel(view);
+		const ggufCtx = GgufParser.parse(view);
+
+		const wasm = new GgmlWasm();
+		await wasm.init({});
+		const inf = new ModelInference(wasm, parsed.hyperparams);
+		inf.loadWeights(ggufCtx, view);
+		inf.initKVCache(64);
+
+		const ids = new Int32Array([1, 22172, 22172]);
+		const pos = new Int32Array([0, 1, 2]);
+		await inf.forward(ids, pos);
+		expect(inf.cachedTokenCount).toBe(3);
+
+		inf.truncateKVCache(2);
+		expect(inf.cachedTokenCount).toBe(2);
+
+		expect(() => inf.truncateKVCache(5)).toThrow("> current nCached");
+		expect(() => inf.truncateKVCache(-1)).toThrow(">= 0");
+
+		inf.truncateKVCache(0);
+		expect(inf.cachedTokenCount).toBe(0);
+
+		await inf.dispose();
+		await wasm.shutdown();
+	});
 });

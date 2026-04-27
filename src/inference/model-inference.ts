@@ -250,6 +250,23 @@ export class ModelInference {
 		this.nCached = 0;
 	}
 
+	/**
+	 * Roll the logical KV cache size back to `n`. Used after partial accept
+	 * in speculative decoding when only some of K drafted tokens are kept.
+	 *
+	 * The physical KV-buffer slots remain in place — they're overwritten on
+	 * the next forward at the rolled-back position.
+	 */
+	truncateKVCache(n: number): void {
+		if (n < 0) throw new Error(`truncateKVCache: n=${n} must be >= 0`);
+		if (n > this.nCached) {
+			throw new Error(
+				`truncateKVCache: n=${n} > current nCached=${this.nCached}; cannot grow via truncate.`,
+			);
+		}
+		this.nCached = n;
+	}
+
 	get cachedTokenCount(): number {
 		return this.nCached;
 	}
