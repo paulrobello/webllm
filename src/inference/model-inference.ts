@@ -629,6 +629,15 @@ export class ModelInference {
 	/**
 	 * Internal worker: same graph as `forward()` for `nTokens > 1`, but the
 	 * logits readback returns all `nTokens` rows instead of only the last.
+	 *
+	 * **This is a verbatim copy of `forward()`'s body** with one targeted
+	 * change at the readback. The graph construction (V-permute axes 1,2,0,3,
+	 * KV `opCpy` strided-source handling, `graphBuildForwardExpand` ordering
+	 * before the attention reads, `tensorSetData` no-op rationale, mask
+	 * padding to multiple of 32, etc.) carries load-bearing invariants
+	 * documented inline in `forward()`. Read `forward()` for the rationale
+	 * before changing anything here. If you need to fix a graph-shape bug,
+	 * fix it in both methods or extract a shared helper.
 	 */
 	private async forwardAllPositions(
 		tokenIds: Int32Array,
