@@ -233,8 +233,7 @@ export interface SpeculativeGenerateOptions {
 	/** Draft-burst length K (≥ 2). */
 	draftLength: number;
 	/** Optional abort signal. Honored at three points per spec step (top of
-	 *  loop, after draft burst, mid-draft-burst). NOTE: Task 6 skeleton does
-	 *  not yet check this; Task 7 adds the checks. */
+	 *  loop, after draft burst, mid-draft-burst). */
 	signal?: AbortSignal;
 }
 
@@ -249,12 +248,16 @@ export interface SpeculativeGenerateOptions {
  * `Generator.generate`'s return so the engine adapter can treat both paths
  * symmetrically.
  *
- * **Task-6 skeleton: KV rollback after partial accept, and abort-signal
- * handling, are NOT yet implemented. Task 7 adds them. Until then, after a
- * partial-accept spec step the drafter and target's `nCached` are left at
- * `pastLen + K` instead of `pastLen + emitted` — so the next step would see
- * stale KV. Do not call this function from production paths until Task 7
- * lands.**
+ * After each spec step, rolls drafter and target `nCached` back to the new
+ * `pastLen` so the next step's KV state is consistent. On full accept + bonus
+ * (emitted = K + 1), both caches stay at `pastLen_before + K` since the bonus
+ * token's KV slot will be written by the next step's first drafter forward
+ * — same shape as the prefill→decode handoff.
+ *
+ * Honors `opts.signal` at three points per step: top of decode loop, mid
+ * draft burst (after each drafter forward), and post-draft (before verify).
+ * On abort the function returns a `GenerationResult` with
+ * `finishReason: "aborted"` and the already-yielded `tokenCount`.
  */
 export const SpeculativeGenerator = {
 	async *generate(
@@ -269,6 +272,7 @@ export const SpeculativeGenerator = {
 			config,
 			eosTokenId,
 			draftLength,
+			signal,
 		} = opts;
 		const K = draftLength;
 		if (K < 2) {
@@ -321,6 +325,10 @@ export const SpeculativeGenerator = {
 
 		// === Decode loop ===
 		while (finishReason === undefined) {
+			if (signal?.aborted) {
+				finishReason = "aborted";
+				break;
+			}
 			if (generatedCount >= config.maxTokens) {
 				finishReason = "max-tokens";
 				break;
@@ -336,7 +344,12 @@ export const SpeculativeGenerator = {
 			const draftTokens: number[] = [];
 			const draftDistros: Float32Array[] = [];
 			let prev = lastEmittedId;
+			let aborted = false;
 			for (let k = 0; k < K; k++) {
+				if (signal?.aborted) {
+					aborted = true;
+					break;
+				}
 				const logits = await drafter.forward(
 					new Int32Array([prev]),
 					new Int32Array([pastLen + k]),
@@ -347,6 +360,20 @@ export const SpeculativeGenerator = {
 				draftTokens.push(id);
 				draftDistros.push(distro);
 				prev = id;
+			}
+			if (aborted) {
+				finishReason = "aborted";
+				// Drafter ran ahead by `draftTokens.length` cache slots; target
+				// is still at pastLen (verify hasn't run). Roll drafter back to
+				// match.
+				drafter.truncateKVCache(target.cachedTokenCount);
+				break;
+			}
+			if (signal?.aborted) {
+				finishReason = "aborted";
+				// Drafter is at pastLen + K; target is still at pastLen.
+				drafter.truncateKVCache(target.cachedTokenCount);
+				break;
 			}
 
 			// --- Verify on target ---
@@ -406,6 +433,20 @@ export const SpeculativeGenerator = {
 
 			pastLen +=
 				result.acceptedCount + (result.finalSampledId !== null ? 1 : 0);
+
+			// === KV rollback ===
+			// On partial accept (emitted ≤ K): drafter and target nCached are at
+			// pastLen_before + K; we want them at the new pastLen (= pastLen_before
+			// + emitted). Roll back the unaccepted suffix.
+			//
+			// On full accept + bonus (emitted = K + 1): both nCached are at
+			// pastLen_before + K. The bonus token's KV slot will be written on
+			// the next step's first drafter forward — same shape as the
+			// prefill→decode handoff. min(currentNCached, newPastLen) =
+			// min(pastLen_before + K, pastLen_before + K + 1) = pastLen_before + K
+			// → no actual decrement on full-accept-with-bonus.
+			drafter.truncateKVCache(Math.min(drafter.cachedTokenCount, pastLen));
+			target.truncateKVCache(Math.min(target.cachedTokenCount, pastLen));
 
 			if (result.finishReason !== null) {
 				finishReason = result.finishReason;
