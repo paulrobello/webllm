@@ -2628,23 +2628,30 @@ batch-throughput use-case appears.
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 419 pass / 10 skip / 0 fail.
+1. **`make checkall`** — confirm 424 pass / 11 skip / 0 fail.
    The §C drafter spec-decoding work added 19 unit + integration
    tests across `tests/sampler.test.ts` (7), `tests/speculative-
    rejection.test.ts` (11), `tests/forward-verify-equivalence.test.ts`
    (Bun-skipped, +6 more), `tests/speculative-integration.test.ts`
    (Bun-skipped, 3), and 1 engagement-gate test. The §20 FA-revisit
-   work added a further 5 tests at `tests/fa-mode-config.test.ts`
-   (413 → 418). The §21 §D cycle added 1 test at
-   `tests/encoder-cosine-parity.test.ts` (418 → 419). Skip
-   count is still 10 — the WebGPU-gated integration tests skip
+   work added 5 tests at `tests/fa-mode-config.test.ts` (413 → 418).
+   The §21 §D cycle added 1 test at `tests/encoder-cosine-parity.test.ts`
+   (418 → 419). The §22 prefill-tile cycle added 5 unit tests at
+   `tests/prefill-tiling-config.test.ts` plus 1 Bun-skipped equivalence
+   stub at `tests/prefill-tiling-equivalence.test.ts` (419 → 424;
+   skip count 10 → 11). The WebGPU-gated integration tests skip
    under Bun (no `navigator.gpu`).
-2. **`git log --oneline -25`** — §21 (§D encoder perf cycle)
-   was fast-forward merged to `main`. Top of `main` is
-   `b6a288c docs: generalize DOCUMENTATION_STYLE_GUIDE.md`.
-   Below it `5e24913` (§21 §D closure), `66bc603` (§D
-   Phase 2.5 diagnostic), `3a6a366` (revert L1 same-graph-
-   cache — gate failed), `f0d89f1` (Phase 2 L1 measurements),
+2. **`git log --oneline -25`** — §22 (7B+ long-prefill graph-buffer
+   tiling) was fast-forward merged to `main` on 2026-04-27. Top of
+   `main` is `a73ad88 docs(TODO): §22 — prefill-tile chunking SHIP
+   GATED`. Below it the §22 implementation: `5b5705a` (Task 5 matrix),
+   `18e1677` (Task 4 perf flag), `2fcc334` (Task 3 smoke wiring),
+   `f281ac3` (Task 2 equivalence stub), `c38fb8f` (Task 1 ctor option
+   + dispatcher), `8e21036` (Task 0 Phase 0 diagnostic). Below those:
+   `b8eebf8` (post-§21 resumption refresh), `b6a288c docs: generalize
+   DOCUMENTATION_STYLE_GUIDE.md`. The §21 block: `5e24913` (§21 §D
+   closure), `66bc603` (§D Phase 2.5 diagnostic), `3a6a366` (revert L1
+   same-graph-cache — gate failed), `f0d89f1` (Phase 2 L1 measurements),
    `5eb1f73` (L1 implementation, reverted), `c24c628` (Phase 2
    choice spec), `a92ca7e` (Phase 1 baseline), `4c237a3`
    (cosine parity test), `582a3ba` (embed-perf Make targets),
@@ -2674,8 +2681,10 @@ Boot sequence for a fresh session:
    closure), `068ef84`/`d26d736`/`4692bce`/`33f10eb`
    (FA infrastructure that survived), then `bebed0c` (§17
    §A closure) and `c98d0a7` (§16 qwen3-8b register).
-   The merged branch `feat/fa-revisit-prefill-long-decode`
-   can be deleted (`git branch -d` is safe — it points at
+   The merged branch `feat/prefill-tiling-22` was already
+   deleted at merge time. The §20-era `feat/fa-revisit-prefill-
+   long-decode` is also already merged; if it's still in your
+   local checkout, `git branch -d` is safe (it points at
    `b872b5f` already on `main`).
 3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
    — confirm the **11-patch stack** is intact and the base
@@ -2684,40 +2693,49 @@ Boot sequence for a fresh session:
    UB shift-by-32 in load_u32_at_src{,0}` — patch 11, the
    bug #28 fix. Safety branch
    `webllm-browser-patches-pre-rebase-2026-04-26` preserves
-   the pre-rebase tip if needed. **§17, §18, §19, and §20
-   added zero patches** — the `__EMSCRIPTEN__` guard around
-   FA was already removed in the 2026-04-25 rebase, and §20
-   re-uses the bridge wrappers from §18 with no new shader
-   work.
+   the pre-rebase tip if needed. **§17, §18, §19, §20, §21,
+   and §22 added zero patches** — the `__EMSCRIPTEN__` guard
+   around FA was already removed in the 2026-04-25 rebase;
+   §20 re-uses the bridge wrappers from §18 with no new shader
+   work; §21 and §22 are pure-TS / pure-JS work above the
+   bridge with no shader changes.
 4. **WASM build state.** `smoke-test/webllm-bundle.js` mtime
-   is 2026-04-27 ~14:57 (post-§21 — contains the embedPerf
-   hook + cosine-parity wiring on top of §20's gated FA
-   path); `smoke-test/webllm-wasm.{js,wasm}` mtimes are
-   2026-04-27 ~10:12 (unchanged through §21 — no llama.cpp
-   patches and no shader work in the encoder cycle). The
-   bundle includes §20's `flashAttn` ctor option and the
-   dual V-cache layout plus §21's `runEmbedPerfHook` and
-   `?embedPerf=…` smoke-page wiring. If the
-   artifacts look stale, run: `source ~/emsdk/emsdk_env.sh
-   && make wasm-build && bun build src/index.ts --outfile
-   smoke-test/webllm-bundle.js --target browser && cp
-   src/wasm/build/webllm-wasm.{js,wasm} smoke-test/ && make
-   smoke-restart`. Then navigate the smoke page to
-   `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M coherent
-   at ≥20 tok/s confirms patch 11 is healthy.
+   is 2026-04-27 ~16:11 (post-§22 — contains the §22
+   `prefillTileSize` ctor option, `forwardSingle()` rename,
+   and `?prefillTile=N` URL param wiring on top of §21's
+   `runEmbedPerfHook` and §20's gated FA path);
+   `smoke-test/webllm-wasm.{js,wasm}` mtimes are also
+   2026-04-27 ~16:11 (the Task 5 `make smoke-restart` rebuilt
+   them, but no llama.cpp patches and no shader work landed
+   in §22 — content is functionally identical to the §21
+   build). If the artifacts look stale, run:
+   `source ~/emsdk/emsdk_env.sh && make wasm-build && bun
+   build src/index.ts --outfile smoke-test/webllm-bundle.js
+   --target browser && cp src/wasm/build/webllm-wasm.{js,wasm}
+   smoke-test/ && make smoke-restart`. Then navigate the smoke
+   page to `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M
+   coherent at ≥20 tok/s confirms patch 11 is healthy. To
+   confirm §22 wiring, navigate to
+   `model=mistral-7b-instruct-v0.3-q4ks&prefillTile=128&prompt=<prefill-512>`
+   — coherent output at ~33 tok/s confirms the tile dispatcher
+   is healthy (matches §22 SUMMARY.md cell 4).
 5. **Read for context:** §17 (§A closure), §18 (§4 FA
    closure at N=1 decode), §19 (§C drafter spec-decode
    closure), §20 (§4 FA revisit at prefill / long-decode
-   scope closure), and §21 (§D encoder perf cycle —
-   diagnostic close, no ship). All five follow the same
-   "measure-and-close" pattern — useful templates for the
-   next lever (the 7B+ long-prefill graph-buffer infra
-   item that blocked §20 from completing the matrix, or
-   §C v2 with GPU-resident verify). §21 is the cleanest
-   recent template for **closing on a diagnostic finding**
-   when the bottleneck profile invalidates the planned
-   levers — see `docs/superpowers/specs/2026-04-27-
-   encoder-perf-pass-design.md` (Phase 2.5 addendum) and
+   scope closure), §21 (§D encoder perf cycle — diagnostic
+   close, no ship), and §22 (7B+ long-prefill graph-buffer
+   tiling — gated ship, default-off). All six follow the
+   same "measure-and-close" pattern. §22 is the cleanest
+   recent template for **gated-ship**: opt-in plumbing
+   threaded through ctor / URL param / CLI flag, default-off
+   keeps the fast-path bit-identical, decision rule cited
+   matrix numbers — see `docs/superpowers/plans/2026-04-27-
+   prefill-tiling.md` and `eval/reports/prefill-tiling-
+   2026-04-27/SUMMARY.md`. §21 remains the cleanest template
+   for **closing on a diagnostic finding** when the bottleneck
+   profile invalidates the planned levers — see
+   `docs/superpowers/specs/2026-04-27-encoder-perf-pass-design.md`
+   (Phase 2.5 addendum) and
    `docs/superpowers/plans/2026-04-27-encoder-perf-pass.md`.
    The §20 plan
    at `docs/superpowers/plans/2026-04-26-fa-revisit-long-
@@ -2738,8 +2756,9 @@ Boot sequence for a fresh session:
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
    should return **29 runs / 30 evals** (unchanged through
-   §17/§18/§19/§20 — none of the four closures produced new
-   dashboard data, only TODO writeups and § perf.ts logs).
+   §17/§18/§19/§20/§21/§22 — none of the six closures produced
+   new dashboard data, only TODO writeups, perf.ts logs, and
+   §22's `eval/reports/prefill-tiling-2026-04-27/` matrix).
    The live dashboard SSE counter
    shows higher numbers (~52/53) because it accumulates
    streaming events without DB persistence; both views are
@@ -2756,20 +2775,29 @@ Boot sequence for a fresh session:
    §20 wired call sites into `model-inference.ts` behind
    `flashAttn=true`; the wrappers are now live (not dead)
    when the gate is enabled. **Do not delete them.**
-8. **§20 FA gate state (on `feat/fa-revisit-prefill-long-
-   decode`).** Default is **off** — `new ModelInference(...)
-   `with no `opts` argument is bit-identical to pre-§20
-   behaviour. To exercise the FA path: pass
-   `{ flashAttn: true }` to the constructor, append
-   `?fa=on` to the smoke-page URL, or pass
-   `--fa on` to `eval/perf.ts`. `eval/perf.ts` also
-   accepts `--prompt-fixture <prefill-256|prefill-512|
-   prefill-1024>` and `--decode-tokens <n>` for the
-   long-decode harness; fixtures live in
-   `eval/fixtures/long-prompts.ts`. Mistral-7B and 8B
-   models will abort at `backend_alloc_ctx_tensors` on
-   long-prefill workloads regardless of FA mode (see §20
-   closure for the WebGPU buffer-binding limit details).
+8. **§20 FA gate + §22 prefill-tile gate state (both on `main`).**
+   Both gates default **off** — `new ModelInference(wasm, hp)` with
+   no `opts` argument is bit-identical to pre-§20/§22 behaviour.
+   - **FA path:** pass `{ flashAttn: true }` to the constructor,
+     append `?fa=on` to the smoke-page URL, or pass `--fa on` to
+     `eval/perf.ts`.
+   - **Prefill-tile path (§22):** pass
+     `{ prefillTileSize: 128 }` to the constructor, append
+     `?prefillTile=128` to the smoke-page URL, or pass
+     `--prefill-tile 128` to `eval/perf.ts`. Recommended tile=128
+     for 7B+ (Phase 0 derivation in `eval/reports/prefill-tiling-
+     2026-04-27/00-phase0-diagnostic.txt`); leave tile=0 for sub-7B
+     to avoid the +81% TTFT regression measured on TinyLlama.
+   - **`eval/perf.ts`** also accepts
+     `--prompt-fixture <prefill-256|prefill-512|prefill-1024>` and
+     `--decode-tokens <n>` for the long-prefill / long-decode
+     harness; fixtures live in `eval/fixtures/long-prompts.ts`.
+   - **Mistral-7B and 8B models** abort at `backend_alloc_ctx_tensors`
+     on long-prefill workloads when `prefillTileSize=0` — the
+     §22 closure documents the actual failure mechanism (host-side
+     ggml graph allocator at `ggml-alloc.c:82`, not the WebGPU
+     binding cap as §20 originally hypothesized). Use
+     `prefillTileSize: 128` to unblock; FA mode is orthogonal.
 
 **Recommended first move:** **No obvious next lever — pick
 deliberately.** §17 (§A matmul kernel), §18 (FA at N=1 decode),
