@@ -430,24 +430,39 @@ export class ModelInference {
 			// Expand into the graph NOW so the cpy node precedes attention reads.
 			wasm.graphBuildForwardExpand(graph, kWrite);
 
-			// Write V to cache: v3 is [headDim, nKvHeads, nTokens] and the cache
-			// layout is [nTokens, headDim, nKvHeads]. In ggml_permute the axisN
-			// argument is the DESTINATION axis for source dim N, so to map
-			// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(nTokens=0, headDim=1, nKvHeads=2)
-			// we pass (1, 2, 0, 3).
-			const vNb0 = wasm.tensorNb(kv.v, 0);
+			// V cache layout depends on this.flashAttn:
+			// - FA mode:     [headDim, maxCtx, nKvHeads]  (FA-ready)
+			// - Manual mode: [maxCtx, headDim, nKvHeads]  (mul_mat compat)
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-			const vWriteView = wasm.opView3d(
-				kv.v,
-				nTokens,
-				headDim,
-				hp.headCountKv,
-				vNb1,
-				vNb2,
-				pastLen * vNb0,
-			);
+			let v3P: TensorPtr;
+			let vWriteView: TensorPtr;
+			if (this.flashAttn) {
+				// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(headDim=0, nTokens=1, nKvHeads=2): permute (0, 2, 1, 3).
+				v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+				vWriteView = wasm.opView3d(
+					kv.v,
+					headDim,
+					nTokens,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					pastLen * vNb1,
+				);
+			} else {
+				// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(nTokens=0, headDim=1, nKvHeads=2): permute (1, 2, 0, 3).
+				const vNb0 = wasm.tensorNb(kv.v, 0);
+				v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+				vWriteView = wasm.opView3d(
+					kv.v,
+					nTokens,
+					headDim,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					pastLen * vNb0,
+				);
+			}
 			// opCpy handles strided src — opCont skipped (see K write above).
 			const vWrite = wasm.opCpy(v3P, vWriteView);
 			wasm.graphBuildForwardExpand(graph, vWrite);
@@ -462,40 +477,56 @@ export class ModelInference {
 				kNb2,
 				0,
 			);
-			// Read V from cache: [totalLen, headDim, nKvHeads]
-			const fullV = wasm.opView3d(
-				kv.v,
-				totalLen,
-				headDim,
-				hp.headCountKv,
-				vNb1,
-				vNb2,
-				0,
-			);
+			// Read V from cache. FA mode wants [headDim, totalLen, nKvHeads]
+			// with stride_v1 = headDim (in elements). Manual mode wants
+			// [totalLen, headDim, nKvHeads] for opMulMat(V, attn).
+			const fullV = this.flashAttn
+				? wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv, vNb1, vNb2, 0)
+				: wasm.opView3d(kv.v, totalLen, headDim, hp.headCountKv, vNb1, vNb2, 0);
 
 			// Permute Q: [headDim, nHeads, nTokens] -> [headDim, nTokens, nHeads]
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
 
-			// QK^T: K=[headDim, totalLen, nKvHeads], Q=[headDim, nTokens, nHeads] -> [totalLen, nTokens, nHeads]
-			const qk = wasm.opMulMat(fullK, qp);
-			// Fused scale + causal mask + softmax via ggml_soft_max_ext — same
-			// op llama.cpp uses. Replaces a buggy custom diag_mask_inf shader.
-			const attnW = wasm.opSoftMaxExt(
-				qk,
-				maskTensor,
-				1.0 / Math.sqrt(headDim),
-				0.0,
-			);
-
-			// V * attn: V=[totalLen, headDim, nKvHeads], attn=[totalLen, nTokens, nHeads] -> [headDim, nTokens, nHeads]
-			const attnOut = wasm.opMulMat(fullV, attnW);
-
-			// Merge heads: [headDim, nTokens, nHeads] -> permute -> [headDim, nHeads, nTokens] -> [embDim, nTokens]
-			const merged = wasm.opReshape2d(
-				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-				nHeads * headDim,
-				nTokens,
-			);
+			let merged: TensorPtr;
+			if (this.flashAttn) {
+				// Fused FA: Q=[headDim, nTokens, nHeads], K/V=[headDim, totalLen, nKvHeads]
+				// -> [headDim, nHeads, nTokens]. The ggml-webgpu backend picks
+				// VEC/TILE shader if F16 K/V (KV is F32 in this plan; backend
+				// supports F32 K/V too — see flash_attn_get_decisions).
+				const attnOut = wasm.opFlashAttn(
+					qp,
+					fullK,
+					fullV,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0, // max_bias (ALiBi disabled)
+					0.0, // logit_softcap (Gemma; not used by Llama/Qwen/Mistral)
+				);
+				// FA returns contiguous [headDim, nHeads, nTokens] — reshape
+				// directly to [embDim, nTokens] for oProj. No permute or
+				// opCont needed (this is one of FA's wins).
+				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
+			} else {
+				// Manual chain: QK^T -> scaled+masked softmax -> V * attn.
+				// QK^T: K=[headDim, totalLen, nKvHeads], Q=[headDim, nTokens, nHeads]
+				//       -> [totalLen, nTokens, nHeads].
+				const qk = wasm.opMulMat(fullK, qp);
+				const attnW = wasm.opSoftMaxExt(
+					qk,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0,
+				);
+				// V * attn: V=[totalLen, headDim, nKvHeads], attn=[totalLen, nTokens, nHeads]
+				//           -> [headDim, nTokens, nHeads].
+				const attnOut = wasm.opMulMat(fullV, attnW);
+				// Merge heads: [headDim, nTokens, nHeads] -> [headDim, nHeads, nTokens] -> [embDim, nTokens].
+				merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					nHeads * headDim,
+					nTokens,
+				);
+			}
 
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
