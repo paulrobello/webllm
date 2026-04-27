@@ -166,8 +166,8 @@ agentchrome-stop: ## Stop all agentchrome sessions (kill launched Chrome + clear
 	@echo "agentchrome session cleared"
 
 smoke-bench: smoke-restart ## End-to-end inference benchmark (auto-launches agentchrome if needed)
-	@echo "=== smoke-bench: $(PERF_MODEL), $(PERF_RUNS) runs ==="
-	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --profile
+	@echo "=== smoke-bench: $(PERF_MODEL)$(if $(PERF_DRAFTER), drafter=$(PERF_DRAFTER)), $(PERF_RUNS) runs ==="
+	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --profile $(if $(PERF_DRAFTER),--drafter $(PERF_DRAFTER))
 
 # ---------------------------------------------------------------------------
 # Benchmarks
@@ -190,7 +190,7 @@ bench-eval-models: ## List available eval models
 	bun run bench:eval --models
 
 bench-inference: smoke-restart ## Run end-to-end inference perf (needs Chrome)
-	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS)
+	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) $(if $(PERF_DRAFTER),--drafter $(PERF_DRAFTER))
 
 bench-inference-save: smoke-restart ## Run inference perf and save baseline
 	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --save

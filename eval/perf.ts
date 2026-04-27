@@ -90,6 +90,7 @@ function main(): void {
 	const { values } = parseArgs({
 		options: {
 			model: { type: "string", short: "m" },
+			drafter: { type: "string" },
 			runs: { type: "string" },
 			save: { type: "boolean" },
 			port: { type: "string" },
@@ -123,6 +124,7 @@ function main(): void {
 		baseline: values.baseline ?? BASELINE_PATH,
 		profile: values.profile ?? false,
 		thinking: values.thinking ?? false,
+		drafter: values.drafter,
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -139,6 +141,7 @@ async function run(
 		baseline: string;
 		profile: boolean;
 		thinking: boolean;
+		drafter?: string;
 	},
 ): Promise<void> {
 	await ensureSmokeServerReachable();
@@ -156,6 +159,7 @@ async function run(
 				perf: `${Date.now()}-${i}`,
 				...(opts.profile ? { profile: 1 } : {}),
 				...(opts.thinking ? { thinking: 1 } : {}),
+				...(opts.drafter ? { drafter: opts.drafter } : {}),
 			},
 		});
 		agentchrome(port, tab, ["navigate", url]);
@@ -429,6 +433,7 @@ function printUsage(): void {
 
 Options:
   -m, --model <id>      Model to benchmark (default: ${DEFAULT_MODEL_ID})
+      --drafter <id>    Optional drafter model id for speculative decoding
       --runs <n>        Number of runs (default: ${DEFAULT_RUNS})
       --save            Write eval/reports/perf-baseline.json
       --port <cdp-port> Use this agentchrome CDP port instead of auto-detecting

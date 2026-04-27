@@ -51,6 +51,16 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		params.get("ctx") || DEFAULT_CONTEXT_LENGTH,
 	);
 	const modelUrl = `./models/${modelId}.gguf`;
+	// Speculative-decoding lever: when `?drafter=<id>` is set the page
+	// brings up a second model alongside the target and routes chat
+	// through CompletionConfig.drafter / draftLength so ship-gate
+	// measurements exercise the public API end-to-end.
+	const drafterId = params.get("drafter") || null;
+	const drafterDraftLengthParam = Number(params.get("draftLength"));
+	const drafterDraftLength =
+		Number.isFinite(drafterDraftLengthParam) && drafterDraftLengthParam > 0
+			? Math.floor(drafterDraftLengthParam)
+			: null;
 	document.body.innerHTML = getSmokePageShellMarkup();
 
 	const logEl = document.getElementById("log");
@@ -346,6 +356,98 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			return;
 		}
 
+		// Optional drafter for speculative decoding. Mirrors the target's
+		// load path: fetch the GGUF, bring up a *separate* `GgmlWasm` heap
+		// (heaps are per-model in this codebase — sharing one between
+		// target + drafter would let one model's malloc invalidate the
+		// other's HEAPU8 view), construct a `ModelInference`, and adopt
+		// it under a second handle id on the same engine.
+		if (drafterId) {
+			log("running", `[drafter] Loading ${drafterId}...`);
+			const drafterUrl = `./models/${drafterId}.gguf${assetSuffix}`;
+			let drafterPtr = 0;
+			let drafterByteLength = 0;
+			let drafterWasm = null;
+			try {
+				drafterWasm = new GgmlWasm();
+				await drafterWasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
+				const drafterResp = await fetch(drafterUrl);
+				if (!drafterResp.ok) {
+					throw new Error(`HTTP ${drafterResp.status} fetching ${drafterUrl}`);
+				}
+				const drafterTotal = Number(
+					drafterResp.headers.get("content-length") || 0,
+				);
+				if (drafterTotal <= 0) {
+					throw new Error(
+						"missing content-length on drafter response; streaming into WASM heap requires it",
+					);
+				}
+				drafterPtr = drafterWasm.malloc(drafterTotal);
+				if (!drafterPtr) {
+					throw new Error(`drafter wasm malloc(${drafterTotal}) returned null`);
+				}
+				drafterByteLength = drafterTotal;
+				const drafterReader = drafterResp.body.getReader();
+				let drafterReceived = 0;
+				while (true) {
+					const { done, value } = await drafterReader.read();
+					if (done) break;
+					// Re-derive heapU8 each chunk — same memory-grow rationale
+					// as the target fetch above.
+					drafterWasm.heapU8.set(value, drafterPtr + drafterReceived);
+					drafterReceived += value.length;
+				}
+				if (drafterReceived !== drafterTotal) {
+					throw new Error(
+						`drafter short read: expected ${drafterTotal} bytes, got ${drafterReceived}`,
+					);
+				}
+				const drafterDataAt = (off, len) =>
+					new Uint8Array(
+						drafterWasm.heapU8.buffer,
+						drafterPtr + off,
+						len,
+					);
+				const drafterFullView = drafterDataAt(0, drafterByteLength);
+				const drafterGgufCtx = GgufParser.parse(drafterFullView);
+				const drafterParsed = ModelLoader.parseModel(drafterFullView);
+				const drafterInference = new ModelInference(
+					drafterWasm,
+					drafterParsed.hyperparams,
+				);
+				drafterInference.loadWeights(drafterGgufCtx, drafterDataAt);
+				const drafterCtxLen =
+					requestedContextLength > 0
+						? Math.min(
+								drafterParsed.kvCacheConfig.maxContextLength,
+								requestedContextLength,
+							)
+						: drafterParsed.kvCacheConfig.maxContextLength;
+				await drafterInference.initKVCache(drafterCtxLen);
+				// Free the staging copy now that weights are on the GPU —
+				// same reasoning as the target free at [4/8].
+				drafterWasm.free(drafterPtr);
+				drafterPtr = 0;
+				await smokeEngine.adoptPreloadedModel(drafterId, {
+					wasm: drafterWasm,
+					inference: drafterInference,
+					parsed: drafterParsed,
+				});
+				log(
+					"pass",
+					`[drafter] ${drafterId} loaded (ctx=${drafterCtxLen}, draftLength=${drafterDraftLength ?? "default"})`,
+				);
+			} catch (e) {
+				if (drafterPtr && drafterWasm) drafterWasm.free(drafterPtr);
+				log(
+					"fail",
+					`[drafter] Load failed: ${e.message}\n${e.stack || ""}`,
+				);
+				return;
+			}
+		}
+
 		// Shader-cache warmup. Cold WebGPU pipelines compile on first dispatch,
 		// which on Apple Metal can take ~15s for a transformer graph and
 		// dominates any subsequent tok/s measurement. Run a tiny generation /
@@ -604,6 +706,13 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					smokeChatOptions,
 				),
 				...samplingOverrides,
+				// Optional spec-decode lever — `runCompletion` spreads the
+				// sampling config into `engine.chatCompletion`'s
+				// `CompletionConfig`, which already accepts these fields.
+				...(drafterId ? { drafter: drafterId } : {}),
+				...(drafterDraftLength !== null
+					? { draftLength: drafterDraftLength }
+					: {}),
 			};
 			const smokeMaxTokens =
 				maxTokensOverride ?? (thinkingEnabled ? 1024 : 64);
