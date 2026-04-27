@@ -397,3 +397,120 @@ blast radius.
   the second `embed()` call. This is the highest-risk failure mode
   if the long-lived graph buf interacts badly with WebGPU's resource
   lifetime.
+
+## Phase 2 Result + Phase 2.5 Diagnostic + §D Closure (2026-04-27)
+
+### Phase 2 result: L1 measured + reverted
+
+L1 same-graph-cache implemented at commit `5eb1f73`, measured at `f0d89f1`,
+reverted at `3a6a366`. Single-text p50 wall ms vs Phase 1 baseline:
+
+| Cell                          | Baseline | L1   |  Δ%   |
+|-------------------------------|---------:|-----:|------:|
+| arctic-embed-s short          |    34.00 | 34.20|  +0.6%|
+| arctic-embed-s long           |    25.70 | 26.30|  +2.3%|
+| arctic-embed-m short          |    52.00 | 53.40|  +2.7%|
+| arctic-embed-m long           |    41.90 | 37.90|  -9.5%|
+| arctic-embed-s batchMixed t/s |    33.5  | 33.6 |   flat|
+| arctic-embed-m batchMixed t/s |    21.3  | 22.5 |  +5.6%|
+
+Three slight regressions, one improvement. The arctic-embed-m long -9.5%
+reading is bimodal trial noise (~34 ms cluster + ~38-39 ms cluster, 50/50
+split) — not a real lever effect. G1 strict reading: no model dropped ≥10%
+AND zero of three regressions exceed 3%, but the single sub-threshold
+improvement is within run-to-run variance. Per gate rule "lever that hits G3
+but misses G1/G2 reverts (no shipping a no-op change)" → **revert**. Cosine
+preserved at 0.76 throughout (G3 part 1 passed in browser smoke).
+
+### Phase 2.5 diagnostic: where the 30-50 ms actually lives
+
+Temporary instrumentation added to `EncoderInference.embed()` recorded
+sub-call timings to `globalThis.__embedSubtraces` over 30 reps of
+arctic-embed-s short. Means:
+
+| Bucket           | mean ms | % of step |
+|------------------|--------:|----------:|
+| ctxAndBuild      |    0.27 |      0.8% |
+| upload (leaves)  |    0.01 |      0.0% |
+| **graphCompute** |  **32.5** | **95.6%** |
+| download         |    1.04 |      3.1% |
+| pool/normalize   |    0.02 |      0.1% |
+
+`graphCompute` is overwhelmingly dominant. Per-call ctx + graph rebuild is
+<1 ms total — confirms why L1 was a no-op. Download is ~1 ms — L2 (GPU pool
+/ readback shrink) would buy at most ~3% of step time even if perfectly
+executed. ctx/graph/buffer rebuild + leaf upload + pool combined are
+under 5% of step time.
+
+A 33M F16 model is ~66 MB of weights. On Apple Silicon at ~200 GB/s memory
+bandwidth, one full pass should take <1 ms of actual compute. So the 30 ms
+in `graphCompute` is **not memory-bound or compute-bound** — it's
+**dispatch / kernel-launch overhead**. The encoder graph has ~390 tensors
+(12 layers × ~33 ops/layer + entry/exit) → ~390 dispatches × ~80 µs/dispatch
+≈ 31 ms. The arithmetic matches.
+
+### Lever portfolio re-ranked against Phase 2.5 data
+
+| Lever | Targeted bucket | Headroom (% of step) | Verdict |
+|-------|-----------------|---------------------:|---------|
+| L1 ctx/graph reuse | ctxAndBuild      |  <1% | measured + reverted |
+| L2 GPU-side pool   | download         |  ~3% | not worth shipping for ~1 ms |
+| L3 embedBatch (sequential loop) | per-call overhead | <1% | no-op on dispatch count |
+| **L4 concat-graph batched compute** | **graphCompute via dispatch amortization** | **up to 90%** | only viable lever |
+
+L4 (concat-graph batched compute) was explicitly listed as a non-goal in
+this spec because it's a substantial structural change: requires either a
+block-diagonal F16 attention mask (up to ~85 MB at K=64 for batchMixed —
+too large; would need K≤8) or a 4D padded batch dim refactor of the entire
+`buildGraph`. Either route adds correctness risk (per-text positions,
+per-text segment IDs, per-text pooling at output) and is multi-hour
+implementer work with measurable revert probability if mask construction
+or batch-dim refactor goes wrong.
+
+### Closure decision
+
+Cycle closes per the spec's stop rule: "a lever's measured impact is in
+the noise AND nothing else profiles as a hotspot → close early; document
+what was tried." L1's null result + Phase 2.5's dispatch-overhead
+characterization rules out L2/L3-sequential without measurement. L4 is
+out of scope.
+
+**What ships from this cycle (kept on `main` after merge):**
+
+- `eval/embed-perf.ts` harness CLI + the `EmbedPerfTrace` /
+  `waitForEmbedPerfResult` pieces in `eval/browser-smoke.ts`.
+- `eval/fixtures/embed-prompts.ts` pinned text fixtures.
+- `smoke-test/real-model-page.js` `?embedPerf=…&embedReps=…&embedFixture=…`
+  URL-param hooks (causal-LM and encoder branches).
+- `Makefile` `embed-perf` and `embed-perf-baseline` targets.
+- `tests/encoder-cosine-parity.test.ts` G3 baseline guard.
+- `eval/reports/embed-perf-baseline-cosine.json` cosine pin (0.76, ±0.005).
+- `eval/reports/embed-perf-2026-04-27-baseline/` baseline measurements.
+- `eval/reports/embed-perf-2026-04-27-L1/` L1 measurements (negative result).
+
+**What's reverted:** `feat(encoder): L1 same-graph-cache across embed()
+calls` (`5eb1f73` reverted by `3a6a366`).
+
+**Future-cycle resurrection paths:**
+
+1. **Concat-graph batched compute (deferred L4).** If a real use-case
+   emerges for batch encoder throughput (e.g., a RAG ingestion pipeline
+   in the SDK consumer), open a new cycle that targets dispatch
+   amortization specifically. Two implementation options to evaluate
+   then: (a) flat concat + block-diagonal mask at K≤8 (4-8× speedup
+   ceiling, mask construction adds ~5 KB at K=8 short / ~5 MB at K=8
+   long, manageable); (b) padded 4D batch (cleaner, requires full
+   `buildGraph` rewrite to 4D — bigger blast radius). The harness in
+   this cycle is ready to measure the result against G2.
+
+2. **Larger encoder model registration (deferred wave-2 from
+   non-goals).** If `bge-m3` or `gte-large-en-v1.5` ever land in the
+   fleet, single-text p50 may flip from dispatch-bound to
+   compute/bandwidth-bound — at which point L1 (and possibly L2) regain
+   relevance. Re-measure then.
+
+3. **Backend-side dispatch coalescing.** If `ggml-webgpu` ever grows a
+   command-buffer-coalescing optimization upstream, that automatically
+   addresses the bucket Phase 2.5 surfaced here without any §D-side
+   changes. Worth re-running this cycle's harness on a future llama.cpp
+   rebase to spot it for free.
