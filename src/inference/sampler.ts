@@ -69,14 +69,12 @@ export class Sampler {
 	 * Run the full sampling pipeline on raw logits and return a token index.
 	 */
 	sample(logits: Float32Array): number {
-		const probs = this.computeDistribution(logits);
-		if (this.temperature === 0) {
-			for (let i = 0; i < probs.length; i++) {
-				if (probs[i] === 1.0) return i;
-			}
-			return 0; // unreachable for non-empty logits
-		}
-		return this.sampleFromDistribution(probs);
+		// Greedy fast-path: avoid the vocab-sized one-hot alloc + linear
+		// re-scan that `computeDistribution` would do at temp=0. The decode
+		// hot loop calls this per token; on Qwen3's 152K vocab the alloc
+		// dominates if we route through computeDistribution.
+		if (this.temperature === 0) return argmax(logits);
+		return this.sampleFromDistribution(this.computeDistribution(logits));
 	}
 
 	/**
