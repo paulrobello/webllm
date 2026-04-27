@@ -1,0 +1,9 @@
+{
+  "model": "snowflake-arctic-embed-s-q0f32-b4",
+  "pair": ["happy", "joyful"],
+  "cosine": 0.76,
+  "tolerance": 0.005,
+  "capturedAt": "2026-04-27T17:14:00Z",
+  "capturedFromCommit": "670ba2e",
+  "note": "Pre-cycle cosine; G3 requires every shipped lever to keep this within the tolerance. Captured by navigating the existing smoke-test agentchrome tab to model=tinyllama-1.1b-chat-q4_0 (which loads arctic-embed-s as the [8/8] reference encoder) and scraping cosine= from the page log."
+}
