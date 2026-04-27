@@ -361,17 +361,10 @@ export const SpeculativeGenerator = {
 				draftDistros.push(distro);
 				prev = id;
 			}
-			if (aborted) {
+			if (aborted || signal?.aborted) {
 				finishReason = "aborted";
-				// Drafter ran ahead by `draftTokens.length` cache slots; target
-				// is still at pastLen (verify hasn't run). Roll drafter back to
-				// match.
-				drafter.truncateKVCache(target.cachedTokenCount);
-				break;
-			}
-			if (signal?.aborted) {
-				finishReason = "aborted";
-				// Drafter is at pastLen + K; target is still at pastLen.
+				// Drafter ran ahead; target is still at pastLen (verify hasn't
+				// run). Roll drafter back to match.
 				drafter.truncateKVCache(target.cachedTokenCount);
 				break;
 			}
@@ -435,16 +428,12 @@ export const SpeculativeGenerator = {
 				result.acceptedCount + (result.finalSampledId !== null ? 1 : 0);
 
 			// === KV rollback ===
-			// On partial accept (emitted ≤ K): drafter and target nCached are at
-			// pastLen_before + K; we want them at the new pastLen (= pastLen_before
-			// + emitted). Roll back the unaccepted suffix.
-			//
-			// On full accept + bonus (emitted = K + 1): both nCached are at
-			// pastLen_before + K. The bonus token's KV slot will be written on
-			// the next step's first drafter forward — same shape as the
-			// prefill→decode handoff. min(currentNCached, newPastLen) =
-			// min(pastLen_before + K, pastLen_before + K + 1) = pastLen_before + K
-			// → no actual decrement on full-accept-with-bonus.
+			// Partial accept: nCached = pastLen_before + K, new pastLen <= that
+			// → truncate the unaccepted suffix.
+			// Full accept + bonus: nCached = pastLen_before + K but new pastLen
+			// = pastLen_before + K + 1 (bonus slot isn't written yet). The
+			// min() clamp avoids a spurious extension here; the bonus's KV
+			// lands on next step's first drafter forward.
 			drafter.truncateKVCache(Math.min(drafter.cachedTokenCount, pastLen));
 			target.truncateKVCache(Math.min(target.cachedTokenCount, pastLen));
 
