@@ -1,0 +1,31 @@
+# Cell 4 — Mistral-7B prefill-512 tile=128 (unblock test)
+
+Timestamp: 2026-04-27
+URL: http://localhost:8031/real-model.html?model=mistral-7b-instruct-v0.3-q4ks&prompt=<prefill-512>&prefillTile=128&v=1777331638
+Status: COMPLETED — UNBLOCKED
+
+Smoke summary line:
+[7/8] Generated 64 tokens in 6.3s (prefill: 4368ms, decode: 1904ms, 33.6 tok/s, finish=max-tokens)
+[8/8] embed('happy') · embed('joyful') cosine=0.76 (>=0.75 expected, ||v||=1.00)
+
+Metrics:
+- Prefill (ms):     4368
+- Decode (tok/s):   33.6
+- Total tokens:     64
+- Finish reason:    max-tokens
+
+Visible answer (excerpt) — coherent, on-topic:
+Assistant: A software engineering team is a group of professionals who work
+together to design, develop, test, and maintain software systems. Effective
+teams follow established principles and best practices to ensure that their
+software is reliable, efficient, and easy to maintain. They also have clear
+communication and collaboration processes in place to work efficiently and
+deliver high
+
+Sanity check: PASS — coherent English, directly addresses the prompt
+("what makes a software engineering team effective"), no gibberish.
+
+Phase-0 hypothesis confirmed: tile=128 splits the prefill graph into 4
+chunks of 128 tokens, each fitting under the per-graph buffer cap that
+node_510 violated at tile=0 (Cell 3). Mistral-7B Q4_K_S now runs
+prefill-512 successfully where it aborted before.

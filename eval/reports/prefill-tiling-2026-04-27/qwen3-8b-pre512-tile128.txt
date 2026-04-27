@@ -1,0 +1,28 @@
+# Cell 5 — Qwen3-8B prefill-512 tile=128 (8B unblock)
+
+Timestamp: 2026-04-27
+URL: http://localhost:8031/real-model.html?model=qwen3-8b-iq3m&prompt=<prefill-512>&prefillTile=128&v=1777331681
+Status: COMPLETED — UNBLOCKED
+
+Smoke summary line:
+[7/8] Generated 64 tokens in 8.5s (prefill: 4518ms, decode: 3944ms, 16.2 tok/s, finish=max-tokens)
+[8/8] embed('happy') · embed('joyful') cosine=0.76 (>=0.75 expected, ||v||=1.00)
+
+Metrics:
+- Prefill (ms):     4518
+- Decode (tok/s):   16.2
+- Total tokens:     64
+- Finish reason:    max-tokens
+
+Visible answer (excerpt) — coherent, on-topic:
+Assistant: A software engineering team is effective when it combines
+**technical competence**, **collaboration**, and **structured processes**
+to deliver high-quality software consistently. Here's a brief explanation
+of what contributes to effectiveness:
+
+Sanity check: PASS — coherent English, structured Markdown answer
+directly addressing the prompt, no gibberish.
+
+Phase-0 hypothesis confirmed for the larger 8B model class as well.
+Decode tok/s (16.2) is slower than Mistral-7B (33.6) which matches the
+expected scale gap for an 8B model on Q3-class quantization.

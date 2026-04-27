@@ -1,0 +1,30 @@
+# Cell 2 — TinyLlama prefill-256 tile=128 (control regression)
+
+Timestamp: 2026-04-27
+URL: http://localhost:8031/real-model.html?model=tinyllama-1.1b-chat-q4_0&prompt=<prefill-256>&prefillTile=128&v=1777331555
+Status: COMPLETED
+
+Smoke summary line:
+[7/8] Generated 64 tokens in 1.1s (prefill: 524ms, decode: 599ms, 106.9 tok/s, finish=max-tokens)
+[8/8] embed('happy') · embed('joyful') cosine=0.76 (>=0.75 expected, ||v||=1.00)
+
+Metrics:
+- Prefill (ms):     524
+- Decode (tok/s):   106.9
+- Total tokens:     64
+- Finish reason:    max-tokens
+
+Δ vs Cell 1 baseline (tile=0):
+- Prefill TTFT:    289 → 524 ms  (+81.3%)   <-- BLOWS the ≤3% gate
+- Decode tok/s:    101.9 → 106.9 tok/s  (+4.9%, no regression)
+
+Visible answer (excerpt) — bytewise identical to Cell 1:
+Assistant: Yes, I can provide you with a comprehensive definition of software
+engineering, which includes the principles, practices, and technologies related
+to software development and maintenance. Software engineering is a multi-
+disciplinary field that involves the understanding of requirements, design,
+development, testing, and maintenance of software systems. It involves
+
+Sanity check: coherent, identical output to tile=0 — equivalence holds. Tiling
+adds prefill overhead (extra graph dispatches per chunk) but the resulting
+logits/sampling path is unchanged.

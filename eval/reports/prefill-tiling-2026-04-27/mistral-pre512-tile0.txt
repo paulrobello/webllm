@@ -1,0 +1,27 @@
+# Cell 3 — Mistral-7B prefill-512 tile=0 (confirm §20 abort)
+
+Timestamp: 2026-04-27
+URL: http://localhost:8031/real-model.html?model=mistral-7b-instruct-v0.3-q4ks&prompt=<prefill-512>&v=1777331589
+Status: ABORTED (as expected; confirms the §20 unblock motivation for §22)
+
+Abort signature (from console errors):
+  [error] ggml_tallocr_alloc: not enough space in the buffer to allocate
+          node_510 (needed 8011776, available 475648)
+  [error] /Users/probello/Repos/llama.cpp/ggml/src/ggml-alloc.c:82:
+          not enough space in the buffer
+  [error] Aborted()
+
+Page-log message (from [7/8]):
+  [7/8] Generation failed: Aborted(). Build with -sASSERTIONS for more info.
+  RuntimeError: Aborted()
+    at abort (webllm-wasm.js)
+    at Object.wrapper [as _backend_alloc_ctx_tensors] (webllm-wasm.js)
+
+Notes:
+- The deeper console signature is the ggml-alloc node-510 underflow; the
+  page-log surface message names `_backend_alloc_ctx_tensors`. Same failure
+  class as §20: a single full-prefill graph blows the per-graph buffer
+  budget on a 7B causal model. Confirms §22's premise — the unblock has to
+  come from chunking the prefill graph, not from raising the buffer.
+- This is the negative control. tile=128 (Cell 4) must succeed where this
+  fails for the Phase-0 recommendation to land.

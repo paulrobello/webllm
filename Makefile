@@ -227,6 +227,13 @@ bench-full: smoke-restart ## Speed + accuracy for every configured profile, stre
 
 bench-all: bench-perf bench-eval ## Run all benchmarks
 
+.PHONY: bench-prefill-tiling
+bench-prefill-tiling: ## Run the §22 prefill-tile measurement matrix into eval/reports/prefill-tiling-2026-04-27/
+	@echo "==> see docs/superpowers/plans/2026-04-27-prefill-tiling.md Task 5"
+	@echo "==> matrix is captured manually via agentchrome; this target is a placeholder"
+	@echo "==> for reproducibility — re-run the cells documented in"
+	@echo "==> eval/reports/prefill-tiling-2026-04-27/SUMMARY.md."
+
 # ---------------------------------------------------------------------------
 # Combined targets
 # ---------------------------------------------------------------------------

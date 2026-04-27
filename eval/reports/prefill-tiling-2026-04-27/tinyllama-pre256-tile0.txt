@@ -1,0 +1,24 @@
+# Cell 1 — TinyLlama prefill-256 tile=0 (control)
+
+Timestamp: 2026-04-27
+URL: http://localhost:8031/real-model.html?model=tinyllama-1.1b-chat-q4_0&prompt=<prefill-256>&v=1777331522
+Status: COMPLETED
+
+Smoke summary line:
+[7/8] Generated 64 tokens in 0.9s (prefill: 289ms, decode: 628ms, 101.9 tok/s, finish=max-tokens)
+[8/8] embed('happy') · embed('joyful') cosine=0.76 (>=0.75 expected, ||v||=1.00)
+
+Metrics:
+- Prefill (ms):     289
+- Decode (tok/s):   101.9
+- Total tokens:     64
+- Finish reason:    max-tokens
+
+Visible answer (excerpt):
+Assistant: Yes, I can provide you with a comprehensive definition of software
+engineering, which includes the principles, practices, and technologies related
+to software development and maintenance. Software engineering is a multi-
+disciplinary field that involves the understanding of requirements, design,
+development, testing, and maintenance of software systems. It involves
+
+Sanity check: coherent English, on-topic, no gibberish.
