@@ -69,17 +69,14 @@ export class Sampler {
 	 * Run the full sampling pipeline on raw logits and return a token index.
 	 */
 	sample(logits: Float32Array): number {
-		if (this.temperature === 0) return argmax(logits);
-		const scaled = this.applyTemperature(logits);
-		const filtered = this.applyTopK(scaled);
-		const topPFiltered = this.applyTopP(filtered);
-		const probs = softmax(topPFiltered);
-		let r = this.rng();
-		for (let i = 0; i < probs.length; i++) {
-			r -= probs[i];
-			if (r <= 0) return i;
+		const probs = this.computeDistribution(logits);
+		if (this.temperature === 0) {
+			for (let i = 0; i < probs.length; i++) {
+				if (probs[i] === 1.0) return i;
+			}
+			return 0; // unreachable for non-empty logits
 		}
-		return probs.length - 1;
+		return this.sampleFromDistribution(probs);
 	}
 
 	/**
@@ -186,6 +183,50 @@ export class Sampler {
 			if (logits[idx] > 0) logits[idx] /= this.repetitionPenalty;
 			else logits[idx] *= this.repetitionPenalty;
 		}
+	}
+
+	/**
+	 * Return a uniform-(0,1) draw from the sampler's seeded PRNG (or
+	 * `Math.random()` if no seed was set). Used by speculative decoding's
+	 * rejection roll.
+	 */
+	rand(): number {
+		return this.rng();
+	}
+
+	/**
+	 * Compute the post-temperature/topK/topP probability distribution over
+	 * `logits`. Equivalent to the internal pipeline `Sampler.sample()` runs
+	 * before drawing — exposed so callers (e.g. speculative decoding) can
+	 * inspect or sample from it explicitly.
+	 *
+	 * For `temperature === 0`, returns a one-hot at `argmax(logits)`. The
+	 * caller is responsible for applying `applyRepetitionPenalty` before this
+	 * if they want repetition penalty included.
+	 */
+	computeDistribution(logits: Float32Array): Float32Array {
+		if (this.temperature === 0) {
+			const argmaxIdx = argmax(logits);
+			const onehot = new Float32Array(logits.length);
+			onehot[argmaxIdx] = 1.0;
+			return onehot;
+		}
+		const tempScaled = this.applyTemperature(logits);
+		const topPFiltered = this.applyTopP(this.applyTopK(tempScaled));
+		return softmax(topPFiltered);
+	}
+
+	/**
+	 * Sample a token id from a precomputed probability distribution using the
+	 * sampler's PRNG. The distribution must be normalized (sum to ~1.0).
+	 */
+	sampleFromDistribution(probs: Float32Array): number {
+		let r = this.rng();
+		for (let i = 0; i < probs.length; i++) {
+			r -= probs[i];
+			if (r <= 0) return i;
+		}
+		return probs.length - 1;
 	}
 }
 
