@@ -821,19 +821,35 @@ export class ModelInference {
 			const kWrite = wasm.opCpy(kRopeP, kWriteView);
 			wasm.graphBuildForwardExpand(graph, kWrite);
 
-			const vNb0 = wasm.tensorNb(kv.v, 0);
+			// V cache write — same dual-layout pattern as forward(); see Task 3.
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-			const vWriteView = wasm.opView3d(
-				kv.v,
-				nTokens,
-				headDim,
-				hp.headCountKv,
-				vNb1,
-				vNb2,
-				pastLen * vNb0,
-			);
+			let v3P: TensorPtr;
+			let vWriteView: TensorPtr;
+			if (this.flashAttn) {
+				v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+				vWriteView = wasm.opView3d(
+					kv.v,
+					headDim,
+					nTokens,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					pastLen * vNb1,
+				);
+			} else {
+				const vNb0 = wasm.tensorNb(kv.v, 0);
+				v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+				vWriteView = wasm.opView3d(
+					kv.v,
+					nTokens,
+					headDim,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					pastLen * vNb0,
+				);
+			}
 			const vWrite = wasm.opCpy(v3P, vWriteView);
 			wasm.graphBuildForwardExpand(graph, vWrite);
 
@@ -846,31 +862,38 @@ export class ModelInference {
 				kNb2,
 				0,
 			);
-			const fullV = wasm.opView3d(
-				kv.v,
-				totalLen,
-				headDim,
-				hp.headCountKv,
-				vNb1,
-				vNb2,
-				0,
-			);
+			const fullV = this.flashAttn
+				? wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv, vNb1, vNb2, 0)
+				: wasm.opView3d(kv.v, totalLen, headDim, hp.headCountKv, vNb1, vNb2, 0);
 
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-			const qk = wasm.opMulMat(fullK, qp);
-			const attnW = wasm.opSoftMaxExt(
-				qk,
-				maskTensor,
-				1.0 / Math.sqrt(headDim),
-				0.0,
-			);
-			const attnOut = wasm.opMulMat(fullV, attnW);
-
-			const merged = wasm.opReshape2d(
-				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-				nHeads * headDim,
-				nTokens,
-			);
+			let merged: TensorPtr;
+			if (this.flashAttn) {
+				const attnOut = wasm.opFlashAttn(
+					qp,
+					fullK,
+					fullV,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0,
+					0.0,
+				);
+				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
+			} else {
+				const qk = wasm.opMulMat(fullK, qp);
+				const attnW = wasm.opSoftMaxExt(
+					qk,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0,
+				);
+				const attnOut = wasm.opMulMat(fullV, attnW);
+				merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					nHeads * headDim,
+					nTokens,
+				);
+			}
 
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
@@ -1123,19 +1146,35 @@ export class ModelInference {
 			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
 			wasm.graphBuildForwardExpand(graph, wasm.opCpy(kRopeP, kWriteView));
 
-			const vNb0 = wasm.tensorNb(kv.v, 0);
+			// V cache write — same dual-layout pattern as forward(); see Task 3.
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-			const vWriteView = wasm.opView3d(
-				kv.v,
-				nTokens,
-				headDim,
-				hp.headCountKv,
-				vNb1,
-				vNb2,
-				pastLen * vNb0,
-			);
+			let v3P: TensorPtr;
+			let vWriteView: TensorPtr;
+			if (this.flashAttn) {
+				v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+				vWriteView = wasm.opView3d(
+					kv.v,
+					headDim,
+					nTokens,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					pastLen * vNb1,
+				);
+			} else {
+				const vNb0 = wasm.tensorNb(kv.v, 0);
+				v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+				vWriteView = wasm.opView3d(
+					kv.v,
+					nTokens,
+					headDim,
+					hp.headCountKv,
+					vNb1,
+					vNb2,
+					pastLen * vNb0,
+				);
+			}
 			wasm.graphBuildForwardExpand(graph, wasm.opCpy(v3P, vWriteView));
 
 			const fullK = wasm.opView3d(
@@ -1147,30 +1186,38 @@ export class ModelInference {
 				kNb2,
 				0,
 			);
-			const fullV = wasm.opView3d(
-				kv.v,
-				totalLen,
-				headDim,
-				hp.headCountKv,
-				vNb1,
-				vNb2,
-				0,
-			);
+			const fullV = this.flashAttn
+				? wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv, vNb1, vNb2, 0)
+				: wasm.opView3d(kv.v, totalLen, headDim, hp.headCountKv, vNb1, vNb2, 0);
 
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-			const qk = wasm.opMulMat(fullK, qp);
-			const attnW = wasm.opSoftMaxExt(
-				qk,
-				maskTensor,
-				1.0 / Math.sqrt(headDim),
-				0.0,
-			);
-			const attnOut = wasm.opMulMat(fullV, attnW);
-			const merged = wasm.opReshape2d(
-				wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-				nHeads * headDim,
-				nTokens,
-			);
+			let merged: TensorPtr;
+			if (this.flashAttn) {
+				const attnOut = wasm.opFlashAttn(
+					qp,
+					fullK,
+					fullV,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0,
+					0.0,
+				);
+				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
+			} else {
+				const qk = wasm.opMulMat(fullK, qp);
+				const attnW = wasm.opSoftMaxExt(
+					qk,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0,
+				);
+				const attnOut = wasm.opMulMat(fullV, attnW);
+				merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					nHeads * headDim,
+					nTokens,
+				);
+			}
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
 
@@ -1714,21 +1761,37 @@ export class ModelInference {
 					graph,
 					wasm.opCpy(wasm.opCont(kRopeP), kWriteView),
 				);
-				const vNb0 = wasm.tensorNb(kv.v, 0);
+				// V cache write — same dual-layout pattern as forward(); see Task 3.
+				// Single-token at offset 0 (no pastLen). Manual mode wraps in
+				// opCont because debugLayerOutput's opCpy semantics here differ
+				// from forward's (legacy: opCont preserved for shape safety).
 				const vNb1 = wasm.tensorNb(kv.v, 1);
 				const vNb2 = wasm.tensorNb(kv.v, 2);
-				// Same V-permute fix as in forward(): (1, 2, 0, 3) maps
-				// src(headDim, nKvHeads, nTokens) -> dst(nTokens, headDim, nKvHeads).
-				const v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-				const vWriteView = wasm.opView3d(
-					kv.v,
-					1,
-					hp.embeddingHeadLength,
-					hp.headCountKv,
-					vNb1,
-					vNb2,
-					0,
-				);
+				let v3P: TensorPtr;
+				let vWriteView: TensorPtr;
+				if (this.flashAttn) {
+					v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						hp.embeddingHeadLength,
+						1,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						0,
+					);
+				} else {
+					v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						1,
+						hp.embeddingHeadLength,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						0,
+					);
+				}
 				wasm.graphBuildForwardExpand(
 					graph,
 					wasm.opCpy(wasm.opCont(v3P), vWriteView),
@@ -1742,29 +1805,57 @@ export class ModelInference {
 					kNb2,
 					0,
 				);
-				const fullV = wasm.opView3d(
-					kv.v,
-					1,
-					hp.embeddingHeadLength,
-					hp.headCountKv,
-					vNb1,
-					vNb2,
-					0,
-				);
+				const fullV = this.flashAttn
+					? wasm.opView3d(
+							kv.v,
+							hp.embeddingHeadLength,
+							1,
+							hp.headCountKv,
+							vNb1,
+							vNb2,
+							0,
+						)
+					: wasm.opView3d(
+							kv.v,
+							1,
+							hp.embeddingHeadLength,
+							hp.headCountKv,
+							vNb1,
+							vNb2,
+							0,
+						);
 				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-				const qk = wasm.opMulMat(fullK, qp);
-				const attnW = wasm.opSoftMaxExt(
-					qk,
-					maskTensor,
-					1 / Math.sqrt(hp.embeddingHeadLength),
-					0,
-				);
-				const attnOut = wasm.opMulMat(fullV, attnW);
-				const merged = wasm.opReshape2d(
-					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-					hp.headCount * hp.embeddingHeadLength,
-					1,
-				);
+				let merged: TensorPtr;
+				if (this.flashAttn) {
+					const attnOut = wasm.opFlashAttn(
+						qp,
+						fullK,
+						fullV,
+						maskTensor,
+						1 / Math.sqrt(hp.embeddingHeadLength),
+						0,
+						0,
+					);
+					merged = wasm.opReshape2d(
+						attnOut,
+						hp.headCount * hp.embeddingHeadLength,
+						1,
+					);
+				} else {
+					const qk = wasm.opMulMat(fullK, qp);
+					const attnW = wasm.opSoftMaxExt(
+						qk,
+						maskTensor,
+						1 / Math.sqrt(hp.embeddingHeadLength),
+						0,
+					);
+					const attnOut = wasm.opMulMat(fullV, attnW);
+					merged = wasm.opReshape2d(
+						wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+						hp.headCount * hp.embeddingHeadLength,
+						1,
+					);
+				}
 				const oProj = wasm.opMulMat(lw.oProj, merged);
 				if (il === layerIdx && checkpoint === "attn_out") {
 					returnTensor = oProj;
@@ -1807,8 +1898,6 @@ export class ModelInference {
 				if (il === layerIdx && checkpoint === "layer_output") {
 					returnTensor = cur;
 				}
-				// Reset vNb0 to silence lint
-				void vNb0;
 			}
 
 			wasm.graphBuildForwardExpand(graph, returnTensor);
