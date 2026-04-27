@@ -94,6 +94,20 @@ export function acceptPrefix(args: AcceptPrefixArgs): AcceptPrefixResult {
 		);
 	}
 
+	// Threshold convention for the maxTokens checks below:
+	//   post-emit: `generatedCount + acceptedCount >= maxTokens`
+	//     — acceptedCount has just been incremented to count the token we
+	//       accepted; we've now produced exactly `generatedCount + acceptedCount`
+	//       tokens total. Equality means we hit the budget exactly.
+	//   pre-emit:  `generatedCount + acceptedCount + 1 > maxTokens`
+	//     — the +1 accounts for the residual / bonus sample we're *about to*
+	//       draw and yield. Strict `>` reads as "would exceed budget if we
+	//       drew it"; equality is fine, we yield it then stop.
+	//   post-residual / post-bonus: same `+1 >= maxTokens` form as post-emit.
+	// The two pre-emit `>` checks are nearly dead code (the post-emit `>=`
+	// check at line ~114 establishes the invariant they could fire on for
+	// k > 0); kept as defensive guards against caller-supplied
+	// `generatedCount >= maxTokens`.
 	let acceptedCount = 0;
 	for (let k = 0; k < K; k++) {
 		const id = draftTokens[k];

@@ -262,24 +262,54 @@ describe("acceptPrefix — finish conditions", () => {
 	});
 
 	test("bonus token EOS sets stop-token after full accept", () => {
+		// Structural constraint: targetDistros[K-1] determines BOTH whether
+		// the last drafted token accepts AND the bonus distribution. To get
+		// "full accept then bonus=EOS" we need target to put non-zero mass
+		// on both the drafted token (so it accepts) and on EOS (so the bonus
+		// can land on it). That makes the bonus draw probabilistic; we run
+		// N iterations and verify the histogram instead of pinning a
+		// specific seed-dependent draw.
 		const sampler = new Sampler({ seed: 104 });
 		const matched = uniform(8);
-		// targetDistros[1] gives draft id 1 enough mass to always accept
-		// (pT=0.4, pD=0.125, r=1) while concentrating bonus mass on EOS=5.
+		// targetDistros[1]: draft id 1 has mass 0.4 (pT=0.4, pD=0.125, r=1
+		// → always accept). EOS=5 has mass 0.6. Bonus is drawn from this
+		// distro: 60% land on EOS=5 (→ stop-token), 40% land on id=1 (→
+		// finishReason=null with finalSampledId=1, the only other support).
 		const bonusFavorEos = new Float32Array([0, 0.4, 0, 0, 0, 0.6, 0, 0]);
-		const result = acceptPrefix({
-			draftTokens: [0, 1],
-			draftDistros: [matched, matched],
-			targetDistros: [matched, bonusFavorEos],
-			sampler,
-			warnState: newSpeculativeWarnState(),
-			eosTokenId: 5,
-			stopTokens: new Set(),
-			maxTokens: 100,
-			generatedCount: 0,
-		});
-		expect(result.acceptedCount).toBe(2);
-		expect(result.finalSampledId).toBe(5);
-		expect(result.finishReason).toBe("stop-token");
+		const N = 5000;
+		let stopCount = 0;
+		let nullCount = 0;
+		const bonusCounts = [0, 0, 0, 0, 0, 0, 0, 0];
+		for (let i = 0; i < N; i++) {
+			const result = acceptPrefix({
+				draftTokens: [0, 1],
+				draftDistros: [matched, matched],
+				targetDistros: [matched, bonusFavorEos],
+				sampler,
+				warnState: newSpeculativeWarnState(),
+				eosTokenId: 5,
+				stopTokens: new Set(),
+				maxTokens: 100,
+				generatedCount: 0,
+			});
+			expect(result.acceptedCount).toBe(2);
+			expect(result.finalSampledId).not.toBe(null);
+			if (result.finalSampledId !== null) {
+				bonusCounts[result.finalSampledId]++;
+			}
+			if (result.finishReason === "stop-token") {
+				expect(result.finalSampledId).toBe(5);
+				stopCount++;
+			} else {
+				expect(result.finishReason).toBe(null);
+				expect(result.finalSampledId).toBe(1);
+				nullCount++;
+			}
+		}
+		// Histogram should match the 0.4 / 0.6 distro within 2pp on N=5000.
+		expect(Math.abs(bonusCounts[1] / N - 0.4)).toBeLessThan(0.02);
+		expect(Math.abs(bonusCounts[5] / N - 0.6)).toBeLessThan(0.02);
+		expect(stopCount + nullCount).toBe(N);
+		expect(Math.abs(stopCount / N - 0.6)).toBeLessThan(0.02);
 	});
 });
