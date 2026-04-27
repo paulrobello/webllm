@@ -22,8 +22,7 @@ import {
 	ModelInference,
 } from "../inference/model-inference.js";
 import { Sampler } from "../inference/sampler.js";
-import { SpeculativeGenerator } from "../inference/speculative.js";
-import { StreamingDecoder, Tokenizer } from "../inference/tokenizer.js";
+import { Tokenizer } from "../inference/tokenizer.js";
 import { GgufParser } from "../models/gguf-parser.js";
 import type { GgufContext } from "../models/gguf-types.js";
 import { InferenceSession } from "../models/inference-session.js";
@@ -275,113 +274,20 @@ export class WebLLM {
 			stopTokens: config?.stopTokenIds,
 		};
 
-		// Speculative-decode routing. Runs before Qwen mask injection so the
-		// steering-fields probe sees a clean genConfig and can reject any
-		// caller-set steering, and so we can refuse Qwen3 thinking-mode
-		// requests explicitly (the engine would otherwise inject masks
-		// downstream that the spec driver doesn't support in v1).
+		// Speculative-decode is reserved in v1: measurement on 2026-04-26
+		// against qwen3-8b-iq3m / qwen3-0.6b-q4f16 at K=4 produced 3.0 tok/s
+		// vs 15.3 tok/s baseline (0.20×) — verify-readback overhead and
+		// per-step drafter forwards dwarf the savings. Driver, sampler
+		// helpers, forwardVerify, truncateKVCache, and tests remain in
+		// tree (`src/inference/speculative.ts`, etc.) so a v2 lever
+		// (dynamic K, multi-tokenizer drafters, or GPU-resident verify
+		// reduction) can revisit without re-discovering the design. See
+		// TODO.md §19 and docs/superpowers/specs/2026-04-26-speculative-
+		// decoding-design.md.
 		if (config?.drafter !== undefined) {
-			const drafterId = config.drafter;
-			const drafterInf = this.inferenceEngines.get(drafterId);
-			if (!drafterInf) {
-				throw new Error(
-					`Drafter "${drafterId}" is not loaded; load it first via loadModel.`,
-				);
-			}
-			const drafterEntry = this.modelManager.get(drafterId);
-			if (!drafterEntry?.tokenizer) {
-				throw new Error(`Drafter "${drafterId}" tokenizer is not initialized.`);
-			}
-			if (drafterEntry.tokenizer.vocabSize !== tokenizer.vocabSize) {
-				throw new Error(
-					`Drafter vocab (${drafterEntry.tokenizer.vocabSize}) != target vocab (${tokenizer.vocabSize}); cross-tokenizer drafters are not supported in v1.`,
-				);
-			}
-			if (
-				drafterEntry.tokenizer.bosId !== tokenizer.bosId ||
-				drafterEntry.tokenizer.eosId !== tokenizer.eosId
-			) {
-				throw new Error("Drafter EOS/BOS mismatch with target.");
-			}
-			// `isQwenChatml` already requires Array.isArray(input); a future
-			// refactor that loosens that condition would silently bypass this
-			// gate, so re-evaluate this guard if that happens.
-			if (isQwenChatml && config?.enableThinking !== false) {
-				throw new Error(
-					"Speculative decode does not support Qwen3 thinking-mode steering; pass enableThinking: false or use the non-drafted path.",
-				);
-			}
-			// Belt-and-suspenders: the only writer of these fields lives below
-			// in the Qwen mask-injection branch, so this probe is currently
-			// unreachable. It's cheap and turns a future regression (e.g.
-			// steering writes added above this block) into a loud throw.
-			const steeringFields: (keyof GenerationConfig)[] = [
-				"maskedTokensWhileThinking",
-				"maskedTokensAfterThinkingUntilAnswer",
-				"maskedTokensAfterAnswerStarts",
-				"requireVisibleAnswerAfterThinking",
-				"requireVisibleAnswerBeforeStop",
-				"requireLeadingWhitespaceAfterThinking",
-				"suppressWhitespaceOnlyAfterThinking",
-				"suppressWhitespaceOnlyUntilAnswer",
-				"enforceSingleThinkBlock",
-				"forbiddenReentryTokens",
-			];
-			const probe = genConfig as unknown as Record<string, unknown>;
-			for (const field of steeringFields) {
-				const v = probe[field];
-				const set = Array.isArray(v)
-					? v.length > 0
-					: v !== undefined && v !== false;
-				if (set) {
-					throw new Error(
-						`Speculative decode requires no steering; got ${String(field)} configured. Disable thinking mode or use the non-drafted path.`,
-					);
-				}
-			}
-			const draftLength = config.draftLength ?? 4;
-			if (draftLength < 2 || draftLength > 32) {
-				throw new Error(`draftLength must be in [2, 32], got ${draftLength}.`);
-			}
-
-			const promptTokensSpec = Array.isArray(input)
-				? this.prepareChatPrompt(modelId, input, tokenizer, inf, config)
-				: tokenizer.encode(input);
-
-			const result = SpeculativeGenerator.generate({
-				promptTokenIds: promptTokensSpec,
-				target: inf,
-				drafter: drafterInf,
-				tokenizer,
-				sampler,
-				config: genConfig,
-				eosTokenId: tokenizer.eosId,
-				draftLength,
-				signal: config?.signal,
-			});
-			const decoder = new StreamingDecoder(tokenizer);
-			const startTime = performance.now();
-			let res = await result.next();
-			while (!res.done) {
-				const tokenId = res.value;
-				const text = decoder.push(tokenId);
-				yield { text, tokenId, done: false };
-				res = await result.next();
-			}
-			const final = res.value;
-			yield {
-				text: "",
-				done: true,
-				stats: {
-					tokenCount: final.tokenCount,
-					tokensPerSecond: final.tokensPerSecond,
-					timeToFirstTokenMs: final.timeToFirstTokenMs,
-					totalMs: performance.now() - startTime,
-					text: decoder.text,
-					finishReason: final.finishReason,
-				},
-			};
-			return;
+			throw new Error(
+				"Speculative decoding is reserved in v1 (measured 0.20× vs baseline at K=4 on qwen3-8b/qwen3-0.6b on 2026-04-26). See TODO.md §19 and docs/superpowers/specs/2026-04-26-speculative-decoding-design.md.",
+			);
 		}
 
 		if (Array.isArray(input)) {

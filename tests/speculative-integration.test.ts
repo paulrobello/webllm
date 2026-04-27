@@ -202,8 +202,12 @@ function makeEngagementTokenizer(): Tokenizer {
 	return new Tokenizer(config);
 }
 
-describe("WebLLM.generateStream drafter engagement", () => {
-	test("throws when drafter is not loaded", async () => {
+// Speculative decoding is reserved in v1 (see TODO.md §19). The engine
+// now throws on any drafter:-set request rather than dispatching to the
+// driver. This test pins that contract so a future re-enablement is a
+// deliberate change, not an accidental regression.
+describe("WebLLM.generateStream drafter is reserved in v1", () => {
+	test("throws when drafter is set", async () => {
 		const tokenizer = makeEngagementTokenizer();
 		const engine = Object.create(WebLLM.prototype) as WebLLM &
 			Record<string, unknown>;
@@ -232,13 +236,13 @@ describe("WebLLM.generateStream drafter engagement", () => {
 		await expect(
 			(async () => {
 				const stream = engine.generateStream("target", "hi", {
-					drafter: "nonexistent",
+					drafter: "anything",
 					maxTokens: 4,
 				});
 				for await (const _ of stream) {
 					/* drain */
 				}
 			})(),
-		).rejects.toThrow("not loaded");
+		).rejects.toThrow("reserved in v1");
 	});
 });

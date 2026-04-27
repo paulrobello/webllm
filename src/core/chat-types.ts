@@ -52,16 +52,19 @@ export interface CompletionConfig {
 	 */
 	tools?: ChatToolSchema[];
 	/**
-	 * If set, route the generation through the speculative-decode driver
-	 * using the named drafter model (must already be loaded via
-	 * `loadModel`). The drafter must share the target's tokenizer (vocab
-	 * size, BOS, EOS) and the request must not configure any steering
-	 * fields (Qwen3 thinking masks etc.) — otherwise routing throws.
+	 * Reserved in v1. Setting this throws — measurement on 2026-04-26
+	 * (qwen3-8b-iq3m via qwen3-0.6b-q4f16, K=4) produced 3.0 vs 15.3 tok/s
+	 * baseline (0.20×); verify-readback overhead and per-step drafter
+	 * forwards dwarf the savings. Driver, sampler helpers, forwardVerify,
+	 * and tests remain in tree (`src/inference/speculative.ts` etc.) for a
+	 * future v2 lever (dynamic K, multi-tokenizer drafters, GPU-resident
+	 * verify reduction).
 	 *
-	 * See docs/superpowers/specs/2026-04-26-speculative-decoding-design.md.
+	 * See TODO.md §19 and
+	 * docs/superpowers/specs/2026-04-26-speculative-decoding-design.md.
 	 */
 	drafter?: string;
-	/** Speculative-decode draft burst length (default 4, range [2, 32]). */
+	/** Reserved in v1 — see `drafter` above. */
 	draftLength?: number;
 }
 
