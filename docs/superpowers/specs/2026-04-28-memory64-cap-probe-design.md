@@ -138,6 +138,7 @@ without screen-scraping:
 window.__memory64ProbeResult = {
   phase1: "ok" | "fail: <reason>",
   phase2: "ok" | "fail: <reason>",
+  phase3_status: "ok" | "fail: <reason>" | "skipped (phase1 failed)",
   phase3_cap_bytes: <Number>,
   phase3_iterations: <Number>,
   phase4: "ok" | "fail: <reason>",
