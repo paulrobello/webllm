@@ -455,6 +455,88 @@ const CHART_COLORS = {
 	grid: "rgba(139, 148, 158, 0.15)",
 };
 
+// ── model-family inference (for family-coloured charts) ─────────────
+// Model registry doesn't carry an explicit family field today; infer it
+// from the id prefix. Used by the accuracy×speed scatter and the
+// param-count vs decode tok/s scatter so dots from the same family share
+// a colour.
+function inferModelFamily(id) {
+	const s = String(id ?? "").toLowerCase();
+	if (s.startsWith("tinyllama-")) return "TinyLlama";
+	if (s.startsWith("llama-3.")) return "Llama";
+	if (s.startsWith("hermes-")) return "Llama";
+	if (s.startsWith("qwen2.5-")) return "Qwen2.5";
+	if (s.startsWith("qwen3-")) return "Qwen3";
+	if (s.startsWith("mistral-")) return "Mistral";
+	if (s.startsWith("smollm2-")) return "SmolLM2";
+	if (s.startsWith("gemma-")) return "Gemma";
+	if (s.startsWith("phi-")) return "Phi";
+	return "Other";
+}
+
+// Visually distinct family palette tuned for the dark surface
+// (#161b22). Order is stable so legend colours don't shuffle between
+// renders. Keep keys aligned with inferModelFamily()'s return values.
+const FAMILY_COLORS = {
+	TinyLlama: "#fb923c",
+	Llama: "#58a6ff",
+	"Qwen2.5": "#3fb950",
+	Qwen3: "#bc8cff",
+	Mistral: "#f778ba",
+	SmolLM2: "#22d3ee",
+	Gemma: "#d29922",
+	Phi: "#a78bfa",
+	Other: "#8b949e",
+};
+
+// Strip recognised quant suffixes from a model id so two quants of the
+// same base model collapse to a shared stem (used by Task 2 to draw
+// connector lines across same-base-model dots in the scatter).
+const QUANT_SUFFIXES = [
+	"-q4_0",
+	"-q4f16",
+	"-q4ks",
+	"-q4_k_m",
+	"-q4_k_s",
+	"-q3km",
+	"-q3_k_m",
+	"-iq3m",
+	"-iq3_m",
+	"-iq3xxs",
+	"-iq4xs",
+	"-q8_0",
+	"-q8",
+];
+function getModelStem(id) {
+	const s = String(id ?? "").toLowerCase();
+	for (const suffix of QUANT_SUFFIXES) {
+		if (s.endsWith(suffix)) return s.slice(0, -suffix.length);
+	}
+	return s;
+}
+
+// Map id substrings → param count in billions. Used by the
+// param-count vs decode tok/s scatter; ids that don't match any token
+// are omitted from that panel rather than guessed.
+const PARAM_TOKENS = [
+	["-1.1b-", 1.1],
+	["-0.6b-", 0.6],
+	["-1.7b-", 1.7],
+	["-360m-", 0.36],
+	["-1.5b-", 1.5],
+	["-3b-", 3],
+	["-4b-", 4],
+	["-7b-", 7],
+	["-8b-", 8],
+];
+function inferParamCountB(id) {
+	const s = String(id ?? "").toLowerCase();
+	for (const [tok, n] of PARAM_TOKENS) {
+		if (s.includes(tok)) return n;
+	}
+	return null;
+}
+
 function baseChartOptions({ xTitle, tooltipLabel } = {}) {
 	return {
 		indexAxis: "y",
@@ -701,13 +783,11 @@ function renderScatterChart() {
 		if (!prev || prev.timestamp < ev.timestamp) evalByKey.set(key, ev);
 	}
 
-	// Group by `(modelId, thinking)` so the legend turns into a colour key
-	// that respects thinking mode — same model running thinking-on and
-	// thinking-off produces visibly different scores and shouldn't share a
-	// colour. Matches the convention used by the temperature-sweep and
-	// per-dimension grouped charts. Tooltip still spells out the full
-	// profile label and thinking mode for each individual dot.
-	const pointsByKey = new Map();
+	// Group by family so the legend reduces to one chip per family rather
+	// than one per (model, thinking). Each datapoint still carries the
+	// full modelId + profile + thinking mode for the tooltip, so individual
+	// dots remain identifiable on hover.
+	const pointsByFamily = new Map();
 	for (const [key, run] of runByKey) {
 		const ev = evalByKey.get(key);
 		if (!ev) continue;
@@ -715,19 +795,20 @@ function renderScatterChart() {
 		if (avgTps === 0) continue;
 		const modelId = ev.modelId ?? run.model ?? key;
 		const thinking = ev.thinking === "on" ? "on" : "off";
-		const groupKey = `${modelId}::${thinking}`;
-		if (!pointsByKey.has(groupKey)) {
-			pointsByKey.set(groupKey, { modelId, thinking, points: [] });
-		}
-		pointsByKey.get(groupKey).points.push({
+		const family = inferModelFamily(modelId);
+		const point = {
 			x: avgTps,
 			y: Math.round((ev.overall ?? 0) * 100),
 			label: key,
+			modelId,
 			think: thinking,
-		});
+			family,
+		};
+		if (!pointsByFamily.has(family)) pointsByFamily.set(family, []);
+		pointsByFamily.get(family).push(point);
 	}
 
-	if (pointsByKey.size === 0) {
+	if (pointsByFamily.size === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
 		if (scatterChartInstance) { scatterChartInstance.destroy(); scatterChartInstance = null; }
@@ -736,32 +817,18 @@ function renderScatterChart() {
 	if (host) host.hidden = false;
 	if (empty) empty.hidden = true;
 
-	const palette = [
-		CHART_COLORS.blue,
-		CHART_COLORS.purple,
-		CHART_COLORS.green,
-		CHART_COLORS.yellow,
-		CHART_COLORS.orange ?? "#fb923c",
-		"#f472b6",
-		"#22d3ee",
-		"#a78bfa",
-	];
-	// Sort keys for stable colour assignment across renders. thinking-off
-	// keeps the bare model id as its dataset label so non-thinking-capable
-	// models read the same as before.
-	const sortedKeys = Array.from(pointsByKey.keys()).sort();
-	const datasets = sortedKeys.map((groupKey, i) => {
-		const { modelId, thinking, points } = pointsByKey.get(groupKey);
-		const label = thinking === "on" ? `${modelId} (think)` : modelId;
-		return {
-			label,
-			data: points,
-			backgroundColor: palette[i % palette.length],
-			borderColor: palette[i % palette.length],
-			pointRadius: 6,
-			pointHoverRadius: 8,
-		};
-	});
+	// One dataset per family → one legend entry per family, family-coloured
+	// dots. Sorted alphabetically for a stable legend order.
+	const familyKeys = Array.from(pointsByFamily.keys()).sort();
+	const datasets = familyKeys.map((family) => ({
+		label: family,
+		data: pointsByFamily.get(family),
+		backgroundColor: FAMILY_COLORS[family] ?? FAMILY_COLORS.Other,
+		borderColor: FAMILY_COLORS[family] ?? FAMILY_COLORS.Other,
+		pointRadius: 6,
+		pointHoverRadius: 8,
+	}));
+
 	const data = { datasets };
 
 	const options = {
@@ -789,6 +856,12 @@ function renderScatterChart() {
 					color: CHART_COLORS.muted,
 					boxWidth: 10,
 					font: { size: 11 },
+					// Hide the connector datasets from the legend; they're
+					// visual links, not a separate data series.
+					filter: (item, chartData) => {
+						const ds = chartData.datasets[item.datasetIndex];
+						return !ds?._isConnector;
+					},
 				},
 			},
 			tooltip: {
@@ -797,10 +870,12 @@ function renderScatterChart() {
 				bodyColor: CHART_COLORS.text,
 				borderColor: "#30363d",
 				borderWidth: 1,
+				filter: (ctx) => !ctx.dataset?._isConnector,
 				callbacks: {
 					label: (ctx) => {
 						const p = ctx.raw;
-						return `${p.label}: ${p.x.toFixed(1)} tok/s · ${p.y}% accuracy (think ${p.think})`;
+						if (!p || p.label === undefined) return "";
+						return `${p.label} [${p.family}]: ${p.x.toFixed(1)} tok/s · ${p.y}% accuracy (think ${p.think})`;
 					},
 				},
 			},
