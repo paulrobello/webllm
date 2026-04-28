@@ -39,16 +39,7 @@ set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 set(DawnWebGPU_TARGET "" CACHE STRING "WebGPU target" FORCE)
 
 # Pull in ggml build system (builds ggml-base + enabled backends)
-# For wasm32 (default target)
 add_subdirectory(${LLAMA_CPP_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml)
-
-# For MEMORY64 target: Reuse wasm32 GGML libraries as a starting point.
-# A full separate mem64 GGML build is complex due to CMake environment setup.
-# For the probe phase, we attempt linking wasm32 libraries with wasm64 flags.
-# If this fails (expected), it's a probe finding.
-if(EMSCRIPTEN)
-    set(GGML_MEM64_BUILD_DIR "${CMAKE_BINARY_DIR}/ggml")  # Use the wasm32 GGML build
-endif()
 
 # Emscripten needs an executable target to produce .js + .wasm output.
 # add_library only produces an archive; add_executable triggers the linker.
@@ -97,48 +88,6 @@ if(EMSCRIPTEN)
         "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
     )
     set_target_properties(webllm-wasm PROPERTIES
-        PREFIX ""
-    )
-
-    # ── MEMORY64 cap probe target (separate build, dead code on `main`
-    # until promoted; spec: docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md).
-    # Reuses the same source + same exports list as `webllm-wasm`; deltas:
-    #   -sMEMORY64=1            64-bit pointers on the WASM side
-    #   -sWASM_BIGINT=1         BigInt at the JS↔WASM boundary
-    #   -sMAXIMUM_MEMORY=16GB   probes the upper bound of Chrome's heap grant
-    # Links against mem64-compiled GGML libraries.
-    # Note: For now, reuses wasm32 GGML libraries. The linker will fail if wasm64
-    # object files are truly required. This is expected as a probe finding.
-    add_executable(webllm-wasm-mem64 webgpu-bridge.cpp)
-    target_link_libraries(webllm-wasm-mem64 PRIVATE
-        ${GGML_MEM64_BUILD_DIR}/src/libggml-base.a
-        ${GGML_MEM64_BUILD_DIR}/src/ggml-webgpu/libggml-webgpu.a
-    )
-    target_include_directories(webllm-wasm-mem64 PRIVATE
-        ${LLAMA_CPP_DIR}/ggml/include
-        ${LLAMA_CPP_DIR}/ggml/src
-    )
-    target_compile_options(webllm-wasm-mem64 PRIVATE
-        "-sMEMORY64=1"
-        "-sWASM_BIGINT=1"
-    )
-    target_link_options(webllm-wasm-mem64 PRIVATE
-        "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
-        "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
-        "-sMODULARIZE=1"
-        "-sEXPORT_ES6=1"
-        "-sUSE_ES6_IMPORT_META=1"
-        "-sALLOW_MEMORY_GROWTH=1"
-        "-sMEMORY64=1"
-        "-sWASM_BIGINT=1"
-        "-sMAXIMUM_MEMORY=16GB"
-        "-sSTACK_SIZE=8388608"
-        "-sENVIRONMENT='web'"
-        "-sASYNCIFY_STACK_SIZE=1048576"
-        "-O3"
-        "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
-    )
-    set_target_properties(webllm-wasm-mem64 PROPERTIES
         PREFIX ""
     )
 else()
