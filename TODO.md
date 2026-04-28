@@ -2007,12 +2007,14 @@ housekeeping items closed 2026-04-28** (#4 dashboard refresh /
 #5 pre-rebase baselines / #6 §32 SUMMARY cross-link); **all three
 doc-style next-step candidates closed 2026-04-28** (#7 TODO header
 pin refresh / #8 BENCHMARKS tier expansion / #9 CLAUDE.md
-doctrine capture). **No active perf lever in flight; no
-documentation backlog.** All algorithmic levers at the canonical
-4-baseline are exhausted (§17-§29 closed matmul, FA, drafter,
-encoder, prefill-tiling, spec-decode families). Perf next-work
-is gated entirely on external triggers (see "External-trigger
-candidates" section).
+doctrine capture). **Backlog fully cleared.** All algorithmic
+levers at the canonical 4-baseline are exhausted (§17-§29 closed
+matmul, FA, drafter, encoder, prefill-tiling, spec-decode
+families). Upstream cadence check 2026-04-28: no `ggml-webgpu/`
+movement → no rebase trigger near firing. **One optional candidate
+remains:** #10 vault-save the reusable doctrines for cross-project
+value (see Watch list section). Otherwise next-work is gated
+entirely on external triggers (see "External-trigger candidates").
 
 **Fresh observation pinned 2026-04-28 from #5 data:** the encoder
 overhead (`backendEncodeOverheadMs` per step) is a **fixed
@@ -2209,6 +2211,66 @@ Three doc-style candidates surfaced post-housekeeping; **all closed
    patch-12 squash commit (`2850291`, stack 12 → 11), and §31b
    (16 GiB Emscripten 5.0.6 wasm-ld toolchain ceiling). Future
    readers landing on §32 closure see follow-up outcomes inline.
+
+### Watch list / optional cadence work (2026-04-28)
+
+Backlog is fully cleared. Upstream cadence check 2026-04-28: 2 commits
+since `f9f33654a` (Nemotron Nano 3 Omni model support; `common/`
+reasoning-budget helper) — **neither touches `ggml/src/ggml-webgpu/`**;
+no rebase trigger near firing. Below items are honest candidates if
+appetite remains; none are forced.
+
+10. **Vault-save the project's reusable doctrines** (one real
+    candidate). Per `~/.claude/CLAUDE-VAULT.md` "After solving a
+    non-obvious problem or implementing a reusable pattern, save it"
+    — several patterns developed this cycle have **cross-project**
+    value and are not yet in `~/ClaudeVault/Patterns/`:
+    - **Rebase + sweep cycle template** (§27 free-win / §28 negative-
+      result / §32 small-regression-accepted) — applies to any
+      project on a long-lived patches branch tracking upstream.
+    - **Cap-probe doctrine** (§31b: bump first, characterize second)
+      — applies to any toolchain / runtime / linker cap measurement.
+    - **Pre-rebase baseline doctrine** (§32a: same-model pre/post
+      bucket comparison beats cross-model proxy).
+    - **Probe-first doctrine generalization** — declare what the
+      probe measures, the pass/fail thresholds, and the downstream
+      decision the probe gates. Run probes proactively even when
+      intuition says the answer is obvious.
+    - **Encoder-fixed-µs/dispatch finding** — empirical pattern;
+      worth a `Knowledge/` entry with the µs/dispatch table from §5.
+    - **Patch-stack squash via cherry-pick chain** (post-§32 patch-12
+      cleanup) — confidence gate is artifact byte-identity pre/post.
+
+    Cost: ~30 min wall (5-6 short notes + index rebuild). Risk: zero.
+    Decision rule: do this if you intend to bring these patterns to
+    other projects (almost certainly worth doing — the rebase-cycle
+    template alone is a reusable artifact). Skip only if confident
+    these patterns are webllm-specific (they aren't).
+
+**Watch-list items (no action now; flag for next session):**
+
+- **Pre-rebase baseline freshness window.** `eval/reports/pre-rebase-
+  baselines-2026-04-28/` matrix is fresh as of 2026-04-28; freshness
+  window ~1 month. **Re-capture if no rebase triggers fire by
+  ~2026-05-28** — if the matrix ages past freshness without being
+  consumed, the §32a process-improvement value evaporates.
+  Procedure: `make smoke-bench PERF_MODEL=<m> PERF_RUNS=3` × 6
+  canonical models, ~18 min wall. Only do this on the "stale-matrix
+  + still-no-rebase-ETA" branch; otherwise let the next rebase
+  trigger consume the matrix and start a fresh capture.
+- **Upstream cadence check.** Today: 2 commits, 0 in `ggml-webgpu/`.
+  Procedure: `cd ~/Repos/llama.cpp && git fetch origin && git log
+  webllm-browser-patches..origin/master --oneline -- ggml/src/
+  ggml-webgpu/ ggml/include/`. **If the result is non-empty**, a
+  rebase trigger has fired — apply the §32 procedure (rebase, sweep,
+  classify per §27/§28/§32 templates). **If empty**, log and skip.
+  Reasonable cadence: every 1-2 weeks of active development; ad-hoc
+  otherwise.
+- **Test skip count.** Currently 11 (all environmental — indexedDB
+  unavailable in Bun native, WebGPU unavailable in Bun native,
+  WordPiece HF fixtures not downloaded, side-branch spec-decode
+  tests). Watch for changes; new skips might indicate accidental
+  test regressions.
 
 ### External-trigger candidates
 
