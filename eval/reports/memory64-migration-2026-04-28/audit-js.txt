@@ -1,0 +1,44 @@
+=== JS-side _malloc / _free / wasm.malloc / wasm.free ===
+src/inference/model-inference.ts:675:			const heap = wasm.malloc(totalBytes);
+src/inference/model-inference.ts:723:				wasm.free(heap);
+src/inference/model-inference.ts:1039:			const heap = wasm.malloc(totalBytes);
+src/inference/model-inference.ts:1084:				wasm.free(heap);
+src/inference/model-inference.ts:1614:		const heap = wasm.malloc(totalBytes);
+src/inference/model-inference.ts:1659:			wasm.free(heap);
+src/inference/model-inference.ts:2024:			const maskHeap = wasm.malloc(32 * 2);
+src/inference/model-inference.ts:2029:				wasm.free(maskHeap);
+src/inference/ggml-wasm.ts:257:		return this.m._malloc(size);
+src/inference/ggml-wasm.ts:261:		this.m._free(ptr);
+src/inference/ggml-wasm.ts:302:		this.m._ctx_free();
+src/inference/ggml-wasm.ts:817:		this.m._backend_buffer_free(buffer);
+src/inference/encoder-inference.ts:476:			const heap = wasm.malloc(totalBytes);
+src/inference/encoder-inference.ts:503:				wasm.free(heap);
+src/inference/encoder-inference.ts:512:				const maskPtr = wasm.malloc(maskBytes);
+src/inference/encoder-inference.ts:522:					wasm.free(maskPtr);
+smoke-test/mem64-probe.html:81:// ── Phase 2: BigInt ABI smoke (§31a — via bridge_malloc/bridge_free) ──
+smoke-test/mem64-probe.html:83:// §31a swaps stdlib _malloc/_free for _bridge_malloc/_bridge_free wrappers
+smoke-test/mem64-probe.html:90:    append("--- Phase 2: BigInt ABI smoke (bridge_malloc) ---", "header");
+smoke-test/mem64-probe.html:104:    // Diagnostic: call stdlib _malloc once to confirm the §31 asymmetry
+smoke-test/mem64-probe.html:106:    const stdlibPtr = m._malloc(16n);
+smoke-test/mem64-probe.html:107:    append(`_malloc(16n) [stdlib, diagnostic] → typeof=${typeof stdlibPtr} value=0x${stdlibPtr.toString(16)}`, "info");
+smoke-test/mem64-probe.html:108:    try { m._free(stdlibPtr); } catch (_) { /* ignore — stdlib free may also be broken */ }
+smoke-test/mem64-probe.html:110:    // _bridge_malloc takes size_t — pass BigInt; returned pointer must be BigInt.
+smoke-test/mem64-probe.html:111:    const dataPtr = m._bridge_malloc(16n);
+smoke-test/mem64-probe.html:112:    append(`_bridge_malloc(16n) → typeof=${typeof dataPtr} value=0x${dataPtr.toString(16)}`, "info");
+smoke-test/mem64-probe.html:130:    m._bridge_free(dataPtr);
+smoke-test/mem64-probe.html:131:    m._ctx_free();
+smoke-test/mem64-probe.html:148:    append("--- Phase 3: Cap probe (sequential 1 GiB bridge_malloc) ---", "header");
+smoke-test/mem64-probe.html:155:        ptr = m._bridge_malloc(ONE_GIB);
+smoke-test/mem64-probe.html:157:        append(`Iter ${i}: _bridge_malloc threw — ${mallocErr?.message || mallocErr}`, "info");
+smoke-test/mem64-probe.html:161:        append(`Iter ${i}: _bridge_malloc returned 0 / wrong type (typeof=${typeof ptr})`, "info");
+smoke-test/mem64-probe.html:177:      append(`Iter ${i}: bridge_malloc(1 GiB) OK, total committed=${gibSoFar} GiB`, "info");
+smoke-test/mem64-probe.html:188:      try { m._bridge_free(ptr); freed++; } catch (_) { /* ignore — best-effort cleanup */ }
+smoke-test/real-model-page.js:306:			modelPtr = wasm.malloc(total);
+smoke-test/real-model-page.js:333:			if (modelPtr) wasm.free(modelPtr);
+smoke-test/real-model-page.js:364:			wasm.free(modelPtr);
+smoke-test/real-model-page.js:386:			wasm.free(modelPtr);
+smoke-test/real-model-page.js:438:			wasm.free(modelPtr);
+tests/ggml-wasm.test.ts:10:	_malloc(size: number): number;
+tests/ggml-wasm.test.ts:11:	_free(ptr: number): void;
+tests/ggml-wasm.test.ts:48:		_malloc: (size: number) => {
+tests/ggml-wasm.test.ts:52:		_free: (ptr: number) => {

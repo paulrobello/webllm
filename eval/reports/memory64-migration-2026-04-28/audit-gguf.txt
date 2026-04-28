@@ -1,0 +1,16 @@
+=== GGUF loader heap boundaries ===
+smoke-test/real-model-page.js:293:		// `wasm.heapU8.buffer` at each use via the dataAt callback below.
+smoke-test/real-model-page.js:294:		let modelPtr = 0;
+smoke-test/real-model-page.js:306:			modelPtr = wasm.malloc(total);
+smoke-test/real-model-page.js:307:			if (!modelPtr) throw new Error(`wasm malloc(${total}) returned null`);
+smoke-test/real-model-page.js:315:				// growth invalidate prior buffer references. Module.HEAPU8
+smoke-test/real-model-page.js:318:				wasm.heapU8.set(value, modelPtr + received);
+smoke-test/real-model-page.js:333:			if (modelPtr) wasm.free(modelPtr);
+smoke-test/real-model-page.js:338:		// HEAPU8 on every call so callers can't accidentally hold a
+smoke-test/real-model-page.js:341:			new Uint8Array(wasm.heapU8.buffer, modelPtr + off, len);
+smoke-test/real-model-page.js:364:			wasm.free(modelPtr);
+smoke-test/real-model-page.js:386:			wasm.free(modelPtr);
+smoke-test/real-model-page.js:438:			wasm.free(modelPtr);
+smoke-test/real-model-page.js:439:			modelPtr = 0;
+smoke-test/real-model-page.js:522:		// other's HEAPU8 view), construct a `ModelInference`, and adopt
+smoke-test/real-model-page.js:567:						drafterWasm.heapU8.buffer,

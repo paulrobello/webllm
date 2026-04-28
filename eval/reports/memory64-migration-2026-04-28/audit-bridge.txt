@@ -1,0 +1,12 @@
+=== Bridge int32_t size/offset params ===
+59:int32_t ctx_create(int32_t mem_size) {
+68:    return (int32_t)(g_ctx_stack.size() - 1);
+129:void tensor_set_data(void* tensor, const void* data, int32_t size) {
+133:void tensor_get_data(void* tensor, void* out, int32_t size) {
+187:void* op_view_2d(void* x, int32_t ne0, int32_t ne1, int32_t nb1, int32_t offset) {
+192:                 int32_t nb1, int32_t nb2, int32_t offset) {
+272:void* graph_new(int32_t size) {
+296:void backend_tensor_set(void* tensor, const void* data, int32_t offset, int32_t size) {
+313:void backend_tensor_get(void* tensor, void* out, int32_t offset, int32_t size) {
+317:int32_t backend_tensor_get_async_begin(void* tensor, int32_t offset, int32_t size) {
+328:void backend_tensor_get_async_finish(int32_t request_id, void* out, int32_t size) {
