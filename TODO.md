@@ -1496,7 +1496,7 @@ dashboard hygiene pass from these sessions:
   broadcast deletes).
 
 **Next target options (pick one — see "Recommended first move"
-below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28/§29/§30/§31
+below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28/§29/§30/§31/§31a
 all closed or partial):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
@@ -1514,6 +1514,8 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §29. ~~§C-v2-A path (c) "smaller i-quant drafter".~~ **CLOSED 2026-04-28 by direct verify-cost probe on side branch tip `4e11d79`.** §28 opened path (c) as a new theoretical resurrection candidate. Probe directly measured `forwardVerifyArgmax` cost on the §28 cell-3 workload: verify is **210 ms/call** (median, p10=207, p90=213) over 27 unique calls — 5.9× a solo-decode step (35.5 ms) — driven by nTokens=5 mat-mat falling outside #22344's fast i-quant *mat-vec* kernels (matmul 187 ms = 90% of compute; dispatch count 796 vs solo 805 = identical graph topology). Cycle decomposition: 27 verify cycles × 210 ms = 5670 ms of 6842 ms wall (83% of cycle); drafter+overhead = 43 ms/cycle ≈ K=4 × 11 ms/forward. **Counterfactual drafter→0:** cycle = 210 ms / 2.37 tok = 11.3 tok/s = 0.40× the 28.2 tok/s baseline, fails both gates by 3.8× / 0.6×. Path (c) cannot close the gates regardless of drafter cost. Path (b) MEMORY64 → 70B+ target is the only remaining theoretical v2-A path. Probe cost: 1 profile run + 1 agentchrome js-exec ≈ 2 min wall. Saved: multi-day model acquisition campaign. Side branch tip `4e11d79`; report at `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/VERIFY-COST-PROBE.md` on side branch.
 §30. ~~Heuristic-based prefill-tile default in `ModelInference`.~~ **CLOSED 2026-04-28 — refactor landed on `main`.** Replaced §23's dual-source-of-truth pattern (`recommendedPrefillTile` field on `BenchmarkModel` + mirrored `RECOMMENDED_PREFILL_TILE` map in `smoke-test/real-model-page.js`) with `computeDefaultPrefillTileSize(hp)` exported from `src/inference/model-inference.ts`. Rule: `layerCount >= 32 AND embeddingLength >= 4096` → 128, else 0. Maps directly to the §22 abort signature ("32 layers × seq=512 of F32 intermediates"). Pre-edit Phase 0 probe validated all 18 downloaded registered models classify identically to the prior registry. Tile pill in the smoke page now renders post-ctor from `inference.prefillTileSize` so the auto-default is visible without page-side duplication. Override surfaces unchanged: `{ prefillTileSize: N }` ctor opt, `?prefillTile=N` URL, `--prefill-tile <n>` CLI all win, including the explicit-zero force-disable path. Browser smoke regression (B.1-B.4 from spec) verified all four overrides + auto-defaults work. Net change: −31 LOC (88 ins / 89 del across 6 files), 427 → 428 tests. Spec: `docs/superpowers/specs/2026-04-28-prefill-tile-heuristic-design.md`. Plan: `docs/superpowers/plans/2026-04-28-prefill-tile-heuristic.md`.
 §31. ~~MEMORY64 cap probe.~~ **CLOSED 2026-04-28 — partial result, lever NOT closed.** Probe target `webllm-wasm-mem64` built clean (133K js / 2.28M wasm) under `-sMEMORY64=1 -sWASM_BIGINT=1 -sMAXIMUM_MEMORY=16GB` via `make mem64-probe`; standalone `smoke-test/mem64-probe.html` ran four sequential phases against Chrome 147 + Emscripten 5.0.6 on M4 Max / macOS 26.4.1. **Outcomes:** Phase 1 (ASYNCIFY × MEMORY64 round-trip) **PASS** — `_webgpu_init` 1.4 ms wall, `_webgpu_shutdown` clean. **The single load-bearing risk axis from spec §4.1 is retired.** Phase 2 (BigInt ABI) **FAIL** — asymmetric: custom bridge exports (`_tensor_new_1d`) correctly return `BigInt`, but stdlib `_malloc` returns JS `Number` (`0xac6548` truncated). Phase 3 (cap probe) **invalid** — bailed at iter 0 because `_malloc(1 GiB)` returned a `Number`, indistinguishable from "actually 0" vs "high pointer mangled by JS shim"; no measured cap. Phase 4 (post-probe re-init) **PASS** — runtime stable. **Decision-rule branch (spec §5.1):** "Phase 1 passes, Phase 2 fails — narrower follow-up: investigate the specific ABI failure before committing more surface." Likely fix is a thin C wrapper (`bridge_malloc`/`bridge_free`) so the build emits explicit-signature shims, or a newer Emscripten release. Few-line change. **Probe paid for itself:** surfaced the actual blocker (a config gap, not architectural incompat) in same-day cost. Six commits across CMake / Make / harness / two review-fix rounds: `314f3a3` `e43244d` `2631eb5` `005c522` `e153e92` `53db417` `f3aad4a` plus a sub-probe revert (`b9c0c09`). Spec: `docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md`. Plan: `docs/superpowers/plans/2026-04-28-memory64-cap-probe.md`. Closure report: `eval/reports/memory64-probe-2026-04-28/SUMMARY.md`.
+
+§31a. ~~MEMORY64 cap probe — bridge_malloc sub-probe.~~ **CLOSED 2026-04-28 — lever now VIABLE; ready for full bridge migration scoping.** Direct execution of §31's spec §6 follow-up: added thin C wrappers `bridge_malloc(size_t) → void*` and `bridge_free(void*)` to `src/wasm/webgpu-bridge.cpp`, exported `_bridge_malloc,_bridge_free` from `src/wasm/CMakeLists.txt`, and swapped Phase 2 + Phase 3 of `smoke-test/mem64-probe.html` to use them. Re-ran probe: **all four phases PASS.** Phase 2 — `_bridge_malloc(16n) → typeof=bigint value=0xac6548` with byte-equal F32 round-trip; stdlib `_malloc` diagnostic confirms the §31 asymmetry persists in the same build (`typeof=number`), so the wrapper is the targeted fix not a stdlib upgrade. Phase 3 — sequential 1 GiB allocations succeeded for **15 iterations × 1 GiB = 16,106,127,360 bytes ≈ 15.00 GiB** with 64 KiB page-commit per allocation; iter 15 hit BigInt `0n` (allocator out of headroom under the configured `-sMAXIMUM_MEMORY=16GB`). All 15 freed cleanly via `_bridge_free`. **Decision-rule branch (parent spec §5.1): "≥8 GiB → promote to full bridge migration."** 15 GiB covers every model size that fits the 2026-04-28 30B project ceiling: 8B Q4_K_S (~4.5 GiB weights), 13B Q4_K_S (~7.4 GiB), 30B IQ3_M (~12.8 GiB; tight against 15 GiB once KV+activations land — `MAXIMUM_MEMORY` bump may be needed). **Cap is configured-ceiling-bound, not hardware-bound** — actual Chrome wasm64 upper bound is presumably higher; raise `MAXIMUM_MEMORY` only if the 30B working set demands it. Net code change: **+18 LOC** across 3 files. Probe wall-clock: 19 ms. Implementation took ~5 minutes; build ~30 seconds (incremental). **§31a does NOT migrate the production `webllm-wasm` build to MEMORY64** — that is the P2-class follow-up spec, scoped at: (i) replace stdlib malloc/free call sites in `src/inference/` + `src/wasm/` TS code, (ii) audit `int32_t size`/offset params in `webgpu-bridge.cpp` for >2 GiB transfer signatures, (iii) update GGUF loader to keep BigInt offsets across JS↔WASM, (iv) re-run smoke + bench-inf + bench-profile gates under MEMORY64 to confirm zero regression on the existing ≤4 GiB fleet, (v) decide single-binary vs dual-binary deploy. Open as a separate spec/plan cycle when a 13B or 30B target is asked for. Closure report: `eval/reports/memory64-probe-2026-04-28/SUMMARY-31a.md`.
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -1941,8 +1943,11 @@ Boot sequence for a fresh session:
      `?prefillTile=0` / `--prefill-tile 0` explicitly. FA mode
      is orthogonal.
 
-**Recommended first move:** **§31a follow-up sub-probe is the
-single cheapest open step**, but no perf lever is forced. §17
+**Recommended first move:** **No perf lever is forced.** §31a
+just landed (the previously-cheapest open step) and resolved the
+last open question on the MEMORY64 lever — cap is 15 GiB, lever
+viable, full bridge migration is the gated next step but only
+when a 13B/30B target deployment is asked for. §17
 (§A matmul kernel), §18 (FA at N=1 decode), §19 (§C drafter
 spec-decode at K=4 with full-row verify), §20 (§4 FA at prefill
 / long-decode), the side-branch §C-v2-A (greedy spec-decode +
@@ -1956,11 +1961,15 @@ post-§27 rebase — gates *worsened*, lever closed harder), §29
 verify-cost probe — drafter→0 ceiling is 0.40× target solo),
 **§30 (prefill-tile heuristic refactor — §23 dual-registry
 pattern replaced by `computeDefaultPrefillTileSize` ctor
-heuristic; first `src/`-touching commit since §23)**, and
-**§31 (MEMORY64 cap probe — Phase 1 PASS retires the asyncify
-risk axis; Phase 2 surfaces a stdlib-`_malloc` BigInt-ABI gap;
-lever NOT closed pending §31a sub-probe)** have all closed,
-landed, or hit a measured pause-point.
+heuristic; first `src/`-touching commit since §23)**, **§31
+(MEMORY64 cap probe — Phase 1 PASS retires the asyncify risk
+axis; Phase 2 surfaces a stdlib-`_malloc` BigInt-ABI gap;
+lever NOT closed)**, and **§31a (MEMORY64 sub-probe —
+`bridge_malloc`/`bridge_free` wrappers fix the BigInt ABI gap;
+all 4 phases PASS; 15 GiB cap measured under
+`MAXIMUM_MEMORY=16GB`; lever VIABLE, full bridge migration
+gated on deployment ask)** have all closed, landed, or hit a
+measured pause-point.
 The §27 rebase delivered an unexpected +80% throughput win on
 IQ3_M models (`qwen3-8b-iq3m` 15.1 → 27.2 tok/s) via upstream's
 #22344 fast i-quant mat-vec kernels — a free win for the 8B+
@@ -1971,12 +1980,12 @@ empirically it is not — verify is 210 ms/call (83% of cycle),
 so even an infinitely-fast drafter caps the cell at 0.40×. §30
 was a developer-experience refactor, not a perf lever — the
 heuristic produces bit-identical defaults on every registered
-model. **§31** (MEMORY64 cap probe) confirmed empirically that
-the asyncify-incompatibility fear was overstated — Phase 1 PASS
-retires that risk axis — and surfaced a targeted BigInt-ABI gap
-on stdlib `_malloc` as the actual blocker. The algorithmic
-levers at the canonical 4-baseline are exhausted; remaining
-options are deliberate strategic choices, not obvious wins.
+model. **§31 + §31a** together established that MEMORY64 is
+viable at 15 GiB cap — the algorithmic levers at the canonical
+4-baseline remain exhausted, but the **memory ceiling that
+gated 13B/30B targets is no longer architecturally blocked**.
+Remaining options are deliberate strategic choices, not obvious
+wins.
 
 **Candidate next levers (none are forced; pick on need),
 in rough priority order:**
@@ -1990,32 +1999,32 @@ in rough priority order:**
    must scale symmetrically with target speedup or the ratio
    worsens. Side branch retained as archived infra; do not
    merge.
-2. **MEMORY64 for the 8-30B fleet — §31a follow-up sub-probe
-   needed.** The 70B+ framing is **DEFERRED under the 2026-04-28
-   30B ceiling** — that includes the §C-v2-A "13× → 100× ratio
-   shift via much larger target" resurrection path, which is also
-   deferred (no path to a 100× ratio without crossing the ceiling).
-   What MEMORY64 still buys at ≤30B: 13B Q4_K_S/Q4_K_M (currently
-   above the 4 GiB cap), 30B at IQ3/Q3 quants. **§31 cap probe
-   ran 2026-04-28 (closure report:
-   `eval/reports/memory64-probe-2026-04-28/SUMMARY.md`).** Phase 1
-   (ASYNCIFY × MEMORY64) **PASS** — the load-bearing risk axis from
-   §31 spec §4.1 is **retired**. Phase 2 (BigInt ABI smoke) **FAIL**
-   on stdlib `_malloc` only — custom bridge exports get correct
-   BigInt marshaling but `_malloc` returns a JS `Number` (truncated
-   pointer). Phase 3 (cap measurement) was therefore invalid.
-   **Next concrete step (§31a):** narrow follow-up sub-probe —
-   add a thin C wrapper (`bridge_malloc(size_t) → void*` /
-   `bridge_free(void*)`) to `webgpu-bridge.cpp`, export under a
-   distinct name, replace `m._malloc` / `m._free` calls in the
-   harness with the wrapped names, and re-run only Phase 2 +
-   Phase 3 of `mem64-probe.html`. If that produces a credible
-   non-zero cap, decision rule §5.1 from the §31 spec applies to
-   the new value (≥8 GiB → promote to full bridge migration; 6-8
-   GiB → narrow 8B Q4_K_S follow-up; <6 GiB → close lever).
-   Estimated cost: <1 hour wall (build, navigate, capture).
-   Alternative: try a newer Emscripten point release first — may
-   already be fixed upstream; even cheaper to test.
+2. **MEMORY64 for the 8-30B fleet — full bridge migration is the
+   gated next step.** The 70B+ framing remains **DEFERRED under
+   the 2026-04-28 30B ceiling** (and so does the §C-v2-A "13× →
+   100× ratio shift via much larger target" resurrection path —
+   no path to a 100× ratio without crossing the ceiling). What
+   MEMORY64 buys at ≤30B: 13B Q4_K_S/Q4_K_M and 30B IQ3/Q3, both
+   currently above the 4 GiB cap. **§31a closed the probe phase
+   2026-04-28 (closure report:
+   `eval/reports/memory64-probe-2026-04-28/SUMMARY-31a.md`):**
+   `bridge_malloc`/`bridge_free` wrappers landed, all 4 phases
+   PASS, **15 GiB cap measured** at `MAXIMUM_MEMORY=16GB`
+   (configured-ceiling-bound, not hardware-bound). Decision-rule
+   §5.1 branch: **≥8 GiB → promote to full bridge migration.**
+   That migration is the **P2-class follow-up spec**, not work
+   that runs without a deployment ask. Scope: (i) replace stdlib
+   malloc/free at every JS call site with `_bridge_malloc` /
+   `_bridge_free`, (ii) audit `int32_t size`/offset params in
+   `webgpu-bridge.cpp` for >2 GiB transfer signatures, (iii)
+   keep BigInt offsets across the GGUF loader's JS↔WASM boundary,
+   (iv) re-run smoke + bench-inf + bench-profile under MEMORY64
+   to confirm zero regression on the existing ≤4 GiB fleet, (v)
+   decide single-binary vs dual-binary deploy. **Trigger condition:**
+   a 13B or 30B target lands as a real ask. Until then, leave the
+   `webllm-wasm-mem64` build target dormant in the tree (it's
+   already wired up via `make mem64-probe` and the parallel build
+   dir).
 3. **§D concat-graph batched encoder compute.** Only opens on
    a real batch-encoder-throughput use-case (was non-goal in
    §21). §27 rebase didn't deliver an encoder-side free win
@@ -2046,18 +2055,19 @@ in rough priority order:**
    off — #22344 was a +80% free win nobody anticipated.
    Mechanical; trigger on demand.
 
-**3 candidates remain open** (in the list above: #2 MEMORY64,
-#3 §D batched encoder, #6 upstream rebase + free-win sweep). All
-three are conditional / external-trigger:
+**3 candidates remain open** (in the list above: #2 MEMORY64
+full bridge migration, #3 §D batched encoder, #6 upstream rebase
++ free-win sweep). All three are conditional / external-trigger:
 - #2 reframed under the 2026-04-28 30B ceiling: 70B+ justification
   is deferred; the ≤30B value (13B at Q4_K, 30B at IQ3/Q3) had its
-  probe phase land 2026-04-28 (§31). ASYNCIFY × MEMORY64 axis is
-  retired — the multi-day-rewrite fear was overstated. Remaining
-  blocker is a stdlib-`_malloc` BigInt-ABI gap; **§31a follow-up
-  sub-probe (a thin `bridge_malloc` wrapper + re-run Phase 2/3)
-  is the cheapest next step** to either get a measured cap value
-  or close the lever. <1 hour wall. Try a newer Emscripten release
-  first if appetite is even narrower.
+  probe phase land 2026-04-28 (§31 + §31a). All four probe phases
+  PASS; **15 GiB cap measured** at `MAXIMUM_MEMORY=16GB`. ASYNCIFY
+  × MEMORY64 risk axis retired; BigInt ABI gap closed by
+  `bridge_malloc`/`bridge_free` wrappers. Remaining work is the
+  full bridge migration (P2-class spec — replace stdlib malloc
+  call sites, audit `int32_t` signatures, re-run all gates under
+  MEMORY64); **gated on a 13B or 30B deployment ask, not on
+  technical readiness.**
 - #3 needs a real batch-encoder-throughput use-case.
 - #6 needs upstream `ggml-webgpu` to actually move (last check
   2026-04-28 found origin/master at `516e8d7a8`, 1 commit ahead of
