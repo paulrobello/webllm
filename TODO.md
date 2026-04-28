@@ -2423,6 +2423,66 @@ needs to be collected.
     headroom). Treat §22 as a partial unblock for §C-v2-A, not a
     full resurrection trigger.
 
+23. **§22 default-on auto-tile via per-model registry — LANDED.**
+    Cheap follow-on to §22; promotes the 7B+ unblock from opt-in
+    to right-by-default while preserving the sub-7B fast path.
+    Single commit on `main` (`0c50e03`).
+
+    **What ships:**
+    - `eval/models.ts`: new `recommendedPrefillTile?: number`
+      field on `BenchmarkModel`. Set to `128` on the five 7B+
+      entries (mistral-7b-instruct-v0.3-q4ks / -q3km / -iq4xs,
+      llama-3.1-8b-instruct-iq3m, qwen3-8b-iq3m). Sub-7B entries
+      leave the field unset.
+    - `eval/perf.ts`: when `--prefill-tile` is omitted, falls
+      back to `model.recommendedPrefillTile`. Explicit
+      `--prefill-tile <n>` (including `0`) still wins.
+    - `smoke-test/real-model-page.js`: mirror map
+      `RECOMMENDED_PREFILL_TILE` keyed by model id (data
+      duplication, not logic — bundle / browser boundary
+      precludes importing `eval/models.ts`). When `?prefillTile=`
+      is absent, falls back to the map; explicit
+      `?prefillTile=N` (including `0`) still wins.
+    - `tests/eval-models.test.ts`: 2 registry-shape tests pin
+      the contract (all 7B+ entries default to 128; no sub-7B
+      entry sets the field). 424 → 426 pass.
+
+    **Behaviour after this change:** `bun run eval/perf.ts
+    --model qwen3-8b-iq3m` with no `--prefill-tile` flag
+    auto-applies tile=128. Opening
+    `?model=mistral-7b-instruct-v0.3-q4ks` in the smoke page
+    with no `?prefillTile=` does the same. TinyLlama and other
+    sub-7B paths are bit-identical to pre-§23 (no map entry,
+    falls through to the existing `0` default). Force-disable
+    on a 7B+ model still works via explicit `?prefillTile=0` /
+    `--prefill-tile 0` for regression sweeps.
+
+    **Why two maps instead of one source of truth:** the smoke
+    page is plain JS loaded as a page module; the model registry
+    lives in `eval/models.ts` (TS, harness-side). They sit on
+    opposite sides of the bundle / browser boundary.
+    Cross-importing would either bundle eval into the browser
+    surface or break the harness's Node-only imports. The map in
+    `real-model-page.js` is data, not logic, and the registry
+    field's docstring + the smoke-page comment both call out the
+    mirror requirement. A future cycle could fold the map into
+    the smoke bundle if drift becomes a problem.
+
+    **Future-resurrection paths (not landed; reopen on demand):**
+    (a) **tile=64 fallback in the map** for any future model
+    that hits `ggml_tallocr_alloc` at tile=128 (larger
+    embedding-dim or layer-count pushing per-tile working-set
+    over budget). (b) **Heuristic-based default in
+    `ModelInference`** — derive the recommended tile from
+    `hyperparams.layerCount × embeddingLength` rather than from
+    a hand-curated list. Cleaner, but defers the "is the
+    heuristic right" question until a model trips it; the
+    explicit map is fine while the 7B+ fleet is small enough to
+    enumerate. (c) **Bundle the map into the smoke bundle** if
+    drift between the two registries causes a real bug; the
+    cycle's commit message + the doc comments in both files
+    are the current guard.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
@@ -2443,9 +2503,14 @@ and Qwen3-8B-IQ3_M at 16.2 tok/s but regresses TinyLlama TTFT
 +81.3%; opt-in via `?prefillTile=N` and `--prefill-tile <n>`;
 Phase 0 disproved §20's GPU-cap hypothesis — actual failure is
 the host-side ggml graph allocator at `ggml-alloc.c:82`)**.
-With those six closed, the headroom that remains is the deferred
-concat-graph batched compute lever for encoders (only opens on a
-batch-throughput use-case) plus MEMORY64 for 70B-class targets.
+**§23 (2026-04-27 — LANDED) flipped §22's gate to default-on
+for 7B+ via per-model registry** (`recommendedPrefillTile`
+field, mirrored in the smoke page). Sub-7B paths bit-identical
+to pre-§23. With those closures, the headroom that remains is
+the deferred concat-graph batched compute lever for encoders
+(only opens on a batch-throughput use-case) plus MEMORY64 for
+70B-class targets, and §4 FA at long-prefill on 7B+ — now
+actually testable thanks to §22+§23.
 
 Findings, one bug fix, one upstream rebase, one
 quant-promotion, encoder perf characterization, plus a
@@ -2628,7 +2693,7 @@ batch-throughput use-case appears.
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 424 pass / 11 skip / 0 fail.
+1. **`make checkall`** — confirm 426 pass / 11 skip / 0 fail.
    The §C drafter spec-decoding work added 19 unit + integration
    tests across `tests/sampler.test.ts` (7), `tests/speculative-
    rejection.test.ts` (11), `tests/forward-verify-equivalence.test.ts`
@@ -2639,12 +2704,18 @@ Boot sequence for a fresh session:
    (418 → 419). The §22 prefill-tile cycle added 5 unit tests at
    `tests/prefill-tiling-config.test.ts` plus 1 Bun-skipped equivalence
    stub at `tests/prefill-tiling-equivalence.test.ts` (419 → 424;
-   skip count 10 → 11). The WebGPU-gated integration tests skip
-   under Bun (no `navigator.gpu`).
-2. **`git log --oneline -25`** — §22 (7B+ long-prefill graph-buffer
-   tiling) was fast-forward merged to `main` on 2026-04-27. Top of
-   `main` is `a73ad88 docs(TODO): §22 — prefill-tile chunking SHIP
-   GATED`. Below it the §22 implementation: `5b5705a` (Task 5 matrix),
+   skip count 10 → 11). The §23 default-on auto-tile cycle added 2
+   registry-shape tests in `tests/eval-models.test.ts` (424 → 426).
+   The WebGPU-gated integration tests skip under Bun (no
+   `navigator.gpu`).
+2. **`git log --oneline -25`** — §23 (§22 default-on auto-tile via
+   `recommendedPrefillTile`) landed on `main` on 2026-04-27 as a
+   single commit. Top of `main` is `0c50e03 feat(eval): §22
+   default-on auto-tile via recommendedPrefillTile`. Below it:
+   `1b15f37 docs(TODO): refresh resumption checklist post-§22 merge`.
+   Then the §22 fast-forward merge from 2026-04-27: `a73ad88
+   docs(TODO): §22 — prefill-tile chunking SHIP GATED`. Below it
+   the §22 implementation: `5b5705a` (Task 5 matrix),
    `18e1677` (Task 4 perf flag), `2fcc334` (Task 3 smoke wiring),
    `f281ac3` (Task 2 equivalence stub), `c38fb8f` (Task 1 ctor option
    + dispatcher), `8e21036` (Task 0 Phase 0 diagnostic). Below those:
@@ -2694,44 +2765,55 @@ Boot sequence for a fresh session:
    bug #28 fix. Safety branch
    `webllm-browser-patches-pre-rebase-2026-04-26` preserves
    the pre-rebase tip if needed. **§17, §18, §19, §20, §21,
-   and §22 added zero patches** — the `__EMSCRIPTEN__` guard
-   around FA was already removed in the 2026-04-25 rebase;
-   §20 re-uses the bridge wrappers from §18 with no new shader
-   work; §21 and §22 are pure-TS / pure-JS work above the
-   bridge with no shader changes.
-4. **WASM build state.** `smoke-test/webllm-bundle.js` mtime
-   is 2026-04-27 ~16:11 (post-§22 — contains the §22
-   `prefillTileSize` ctor option, `forwardSingle()` rename,
-   and `?prefillTile=N` URL param wiring on top of §21's
-   `runEmbedPerfHook` and §20's gated FA path);
-   `smoke-test/webllm-wasm.{js,wasm}` mtimes are also
-   2026-04-27 ~16:11 (the Task 5 `make smoke-restart` rebuilt
-   them, but no llama.cpp patches and no shader work landed
-   in §22 — content is functionally identical to the §21
-   build). If the artifacts look stale, run:
+   §22, and §23 added zero patches** — the `__EMSCRIPTEN__`
+   guard around FA was already removed in the 2026-04-25
+   rebase; §20 re-uses the bridge wrappers from §18 with no
+   new shader work; §21, §22, and §23 are pure-TS / pure-JS
+   work above the bridge with no shader changes.
+4. **WASM build state.** `smoke-test/webllm-bundle.js` and
+   `smoke-test/webllm-wasm.{js,wasm}` mtimes are 2026-04-27
+   ~16:11 (post-§22 — contain the `prefillTileSize` ctor
+   option, `forwardSingle()` rename, and `?prefillTile=N` URL
+   param wiring on top of §21's `runEmbedPerfHook` and §20's
+   gated FA path). **§23 did not rebuild WASM** — the
+   `recommendedPrefillTile` field is harness-side TS and the
+   smoke-page lookup map is plain JS; neither is bundled into
+   `webllm-bundle.js`. The 2026-04-27 ~16:11 artifacts remain
+   the canonical build for §22+§23 verification.
+   If the artifacts look stale, run:
    `source ~/emsdk/emsdk_env.sh && make wasm-build && bun
    build src/index.ts --outfile smoke-test/webllm-bundle.js
    --target browser && cp src/wasm/build/webllm-wasm.{js,wasm}
    smoke-test/ && make smoke-restart`. Then navigate the smoke
    page to `model=mistral-7b-instruct-v0.3-q3km` — Q3_K_M
    coherent at ≥20 tok/s confirms patch 11 is healthy. To
-   confirm §22 wiring, navigate to
-   `model=mistral-7b-instruct-v0.3-q4ks&prefillTile=128&prompt=<prefill-512>`
-   — coherent output at ~33 tok/s confirms the tile dispatcher
-   is healthy (matches §22 SUMMARY.md cell 4).
+   confirm §23 auto-default wiring, navigate to
+   `model=mistral-7b-instruct-v0.3-q4ks&prompt=<prefill-512>`
+   *with no `?prefillTile=` param* — the mode bar should show
+   the `tile: 128` pill and prefill should complete (§22
+   matrix cell 4 numbers ≈ 33 tok/s). To confirm §23 force-
+   disable still works, append `&prefillTile=0` to the same
+   URL — the pill disappears and prefill should abort with
+   the §22 ggml-alloc signature.
 5. **Read for context:** §17 (§A closure), §18 (§4 FA
    closure at N=1 decode), §19 (§C drafter spec-decode
    closure), §20 (§4 FA revisit at prefill / long-decode
    scope closure), §21 (§D encoder perf cycle — diagnostic
-   close, no ship), and §22 (7B+ long-prefill graph-buffer
-   tiling — gated ship, default-off). All six follow the
-   same "measure-and-close" pattern. §22 is the cleanest
-   recent template for **gated-ship**: opt-in plumbing
-   threaded through ctor / URL param / CLI flag, default-off
-   keeps the fast-path bit-identical, decision rule cited
-   matrix numbers — see `docs/superpowers/plans/2026-04-27-
-   prefill-tiling.md` and `eval/reports/prefill-tiling-
-   2026-04-27/SUMMARY.md`. §21 remains the cleanest template
+   close, no ship), §22 (7B+ long-prefill graph-buffer
+   tiling — gated ship, default-off), and §23 (§22 default-on
+   flip via `recommendedPrefillTile` registry field — landed
+   2026-04-27 as a single commit, `0c50e03`). The first six
+   follow the "measure-and-close" pattern; §23 is a thin
+   policy-layer follow-on with no measurement campaign.
+   §22 is the cleanest recent template for **gated-ship**:
+   opt-in plumbing threaded through ctor / URL param / CLI
+   flag, default-off keeps the fast-path bit-identical,
+   decision rule cited matrix numbers — see
+   `docs/superpowers/plans/2026-04-27-prefill-tiling.md` and
+   `eval/reports/prefill-tiling-2026-04-27/SUMMARY.md`.
+   §23 is the cleanest template for **promoting an opt-in
+   gate to default-on without a new measurement** when the
+   gating decision can be expressed as registry data. §21 remains the cleanest template
    for **closing on a diagnostic finding** when the bottleneck
    profile invalidates the planned levers — see
    `docs/superpowers/specs/2026-04-27-encoder-perf-pass-design.md`
@@ -2756,9 +2838,10 @@ Boot sequence for a fresh session:
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
    should return **29 runs / 30 evals** (unchanged through
-   §17/§18/§19/§20/§21/§22 — none of the six closures produced
-   new dashboard data, only TODO writeups, perf.ts logs, and
-   §22's `eval/reports/prefill-tiling-2026-04-27/` matrix).
+   §17/§18/§19/§20/§21/§22/§23 — none of the seven closures
+   produced new dashboard data, only TODO writeups, perf.ts
+   logs, and §22's `eval/reports/prefill-tiling-2026-04-27/`
+   matrix).
    The live dashboard SSE counter
    shows higher numbers (~52/53) because it accumulates
    streaming events without DB persistence; both views are
@@ -2775,75 +2858,101 @@ Boot sequence for a fresh session:
    §20 wired call sites into `model-inference.ts` behind
    `flashAttn=true`; the wrappers are now live (not dead)
    when the gate is enabled. **Do not delete them.**
-8. **§20 FA gate + §22 prefill-tile gate state (both on `main`).**
-   Both gates default **off** — `new ModelInference(wasm, hp)` with
-   no `opts` argument is bit-identical to pre-§20/§22 behaviour.
+8. **§20 FA gate + §22/§23 prefill-tile gate state (both on `main`).**
+   `new ModelInference(wasm, hp)` with no `opts` argument is
+   bit-identical to pre-§20/§22 behaviour: FA defaults off,
+   `prefillTileSize` defaults to `0` at the ctor. **§23 moves
+   the per-model auto-default up one layer** — the
+   harness (`eval/perf.ts`) and the smoke page now consult
+   `recommendedPrefillTile` (registry side) /
+   `RECOMMENDED_PREFILL_TILE` (smoke side) to pick the ctor
+   arg automatically. The ctor itself is unchanged.
    - **FA path:** pass `{ flashAttn: true }` to the constructor,
      append `?fa=on` to the smoke-page URL, or pass `--fa on` to
-     `eval/perf.ts`.
-   - **Prefill-tile path (§22):** pass
-     `{ prefillTileSize: 128 }` to the constructor, append
-     `?prefillTile=128` to the smoke-page URL, or pass
-     `--prefill-tile 128` to `eval/perf.ts`. Recommended tile=128
-     for 7B+ (Phase 0 derivation in `eval/reports/prefill-tiling-
-     2026-04-27/00-phase0-diagnostic.txt`); leave tile=0 for sub-7B
-     to avoid the +81% TTFT regression measured on TinyLlama.
+     `eval/perf.ts`. No auto-default — FA stays opt-in.
+   - **Prefill-tile path (§22+§23):** auto-applies tile=128 on
+     all 7B+ entries (mistral-7b q4ks/q3km/iq4xs, llama-3.1-8b-
+     iq3m, qwen3-8b-iq3m). Sub-7B paths get tile=0
+     (single-graph fast path). Override surface:
+     `?prefillTile=N` (smoke), `--prefill-tile <n>`
+     (`eval/perf.ts`), or `{ prefillTileSize: <n> }`
+     (`ModelInference` ctor). Force-disable via `0`.
+     Adding new 7B+ entries: set `recommendedPrefillTile: 128`
+     in `eval/models.ts` AND add the `modelId → 128` row to
+     `RECOMMENDED_PREFILL_TILE` in
+     `smoke-test/real-model-page.js` (the registry test in
+     `tests/eval-models.test.ts` enforces the registry side).
    - **`eval/perf.ts`** also accepts
      `--prompt-fixture <prefill-256|prefill-512|prefill-1024>` and
      `--decode-tokens <n>` for the long-prefill / long-decode
      harness; fixtures live in `eval/fixtures/long-prompts.ts`.
    - **Mistral-7B and 8B models** abort at `backend_alloc_ctx_tensors`
-     on long-prefill workloads when `prefillTileSize=0` — the
+     on long-prefill workloads with `prefillTileSize=0` — the
      §22 closure documents the actual failure mechanism (host-side
      ggml graph allocator at `ggml-alloc.c:82`, not the WebGPU
-     binding cap as §20 originally hypothesized). Use
-     `prefillTileSize: 128` to unblock; FA mode is orthogonal.
+     binding cap as §20 originally hypothesized). Post-§23 the
+     auto-default makes this transparent for harness consumers;
+     the abort surface only re-emerges if a caller passes
+     `?prefillTile=0` / `--prefill-tile 0` explicitly. FA mode
+     is orthogonal.
 
 **Recommended first move:** **No obvious next lever — pick
 deliberately.** §17 (§A matmul kernel), §18 (FA at N=1 decode),
 §19 (§C drafter spec-decode at K=4 with full-row verify), §20
 (§4 FA at prefill / long-decode), the side-branch §C-v2-A
 (greedy spec-decode + GPU-resident K+1 verify), §21 (§D encoder
-perf pass), and §22 (7B+ long-prefill graph-buffer tiling) have
-all closed. §22 in particular shipped a default-off gate that
-unblocks 7B+ at long-prefill via tile chunking — which means the
-"7B+ long-prefill graph-buffer rework" item that §20/§C-v2-A
-flagged as the next infra need is now **partially landed** as a
-gated workaround. The algorithmic levers at the canonical
+perf pass), §22 (7B+ long-prefill graph-buffer tiling), and §23
+(§22 default-on flip) have all closed or landed. §22 + §23
+together turn the 7B+ long-prefill unblock from "opt-in
+workaround" into "default behaviour for the registered fleet"
+— which means the "7B+ long-prefill graph-buffer rework" item
+that §20 / §C-v2-A flagged as the next infra need is now
+**fully landed for any workload that goes through the harness
+or the smoke page**. The algorithmic levers at the canonical
 4-baseline are exhausted; remaining options are deliberate
 strategic choices, not obvious wins.
 
-**Candidate next levers (none are forced; pick on need):**
+**Candidate next levers (none are forced; pick on need),
+in rough priority order:**
 
-- **§C-v2-A resurrection (conditional).** §22 partially
-  alleviates the per-step K+1 verify cost for short prefills
-  via tile chunking. The 8B+ K+1 verify cost at the canonical
-  target/drafter ratio was **not** measured in §22, so this
-  is a candidate, not a conclusion. Resurrection still hinges
-  on whether tiled-verify drops per-step cost enough to break
-  the K=4 even-α ceiling at 8B IQ3_M × 0.6B Q8. A new
-  measurement cycle on the side branch under
-  `prefillTileSize=128` would settle it. **Cheap to try; do
-  this first if speculative decoding is on the roadmap.**
-- **§22 default-on flip via per-model auto-default.** Add
-  `recommendedPrefillTile?: number` to the model registry,
-  flip 7B+ entries to tile=128 by default, leave smaller
-  models at tile=0. Single-file change once the registry
-  schema lands; preserves the TinyLlama fast path. **Cheap
-  follow-on to §22.**
-- **MEMORY64 for 70B-class targets.** Multi-day engineering
-  (pointer-type changes through the bridge, asyncify
-  interactions). Only worth it for a concrete 70B+ deployment
-  ask.
-- **§D concat-graph batched encoder compute.** Only opens on
-  a real batch-encoder-throughput use-case (was non-goal in
-  §21).
-- **§4 FA revisit at long-prefill on 7B+ now that §22
-  unblocks the path.** Run the §20 matrix again with
-  `prefillTileSize=128`; FA's win pattern (long-prefill TTFT,
-  long-decode batches) becomes testable on the 4-baseline
-  for the first time. **The most direct payoff from §22 if
-  any.**
+1. **§4 FA revisit at long-prefill on 7B+ — now actually
+   testable.** §22 + §23 mean Mistral-7B-Q4_K_S, Llama-3.1-8B-
+   IQ3_M, and Qwen3-8B-IQ3_M can prefill 512+ token prompts
+   without hitting the `ggml-alloc.c:82` abort. §20 closed the
+   FA gate on TinyLlama wins (everywhere) + a Mistral 7B
+   short-short -3.3% regression that exceeded the 3% gate; the
+   long-prefill / long-decode cells that would actually test
+   FA's strong shape (seq² attention matrix avoidance) were
+   **never measured** because the abort blocked them.
+   Re-running the §20 matrix with
+   `prefillTileSize=128 + flashAttn=true` on the 4-baseline
+   would settle whether FA wins at the shape it was designed
+   for. **The most direct payoff from §22 + §23 if any.**
+   Plan template: §20 plan at
+   `docs/superpowers/plans/2026-04-26-fa-revisit-long-decode.md`.
+2. **§C-v2-A resurrection (conditional).** §22 partially
+   alleviates the per-step K+1 verify cost for short prefills
+   via tile chunking. The 8B+ K+1 verify cost at the canonical
+   target/drafter ratio was **not** measured in §22, so this
+   is a candidate, not a conclusion. Resurrection still hinges
+   on whether tiled-verify drops per-step cost enough to break
+   the K=4 even-α ceiling at 8B IQ3_M × 0.6B Q8. A new
+   measurement cycle on the side branch under
+   `prefillTileSize=128` would settle it. **Cheap to try; do
+   this if speculative decoding is on the roadmap.**
+3. **MEMORY64 for 70B-class targets.** Multi-day engineering
+   (pointer-type changes through the bridge, asyncify
+   interactions). Only worth it for a concrete 70B+ deployment
+   ask.
+4. **§D concat-graph batched encoder compute.** Only opens on
+   a real batch-encoder-throughput use-case (was non-goal in
+   §21).
+5. **Heuristic-based prefill-tile default in `ModelInference`.**
+   §23 lever (b) — fold the per-model registry into a
+   ctor-side derivation from `hyperparams.layerCount ×
+   embeddingLength`. Nice-to-have when the registered 7B+
+   fleet grows past hand-curation; defer until that pressure
+   actually exists.
 
 If none of those align with current priorities, the team
 should pick a direction explicitly — there is no obvious
