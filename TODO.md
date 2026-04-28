@@ -808,11 +808,14 @@ Upstream cadence check 2026-04-28: no `ggml-webgpu/` movement → no
 rebase trigger near firing. Perf next-work is gated entirely on
 external triggers (see "External-trigger candidates").
 
-**Embedding-model expansion (2026-04-28).** Bucket A landed
-(commit `41b27bd` — bge-small + bge-large registered, both validated
-end-to-end via agentchrome smoke). B (non-BERT BERT-derived) and
-C (causal-LM-derived) remain queued for triage. See "Embedding-
-model expansion candidates" section below.
+**Embedding-model expansion (2026-04-28).** Buckets A and B both
+landed: A via commit `41b27bd` (bge-small + bge-large registered);
+B via 10 commits closing with Phase 5 (jina-embeddings-v2-base-en
+ALiBi/GeGLU + nomic-embed-text-v1.5 NEOX-RoPE/fused-QKV/SwiGLU,
+both at 5/5 reference-vector parity). Dashboard Embeddings section
+now shows 6 rows. C (causal-LM-derived) remains deferred behind a
+deployment ask. See "Embedding-model expansion candidates" section
+below.
 
 **Fresh observation pinned 2026-04-28 from #5 data:** the encoder
 overhead (`backendEncodeOverheadMs` per step) is a **fixed
@@ -846,8 +849,8 @@ appears. Captured as a finding rather than a next step.
 
 User-driven scope: extend embedding fleet beyond the two registered
 Arctic-Embed entries. Three candidate buckets, in increasing scope.
-**Bucket A is in progress;** B and C tracked here for triage when A
-closes.
+**Buckets A and B closed 2026-04-28;** C remains deferred behind a
+deployment ask.
 
 **A. Register more BERT-arch embedders** ~~(in progress 2026-04-28)~~
 **DONE 2026-04-28** (commit `41b27bd`). Confirmed cleanly: the
@@ -877,20 +880,60 @@ Add them only if a specific deployment ask names them, or as part
 of B/C closure. Otherwise dispatch B or C next based on what
 embedder family the next deployment ask names.
 
-**B. Extend `EncoderInference` to non-BERT arch** (deferred). Two
-popular asks both require real engineering on top of A's
-infrastructure:
-- `nomic-embed-text-v1` — modified BERT with rotary positional
-  embeddings instead of absolute. Needs RoPE path in
-  `EncoderInference.forward` and arch branch in the loader.
-- `jina-embeddings-v2` — ALiBi attention (linear bias). Needs
-  ALiBi support in the encoder attention path and a new arch
-  identifier.
+**B. Extend `EncoderInference` to non-BERT arch** **DONE 2026-04-28**.
+Both `jina-embeddings-v2-base-en` (ALiBi, GeGLU, no FFN biases) and
+`nomic-embed-text-v1.5` (NEOX RoPE, fused QKV, SwiGLU, no biases)
+landed with 5/5 reference-vector parity each at cosine ≥ 0.999999.
+Plan v2 in `docs/superpowers/plans/2026-04-28-encoder-non-bert-arch.md`
+guided 5 phases (probe / types / forward / registration / closure);
+spec v2 at
+`docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`.
 
-Scope estimate: 1-2 day equivalents each; reversible (additive,
-opt-in). Trigger: a deployment ask explicitly naming one of these
-families, OR an MTEB-quality justification beating the BGE
-canonical pick that lands under A.
+Commit ledger (10 commits):
+
+| Phase | SHA | Subject |
+|---|---|---|
+| Plan v1 | `4c4cd4c` | bucket B plan v1 (preserved as artifact) |
+| Spec v2 | `bf51912` | post-Phase-0 spec rewrite |
+| Plan v2 | `61b8309` | post-Phase-0 plan rewrite |
+| 0 (probe) | `43df996` | GGUF discovery probe |
+| 1 (types) | `7a41f79` | ModelArchitecture widening |
+| 2a (forward) | `7a18074` | bert + jina forward + engine routing |
+| 2b (forward) | `3982af9` | nomic fused-QKV + RoPE |
+| 2b (review) | `31d6ac2` | view3d offset coverage + F32_BYTES |
+| 3a (refs) | `5e85db8` | sentence-transformers reference vectors |
+| 3 (jina) | `d16b5b1` | jina registration + 5/5 parity (1.000000) |
+| 4 (nomic) | `709511e` | nomic registration + 5/5 parity |
+
+Latent bugs surfaced and fixed during integration:
+1. Phase 1/2a: encoder routing in `smoke-test/real-model-page.js`
+   only matched `architecture === "bert"`, so jina + nomic loads
+   silently fell through to the causal path. Fixed in Phase 3.
+2. Phase 2a: `ggml_soft_max_ext` requires a non-NULL mask when
+   `max_bias > 0` (`ggml.c:4012`). Phase 3 added the mask leaf
+   populated with `-|i - j|` per `llama-graph.cpp:411`.
+3. Spec v2 wrong on jina activation: spec said SwiGLU, llama.cpp
+   uses GeGLU (`bert.cpp:122-130`). Fixed in Phase 3.
+4. Spec v2 + plan wrong on nomic RoPE mode: said NORMAL, llama.cpp
+   uses NEOX (`llama-model.cpp:9266`). Fixed in Phase 4.
+5. Phase 1: nomic GGUF omits `tokenizer.ggml.cls_token_id` /
+   `mask_token_id`. Phase 4 added bos/eos fallback for WordPiece.
+
+Dashboard now shows **6 embedding rows** (arctic-embed-s,
+arctic-embed-m, bge-small-en-v1.5, bge-large-en-v1.5,
+jina-embeddings-v2-base-en, nomic-embed-text-v1.5) — the full
+BERT-family encoder lever portfolio: split QKV, fused QKV, NEOX
+RoPE, ALiBi, GeLU, GeGLU, SwiGLU, full biases, no biases, mixed
+biases. Bench-full populated cosine-task and per-text latency for
+both new models; parity artifacts at
+`eval/reports/encoder-parity-2026-04-28/` (jina-ref.json,
+nomic-ref.json, dashboard PNG).
+
+Net learning: the non-BERT encoder lever is now exhausted for the
+two named families. Remaining encoder asks are register-and-run on
+top of this foundation if they share an arch tag already on file
+(`bert` / `jina-bert-v2` / `nomic-bert-moe`); novel arch tags would
+re-open Phase 0/1.
 
 **C. Causal-LM-derived embedders (`Qwen3-Embedding-0.6B`)**
 (deferred). Reuses the existing causal forward but requires:
