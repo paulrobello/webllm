@@ -15,6 +15,47 @@ For architecture, the public API, and the full benchmark surface, see
 [`README.md`](README.md). For eval methodology, see
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
+## Workflow policies (set 2026-04-28)
+
+These apply to all work on this project — perf cycles, infra, refactors,
+docs, and bug fixes alike.
+
+- **Model-size ceiling: 30B parameters.** Anything larger (Llama-3-70B,
+  DeepSeek-V2 236B, etc.) is out of scope. Levers that justify themselves
+  via 70B+ targets must be **deferred** (with the ceiling cited), not
+  silently dropped. 8-30B remains in scope.
+- **Quick-wins override on YAGNI.** Speculative or YAGNI-flagged work is
+  allowed when **(a)** there is measured gain (or a cheap probe phase
+  that produces one) and **(b)** the gain outweighs the implementation
+  / maintenance complexity. The §27 free-win sweep is the canonical
+  pattern.
+- **Probe-first is the default.** When a lever's gain is unmeasured,
+  start with a probe. Probes are effectively free (time is not a factor)
+  and they produce the data that drives every subsequent decision. Each
+  probe declares up-front what it measures, the pass/fail thresholds,
+  and which downstream decision it gates. Run probes proactively even
+  when intuition says the answer is obvious — the measurement is the
+  artifact. Templates: §29 verify-cost probe, §27 free-win sweep, §31
+  MEMORY64 cap probe.
+- **Complexity ≠ implementation time.** Time estimates are chronically
+  overestimated and **do not factor** into whether work is worth doing.
+  Don't reach for "multi-day", "couple of weeks", etc. as a deterrent.
+  Score levers on **maintenance burden**, **surface area**, **risk
+  surface to load-bearing invariants** (ASYNCIFY, JS↔WASM ABI, async
+  readback, patch stack), **reversibility**, and **external-dependency
+  exposure** — not on duration.
+- **Always commit before work.** Commit pending state — specs, plans,
+  TODO updates, policy changes — **before** starting the next
+  implementation chunk. Reason: docs commits carry the load-bearing
+  reasoning behind code changes; bundling them into one big commit
+  destroys revertability (a `git revert` of the implementation also
+  nukes the spec that justified it). Use the established cadence:
+  `docs(spec):`, `docs(plan):`, `docs(TODO):`, `feat(...)`,
+  `refactor(...)`, `fix(...)` as separate commits. The
+  `docs/superpowers/` directory is gitignored; specs/plans in it must
+  be force-added (`git add -f`) — see commits `ae68bbe`, `b23ccc9`,
+  `66bc603` for the convention.
+
 ## Workflows
 
 **Ship gate:** `make checkall` (fmt + lint + typecheck + test) must pass
