@@ -2017,10 +2017,11 @@ Upstream cadence check 2026-04-28: no `ggml-webgpu/` movement → no
 rebase trigger near firing. Perf next-work is gated entirely on
 external triggers (see "External-trigger candidates").
 
-**Active scope: embedding-model expansion.** User-driven scope
-queued 2026-04-28 — 3 candidate buckets (A: BERT-arch additions,
-**in progress**; B: non-BERT BERT-derived; C: causal-LM-derived).
-See "Embedding-model expansion candidates" section below.
+**Embedding-model expansion (2026-04-28).** Bucket A landed
+(commit `41b27bd` — bge-small + bge-large registered, both validated
+end-to-end via agentchrome smoke). B (non-BERT BERT-derived) and
+C (causal-LM-derived) remain queued for triage. See "Embedding-
+model expansion candidates" section below.
 
 **Fresh observation pinned 2026-04-28 from #5 data:** the encoder
 overhead (`backendEncodeOverheadMs` per step) is a **fixed
@@ -2057,24 +2058,33 @@ Arctic-Embed entries. Three candidate buckets, in increasing scope.
 **Bucket A is in progress;** B and C tracked here for triage when A
 closes.
 
-**A. Register more BERT-arch embedders** (in progress 2026-04-28).
-The encoder forward path, WordPiece tokenizer, F32 dtype, and CLS-
-or-mean pooling (read from GGUF metadata) all already work — only
-`eval/models.ts` registration + `eval/smoke-profiles.ts` /
-`eval/embed-perf.ts` wiring should be needed. Initial picks:
-- `bge-small-en-v1.5` (~33M, 384-dim) — apples-to-apples with
-  arctic-embed-s; serves as a "encoder generalizes within BERT
-  arch" regression net.
-- `bge-large-en-v1.5` (~335M, 1024-dim) — first 335M encoder in
-  fleet; new scaling point for the dashboard's Embeddings section
-  alongside arctic-S/M.
+**A. Register more BERT-arch embedders** ~~(in progress 2026-04-28)~~
+**DONE 2026-04-28** (commit `41b27bd`). Confirmed cleanly: the
+encoder forward path, WordPiece tokenizer, F16 / F32 dtypes, and
+CLS pooling (read from GGUF metadata) all already work for BGE
+out of the box — zero code changes outside `eval/models.ts`,
+`eval/smoke-profiles.ts`, `eval/embed-perf.ts`.
+- `bge-small-en-v1.5-q0f16` (~33M, 384-dim): 17.0 ms p50 single-
+  text short / 91% on 8-task cosine eval. Apples-to-apples with
+  arctic-embed-s.
+- `bge-large-en-v1.5-q0f16` (~335M, 1024-dim): 59.3 ms p50
+  single-text short / 89% on 8-task cosine eval. **First 335M
+  encoder in fleet** — new scaling point for the dashboard's
+  Embeddings section. 3.5× latency for 10× params consistent
+  with bandwidth-bound encoder behavior.
 
-Stretch picks (defer if either of the above hit unexpected
-loader/tensor-name issues): `bge-base-en-v1.5`,
-`mxbai-embed-large-v1`, `snowflake-arctic-embed-l`. Decision rule
-on close: if A landed without requiring loader changes, the BERT-
-arch lever is essentially free for any future ask; dispatch B or C
-based on deployment need.
+GGUF source: `ChristianAzinn/bge-{small,large}-en-v1.5-gguf` mirror
+(same publisher as the arctic-embed entries already in tree).
+File-name pattern: `_fp16` (matches `bge-{small,large}-en-v1.5_fp16.gguf`
+unique within each repo).
+
+**Net learning:** the BERT-arch lever is effectively free for any
+future ask — no loader changes were required. Stretch picks
+(`bge-base-en-v1.5`, `mxbai-embed-large-v1`, `snowflake-arctic-
+embed-l`) are now register-and-run candidates with high confidence.
+Add them only if a specific deployment ask names them, or as part
+of B/C closure. Otherwise dispatch B or C next based on what
+embedder family the next deployment ask names.
 
 **B. Extend `EncoderInference` to non-BERT arch** (deferred). Two
 popular asks both require real engineering on top of A's
