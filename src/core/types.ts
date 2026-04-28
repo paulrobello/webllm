@@ -57,7 +57,20 @@ export type ModelArchitecture =
 	| "qwen3"
 	| "mixtral"
 	| "deepseek"
-	| "bert";
+	| "bert"
+	| "nomic-bert"
+	| "jina-bert-v2";
+
+/** All architectures handled by EncoderInference (bidirectional, no KV cache). */
+export const ENCODER_ARCHITECTURES = [
+	"bert",
+	"nomic-bert",
+	"jina-bert-v2",
+] as const;
+
+export function isEncoderArchitecture(a: ModelArchitecture): boolean {
+	return (ENCODER_ARCHITECTURES as readonly string[]).includes(a);
+}
 
 /** Metadata for a single tensor within a GGUF model file. */
 export interface TensorInfo {
@@ -115,6 +128,13 @@ export interface ModelHyperparams {
 	 * attention (the decoder default).
 	 */
 	causalAttention?: boolean;
+	/**
+	 * Only jina-bert-v2 populates this; the value is passed straight to
+	 * `opSoftMaxExt`'s `max_bias` arg, which causes ggml's softmax to apply
+	 * the standard ALiBi linear bias (slopes derived as `2^(-8/n_head * h)`).
+	 * Defaults to 8.0 when GGUF metadata omits the key (gaianet mirror).
+	 */
+	alibiMaxBias?: number;
 }
 
 /** GPU buffer mappings and tensor metadata for a loaded model's weights. */

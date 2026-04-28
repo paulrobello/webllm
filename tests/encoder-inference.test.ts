@@ -1,7 +1,106 @@
 import { describe, expect, test } from "bun:test";
-import type { ModelHyperparams } from "../src/core/types.js";
+import {
+	ENCODER_ARCHITECTURES,
+	isEncoderArchitecture,
+	type ModelHyperparams,
+} from "../src/core/types.js";
 import { EncoderInference } from "../src/inference/encoder-inference.js";
 import type { GgmlWasm, TensorPtr } from "../src/inference/ggml-wasm.js";
+import type { GgufContext } from "../src/models/gguf-types.js";
+import { ModelLoader } from "../src/models/model-loader.js";
+
+describe("isEncoderArchitecture", () => {
+	test("returns true for encoder archs", () => {
+		expect(isEncoderArchitecture("bert")).toBe(true);
+		expect(isEncoderArchitecture("nomic-bert")).toBe(true);
+		expect(isEncoderArchitecture("jina-bert-v2")).toBe(true);
+	});
+	test("returns false for causal archs", () => {
+		for (const a of [
+			"llama",
+			"mistral",
+			"qwen",
+			"qwen2",
+			"qwen3",
+			"phi",
+			"gemma",
+			"mixtral",
+			"deepseek",
+		] as const) {
+			expect(isEncoderArchitecture(a)).toBe(false);
+		}
+	});
+	test("ENCODER_ARCHITECTURES tuple matches helper truth-table", () => {
+		expect(ENCODER_ARCHITECTURES).toEqual([
+			"bert",
+			"nomic-bert",
+			"jina-bert-v2",
+		]);
+	});
+});
+
+function fakeCtx(
+	arch: string,
+	extras: Record<string, unknown> = {},
+): GgufContext {
+	const meta = new Map<string, { value: unknown }>();
+	meta.set("general.architecture", { value: arch });
+	meta.set(`${arch}.embedding_length`, { value: 768 });
+	meta.set(`${arch}.block_count`, { value: 12 });
+	meta.set(`${arch}.attention.head_count`, { value: 12 });
+	meta.set(`${arch}.feed_forward_length`, { value: 3072 });
+	meta.set(`${arch}.attention.layer_norm_epsilon`, { value: 1e-12 });
+	meta.set(`${arch}.context_length`, { value: 8192 });
+	meta.set(`${arch}.attention.causal`, { value: false });
+	meta.set(`${arch}.pooling_type`, { value: 1 });
+	for (const [k, v] of Object.entries(extras)) meta.set(k, { value: v });
+	return {
+		metadata: meta,
+		tensors: [],
+		dataOffset: 0,
+		totalDataSize: 0,
+	} as unknown as GgufContext;
+}
+
+describe("ModelLoader.extractHyperparams non-BERT encoder branches", () => {
+	test("nomic-bert produces RoPE-ready hyperparams", () => {
+		const ctx = fakeCtx("nomic-bert", {
+			"nomic-bert.rope.freq_base": 1000.0,
+		});
+		const hp = (
+			ModelLoader as unknown as {
+				extractHyperparams: (c: unknown) => unknown;
+			}
+		).extractHyperparams(ctx) as Record<string, unknown>;
+		expect(hp.architecture).toBe("nomic-bert");
+		expect(hp.causalAttention).toBe(false);
+		expect(hp.poolingType).toBe("mean");
+		expect(hp.ropeFreqBase).toBe(1000.0);
+		expect(hp.normEpsilon).toBeCloseTo(1e-12);
+		expect(hp.alibiMaxBias).toBeUndefined();
+	});
+	test("jina-bert-v2 falls back to alibiMaxBias=8.0 when metadata absent", () => {
+		const ctx = fakeCtx("jina-bert-v2");
+		const hp = (
+			ModelLoader as unknown as {
+				extractHyperparams: (c: unknown) => unknown;
+			}
+		).extractHyperparams(ctx) as Record<string, unknown>;
+		expect(hp.architecture).toBe("jina-bert-v2");
+		expect(hp.alibiMaxBias).toBe(8.0);
+	});
+	test("jina-bert-v2 honors alibi_bias_max metadata when present", () => {
+		const ctx = fakeCtx("jina-bert-v2", {
+			"jina-bert-v2.attention.alibi_bias_max": 16.0,
+		});
+		const hp = (
+			ModelLoader as unknown as {
+				extractHyperparams: (c: unknown) => unknown;
+			}
+		).extractHyperparams(ctx) as Record<string, unknown>;
+		expect(hp.alibiMaxBias).toBe(16.0);
+	});
+});
 
 describe("EncoderInference construction", () => {
 	test("rejects non-bert hyperparams", () => {

@@ -1,4 +1,4 @@
-import type { ModelHyperparams } from "../core/types.js";
+import { isEncoderArchitecture, type ModelHyperparams } from "../core/types.js";
 import {
 	TokenAttribute,
 	type TokenData,
@@ -51,23 +51,29 @@ export class ModelLoader {
 		);
 		const headCount = getMetaNumber(ctx, `${arch}.attention.head_count`, 32);
 
-		// BERT uses a plain LayerNorm epsilon under a different metadata key.
-		// Fall back to the RMSNorm key for non-BERT archs.
-		const normEpsilon =
-			arch === "bert"
-				? getMetaFloat(ctx, `${arch}.attention.layer_norm_epsilon`, 1e-12)
-				: getMetaFloat(ctx, `${arch}.attention.layer_norm_rms_epsilon`, 1e-5);
+		// BERT-family encoders use a plain LayerNorm epsilon under a different
+		// metadata key. Fall back to the RMSNorm key for non-encoder archs.
+		const normEpsilon = isEncoderArchitecture(arch)
+			? getMetaFloat(ctx, `${arch}.attention.layer_norm_epsilon`, 1e-12)
+			: getMetaFloat(ctx, `${arch}.attention.layer_norm_rms_epsilon`, 1e-5);
 
-		// Pooling + causal flag live on bert models; causal defaults true elsewhere.
+		// Pooling + causal flag live on encoder models; causal defaults true elsewhere.
 		let poolingType: ModelHyperparams["poolingType"];
 		let causalAttention: boolean | undefined;
-		if (arch === "bert") {
+		let alibiMaxBias: number | undefined;
+		if (isEncoderArchitecture(arch)) {
 			const pt = getMetaNumberOptional(ctx, `${arch}.pooling_type`) ?? 2;
 			// llama.cpp enum: NONE=0, MEAN=1, CLS=2, LAST=3, RANK=4. We only
 			// implement CLS and MEAN in MVP; anything else falls back to CLS.
 			poolingType = pt === 1 ? "mean" : "cls";
 			causalAttention =
 				getMetaBooleanOptional(ctx, `${arch}.attention.causal`) ?? false;
+			if (arch === "jina-bert-v2") {
+				// gaianet GGUF mirror omits this key; 8.0 is the upstream default
+				// (jina-bert-v2 reference impl + llama.cpp).
+				alibiMaxBias =
+					getMetaNumberOptional(ctx, `${arch}.attention.alibi_bias_max`) ?? 8.0;
+			}
 		}
 
 		return {
@@ -102,6 +108,7 @@ export class ModelLoader {
 			expertUsedCount: getMetaNumber(ctx, `${arch}.expert_used_count`, 0),
 			poolingType,
 			causalAttention,
+			alibiMaxBias,
 		};
 	}
 

@@ -83,6 +83,7 @@ export interface ForwardTrace {
 export function getRopeModeForArchitecture(
 	architecture: ModelHyperparams["architecture"],
 ): number {
+	if (architecture === "nomic-bert") return RopeMode.NORMAL;
 	return String(architecture).startsWith("qwen")
 		? RopeMode.NEOX
 		: RopeMode.NORMAL;
