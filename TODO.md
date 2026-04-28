@@ -1247,11 +1247,67 @@ dashboard hygiene pass from these sessions:
   pin → patches 9-10 LAYER_NORM healthy); zero console
   errors/warnings. Tip is now `981859864`. Safety branch
   preserved at `webllm-browser-patches-pre-rebase-2026-04-27`.
-  Free wins from upstream's new register-tile / subgroup matmul
-  tuning are not yet measured — could re-run the canonical
-  4-baseline (`make smoke-bench` on TinyLlama / qwen3-0.6b /
-  qwen3-1.7b / qwen3-8b) on demand to spot any throughput
-  delta from the upstream kernel changes.
+- **Free-win sweep (2026-04-27, post-rebase):** ran
+  `bun run eval/perf.ts --runs 3` on six models against the
+  §17 "pre-§A change" bench-inf baseline table. **Headline:
+  upstream's fast i-quant mat-vec kernels (#22344) delivered
+  a +70-80% throughput win on IQ3_M models — the entire 8B+
+  fleet got faster for free.**
+
+  | Model                         | Quant   | §17 base | Post-rebase | Δ |
+  |---|---|---:|---:|---:|
+  | tinyllama-1.1b-chat-q4_0      | Q4_0    | 105.7   | 110.8       | +4.8% |
+  | qwen3-0.6b-q4f16              | Q8_0    | ~85     | 89.8        | +5.6% |
+  | qwen3-1.7b-q4f16              | Q8_0    | ~59*    | 62.2*       | +5.4% |
+  | mistral-7b-instruct-v0.3-q4ks | Q4_K_S  | 34.5    | 35.8        | +3.8% |
+  | **llama-3.1-8b-instruct-iq3m**| **IQ3_M** | **16.8** | **29.0** | **+72.6%** |
+  | **qwen3-8b-iq3m**             | **IQ3_M** | **15.1** | **27.2** | **+80.1%** |
+
+  \* qwen3-1.7b numbers are 17-token warmup-dominated runs
+  (`Tell one short joke.` elicits short Qwen replies); not the
+  117-token clean steady-state from the TODO header.
+
+  **Story confirmed by quant-family pattern:** the i-quant
+  jump is isolated to IQ3_M (both 8B models, both families).
+  K-quant (Q4_K_S Mistral) is essentially flat (+3.8% ≈ noise),
+  consistent with #22344 targeting only the i-quant decompression
+  path. Dense quants (Q4_0 / Q8_0) all sit at +4-6%, plausibly
+  attributable to upstream's register-tile / subgroup matmul
+  tuning (#22241).
+
+  **Implications:**
+  - The 8B fleet's effective throughput nearly doubled. §16's
+    "16.2 tok/s" baseline for `qwen3-8b-iq3m` is now obsolete;
+    canonical bench-inf number is **27.2 tok/s**.
+  - **§C-v2-A target/drafter ratio analysis shifts.** §26's
+    closure cited "drafter 4×~12 ms ≈ 48 ms + verify K+1 ≈
+    70-80 ms = ~120 ms/step" against a 16 tok/s target baseline.
+    With 8B IQ3_M now at ~27 tok/s (~37 ms/step), the
+    theoretical even-α ceiling at K=4 is ~74 tok/s vs ~27
+    baseline (~2.7×) — wider than the §22.5 1.5× gate.
+    **Does NOT necessarily reopen §C-v2-A** — measured α was
+    0.2-0.25, far below the K=4 break-even ceiling, and the
+    drafter overhead also benefits proportionally so the
+    relative cost picture may not actually move much. A fresh
+    re-measurement on the side branch would settle it; flag
+    this as the natural next "conditional resurrection" trigger
+    if v2-A interest revives.
+  - **§17 / §A reopening:** §A's lever 1 was reverted because
+    `MUL_ACC_Q4_0` showed only -2.9% matmul / +0.6% tok/s on
+    TinyLlama; the wave-2 7B+ fleet was structurally
+    inapplicable (K-quant TPB=16, IQ3_M routes through
+    `mul_mat.wgsl` not `mul_mat_vec.wgsl`). With IQ3_M now
+    fast, §A remains closed for the wrong reason that already
+    closed it (lever shape doesn't apply); no change.
+  - **Net characterization update at 8B IQ3_M (post-rebase):**
+    matmul share of decode is now lower than §16's
+    65-69% measurement (kernel got faster, share drops). A
+    fresh `make smoke-bench --profile` would re-rank the
+    decode budget, but no obvious next lever has appeared.
+
+  Free-win sweep duration: ~5 minutes wall (one rebuild +
+  smoke-restart per model). Sweep done — no follow-on work
+  triggered.
 - **llama.cpp rebased to upstream `78433f606` (2026-04-26).**
   6-commit gap from prior base `b760272f1`; zero conflicts.
   None of the 6 commits touch `ggml-webgpu/`, WGSL shaders,
