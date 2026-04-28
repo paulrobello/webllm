@@ -1952,38 +1952,57 @@ Boot sequence for a fresh session:
      `?prefillTile=0` / `--prefill-tile 0` explicitly. FA mode
      is orthogonal.
 
-**Status (post-§32):** No perf lever is forced. The algorithmic
+**Status (post-§32a):** No perf lever is forced. The algorithmic
 levers at the canonical 4-baseline are exhausted (§17-§29 closed
 the matmul, FA, drafter, encoder, prefill-tiling, and spec-decode
 families). The MEMORY64 ceiling that gated 13B/30B targets is no
 longer architecturally blocked (§31 + §31a — 15 GiB measured cap),
 but the full bridge migration is gated on deployment ask. §32 ran
 the upstream rebase + sweep cycle and accepted a small regression
-on `llama-3.1-8b-iq3m`. All other open work is conditional on
-external triggers.
+on `llama-3.1-8b-iq3m`. **§32a (2026-04-28) ran the profile-mode
+follow-up probe** — H1 "tied-embedding × #22456 aliasing-refactor"
+rejected (no bucket asymmetry vs untied Qwen3-8B reference); H2
+"uniform per-step overhead" supported; §32 baseline accepted as
+final. All other open work is conditional on external triggers.
 
 ### Active next steps (post-§32)
 
 **Opt-in probes — cheap, executable now, useful data either
 direction.** None are forced; pick if appetite + curiosity align.
 
-1. **§32a — Profile-mode rebench on `llama-3.1-8b-iq3m`** to
-   characterize the §32 -6% regression (29.0 → 27.2 tok/s).
-   Tests the **tied-embedding × #22456 aliasing-refactor**
-   hypothesis from §32 §4: qwen3-8b-iq3m has the same GQA shape
-   but untied embeddings and is essentially flat post-rebase, so
-   tied weights exercising the buffer-aliasing path more heavily
-   is the leading suspect. Procedure: `make smoke-bench
-   PERF_MODEL=llama-3.1-8b-instruct-iq3m PERF_RUNS=3` for the
-   60-step trace, compare the bucket breakdown (matmul / encode-
-   overhead / attention / dispatch count) against the §16/§27
-   pre-rebase profile-mode numbers if they exist (or just to the
-   qwen3-8b-iq3m post-§27 profile from §27). Decision rule: if a
-   specific bucket scales with the -6%, file a follow-up; if the
-   regression is uniform across buckets, accept and move on
-   (matches the "buffer-aliasing constant overhead" alternative
-   hypothesis). Cost: ~5 min wall. Risk: zero (read-only
-   measurement; no `src/` change).
+1. ~~**§32a — Profile-mode rebench on `llama-3.1-8b-iq3m`**.~~
+   **CLOSED 2026-04-28 — hypothesis rejected, §32 baseline
+   accepted as final.** Ran `make smoke-bench
+   PERF_MODEL=llama-3.1-8b-instruct-iq3m PERF_RUNS=3` against
+   the §32 rebased base (llama.cpp tip `c4af89356`). Captured
+   156-step profile trace. Buckets: matmul **23.02 ms / 57.3%**,
+   encode **4.01 ms / 10.0%**, attention **0.63 ms / 1.6%**,
+   dispatch **652/token**, profile-mode tok/s **23.5**
+   (perturbation -13.6% vs §32's 27.2 non-profile, normal band
+   for this model class). **Bucket profile is structurally
+   identical to qwen3-8b-iq3m's post-§27 reference within
+   measurement noise** (matmul Δ -0.3%, dispatch delta tracks
+   layer-count delta exactly: 652 = 32 × ~20.4; 805 = 36 × ~22.4).
+   No bucket sticks out as the locus of the -6% regression. **H1
+   "tied-embedding × #22456 aliasing-refactor" rejected** — would
+   predict matmul or encode-overhead asymmetry vs untied Qwen3-8B
+   reference; opposite is observed (Llama's lm_head matmul is
+   *faster* per element). **H2 "buffer-aliasing constant
+   overhead" supported** — uniform per-step overhead distributed
+   across the pipeline; not bucket-localized. Decision rule's
+   "uniform → accept and move on" branch fires. Closure report:
+   `eval/reports/llama-cpp-rebase-2026-04-28-eve/PROFILE-32A.md`.
+   New canonical reference pin: `llama-3.1-8b-iq3m` profile-mode
+   23.5 tok/s / 156-step trace, alongside `qwen3-8b-iq3m`'s
+   22.0 tok/s / 805 dispatch — these now form a matched 8B IQ3_M
+   pair for any future post-rebase probe.
+   **Process improvement noted for next rebase:** when the sweep
+   classifies as "small regression, accepted" (§32 template),
+   capture pre-rebase profile-mode on the regressing model
+   *before* doing the rebase. Cost: ~3 min wall. Pay-off:
+   §32a-style follow-on gets a same-model baseline (would have
+   diagnosed conclusively here rather than via the cross-model
+   proxy).
 
 2. **§31b — `MAXIMUM_MEMORY` upper-bound probe** for the
    `webllm-wasm-mem64` target. §31a measured 15 GiB at
