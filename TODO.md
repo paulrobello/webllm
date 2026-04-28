@@ -2609,16 +2609,21 @@ throughput scatter, `88f3df5` Δ total ms on embeddings table);
 delta polarity fix so lower-is-better metrics (`Δ total ms`)
 read green=speedup / red=regression (`620407e`). DB audit
 during the cycle confirmed `smoke-runs.db` is clean (29 runs /
-30 evals, no purge candidates). **In flight at the time of this
-writeup:** a `/models` endpoint refactor on `eval/live-server.ts`
-that drives `isEncoderModel` / `inferParamCountB` from the
-registry instead of hand-maintained id-prefix maps — eliminates
-the latent footgun where registering a new encoder family
+30 evals, no purge candidates). A `/models` endpoint
+refactor on `eval/live-server.ts` (`11c1626`) drives
+`isEncoderModel` / `inferEncoderParamCountM` from the registry
+instead of hand-maintained id-prefix maps — eliminates the
+latent footgun where registering a new encoder family
 (nomic-embed-*, e5-*) would silently leak encoder rows back
-onto the main tab. Expected as a single commit on top of
-`620407e`; check `git log --oneline -3` to verify it landed.
-Zero `src/` / `tests/` change throughout the cycle; ship gate
-(426/11/0) maintained on every commit.
+onto the main tab. Contract test pinned at `14038e2`. Two
+narrower follow-ups remain: (a) `inferModelFamily` still uses
+id-prefix matching (registry's `family` field could replace it
+but the family-color palette is keyed off inferred labels;
+small palette/key audit needed); (b) the encoder-architecture
+check still hardcodes `architecture === "bert"` — if a
+non-BERT encoder ever lands, update `isEncoderModel` and
+`inferEncoderParamCountM`. Ship gate (427/11/0) maintained on
+every commit.
 
 Findings, one bug fix, one upstream rebase, one
 quant-promotion, encoder perf characterization, plus a
@@ -2801,7 +2806,7 @@ batch-throughput use-case appears.
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 426 pass / 11 skip / 0 fail.
+1. **`make checkall`** — confirm 427 pass / 11 skip / 0 fail.
    The §C drafter spec-decoding work added 19 unit + integration
    tests across `tests/sampler.test.ts` (7), `tests/speculative-
    rejection.test.ts` (11), `tests/forward-verify-equivalence.test.ts`
@@ -2816,23 +2821,22 @@ Boot sequence for a fresh session:
    registry-shape tests in `tests/eval-models.test.ts` (424 → 426).
    The §24 §4 FA revisit at 7B+ long-prefill cycle added 0 tests
    (closure C — measurement campaign + closure writeup; zero `src/`
-   change). **§25 dashboard hygiene + new viz cycle added 0 tests**
-   (10+ commits, dashboard-only — `smoke-test/dashboard.{html,js,css}`
-   and possibly `eval/live-server.ts` if the in-flight `/models`
-   endpoint refactor has landed). The WebGPU-gated integration tests
+   change). **§25 dashboard hygiene + new viz cycle added 1 test**
+   (`tests/live-server.test.ts` gained a `/models` endpoint contract
+   test pinning shape, sort order, and architecture+paramsB
+   coverage; 426 → 427 pass). The WebGPU-gated integration tests
    skip under Bun (no `navigator.gpu`).
 2. **`git log --oneline -25`** — top of `main` is the §25
-   dashboard cycle (~10-11 commits). Tip should be either
-   `620407e fix(dashboard): polarity-aware deltaCellHtml` or
-   the in-flight `/models` endpoint commit on top of it. Below
-   the §25 cycle (in reverse-chronological order):
-   `620407e` polarity fix → `88f3df5` #B5 → `cf4c49d` #B3 →
-   `845b687` #B1 → `02f7872` chore: encoder filter on main tab →
-   `504c837` #5 → `5af0370` #4 → `e4978ae` #3 → `b33f019` #2 →
-   `f8e0ae6` #1. Then `85988c8 docs(TODO): §24 — §4 FA revisit
-   at 7B+ long-prefill MEASURED + CLOSED` is the §24
-   closure (single docs/measurement commit, zero `src/` change).
-   Below §24: §23
+   dashboard cycle (12 commits). Tip is `14038e2 test(live-server):
+   add /models endpoint contract test`. Below it (reverse-
+   chronological): `11c1626` `/models` endpoint + registry-driven
+   filters → `dd59704` §25 docs(TODO) refresh → `620407e` polarity
+   fix → `88f3df5` #B5 → `cf4c49d` #B3 → `845b687` #B1 → `02f7872`
+   chore: encoder filter on main tab → `504c837` #5 → `5af0370` #4
+   → `e4978ae` #3 → `b33f019` #2 → `f8e0ae6` #1. Then
+   `85988c8 docs(TODO): §24 — §4 FA revisit at 7B+ long-prefill
+   MEASURED + CLOSED` is the §24 closure (single docs/measurement
+   commit, zero `src/` change). Below §24: §23
    (§22 default-on auto-tile via `recommendedPrefillTile`) landed
    on `main` on 2026-04-27 as a single commit `0c50e03 feat(eval):
    §22 default-on auto-tile via recommendedPrefillTile`. Below it:
