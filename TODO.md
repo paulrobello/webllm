@@ -2701,6 +2701,28 @@ check still hardcodes `architecture === "bert"` — if a
 non-BERT encoder ever lands, update `isEncoderModel` and
 `inferEncoderParamCountM`. Ship gate (427/11/0) maintained on
 every commit.
+**§26 (2026-04-27 — CLOSED, side-branch + 3 main commits) §C-v2-A
+re-measurement under §22 tile=128.** Direct empirical test of
+§24's parting recommendation. Cherry-picked the 4 §22
+implementation commits (`c38fb8f`, `f281ac3`, `2fcc334`,
+`18e1677`) onto `feat/spec-decode-v2-greedy`; ran the canonical
+4-cell gate matrix at qwen3-8b-iq3m × qwen3-0.6b-q4f16 K=4 with
+explicit `--prefill-tile 128` on both target and drafter. Gate 1
+(speedup ≥1.5×): **0.42×** — FAIL by 3.6×. Gate 2 (safety ≥0.95×):
+**0.54×** — FAIL by 0.4×. The K+1=5 verify graph is three orders
+of magnitude below the 128-token tile threshold and is never
+split, so tile=128 cannot affect verify cost on this workload —
+exactly as the spec hypothesized. Cell 4 drift -33% vs §C-v2-A
+close (12.7 → 8.5) is a notable safety regression flagged for any
+future v2-A resurrection. **§C-v2-A definitively closed under all
+known levers**; resurrection now requires architectural change
+(faster K+1 verify via upstream ggml-webgpu dispatch coalescing,
+OR MEMORY64 → 70B+ target shifting the target/drafter ratio from
+13× to ~100×). Side branch retained as archived infra; do not
+merge. Files on main: spec `b23ccc9`, plan `f0a682c`, TODO closure
+`e715160`. Files on side branch: cherry-picks + matrix + SUMMARY,
+tip `6b20aad`. Zero `src/` change on `main`; checkall remains
+427/11/0.
 
 Findings, one bug fix, one upstream rebase, one
 quant-promotion, encoder perf characterization, plus a
@@ -2873,13 +2895,21 @@ canonical target/drafter ratio (per-step verify overhead caps
 α below the K=4 break-even ceiling); §21 closed §D on a
 diagnostic finding (encoder embed is dispatch-bound, single-text
 levers <5% headroom; only structural lever — concat-graph batched
-compute — is a non-goal until a use-case emerges). **The remaining
-headroom is infrastructure work:** 7B+ long-prefill graph-buffer
-rework to unblock §4 measurements at scale (and incidentally cut
-the verify cost that sank §C-v2-A). MEMORY64 to bring 70B targets
-into reach — multi-day, only worth it if a clear use-case emerges.
-§D's deferred concat-graph lever is the encoder-side fallback if a
-batch-throughput use-case appears.
+compute — is a non-goal until a use-case emerges); **§26 ruled
+out §C-v2-A resurrection under §22 tile=128 (gate 1 0.42×, gate 2
+0.54× — both fail decisively; verify graph at K+1=5 is three
+orders of magnitude below the 128-token tile threshold and is
+never split, so tile=128 cannot affect verify cost on this
+workload).** **All algorithmic levers at the canonical 4-baseline
+are now exhausted.** Remaining headroom is **architectural
+infrastructure**: MEMORY64 to bring 70B+ targets into reach
+(multi-day, conditional on a deployment ask; would also shift the
+§C-v2-A target/drafter ratio from 13× to ~100×, the regime where
+Leviathan-style speculation pays off); upstream ggml-webgpu
+dispatch coalescing or fused-graph optimization (re-run §21 +
+§26 harnesses on every llama.cpp rebase to spot free wins);
+§D's deferred concat-graph lever (encoder-side fallback if a
+batch-throughput use-case appears).
 
 Boot sequence for a fresh session:
 
@@ -2903,12 +2933,20 @@ Boot sequence for a fresh session:
    test pinning shape, sort order, and architecture+paramsB
    coverage; 426 → 427 pass). The WebGPU-gated integration tests
    skip under Bun (no `navigator.gpu`).
-2. **`git log --oneline -25`** — top of `main` is the §25
-   dashboard cycle (12 commits). Tip is `14038e2 test(live-server):
-   add /models endpoint contract test`. Below it (reverse-
-   chronological): `11c1626` `/models` endpoint + registry-driven
-   filters → `dd59704` §25 docs(TODO) refresh → `620407e` polarity
-   fix → `88f3df5` #B5 → `cf4c49d` #B3 → `845b687` #B1 → `02f7872`
+2. **`git log --oneline -30`** — top of `main` is the §26
+   §C-v2-A re-measurement closure (3 commits on `main`; the bulk
+   of the cycle's work landed on the `feat/spec-decode-v2-greedy`
+   side branch, which is **archived — do not merge**). Tip is
+   `e715160 docs(TODO): §26 — §C-v2-A re-measurement under tile=128
+   CLOSED`. Below it: `f0a682c docs(plan): §26 §C-v2-A re-measurement
+   under §22 tile=128` → `b23ccc9 docs(spec): §26 §C-v2-A re-
+   measurement under §22 tile=128`. Below those, the §25
+   dashboard cycle (12 commits): `6622ec7 docs(TODO): refresh
+   resumption checklist post-/models refactor` → `14038e2
+   test(live-server): add /models endpoint contract test` →
+   `11c1626` `/models` endpoint + registry-driven filters →
+   `dd59704` §25 docs(TODO) refresh → `620407e` polarity fix →
+   `88f3df5` #B5 → `cf4c49d` #B3 → `845b687` #B1 → `02f7872`
    chore: encoder filter on main tab → `504c837` #5 → `5af0370` #4
    → `e4978ae` #3 → `b33f019` #2 → `f8e0ae6` #1. Then
    `85988c8 docs(TODO): §24 — §4 FA revisit at 7B+ long-prefill
@@ -3043,10 +3081,11 @@ Boot sequence for a fresh session:
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
    should return **29 runs / 30 evals** (unchanged through
-   §17/§18/§19/§20/§21/§22/§23 — none of the seven closures
-   produced new dashboard data, only TODO writeups, perf.ts
-   logs, and §22's `eval/reports/prefill-tiling-2026-04-27/`
-   matrix).
+   §17/§18/§19/§20/§21/§22/§23/§24/§26 — none of the eight
+   closures produced new dashboard data, only TODO writeups,
+   perf.ts logs, §22's `eval/reports/prefill-tiling-2026-04-27/`
+   matrix, and §26's `eval/reports/spec-decode-v2-tile128-2026-04-27/`
+   matrix on the side branch).
    The live dashboard SSE counter
    shows higher numbers (~52/53) because it accumulates
    streaming events without DB persistence; both views are
@@ -3063,6 +3102,18 @@ Boot sequence for a fresh session:
    §20 wired call sites into `model-inference.ts` behind
    `flashAttn=true`; the wrappers are now live (not dead)
    when the gate is enabled. **Do not delete them.**
+
+   **§26 side-branch state** (no impact on `main`): the
+   `feat/spec-decode-v2-greedy` branch carries the entire v2-A
+   driver, AdaptiveGate, K+1 verify, contract gate, and ~30
+   unit/integration tests, plus the four cherry-picked §22
+   commits and §26's matrix evidence. Tip is `6b20aad`. **Do
+   not merge to `main`** — both gates fail decisively (0.42× /
+   0.54×) and the cell-4 -33% safety drift makes the path
+   strictly worse than at §C-v2-A close. If a future cycle
+   resurrects v2-A, branch fresh from `main` rather than
+   reviving this branch (the cherry-picks now live on the
+   branch itself; carry-over is straightforward).
 8. **§20 FA gate + §22/§23 prefill-tile gate state (both on `main`).**
    `new ModelInference(wasm, hp)` with no `opts` argument is
    bit-identical to pre-§20/§22 behaviour: FA defaults off,
