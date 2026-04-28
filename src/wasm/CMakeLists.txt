@@ -16,6 +16,8 @@ set(CMAKE_CXX_STANDARD 17)
 # configuration; it's significantly faster (often 2×+ for decode).
 option(WEBLLM_ASSERTIONS "Enable Emscripten -sASSERTIONS=1 in the WASM build" OFF)
 
+option(WEBLLM_BUILD_MEM64 "Build the wasm64 webllm-wasm-mem64 target instead of webllm-wasm. Set ON in src/wasm/build-mem64/ for the MEMORY64 cap probe (see docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md). Must be combined with -DCMAKE_C_FLAGS=-sMEMORY64=1 -DCMAKE_CXX_FLAGS=-sMEMORY64=1 so ggml is also built as wasm64." OFF)
+
 # Disable everything we don't need
 set(GGML_WEBGPU ON CACHE BOOL "" FORCE)
 set(GGML_WEBGPU_JSPI OFF CACHE BOOL "" FORCE)
@@ -67,29 +69,66 @@ if(EMSCRIPTEN)
         "_webgpu_last_graph_profile_matmul_ms,_webgpu_last_graph_profile_attention_ms,"
         "_webgpu_last_graph_profile_encode_overhead_ms,_webgpu_last_graph_profile_dispatch_count"
     )
-    add_executable(webllm-wasm webgpu-bridge.cpp)
-    target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)
-    target_include_directories(webllm-wasm PRIVATE
-        ${LLAMA_CPP_DIR}/ggml/include
-        ${LLAMA_CPP_DIR}/ggml/src
-    )
-    target_link_options(webllm-wasm PRIVATE
-        "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
-        "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
-        "-sMODULARIZE=1"
-        "-sEXPORT_ES6=1"
-        "-sUSE_ES6_IMPORT_META=1"
-        "-sALLOW_MEMORY_GROWTH=1"
-        "-sMAXIMUM_MEMORY=4GB"
-        "-sSTACK_SIZE=8388608"
-        "-sENVIRONMENT='web'"
-        "-sASYNCIFY_STACK_SIZE=1048576"
-        "-O3"
-        "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
-    )
-    set_target_properties(webllm-wasm PROPERTIES
-        PREFIX ""
-    )
+
+    if(WEBLLM_BUILD_MEM64)
+        # ── MEMORY64 cap probe target.
+        # Built only when -DWEBLLM_BUILD_MEM64=ON is passed at cmake configure
+        # (driven by `make mem64-probe` in src/wasm/build-mem64/). The probe
+        # binary links wasm64-against-wasm64 archives because the global
+        # CMAKE_C_FLAGS / CMAKE_CXX_FLAGS include `-sMEMORY64=1`, which
+        # propagates to the ggml add_subdirectory above and produces wasm64
+        # ggml-base + ggml-webgpu archives.
+        # Spec: docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md
+        add_executable(webllm-wasm-mem64 webgpu-bridge.cpp)
+        target_link_libraries(webllm-wasm-mem64 PRIVATE ggml-base ggml-webgpu)
+        target_include_directories(webllm-wasm-mem64 PRIVATE
+            ${LLAMA_CPP_DIR}/ggml/include
+            ${LLAMA_CPP_DIR}/ggml/src
+        )
+        target_link_options(webllm-wasm-mem64 PRIVATE
+            "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
+            "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sUSE_ES6_IMPORT_META=1"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMEMORY64=1"
+            "-sWASM_BIGINT=1"
+            "-sMAXIMUM_MEMORY=16GB"
+            "-sSTACK_SIZE=8388608"
+            "-sENVIRONMENT='web'"
+            "-sASYNCIFY_STACK_SIZE=1048576"
+            "-O3"
+            "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
+        )
+        set_target_properties(webllm-wasm-mem64 PROPERTIES
+            PREFIX ""
+        )
+    else()
+        add_executable(webllm-wasm webgpu-bridge.cpp)
+        target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)
+        target_include_directories(webllm-wasm PRIVATE
+            ${LLAMA_CPP_DIR}/ggml/include
+            ${LLAMA_CPP_DIR}/ggml/src
+        )
+        target_link_options(webllm-wasm PRIVATE
+            "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
+            "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sUSE_ES6_IMPORT_META=1"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=4GB"
+            "-sSTACK_SIZE=8388608"
+            "-sENVIRONMENT='web'"
+            "-sASYNCIFY_STACK_SIZE=1048576"
+            "-O3"
+            "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
+        )
+        set_target_properties(webllm-wasm PROPERTIES
+            PREFIX ""
+        )
+    endif()
 else()
     add_library(webllm-bridge webgpu-bridge.cpp)
     target_link_libraries(webllm-bridge PRIVATE ggml-base ggml-webgpu)
