@@ -2483,6 +2483,81 @@ needs to be collected.
     cycle's commit message + the doc comments in both files
     are the current guard.
 
+24. **§4 FA revisit at 7B+ long-prefill — CLOSED.** Direct
+    follow-on to §22+§23 — re-ran the §20 matrix on the 3 cells §20
+    could not capture (Mistral-7B-Q4_K_S, Llama-3.1-8B-IQ3_M,
+    Qwen3-8B-IQ3_M × {short-short, long-short, short-long, long-long}
+    × FA off/on, 24 cells, 3-trial median) with §23's
+    `recommendedPrefillTile=128` auto-default unblocking long-prefill
+    on 7B+. Landed on `main` directly; zero `src/` change.
+
+    **TTFT (prefill ms, p50):**
+
+    | Model     | short-short | long-short | short-long | long-long |
+    |---|---|---|---|---|
+    | mistral-7b-q4ks  | 878 → 847 (-3.5%)   | 4723 → 4865 (+3.0%) | 869 → 865 (-0.5%)  | 5582 → 4569 (-18.1%) |
+    | llama-3.1-8b-iq3m | 791 → 770 (-2.7%)  | 4737 → 4716 (-0.4%) | 788 → 781 (-0.9%)  | 4914 → 4555 (-7.3%)  |
+    | qwen3-8b-iq3m    | 476 → 493 (+3.6%)   | 4880 → 4877 (-0.1%) | 478 → 475 (-0.6%)  | 6348 → 4871 (-23.3%) |
+
+    **Decode tok/s (p50):**
+
+    | Model     | short-short | long-short | short-long | long-long |
+    |---|---|---|---|---|
+    | mistral-7b-q4ks  | 33.7 → 32.2 (-4.5%) | 31.1 → 30.9 (-0.6%) | 33.6 → 31.4 (-6.5%) | 30.1 → 30.3 (+0.7%) |
+    | llama-3.1-8b-iq3m | 16.7 → 16.6 (-0.6%) | 16.7 → 16.7 (+0.0%) | 16.6 → 16.5 (-0.6%) | 16.5 → 16.5 (+0.0%) |
+    | qwen3-8b-iq3m    | 15.5 → 15.2 (-1.9%) | 15.7 → 16.0 (+1.9%) | 15.5 → 14.9 (-3.9%) | 15.7 → 15.9 (+1.3%) |
+
+    **Decision-rule evaluation:**
+    - **A. Ship default-on:** *FAIL.* Mistral short-short decode
+      regresses -4.5% and Qwen3-8B short-short TTFT regresses +3.6%
+      (both >3% gate); zero models gain ≥2% on short-long decode.
+    - **B. Ship gated (auto, FA on for `nTokens > 1`):** *FAIL.*
+      Long-short TTFT deltas across the three 7B+ models (+3.0%,
+      -0.4%, -0.1%) are all ≤5% — zero models meet the gated-ship
+      threshold. The seq² avoidance win that helped TinyLlama at
+      long-short (-10.0%) does not materialize at 7B+/IQ3_M shape.
+    - **C. Close §4 again:** *FIRES (default).*
+
+    **Net characterization:** FA stays behind the manual chain at
+    7B+ across the canonical 4-workload matrix at prefill-512 —
+    matmul is already 65-70% of decode time at this shape, and FA's
+    per-step overhead exceeds the prefill saving on three of four
+    workloads. The exception is **long-long TTFT** (Mistral -18.1%,
+    Qwen3-8B -23.3%, Llama -7.3%) where the cumulative `pastLen`
+    during decode amortizes the seq²-avoidance — but neither §20
+    rule clause keys on long-long TTFT, and long-long decode tok/s
+    wins are tiny (+0.7% / 0.0% / +1.3%), so this characterization
+    flag does not flip the ship decision. It is a useful datapoint
+    for future spec-decode / long-context cycles.
+
+    **Files retained as future infra:** unchanged from §20 —
+    `flashAttn?: boolean` ctor option, `?fa=on` URL param,
+    `--fa <on|off>` perf.ts flag, F16 mask + dual V-cache layout,
+    `eval/fixtures/long-prompts.ts` fixtures (prefill-256 / -512 /
+    -1024), 5 contract tests at `tests/fa-mode-config.test.ts`.
+
+    **Cycle infrastructure:** new files —
+    `eval/reports/fa-revisit-7b-2026-04-27/{run-matrix.sh,
+    SUMMARY.md, 01-coherence.txt, *.log}` (24 cell logs +
+    matrix-driver script + coherence transcripts). Reuses §20's
+    plumbing + §22+§23's auto-tile end-to-end. Zero `src/` change;
+    zero new tests. `make checkall` remains 426 / 11 / 0.
+
+    **Plan reference:** `docs/superpowers/plans/2026-04-27-fa-revisit-7b-long-prefill.md`.
+
+    **Next lever with measured headroom:** §C-v2-A resurrection
+    is the most promising candidate (§22's tile=128 partially
+    alleviates the per-step K+1 verify cost — needs a fresh
+    measurement cycle on the side branch under
+    `prefillTileSize=128` to settle whether tiled-verify drops
+    per-step cost enough to break the K=4 even-α ceiling at
+    8B IQ3_M × 0.6B Q8). MEMORY64 for 70B-class targets and §D
+    concat-graph batched encoder compute remain conditional on
+    use-case; a heuristic-based prefill-tile default in
+    `ModelInference` (§23 follow-on) is a nice-to-have when the
+    7B+ fleet outgrows hand-curation. All explicitly conditional
+    — pick on demand.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
@@ -2506,11 +2581,21 @@ the host-side ggml graph allocator at `ggml-alloc.c:82`)**.
 **§23 (2026-04-27 — LANDED) flipped §22's gate to default-on
 for 7B+ via per-model registry** (`recommendedPrefillTile`
 field, mirrored in the smoke page). Sub-7B paths bit-identical
-to pre-§23. With those closures, the headroom that remains is
-the deferred concat-graph batched compute lever for encoders
-(only opens on a batch-throughput use-case) plus MEMORY64 for
-70B-class targets, and §4 FA at long-prefill on 7B+ — now
-actually testable thanks to §22+§23.
+to pre-§23. **§24 (2026-04-27 — CLOSED) re-ran the §20 FA matrix
+on the 3 cells §20 could not capture** (Mistral-7B-Q4_K_S,
+Llama-3.1-8B-IQ3_M, Qwen3-8B-IQ3_M × 4 workloads × FA off/on,
+24 cells, 3-trial median) under §23's auto-tile=128. Decision
+rule landed on C: zero models meet B's ≥5% long-short TTFT
+gate (deltas +3.0% / -0.4% / -0.1%) and short-short regressions
+exceed A's 3% gate (Mistral decode -4.5%, Qwen3-8B TTFT +3.6%).
+FA does win long-long TTFT (-7.3% to -23.3%) but neither §20
+rule clause keys on long-long. Gate stays default-off as future
+infra; zero `src/` change. With those closures, the remaining
+headroom is the deferred concat-graph batched compute lever for
+encoders (only opens on a batch-throughput use-case) plus
+MEMORY64 for 70B-class targets, and §C-v2-A resurrection (§22
+partially alleviates per-step K+1 verify cost — never
+re-measured under tile=128 since §22 landed).
 
 Findings, one bug fix, one upstream rebase, one
 quant-promotion, encoder perf characterization, plus a
@@ -2706,12 +2791,16 @@ Boot sequence for a fresh session:
    stub at `tests/prefill-tiling-equivalence.test.ts` (419 → 424;
    skip count 10 → 11). The §23 default-on auto-tile cycle added 2
    registry-shape tests in `tests/eval-models.test.ts` (424 → 426).
-   The WebGPU-gated integration tests skip under Bun (no
+   The §24 §4 FA revisit at 7B+ long-prefill cycle added 0 tests
+   (closure C — measurement campaign + closure writeup; zero `src/`
+   change). The WebGPU-gated integration tests skip under Bun (no
    `navigator.gpu`).
-2. **`git log --oneline -25`** — §23 (§22 default-on auto-tile via
-   `recommendedPrefillTile`) landed on `main` on 2026-04-27 as a
-   single commit. Top of `main` is `0c50e03 feat(eval): §22
-   default-on auto-tile via recommendedPrefillTile`. Below it:
+2. **`git log --oneline -25`** — §24 (§4 FA revisit at 7B+
+   long-prefill, CLOSED) landed on `main` on 2026-04-27 as a single
+   docs/measurement commit (zero `src/` change). Below it: §23
+   (§22 default-on auto-tile via `recommendedPrefillTile`) landed
+   on `main` on 2026-04-27 as a single commit `0c50e03 feat(eval):
+   §22 default-on auto-tile via recommendedPrefillTile`. Below it:
    `1b15f37 docs(TODO): refresh resumption checklist post-§22 merge`.
    Then the §22 fast-forward merge from 2026-04-27: `a73ad88
    docs(TODO): §22 — prefill-tile chunking SHIP GATED`. Below it
@@ -2901,36 +2990,24 @@ deliberately.** §17 (§A matmul kernel), §18 (FA at N=1 decode),
 §19 (§C drafter spec-decode at K=4 with full-row verify), §20
 (§4 FA at prefill / long-decode), the side-branch §C-v2-A
 (greedy spec-decode + GPU-resident K+1 verify), §21 (§D encoder
-perf pass), §22 (7B+ long-prefill graph-buffer tiling), and §23
-(§22 default-on flip) have all closed or landed. §22 + §23
-together turn the 7B+ long-prefill unblock from "opt-in
-workaround" into "default behaviour for the registered fleet"
-— which means the "7B+ long-prefill graph-buffer rework" item
-that §20 / §C-v2-A flagged as the next infra need is now
-**fully landed for any workload that goes through the harness
-or the smoke page**. The algorithmic levers at the canonical
-4-baseline are exhausted; remaining options are deliberate
-strategic choices, not obvious wins.
+perf pass), §22 (7B+ long-prefill graph-buffer tiling), §23
+(§22 default-on flip), and §24 (§4 FA revisit at 7B+
+long-prefill — closed C: zero models meet the gated-ship
+long-short TTFT threshold under tile=128) have all closed or
+landed. §22 + §23 together turn the 7B+ long-prefill unblock
+from "opt-in workaround" into "default behaviour for the
+registered fleet". §24 measured the FA cells §20 could not
+capture and confirmed FA stays behind the manual chain at 7B+
+on three of four workloads (long-long TTFT being the lone
+exception, but neither §20 rule clause keys on it). The
+algorithmic levers at the canonical 4-baseline are exhausted;
+remaining options are deliberate strategic choices, not
+obvious wins.
 
 **Candidate next levers (none are forced; pick on need),
 in rough priority order:**
 
-1. **§4 FA revisit at long-prefill on 7B+ — now actually
-   testable.** §22 + §23 mean Mistral-7B-Q4_K_S, Llama-3.1-8B-
-   IQ3_M, and Qwen3-8B-IQ3_M can prefill 512+ token prompts
-   without hitting the `ggml-alloc.c:82` abort. §20 closed the
-   FA gate on TinyLlama wins (everywhere) + a Mistral 7B
-   short-short -3.3% regression that exceeded the 3% gate; the
-   long-prefill / long-decode cells that would actually test
-   FA's strong shape (seq² attention matrix avoidance) were
-   **never measured** because the abort blocked them.
-   Re-running the §20 matrix with
-   `prefillTileSize=128 + flashAttn=true` on the 4-baseline
-   would settle whether FA wins at the shape it was designed
-   for. **The most direct payoff from §22 + §23 if any.**
-   Plan template: §20 plan at
-   `docs/superpowers/plans/2026-04-26-fa-revisit-long-decode.md`.
-2. **§C-v2-A resurrection (conditional).** §22 partially
+1. **§C-v2-A resurrection (conditional).** §22 partially
    alleviates the per-step K+1 verify cost for short prefills
    via tile chunking. The 8B+ K+1 verify cost at the canonical
    target/drafter ratio was **not** measured in §22, so this
@@ -2940,14 +3017,14 @@ in rough priority order:**
    measurement cycle on the side branch under
    `prefillTileSize=128` would settle it. **Cheap to try; do
    this if speculative decoding is on the roadmap.**
-3. **MEMORY64 for 70B-class targets.** Multi-day engineering
+2. **MEMORY64 for 70B-class targets.** Multi-day engineering
    (pointer-type changes through the bridge, asyncify
    interactions). Only worth it for a concrete 70B+ deployment
    ask.
-4. **§D concat-graph batched encoder compute.** Only opens on
+3. **§D concat-graph batched encoder compute.** Only opens on
    a real batch-encoder-throughput use-case (was non-goal in
    §21).
-5. **Heuristic-based prefill-tile default in `ModelInference`.**
+4. **Heuristic-based prefill-tile default in `ModelInference`.**
    §23 lever (b) — fold the per-model registry into a
    ctor-side derivation from `hyperparams.layerCount ×
    embeddingLength`. Nice-to-have when the registered 7B+
