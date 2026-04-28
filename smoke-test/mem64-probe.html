@@ -41,7 +41,6 @@ const result = {
 window.__memory64ProbeResult = result;
 
 const ONE_GIB = 1n << 30n;
-const benignConsoleErrorPattern = /^adapter_info:/;
 
 // Phase 1 calls webgpu_init/shutdown. Phase 4 re-runs init+shutdown
 // after the cap probe, validating the runtime survived heap pressure.
