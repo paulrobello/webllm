@@ -330,6 +330,7 @@ function render() {
 	renderChart();
 	renderToolChart();
 	renderScatterChart();
+	renderParamSpeedChart();
 	renderDimGroupedChart();
 	renderEmbeddingCosineChart();
 	renderEmbeddingLatencyChart();
@@ -436,6 +437,7 @@ function renderRunning() {
 let speedChartInstance = null;
 let toolChartInstance = null;
 let scatterChartInstance = null;
+let paramSpeedChartInstance = null;
 let dimGroupedChartInstance = null;
 let tempSweepChartInstance = null;
 let thinkingDeltaChartInstance = null;
@@ -922,6 +924,143 @@ function renderScatterChart() {
 	} else {
 		scatterChartInstance.data = data;
 		scatterChartInstance.update();
+	}
+}
+
+// ── 13b. Decode speed vs parameter count scatter ────────────────────
+
+// Median of a non-empty number list. Local helper because dashboard.js
+// doesn't share a math util module with dashboard-charts.js.
+function _medianNum(values) {
+	if (!values.length) return null;
+	const sorted = [...values].sort((a, b) => a - b);
+	const mid = Math.floor(sorted.length / 2);
+	return sorted.length % 2 === 0
+		? (sorted[mid - 1] + sorted[mid]) / 2
+		: sorted[mid];
+}
+
+function renderParamSpeedChart() {
+	const canvas = document.getElementById("param-speed-chart");
+	const host = document.getElementById("param-speed-host");
+	const empty = document.getElementById("param-speed-empty");
+	if (!canvas) return;
+
+	// Group all decode-speed samples by modelId; pull the highest of
+	// (one-shot, interactive) tok/s per run as the "decode tok/s" sample,
+	// then take the median across runs of each model. Skip models whose
+	// id has no recognised param-count token.
+	const samplesByModel = new Map();
+	for (const run of state.runsByRunId.values()) {
+		const oneShot = run.oneShot?.tokensPerSecond ?? 0;
+		const interactive = run.interactive?.tokensPerSecond ?? 0;
+		const tps = Math.max(oneShot, interactive);
+		if (!Number.isFinite(tps) || tps <= 0) continue;
+		const modelId = run.model;
+		if (!modelId) continue;
+		if (!samplesByModel.has(modelId)) samplesByModel.set(modelId, []);
+		samplesByModel.get(modelId).push(tps);
+	}
+
+	const pointsByFamily = new Map();
+	for (const [modelId, samples] of samplesByModel) {
+		const params = inferParamCountB(modelId);
+		if (params == null) continue;
+		const med = _medianNum(samples);
+		if (med == null) continue;
+		const family = inferModelFamily(modelId);
+		const point = {
+			x: params,
+			y: Number(med.toFixed(2)),
+			label: modelId,
+			family,
+		};
+		if (!pointsByFamily.has(family)) pointsByFamily.set(family, []);
+		pointsByFamily.get(family).push(point);
+	}
+
+	if (pointsByFamily.size === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (paramSpeedChartInstance) {
+			paramSpeedChartInstance.destroy();
+			paramSpeedChartInstance = null;
+		}
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	const familyKeys = Array.from(pointsByFamily.keys()).sort();
+	const datasets = familyKeys.map((family) => ({
+		label: family,
+		data: pointsByFamily.get(family),
+		backgroundColor: FAMILY_COLORS[family] ?? FAMILY_COLORS.Other,
+		borderColor: FAMILY_COLORS[family] ?? FAMILY_COLORS.Other,
+		pointRadius: 6,
+		pointHoverRadius: 8,
+	}));
+
+	const data = { datasets };
+
+	const options = {
+		responsive: true,
+		maintainAspectRatio: false,
+		animation: { duration: 400 },
+		scales: {
+			x: {
+				type: "logarithmic",
+				title: { display: true, text: "parameters (B)", color: CHART_COLORS.muted },
+				ticks: {
+					color: CHART_COLORS.muted,
+					callback: (v) => {
+						// Show only "nice" decade-or-half values to avoid the
+						// log-scale tick spew. 0.3, 0.5, 1, 2, 5, 10, 20…
+						const allowed = [0.3, 0.5, 1, 2, 3, 5, 7, 10];
+						return allowed.includes(Number(v)) ? String(v) : "";
+					},
+				},
+				grid: { color: CHART_COLORS.grid },
+			},
+			y: {
+				beginAtZero: true,
+				title: { display: true, text: "median decode tok/s", color: CHART_COLORS.muted },
+				ticks: { color: CHART_COLORS.muted },
+				grid: { color: CHART_COLORS.grid },
+			},
+		},
+		plugins: {
+			legend: {
+				display: true,
+				position: "top",
+				labels: {
+					color: CHART_COLORS.muted,
+					boxWidth: 10,
+					font: { size: 11 },
+				},
+			},
+			tooltip: {
+				backgroundColor: "#161b22",
+				titleColor: CHART_COLORS.text,
+				bodyColor: CHART_COLORS.text,
+				borderColor: "#30363d",
+				borderWidth: 1,
+				callbacks: {
+					label: (ctx) => {
+						const p = ctx.raw;
+						if (!p || p.label === undefined) return "";
+						return `${p.label} [${p.family}]: ${p.x}B params · ${p.y} tok/s`;
+					},
+				},
+			},
+		},
+	};
+
+	if (!paramSpeedChartInstance) {
+		paramSpeedChartInstance = new Chart(canvas.getContext("2d"), { type: "scatter", data, options });
+	} else {
+		paramSpeedChartInstance.data = data;
+		paramSpeedChartInstance.update();
 	}
 }
 

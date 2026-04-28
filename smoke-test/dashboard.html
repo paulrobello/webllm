@@ -96,6 +96,15 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>Decode speed vs parameter count (family colour)</h2>
+    <div class="legend dim">x-axis log scale; y-axis median decode tok/s across runs</div>
+  </div>
+  <div id="param-speed-empty" class="bar-empty">need decode-speed data for at least one model with a recognisable param-count token in its id (e.g. -1.7b-, -7b-)</div>
+  <div id="param-speed-host" class="chart-host scatter-host" hidden><canvas id="param-speed-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Per-dimension accuracy by model</h2>
     <div class="legend dim">generative models only — encoder/embedding models live in their own section below</div>
   </div>
