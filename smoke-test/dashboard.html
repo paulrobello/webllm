@@ -242,6 +242,15 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>Cosine × Latency</h2>
+    <div class="legend dim">one dot per encoder; x = mean cosine across embedding tasks, y = median ms / text (lower-right = faster &amp; less accurate, upper-left = slower &amp; more accurate)</div>
+  </div>
+  <div id="embedding-scatter-empty" class="bar-empty">need both cosine and latency data for at least one encoder</div>
+  <div id="embedding-scatter-host" class="chart-host scatter-host" hidden><canvas id="embedding-scatter-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Runs <span id="embedding-run-count" class="dim">0</span></h2>
     <div class="legend dim">embedding-only profiles</div>
   </div>

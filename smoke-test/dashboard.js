@@ -336,6 +336,7 @@ function render() {
 	renderEmbeddingCosineChart();
 	renderEmbeddingLatencyChart();
 	renderEmbeddingThroughputChart();
+	renderEmbeddingScatterChart();
 	renderTempSweepChart();
 	renderThinkingDeltaChart();
 	renderTtftChart();
@@ -1408,6 +1409,147 @@ function renderEmbeddingThroughputChart() {
 		xTitle: "texts / sec",
 		color: CHART_COLORS.green,
 	});
+}
+
+// Per-encoder palette for the embedding scatter / param charts. Today we
+// only ship two encoders (arctic-embed-s and -m); when a new encoder
+// registers we want a stable, distinct colour for it without invading
+// FAMILY_COLORS (which is reserved for chat families).
+const ENCODER_COLORS = [
+	"#22d3ee", // cyan
+	"#fb923c", // orange
+	"#a78bfa", // violet
+	"#3fb950", // green
+	"#f778ba", // pink
+	"#d29922", // yellow
+];
+
+let embeddingScatterChartInstance = null;
+
+// B1 (Phase B): cosine × latency scatter, the encoder analog of the main
+// tab's accuracy × speed scatter. One dot per encoder modelId; x-axis is
+// the mean cosine across that encoder's embedding tasks, y-axis the median
+// ms / text. No family-colour treatment — encoders are coloured per modelId
+// from a stable palette.
+function renderEmbeddingScatterChart() {
+	const canvas = document.getElementById("embedding-scatter-chart");
+	const host = document.getElementById("embedding-scatter-host");
+	const empty = document.getElementById("embedding-scatter-empty");
+	if (!canvas) return;
+
+	// Latest eval per modelId (encoders have no thinking-mode collision so
+	// modelId alone is the right key — same convention as the latency
+	// builder in dashboard-charts.js).
+	const latestByModel = new Map();
+	for (const ev of state.evalsByEvalId.values()) {
+		if (!isEncoderModel(ev)) continue;
+		const dims = Object.keys(ev.dimensions ?? {});
+		if (!(dims.length === 1 && dims[0] === "embedding")) continue;
+		const prev = latestByModel.get(ev.modelId);
+		if (!prev || prev.timestamp < ev.timestamp) {
+			latestByModel.set(ev.modelId, ev);
+		}
+	}
+
+	const points = [];
+	for (const ev of latestByModel.values()) {
+		const results = Array.isArray(ev.results) ? ev.results : [];
+		const cosines = [];
+		const latencies = [];
+		for (const r of results) {
+			if (r?.dimension !== "embedding") continue;
+			if (typeof r.embeddingCosine === "number" && Number.isFinite(r.embeddingCosine)) {
+				cosines.push(r.embeddingCosine);
+			}
+			if (typeof r.latencyMs === "number" && Number.isFinite(r.latencyMs) && r.latencyMs > 0) {
+				latencies.push(r.latencyMs);
+			}
+		}
+		if (cosines.length === 0 || latencies.length === 0) continue;
+		const meanCosine = cosines.reduce((a, b) => a + b, 0) / cosines.length;
+		const medMs = _medianNum(latencies);
+		if (medMs == null) continue;
+		points.push({
+			x: Number(meanCosine.toFixed(4)),
+			y: Number(medMs.toFixed(1)),
+			modelId: ev.modelId,
+		});
+	}
+
+	if (points.length === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (embeddingScatterChartInstance) {
+			embeddingScatterChartInstance.destroy();
+			embeddingScatterChartInstance = null;
+		}
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	// Sort by modelId for stable colour assignment across renders.
+	points.sort((a, b) => a.modelId.localeCompare(b.modelId));
+	const datasets = points.map((p, i) => ({
+		label: p.modelId,
+		data: [p],
+		backgroundColor: ENCODER_COLORS[i % ENCODER_COLORS.length],
+		borderColor: ENCODER_COLORS[i % ENCODER_COLORS.length],
+		pointRadius: 7,
+		pointHoverRadius: 9,
+	}));
+
+	const options = {
+		responsive: true,
+		maintainAspectRatio: false,
+		animation: { duration: 400 },
+		scales: {
+			x: {
+				title: { display: true, text: "mean cosine", color: CHART_COLORS.muted },
+				ticks: { color: CHART_COLORS.muted },
+				grid: { color: CHART_COLORS.grid },
+			},
+			y: {
+				beginAtZero: true,
+				title: { display: true, text: "median ms / text", color: CHART_COLORS.muted },
+				ticks: { color: CHART_COLORS.muted },
+				grid: { color: CHART_COLORS.grid },
+			},
+		},
+		plugins: {
+			legend: {
+				display: true,
+				position: "top",
+				labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+			},
+			tooltip: {
+				backgroundColor: "#161b22",
+				titleColor: CHART_COLORS.text,
+				bodyColor: CHART_COLORS.text,
+				borderColor: "#30363d",
+				borderWidth: 1,
+				callbacks: {
+					label: (ctx) => {
+						const p = ctx.raw;
+						if (!p) return "";
+						return `${p.modelId}: cos ${p.x.toFixed(3)} · ${p.y.toFixed(0)} ms`;
+					},
+				},
+			},
+		},
+	};
+
+	if (!embeddingScatterChartInstance) {
+		embeddingScatterChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "scatter",
+			data: { datasets },
+			options,
+		});
+	} else {
+		embeddingScatterChartInstance.data = { datasets };
+		embeddingScatterChartInstance.options = options;
+		embeddingScatterChartInstance.update();
+	}
 }
 
 function renderEmbeddingPerfChart({
