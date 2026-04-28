@@ -15,21 +15,38 @@
 > `createSmokeCompletionRunner` is gone. Decode-mode selection is now
 > per-step (greedy / topk / full) so steps without active steering state
 > stay on the topk fast path even when the config configures steering.
-> Current smoke-bench baselines (browser, realistic sampling, 3-trial
-> median on 2026-04-25 after qwen3-1.7B characterization landed):
-> - tinyllama-1.1b-chat-q4_0: **~105 tok/s decode**
-> - qwen3-0.6b-q4f16 (actual: Q8_0), thinking-off: **~85 tok/s decode**
-> - qwen3-0.6b-q4f16 (actual: Q8_0), thinking-on: **~93 tok/s decode**
+> **Current canonical baselines (post-§32, `bun run eval/perf.ts
+> --runs 3` non-profile, captured 2026-04-27/28).** The canonical 6
+> are the ship-gate fleet for every rebase + sweep cycle (§27 / §32
+> templates):
+> - tinyllama-1.1b-chat-q4_0 (Q4_0): **110.8 tok/s decode**
+> - qwen3-0.6b-q4f16 (actual: Q8_0): **89.8 tok/s decode**
 >   (was ~17 — see `3e5be59`: CPU post-filter top-K replaced the
 >   full-vocab readback + JS sampling pipeline that was costing
 >   ~76 tok/s on Qwen3's 152K vocab)
-> - qwen3-1.7b-q4f16 (actual: Q8_0), thinking-on: **~66 tok/s decode**
->   (clean 117-token run; thinking-off 17-token run measured ~59 but
->   is warmup-dominated)
-> - smollm2-360m-q4f16 (Q4_0): **~106 tok/s decode** (within noise of
->   TinyLlama-1.1B at the same quant despite 3× fewer params; encode
->   overhead dominates at this scale, matmul takes a back seat — see
->   Active Step §10 wave-1 entry below)
+> - qwen3-1.7b-q4f16 (actual: Q8_0): **62.2 tok/s decode**
+>   (warmup-dominated at 17 tokens; longer 117-token runs land
+>   higher steady-state)
+> - mistral-7b-instruct-v0.3-q4ks (Q4_K_S): **35.0 tok/s decode**
+>   (5-run median; first-run wall-time outlier excluded)
+> - llama-3.1-8b-instruct-iq3m (IQ3_M): **27.2 tok/s decode**
+>   (5-run median; -6.2% vs §27 baseline 29.0, accepted as final
+>   per §32 — H1 "tied-embedding × #22456 aliasing" rejected at §32a)
+> - qwen3-8b-iq3m (IQ3_M): **27.2 tok/s decode** (post-§27, +80% on
+>   §16's pre-rebase 16.2 from upstream's #22344 fast i-quant
+>   mat-vec kernels)
+>
+> Smaller-fleet pins (wave-1 / arch-survey, 2026-04-26):
+> - smollm2-360m-q4f16 (Q4_0): ~106 tok/s decode (within noise of
+>   TinyLlama at the same quant despite 3× fewer params — encode
+>   overhead dominates at this scale; see §10 wave-1 entry)
+> - qwen3-4b-q4f16 (Q4_0): 35.5 tok/s, **highest accuracy in
+>   fleet** at 88-90% (§10 wave-1)
+>
+> Profile-mode pins for the canonical 6 (3-run median, perturbed
+> -15 to -28% vs non-profile due to per-dispatch timestamp
+> sampling — see `eval/reports/pre-rebase-baselines-2026-04-28/
+> SUMMARY.md`): 87.9 / 68.2 / 44.0 / 29.7 / 23.5 / 21.8 tok/s.
 >
 > Bench-full coverage at 1.7B landed (6 profiles · 3 off + 3 thinking)
 > with overall accuracy 82–89% and per-profile decode (smoke chat
