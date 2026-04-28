@@ -805,8 +805,173 @@ rebuilt, MANIFESTs verified — see closure entry in Watch list).
 at the canonical 4-baseline are exhausted (§17-§29 closed matmul,
 FA, drafter, encoder, prefill-tiling, spec-decode families).
 Upstream cadence check 2026-04-28: no `ggml-webgpu/` movement → no
-rebase trigger near firing. Perf next-work is gated entirely on
-external triggers (see "External-trigger candidates").
+rebase trigger near firing.
+
+**MEMORY64 full bridge migration promoted to active 2026-04-28**
+(was external-trigger; user-requested as next major work item).
+See dedicated section below.
+
+---
+
+### MEMORY64 full bridge migration (active, queued 2026-04-28)
+
+**One-line goal.** Migrate the production WebLLM build from the
+4 GiB-cap WASM32 path to the 16 GiB-cap WASM64 path so the engine
+can host 13B Q4_K_S (~7.4 GiB) and 30B IQ3_M (~12.8 GiB) targets
+within the 30B project ceiling.
+
+**Probe state — what's already established:**
+
+- ✅ ASYNCIFY × MEMORY64 round-trip works (§31 closure;
+  `eval/reports/memory64-probe-2026-04-28/SUMMARY.md`). The single
+  load-bearing risk axis is retired.
+- ✅ BigInt ABI gap closed by `bridge_malloc` / `bridge_free` shims
+  in `src/wasm/webgpu-bridge.cpp`; exports added in
+  `src/wasm/CMakeLists.txt` (§31a; `SUMMARY-31a.md`).
+- ✅ Configured cap = **15 GiB measured** at
+  `MAXIMUM_MEMORY=16GB` (§31a Phase 3, 15 × 1 GiB allocations
+  succeed; iter 15 returns NULL with overhead reserved).
+- ✅ Toolchain cap = **16 GiB hard** — Emscripten 5.0.6 wasm-ld
+  rejects `--max-memory > 17179869184` at link time (§31b).
+  *Implication:* 30B IQ3_M at seq=2048 lands at ~14.8-15.8 GiB
+  working set, which is the toolchain ceiling within margin of
+  error. 8B and 13B have substantial headroom.
+- ✅ `webllm-wasm-mem64.{js,wasm}` builds cleanly via
+  `make mem64-probe`; the CMake conditional block already wires
+  `-sMEMORY64=1 -sWASM_BIGINT=1 -sMAXIMUM_MEMORY=16GB`.
+
+**Phasing skeleton** (mirrors §17/§18/§19/§20 phased structure;
+detailed plan to be authored via `superpowers:writing-plans` as the
+next step):
+
+1. **Phase 0 — audit + scope.** Catalog every `m._malloc` /
+   `m._free` call site in `src/inference/`, `src/wasm/`,
+   `src/models/`, `smoke-test/`, and `eval/`. Audit
+   `webgpu-bridge.cpp` for `int32_t size` / `int32_t offset`
+   parameters that cap a single transfer at 2 GiB (spec §6 of
+   §31a flagged `tensor_set_data` as one example). Map the
+   GGUF streaming loader's JS↔WASM boundary points where byte
+   offsets must remain BigInt under wasm64. Output: a punch list
+   of touched call sites + signature changes; no code yet.
+2. **Phase 1 — JS-side bridge migration.** Replace `_malloc` /
+   `_free` with `_bridge_malloc` / `_bridge_free` at every TS
+   call site identified in Phase 0. The bridge already returns
+   BigInt under wasm64 and Number under wasm32, so each callsite
+   needs a small marshaling change to accept either. Existing
+   wasm32 build remains green throughout (`make checkall` per
+   commit). Reversibility: trivial — bridge calls work under
+   both binaries.
+3. **Phase 2 — bridge ABI hardening.** Promote `int32_t` size /
+   offset params in `webgpu-bridge.cpp` to `size_t` /
+   `int64_t` where the transfer can exceed 2 GiB. TS bindings
+   updated to pass BigInt. Single-file edit + matching CMake
+   header signature update so the linker emits BigInt JS shims.
+4. **Phase 3 — GGUF loader BigInt boundary.** Update the GGUF
+   streaming loader so byte offsets and chunk sizes stay BigInt
+   across the JS→WASM boundary. The `uploadRangeChunked` heap-
+   grow detachment fix (already in tree) likely generalizes;
+   verify no Number-narrowing slips.
+5. **Phase 4 — production MEMORY64 build.** Wire
+   `webllm-wasm-mem64` as a first-class target (it currently
+   only powers the probe page). Update `make wasm-build` to
+   produce both binaries; bundle copy logic in
+   `Makefile`/`smoke-test/` updated.
+6. **Phase 5 — bench parity gates.** Run `make smoke-bench` +
+   `make bench-inference` + `make bench-profile` on the canonical
+   6 fleet under the wasm64 binary. **Gate: zero regression
+   ≥3% on tok/s for any of the 6 models.** If any model regresses,
+   diagnose (likely pointer-overhead in hot paths) before
+   proceeding. Pre-rebase baselines at
+   `eval/reports/pre-rebase-baselines-2026-04-28/SUMMARY.md`
+   serve as the wasm32 reference.
+7. **Phase 6 — single-vs-dual binary deployment.** Decide
+   between (a) ship MEMORY64-only (drops the 4 GiB fast path;
+   accepts ~5% pointer overhead across all targets per spec
+   §3.1 estimate; halves bundle complexity) or (b) ship both
+   `webllm-wasm.{js,wasm}` (wasm32) and `webllm-wasm-mem64.{js,wasm}`
+   (wasm64) with deploy-time selection (3.5 → 7 MiB total
+   payload; preserves wasm32 fast path for ≤4 GiB models).
+   Decision criterion: if Phase 5 shows ≤2% wasm32 vs wasm64
+   regression on the canonical 6, pick (a); otherwise (b).
+8. **Phase 7 — register a >4 GiB validation target.** Pick a
+   13B candidate (e.g. `mistral-13b-instruct-q4ks` ~7.4 GiB,
+   or `llama-3.1-13b-iq3m` if available) to exercise the
+   actual >4 GiB happy path. **Gate: forward pass coherent
+   on a 36-prompt sanity eval; tok/s within architecturally
+   expected band for 13B Q4_K_S (likely 18-22 tok/s
+   extrapolating from 7B Q4_K_S 35.0 tok/s and 8B IQ3_M
+   27.2 tok/s).**
+
+**Out of scope (defer or skip):**
+
+- **Lifting the Emscripten 16 GiB linker cap.** Custom wasm-ld
+  patch is multi-day + ongoing maintenance; defer until upstream
+  Emscripten lifts it (track on every Emscripten upgrade — see
+  Watch list).
+- **30B targets beyond seq=2048.** Working set lands at the
+  16 GiB toolchain ceiling within margin of error; longer
+  contexts require either lower-bit quants (IQ2_XXS / IQ2_S)
+  or a wasm-ld bump. **Out of scope unless** a deployment ask
+  forces it.
+- **>30B targets.** Excluded by the 30B project ceiling
+  (CLAUDE.md "Workflow policies"). Don't write infra for
+  70B+; cite the ceiling and stop.
+
+**Risk register:**
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| WASM64 perf regression >3% on a canonical-6 model | Medium | Phase 5 gate catches; Phase 6 dual-binary fallback preserves wasm32 fast path. |
+| BigInt-vs-Number TS callsite leak (silently truncates a 64-bit pointer) | Medium | Phase 0 punch list grounds Phase 1 migration; Phase 1 commits run `make checkall` per file. tsc strictness catches type drift. |
+| Hidden `int32_t` size in bridge param (Phase 0 misses one) | Low | Phase 5 gate exercises 13B model with >2 GiB single-buffer transfers; a missed param shows up as truncation/garbled output, not silent perf loss. |
+| GGUF loader BigInt boundary leak under heap-grow | Low | Phase 3 covers; pre-existing `uploadRangeChunked` fix is the precedent. |
+| Bundle size doubles under dual-binary deploy | Low (cost-only) | Phase 6 decision criterion picks single-binary if perf delta ≤2%. |
+| 13B target's coherence is broken by a quantization bug we haven't seen | Low | Phase 7 sanity eval catches; quantization correctness was tested at 7B/8B in §15/§16. |
+| Toolchain ceiling tightens further on Emscripten upgrade | Low | Watch-list re-probe (cheap) catches at upgrade time; current 16 GiB is the absolute spec ceiling for `--max-memory`. |
+
+**Gates per phase:**
+
+- Phase 0: punch list reviewed; no implementation.
+- Phase 1-4: `make checkall` clean per commit; existing
+  wasm32 build remains green.
+- Phase 5: zero ≥3% regression on canonical 6. Block on
+  failure; diagnose before Phase 6.
+- Phase 7: 13B target loads and runs a 36-prompt sanity eval
+  coherently.
+
+**Probe artifacts (canonical reference):**
+
+- `eval/reports/memory64-probe-2026-04-28/SUMMARY.md` — §31
+  parent probe (ASYNCIFY × MEMORY64 retired).
+- `eval/reports/memory64-probe-2026-04-28/SUMMARY-31a.md` —
+  §31a sub-probe (BigInt bridge + 15 GiB cap).
+- `eval/reports/memory64-probe-2026-04-28/SUMMARY-31b.md` —
+  §31b cap-bump probe (16 GiB toolchain ceiling).
+- `docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md`
+  — probe spec (the cap-probe series; **not** the full
+  migration spec — that's the next step's writing-plans
+  output).
+
+**Next concrete action:** invoke `superpowers:writing-plans` to
+author `docs/superpowers/plans/2026-MM-DD-memory64-full-migration.md`
+(matching `2026-04-28-encoder-non-bert-arch.md` in shape — phases,
+gates, commits per phase, success criteria). Per global
+preference, execute via `superpowers:subagent-driven-development`
+in this session once the plan is reviewed.
+
+**Execution policy reminders** (from CLAUDE.md):
+
+- 30B model-size ceiling — do not write infra for 70B+ unless
+  the ceiling lifts.
+- Probe-first default — Phase 0 audit *is* the probe; output is
+  a punch list, not code.
+- Always commit before work — each phase commit per established
+  cadence (`feat(wasm): ...`, `refactor(bridge): ...`, etc.); do
+  not bundle phases.
+- Complexity ≠ implementation time — score phases on maintenance
+  burden / surface area / reversibility, not duration.
+
+---
 
 **Embedding-model expansion (2026-04-28).** Buckets A and B both
 landed: A via commit `41b27bd` (bge-small + bge-large registered);
@@ -1081,18 +1246,9 @@ appetite remains; none are forced.
 
 Three open candidates, all conditional:
 
-- **MEMORY64 full bridge migration** (P2-class spec). Trigger:
-  a 13B or 30B target lands as a real deployment ask. Scope: (i)
-  replace stdlib `malloc`/`free` at every JS call site with
-  `_bridge_malloc` / `_bridge_free`, (ii) audit `int32_t
-  size`/offset params in `webgpu-bridge.cpp` for >2 GiB transfer
-  signatures, (iii) keep BigInt offsets across the GGUF loader's
-  JS↔WASM boundary, (iv) re-run smoke + bench-inf + bench-profile
-  under MEMORY64 to confirm zero regression on the existing
-  ≤4 GiB fleet, (v) decide single-binary vs dual-binary deploy.
-  Probe phase complete (§31 + §31a — `eval/reports/memory64-
-  probe-2026-04-28/SUMMARY-31a.md`); ASYNCIFY × MEMORY64 risk
-  axis retired; BigInt ABI gap closed; 15 GiB cap viable.
+- ~~**MEMORY64 full bridge migration**~~ → **promoted to Active next
+  step 2026-04-28** (see "MEMORY64 full bridge migration" block
+  above the External-trigger section).
 
 - **§D concat-graph batched encoder compute.** Trigger: a real
   batch-encoder-throughput use-case (was non-goal in §21). The
