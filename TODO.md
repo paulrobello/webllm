@@ -1982,10 +1982,14 @@ gate 428/11/0 unchanged. All three opt-in probes from the
 post-§32 next-steps list are now closed (§32a / §31b / patch-12
 squash). All other open work is conditional on external triggers.
 
-### Active next steps (post-§32)
+### Active next steps (post-§31b + squash)
 
-**Opt-in probes — cheap, executable now, useful data either
-direction.** None are forced; pick if appetite + curiosity align.
+**Status:** all three opt-in probes from the post-§32 list closed
+2026-04-28 (§32a / §31b / patch-12 squash — closure entries
+preserved below for reference). No active perf lever in flight.
+The fresh optional items at the bottom of this list (#4-#6) are
+housekeeping / banked-data candidates — none are forced; pick if
+appetite + curiosity align.
 
 1. ~~**§32a — Profile-mode rebench on `llama-3.1-8b-iq3m`**.~~
    **CLOSED 2026-04-28 — hypothesis rejected, §32 baseline
@@ -2064,6 +2068,51 @@ direction.** None are forced; pick if appetite + curiosity align.
    section removed; §32 narrative augmented with squash-pass
    note).
 
+---
+
+**Fresh optional items (post-§31b housekeeping, not yet started).**
+Pick if curious; none required for ship correctness.
+
+4. **Dashboard refresh sweep on the 6-model fleet.** The
+   `smoke-runs.db` dashboard backing store still pins
+   `qwen3-8b-iq3m` at §16's pre-§27 baseline (16.2 tok/s) and
+   does not have post-§32 entries for `llama-3.1-8b-iq3m`
+   (29.0 → 27.2 tok/s) or the other 5 models. Boot-sequence
+   step 6 already documents the staleness. Procedure: `make
+   bench-profile PROFILES=<list>` for the canonical fleet
+   (tinyllama-q4_0, qwen3-0.6b cold/warm × off/on, qwen3-1.7b,
+   mistral-7b-q4ks, llama-3.1-8b-iq3m, qwen3-8b-iq3m × off/on,
+   plus warm/hot if useful) — SSE feeds into the database;
+   live dashboard at `localhost:8033` shows the refresh in
+   real time. Cost: ~30 min wall (mostly model load + decode).
+   Risk: zero (read-only DB writes; existing rows aren't
+   overwritten). Decision rule: trivial — refreshes the
+   visible state to match the canonical claims.
+
+5. **Pre-rebase profile-mode capture on the canonical 6.** Per
+   the §32a process-improvement note: when a `bench` sweep is
+   the planned probe for the *next* rebase trigger, captured
+   pre-rebase profile-mode lets a §32a-style follow-on probe
+   diagnose regressions via same-model pre/post deltas instead
+   of a cross-model proxy. Procedure: `make smoke-bench
+   PERF_MODEL=<m> PERF_RUNS=3` on each of the 6 canonical
+   models; save trace + bucket breakdown to
+   `eval/reports/pre-rebase-baselines-<DATE>/`. Cost: ~15 min
+   wall (6 × 90 sec profile run + ~30 sec build setup, mostly
+   serialised by smoke-restart). Risk: zero. **Pay-off only
+   accrues if a rebase trigger fires within the data's freshness
+   window** (~weeks; bench-mode noise is small but model
+   selection / fleet drift could outdate the comparison if a
+   month+ passes). Skip if no rebase ETA in sight.
+
+6. **§32 SUMMARY cross-link refresh.** Append a "Post-cycle
+   updates" stanza to
+   `eval/reports/llama-cpp-rebase-2026-04-28-eve/SUMMARY.md`
+   pointing at PROFILE-32A.md (hypothesis test outcome) and the
+   patch-12 squash commit. Pure doc cross-link; future readers
+   land on §32 closure → see follow-up cycle outcomes inline.
+   Cost: 5 min wall. Risk: zero.
+
 ### External-trigger candidates
 
 Three open candidates, all conditional:
@@ -2119,10 +2168,36 @@ Three open candidates, all conditional:
   global preference). Mirror §17/§18/§19/§20 plan structure:
   explicit phases, measurable gates, measure-and-close decision
   rule.
-- Probes (§32a, §31b) are short enough to skip the formal plan
-  cycle and execute inline against the existing spec/closure
-  reports — match the §29 verify-cost-probe pattern (one
-  agentchrome js-exec, one writeup commit, done).
+- Probes (§29, §32a, §31b) are short enough to skip the formal
+  plan cycle and execute inline against the existing spec /
+  closure reports — match the §29 verify-cost-probe pattern (one
+  agentchrome js-exec or one make-target run, one writeup
+  commit, done).
+- **Cap probes — bump first, characterize second** (lesson from
+  §31b). When a measurement hits a cap at a configurable value,
+  immediately try bumping the configuration to confirm whether
+  the cap is configuration-bound or toolchain/runtime-bound. The
+  bump is cheap (1 line + 1 rebuild attempt). §31a missed this
+  step and landed a "configured-ceiling-bound, not hardware-
+  bound" framing that understated the constraint by one layer
+  (the configuration ceiling *was* the toolchain ceiling).
+- **Pre-rebase baselines** (lesson from §32a). When a rebase
+  cycle plans a `bench` sweep for outcome classification, capture
+  profile-mode traces on the same model fleet pre-rebase. Post-
+  rebase regressions that classify as "small, accepted" can then
+  be diagnosed via same-model pre/post deltas instead of cross-
+  model proxies. ~15 min one-time cost; saves a follow-on probe
+  when a regression fires.
+- **History rewrites for forward fix-ups** (lesson from §32 →
+  patch-12-squash). When a rebase produces a semantic conflict
+  resolved by a forward-fix-up commit (rather than amending the
+  upstream-touching patch in place to avoid history rewriting),
+  schedule a squash cleanup pass in a follow-on cycle. The squash
+  is mechanically: cherry-pick chain on a temp branch with
+  `cherry-pick --no-commit <fixup>` followed by `commit --amend
+  --no-edit` to fold the fixup into its target. Confidence gate
+  is **WASM byte-identity pre/post squash** — if the artifact
+  matches, the squash is semantically a no-op and safe to swap.
 
 #### Archived: How to test §A lever 1 — see `TODO_ARCHIVE.md`
 
