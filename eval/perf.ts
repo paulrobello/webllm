@@ -175,17 +175,12 @@ async function run(
 	// Trigger N page reloads with cache busting and collect tok/s from each.
 	const perfRuns: PerfRun[] = [];
 	const allTraces: DecodeTrace[] = [];
-	// §22 default-on auto-tile: when --prefill-tile is omitted, fall back
-	// to the registry's `recommendedPrefillTile` so 7B+ entries unblock
-	// long-prefill graphs by default while sub-7B entries stay on the
-	// single-graph fast path. Explicit `--prefill-tile <n>` wins;
-	// `--prefill-tile 0` opts out.
-	const effectivePrefillTile =
-		opts.prefillTile !== undefined
-			? opts.prefillTile
-			: model.recommendedPrefillTile !== undefined
-				? String(model.recommendedPrefillTile)
-				: undefined;
+	// §30 prefill-tile heuristic: when --prefill-tile is omitted we leave
+	// `prefillTile` undefined here so the smoke page also leaves it
+	// unspecified — `ModelInference` ctor's hyperparam-derived default
+	// (computeDefaultPrefillTileSize) decides. Explicit `--prefill-tile <n>`
+	// (including 0) still wins.
+	const effectivePrefillTile = opts.prefillTile;
 
 	for (let i = 0; i < nRuns; i++) {
 		process.stdout.write(`Run ${i + 1}/${nRuns}...`);

@@ -89,6 +89,26 @@ export function getRopeModeForArchitecture(
 }
 
 /**
+ * Compute the default `prefillTileSize` for a model based on hyperparameters.
+ *
+ * Rule: `layerCount >= 32 AND embeddingLength >= 4096` → 128, else 0.
+ *
+ * Maps directly to the §22 abort signature observed in
+ * `eval/reports/prefill-tiling-2026-04-27/00-phase0-diagnostic.txt`:
+ * "32 layers × seq=512 of F32 intermediates" exceeds the host-side ggml graph
+ * allocator budget at `ggml-alloc.c:82`. Either gate alone keeps the per-tile
+ * working set below the budget on every currently-registered model.
+ *
+ * Override surface (ctor opt / `?prefillTile=` / `--prefill-tile`) wins
+ * unconditionally — including the explicit-zero force-disable path.
+ *
+ * Spec: `docs/superpowers/specs/2026-04-28-prefill-tile-heuristic-design.md`.
+ */
+export function computeDefaultPrefillTileSize(hp: ModelHyperparams): number {
+	return hp.layerCount >= 32 && hp.embeddingLength >= 4096 ? 128 : 0;
+}
+
+/**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
@@ -146,7 +166,8 @@ export class ModelInference {
 		this.wasm = wasm;
 		this.hp = hyperparams;
 		this.flashAttn = opts.flashAttn ?? false;
-		this.prefillTileSize = opts.prefillTileSize ?? 0;
+		this.prefillTileSize =
+			opts.prefillTileSize ?? computeDefaultPrefillTileSize(hyperparams);
 		if (this.prefillTileSize < 0) {
 			throw new Error(
 				`prefillTileSize must be >= 0; got ${this.prefillTileSize}`,

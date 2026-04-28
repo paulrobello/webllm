@@ -147,28 +147,17 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// long-prefill request and watches console for the abort to capture
 	// the offending buffer size.
 	const diagnoseAlloc = params.get("diagnoseAlloc") === "1";
-	// §22 prefill-tiling gate: ?prefillTile=N enables auto-chunking of long
-	// forward calls. When the URL param is absent, fall back to the
-	// per-model auto-default below — 7B+ entries unblock long-prefill
-	// graphs by defaulting to tile=128; sub-7B entries stay on the
-	// single-graph fast path. Mirror `recommendedPrefillTile` in
-	// `eval/models.ts` when changing this map. Pass `?prefillTile=0`
-	// to force-disable on a 7B+ model.
-	const RECOMMENDED_PREFILL_TILE = {
-		"mistral-7b-instruct-v0.3-q4ks": 128,
-		"mistral-7b-instruct-v0.3-q3km": 128,
-		"mistral-7b-instruct-v0.3-iq4xs": 128,
-		"llama-3.1-8b-instruct-iq3m": 128,
-		"qwen3-8b-iq3m": 128,
-	};
+	// §22 prefill-tiling gate: `?prefillTile=N` forces a specific tile size.
+	// When the URL param is absent, we leave the ctor opt undefined and let
+	// `ModelInference`'s hyperparam-derived default decide (see §30 +
+	// `computeDefaultPrefillTileSize` in src/inference/model-inference.ts).
+	// Pass `?prefillTile=0` to force-disable on a 7B+ model.
 	const prefillTileParam = params.get("prefillTile");
-	let prefillTileSize = 0;
+	let prefillTileOverride; // undefined → ctor heuristic decides
 	if (prefillTileParam !== null) {
 		const raw = Number(prefillTileParam);
-		prefillTileSize =
-			Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
-	} else if (RECOMMENDED_PREFILL_TILE[modelId] !== undefined) {
-		prefillTileSize = RECOMMENDED_PREFILL_TILE[modelId];
+		prefillTileOverride =
+			Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
 	}
 	// §D embed-perf measurement loop (driven by eval/embed-perf.ts harness).
 	// `embedPerf` enables the hook; null = no-op (existing smoke unaffected).
@@ -213,12 +202,6 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	faPill.className = `mode-pill ${flashAttnEnabled ? "on" : "off"}`;
 	faPill.textContent = `FA: ${flashAttnEnabled ? "ON" : "OFF"}`;
 	modeBar.appendChild(faPill);
-	if (prefillTileSize > 0) {
-		const tilePill = document.createElement("span");
-		tilePill.className = "mode-pill on";
-		tilePill.textContent = `tile: ${prefillTileSize}`;
-		modeBar.appendChild(tilePill);
-	}
 	if (profileName) {
 		const profilePill = document.createElement("span");
 		profilePill.className = "mode-pill profile";
@@ -408,11 +391,18 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			} else {
 				inference = new ModelInference(wasm, parsed.hyperparams, {
 					flashAttn: flashAttnEnabled,
-					prefillTileSize,
+					prefillTileSize: prefillTileOverride,
 				});
 				if (profileMode) {
 					inference.traceEnabled = true;
 					window.__decodeTraces = [];
+				}
+				const resolvedTile = inference.prefillTileSize;
+				if (resolvedTile > 0) {
+					const tilePill = document.createElement("span");
+					tilePill.className = "mode-pill on";
+					tilePill.textContent = `tile: ${resolvedTile}`;
+					modeBar.appendChild(tilePill);
 				}
 			}
 			const t1 = performance.now();
@@ -563,7 +553,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				const drafterInference = new ModelInference(
 					drafterWasm,
 					drafterParsed.hyperparams,
-					{ prefillTileSize },
+					{ prefillTileSize: prefillTileOverride },
 				);
 				drafterInference.loadWeights(drafterGgufCtx, drafterDataAt);
 				const drafterCtxLen =

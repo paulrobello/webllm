@@ -1482,7 +1482,7 @@ dashboard hygiene pass from these sessions:
   broadcast deletes).
 
 **Next target options (pick one — see "Recommended first move"
-below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28/§29
+below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28/§29/§30
 all closed):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
@@ -1498,6 +1498,7 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §27. ~~llama.cpp rebase + free-win sweep.~~ **LANDED 2026-04-27 — §27.** Rebased `webllm-browser-patches` `78433f606 → 434b2a1ff` (zero conflicts, all 11 patches replayed). Bench sweep on 6 models found **+70-80% free win on IQ3_M** (qwen3-8b-iq3m 15.1 → 27.2 tok/s; llama-3.1-8b-iq3m 16.8 → 29.0) from upstream's #22344 fast i-quant mat-vec kernels. Other quants +4-6%. Profile-mode rebench: matmul **48.04 → 23.07 ms** (-52%), dispatch count unchanged (805/token). §16's 16.2 tok/s baseline for `qwen3-8b-iq3m` is obsolete — canonical bench-inf is now **27.2 tok/s**. Commits `db50d28` / `ccf2abb` / `7402e4b`.
 §28. ~~§C-v2-A re-measurement post-§27 rebase.~~ **CLOSED 2026-04-28 on side branch `feat/spec-decode-v2-greedy` tip `9bdd707`** — gates **worsened**, not improved (gate 1: 0.42×→0.34×; gate 2: 0.54×→0.45×). Target baseline scaled +78% (15.8→28.2 tok/s) but drafted path only +45-49% — drafter qwen3-0.6b is Q8_0 (not i-quant), retains pre-rebase cost; only K+1=5 verify benefits, amortized across 5 tokens. §26 path (a) "faster K+1 verify" is now **empirically closed**. TODO ref `d10971b` on main; raw matrix at `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/SUMMARY.md` on side branch.
 §29. ~~§C-v2-A path (c) "smaller i-quant drafter".~~ **CLOSED 2026-04-28 by direct verify-cost probe on side branch tip `4e11d79`.** §28 opened path (c) as a new theoretical resurrection candidate. Probe directly measured `forwardVerifyArgmax` cost on the §28 cell-3 workload: verify is **210 ms/call** (median, p10=207, p90=213) over 27 unique calls — 5.9× a solo-decode step (35.5 ms) — driven by nTokens=5 mat-mat falling outside #22344's fast i-quant *mat-vec* kernels (matmul 187 ms = 90% of compute; dispatch count 796 vs solo 805 = identical graph topology). Cycle decomposition: 27 verify cycles × 210 ms = 5670 ms of 6842 ms wall (83% of cycle); drafter+overhead = 43 ms/cycle ≈ K=4 × 11 ms/forward. **Counterfactual drafter→0:** cycle = 210 ms / 2.37 tok = 11.3 tok/s = 0.40× the 28.2 tok/s baseline, fails both gates by 3.8× / 0.6×. Path (c) cannot close the gates regardless of drafter cost. Path (b) MEMORY64 → 70B+ target is the only remaining theoretical v2-A path. Probe cost: 1 profile run + 1 agentchrome js-exec ≈ 2 min wall. Saved: multi-day model acquisition campaign. Side branch tip `4e11d79`; report at `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/VERIFY-COST-PROBE.md` on side branch.
+§30. ~~Heuristic-based prefill-tile default in `ModelInference`.~~ **CLOSED 2026-04-28 — refactor landed on `main`.** Replaced §23's dual-source-of-truth pattern (`recommendedPrefillTile` field on `BenchmarkModel` + mirrored `RECOMMENDED_PREFILL_TILE` map in `smoke-test/real-model-page.js`) with `computeDefaultPrefillTileSize(hp)` exported from `src/inference/model-inference.ts`. Rule: `layerCount >= 32 AND embeddingLength >= 4096` → 128, else 0. Maps directly to the §22 abort signature ("32 layers × seq=512 of F32 intermediates"). Pre-edit Phase 0 probe validated all 18 downloaded registered models classify identically to the prior registry. Tile pill in the smoke page now renders post-ctor from `inference.prefillTileSize` so the auto-default is visible without page-side duplication. Override surfaces unchanged: `{ prefillTileSize: N }` ctor opt, `?prefillTile=N` URL, `--prefill-tile <n>` CLI all win, including the explicit-zero force-disable path. Browser smoke regression (B.1-B.4 from spec) verified all four overrides + auto-defaults work. Net change: −31 LOC (88 ins / 89 del across 6 files), 427 → 428 tests. Spec: `docs/superpowers/specs/2026-04-28-prefill-tile-heuristic-design.md`. Plan: `docs/superpowers/plans/2026-04-28-prefill-tile-heuristic.md`.
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -1809,7 +1810,7 @@ Boot sequence for a fresh session:
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
    should return **29 runs / 30 evals** (unchanged through
-   §17/§18/§19/§20/§21/§22/§23/§24/§26/§27/§28/§29 — none of the
+   §17/§18/§19/§20/§21/§22/§23/§24/§26/§27/§28/§29/§30 — none of the
    ten closures produced new dashboard data, only TODO
    writeups, perf.ts logs, §22's
    `eval/reports/prefill-tiling-2026-04-27/` matrix, §26's
@@ -1943,12 +1944,13 @@ in rough priority order:**
    a real batch-encoder-throughput use-case (was non-goal in
    §21). §27 rebase didn't deliver an encoder-side free win
    (encoder is dispatch-bound, not memory-bound).
-4. **Heuristic-based prefill-tile default in `ModelInference`.**
-   §23 lever (b) — fold the per-model registry into a
-   ctor-side derivation from `hyperparams.layerCount ×
-   embeddingLength`. Nice-to-have when the registered 7B+
-   fleet grows past hand-curation; defer until that pressure
-   actually exists.
+4. ~~**Heuristic-based prefill-tile default in `ModelInference`.**~~
+   **CLOSED 2026-04-28 — §30.** §23 lever (b) landed: registry
+   field `recommendedPrefillTile` and smoke mirror map deleted;
+   ctor now derives from `hyperparams.layerCount ×
+   embeddingLength` via `computeDefaultPrefillTileSize`. All 18
+   downloaded registered models classify identically to the prior
+   registry (Phase 0 probe). Override surfaces unchanged.
 5. ~~**Smaller i-quant drafter for §C-v2-A path (c, new).**~~
    **CLOSED 2026-04-28 — §29.** Direct verify-cost probe on
    the §28 cell-3 workload measured verify at **210 ms/call**
