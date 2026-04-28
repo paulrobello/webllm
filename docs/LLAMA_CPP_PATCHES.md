@@ -37,13 +37,18 @@ binary that crashes the page during inference.
 The branch currently carries eleven commits on top of upstream `master`,
 in the order shown (oldest first). Commit 7 and its revert (commit 8)
 are kept as a pair pending a proper replacement; treat them as a no-op
-until you hear otherwise. Last rebased onto upstream master 2026-04-26
-to tip `78433f606` ("Fix recurrent state serialization for partial
-reads and writes (#22362)"). The 2026-04-25 → 2026-04-26 delta was
-6 commits, all in backends we don't build (CUDA / CPU / OpenCL),
-admin-only (CODEOWNERS), or in code paths we don't exercise (recurrent
-state serialization) — zero conflicts on rebase. See notes below patch 9
-for the status of FA enablement on browser decode (unchanged).
+until you hear otherwise. Last rebased onto upstream master 2026-04-27
+to tip `434b2a1ff` ("ggml-webgpu: add Q1_0 support (#22374)"). The
+2026-04-26 → 2026-04-27 delta was 13 commits; 3 of them touched
+`ggml-webgpu/` (Q1_0 kernel addition #22374, fast i-quant mat-vec
+kernels #22344, performance-portable register-tile / subgroup matmul
+tuning #22241) — zero conflicts on rebase, all 11 patches replayed
+cleanly. WASM rebuild + checkall (427/11/0) + browser smoke
+(TinyLlama Q4_0 120 tok/s, encoder cosine 0.76, zero console errors)
+verified post-rebase. Safety branch
+`webllm-browser-patches-pre-rebase-2026-04-27` preserves the
+pre-rebase tip (`a536df4f4`). See notes below patch 9 for the status
+of FA enablement on browser decode (unchanged).
 
 ### 1. ggml: iterative `ggml_visit_parents_graph` for WASM stack safety
 

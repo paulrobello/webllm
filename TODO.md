@@ -1232,6 +1232,26 @@ dashboard hygiene pass from these sessions:
   `webllm-browser-patches` (`a536df4f4` after rebase, was
   `391c59f39` pre-rebase). Q3_K_M now coherent at 24.4 tok/s
   on Mistral-7B; Q4_K_S regression-safe at 36.0 tok/s.
+- **llama.cpp rebased to upstream `434b2a1ff` (2026-04-27).**
+  13-commit gap from prior base `78433f606`; zero conflicts;
+  all 11 patches replayed cleanly. 3 of the 13 commits touched
+  `ggml-webgpu/` (Q1_0 kernel #22374, fast i-quant mat-vec
+  kernels #22344, performance-portable register-tile / subgroup
+  matmul tuning #22241) — none collided with our patch surface
+  (LAYER_NORM via `row_norm.wgsl`, browser ASYNCIFY,
+  request-based readback API, profiling, UB shift-by-32 fix).
+  Post-rebase verification: WASM build clean (~32 KB binary
+  growth from new kernels); checkall 427/11/0; browser smoke on
+  TinyLlama Q4_0 reported 120 tok/s decode (above the 105
+  steady-state baseline) and encoder cosine 0.76 (matches §21
+  pin → patches 9-10 LAYER_NORM healthy); zero console
+  errors/warnings. Tip is now `981859864`. Safety branch
+  preserved at `webllm-browser-patches-pre-rebase-2026-04-27`.
+  Free wins from upstream's new register-tile / subgroup matmul
+  tuning are not yet measured — could re-run the canonical
+  4-baseline (`make smoke-bench` on TinyLlama / qwen3-0.6b /
+  qwen3-1.7b / qwen3-8b) on demand to spot any throughput
+  delta from the upstream kernel changes.
 - **llama.cpp rebased to upstream `78433f606` (2026-04-26).**
   6-commit gap from prior base `b760272f1`; zero conflicts.
   None of the 6 commits touch `ggml-webgpu/`, WGSL shaders,
@@ -1497,17 +1517,26 @@ Boot sequence for a fresh session:
    `b872b5f` already on `main`).
 3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
    — confirm the **11-patch stack** is intact and the base
-   is upstream `78433f606 Fix recurrent state serialization`
-   (rebased 2026-04-26). Tip is `a536df4f4 ggml-webgpu: fix
-   UB shift-by-32 in load_u32_at_src{,0}` — patch 11, the
-   bug #28 fix. Safety branch
-   `webllm-browser-patches-pre-rebase-2026-04-26` preserves
-   the pre-rebase tip if needed. **§17, §18, §19, §20, §21,
-   §22, and §23 added zero patches** — the `__EMSCRIPTEN__`
-   guard around FA was already removed in the 2026-04-25
-   rebase; §20 re-uses the bridge wrappers from §18 with no
-   new shader work; §21, §22, and §23 are pure-TS / pure-JS
-   work above the bridge with no shader changes.
+   is upstream `434b2a1ff ggml-webgpu: add Q1_0 support
+   (#22374)` (rebased 2026-04-27). Tip is `981859864 ggml-webgpu:
+   fix UB shift-by-32 in load_u32_at_src{,0}` — patch 11, the
+   bug #28 fix (SHA changed from pre-rebase `a536df4f4` because
+   of the rebase replay; same patch content). Safety branches
+   `webllm-browser-patches-pre-rebase-2026-04-27` (today) and
+   `webllm-browser-patches-pre-rebase-2026-04-26` (prior)
+   preserve pre-rebase tips if needed. The 2026-04-26 → 2026-04-27
+   delta was 13 upstream commits, 3 of them in `ggml-webgpu/`
+   (Q1_0 kernel #22374, fast i-quant mat-vec kernels #22344,
+   register-tile / subgroup matmul tuning #22241) — **zero
+   conflicts** on rebase. WASM rebuild was clean; checkall held
+   at 427/11/0; browser smoke on TinyLlama Q4_0 reported 120
+   tok/s decode (above the 105 baseline) and encoder cosine 0.76
+   (matches §21 pin); zero console errors/warnings. **§17, §18,
+   §19, §20, §21, §22, and §23 added zero patches** — the
+   `__EMSCRIPTEN__` guard around FA was already removed in the
+   2026-04-25 rebase; §20 re-uses the bridge wrappers from §18
+   with no new shader work; §21, §22, and §23 are pure-TS /
+   pure-JS work above the bridge with no shader changes.
 4. **WASM build state.** `smoke-test/webllm-bundle.js` and
    `smoke-test/webllm-wasm.{js,wasm}` mtimes are 2026-04-27
    ~16:11 (post-§22 — contain the `prefillTileSize` ctor
