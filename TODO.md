@@ -1604,7 +1604,7 @@ next free win); §D's deferred concat-graph lever
 
 Boot sequence for a fresh session:
 
-1. **`make checkall`** — confirm 427 pass / 11 skip / 0 fail.
+1. **`make checkall`** — confirm 428 pass / 11 skip / 0 fail.
    The §C drafter spec-decoding work added 19 unit + integration
    tests across `tests/sampler.test.ts` (7), `tests/speculative-
    rejection.test.ts` (11), `tests/forward-verify-equivalence.test.ts`
@@ -1628,13 +1628,30 @@ Boot sequence for a fresh session:
    sweep (3 docs commits); §28 was a side-branch re-measurement
    (1 docs commit on main, side branch tip `9bdd707`); §29 was a
    side-branch verify-cost probe (1 docs commit on main, side
-   branch tip `4e11d79`). The WebGPU-gated integration tests
-   skip under Bun (no `navigator.gpu`).
-2. **`git log --oneline -30`** — top of `main` is the §29
-   §C-v2-A path (c) closure docs commit (1 commit on `main`;
-   the verify-cost probe writeup landed on
-   `feat/spec-decode-v2-greedy` side branch tip `4e11d79`,
-   which is **archived — do not merge**). Below it: `a7633c4
+   branch tip `4e11d79`). **§30 was a refactor (registry → ctor
+   heuristic): net +1 test** — added 3 boundary tests in
+   `tests/prefill-tiling-config.test.ts` (5 → 8) and deleted 2
+   registry-shape tests in `tests/eval-models.test.ts` (the
+   `recommendedPrefillTile auto-default` describe block); 427 →
+   428 pass. The WebGPU-gated integration tests skip under Bun
+   (no `navigator.gpu`).
+2. **`git log --oneline -30`** — top of `main` is the §30
+   prefill-tile heuristic refactor (`88b74f9 refactor(prefill-tile):
+   replace dual-registry pattern with hyperparam heuristic`).
+   This is the FIRST `src/`-touching commit since §23 (`0c50e03`,
+   2026-04-27): all of §24-§29 were measurement-only / docs-only.
+   §30 deletes `recommendedPrefillTile` from `eval/models.ts`,
+   the smoke mirror map from `smoke-test/real-model-page.js`,
+   and the registry fallback from `eval/perf.ts`; adds
+   `computeDefaultPrefillTileSize` to `src/inference/model-inference.ts`.
+   Below `88b74f9`: `3a58949 docs(plan): prefill-tile heuristic
+   refactor — phased implementation plan` and `ae68bbe docs(spec):
+   prefill-tile heuristic — replace dual-registry pattern` are
+   the §30 spec + plan commits. Below those: `cf6dd4a docs(TODO):
+   §29 — §C-v2-A path (c) closed by verify-cost probe` was the §29
+   main commit (verify-cost probe writeup landed on
+   `feat/spec-decode-v2-greedy` side branch tip `4e11d79`, which
+   is **archived — do not merge**). Below it: `a7633c4
    docs(TODO): refresh resumption checklist post-§27 rebase
    + §28 closure` was the §28 main commit. Below that the §28
    measurement: `d10971b docs(perf): §28 §C-v2-A re-measurement
@@ -1734,12 +1751,15 @@ Boot sequence for a fresh session:
    2026-04-25 rebase; §20 re-uses the bridge wrappers from §18
    with no new shader work; §21, §22, and §23 are pure-TS /
    pure-JS work above the bridge with no shader changes.
-4. **WASM build state.** `smoke-test/webllm-bundle.js` and
-   `smoke-test/webllm-wasm.{js,wasm}` mtimes are 2026-04-27
-   ~20:38 (post-§28 round-trip — built against the §27 rebased
-   llama.cpp tip `981859864`, which picks up upstream #22344
-   fast i-quant mat-vec kernels). Bundle is 189 KB on `main`
-   (203 KB on side branch — extra v2-A driver). `webllm-wasm.wasm`
+4. **WASM build state.** `smoke-test/webllm-bundle.js` mtime
+   is 2026-04-27 ~22:38 (post-§30 rebuild after the
+   `computeDefaultPrefillTileSize` helper landed); size is 189574
+   bytes (was 189416 pre-§30 — the helper added ~158 bytes).
+   `smoke-test/webllm-wasm.{js,wasm}` mtimes are still 2026-04-27
+   ~20:38 (no WASM rebuild needed for §30 — TS-only refactor;
+   built against §27 rebased llama.cpp tip `981859864`, which
+   picks up upstream #22344 fast i-quant mat-vec kernels). Side
+   branch bundle is 203 KB — extra v2-A driver. `webllm-wasm.wasm`
    is **2240603 bytes** (was 2207801 pre-§27 — +32 KB from new
    Q1_0 + i-quant kernels). If the artifacts look stale, run:
    `source ~/emsdk/emsdk_env.sh && make wasm-build && bun
@@ -1877,11 +1897,14 @@ Boot sequence for a fresh session:
      `?prefillTile=N` (smoke), `--prefill-tile <n>`
      (`eval/perf.ts`), or `{ prefillTileSize: <n> }`
      (`ModelInference` ctor). Force-disable via `0`.
-     Adding new 7B+ entries: set `recommendedPrefillTile: 128`
-     in `eval/models.ts` AND add the `modelId → 128` row to
-     `RECOMMENDED_PREFILL_TILE` in
-     `smoke-test/real-model-page.js` (the registry test in
-     `tests/eval-models.test.ts` enforces the registry side).
+     Adding new 7B+ entries: nothing to do — the §30
+     `computeDefaultPrefillTileSize(hp)` heuristic in
+     `src/inference/model-inference.ts` derives the default
+     from `hyperparams.layerCount × embeddingLength`, so the
+     ctor self-configures. If the heuristic is wrong on a
+     specific model, override at the call site via
+     `{ prefillTileSize: N }` ctor opt, `?prefillTile=N`
+     URL, or `--prefill-tile <n>` CLI flag.
    - **`eval/perf.ts`** also accepts
      `--prompt-fixture <prefill-256|prefill-512|prefill-1024>` and
      `--decode-tokens <n>` for the long-prefill / long-decode
@@ -1906,18 +1929,23 @@ perf pass), §22 (7B+ long-prefill graph-buffer tiling), §23
 §26 (§C-v2-A re-measurement under tile=128), §27 (llama.cpp
 rebase + free-win sweep — IQ3_M +70-80%), §28 (§C-v2-A
 re-measurement post-§27 rebase — gates *worsened*, lever
-closed harder), and **§29 (§C-v2-A path (c) "smaller i-quant
+closed harder), §29 (§C-v2-A path (c) "smaller i-quant
 drafter" closed by direct verify-cost probe — drafter→0 ceiling
-is 0.40× target solo)** have all closed or landed. The §27
-rebase delivered an unexpected +80% throughput win on IQ3_M
-models (`qwen3-8b-iq3m` 15.1 → 27.2 tok/s) via upstream's
+is 0.40× target solo), and **§30 (prefill-tile heuristic
+refactor — §23 dual-registry pattern replaced by
+`computeDefaultPrefillTileSize` ctor heuristic; first
+`src/`-touching commit since §23)** have all closed or landed.
+The §27 rebase delivered an unexpected +80% throughput win on
+IQ3_M models (`qwen3-8b-iq3m` 15.1 → 27.2 tok/s) via upstream's
 #22344 fast i-quant mat-vec kernels — a free win for the 8B+
 fleet. §28 then settled whether that target speedup reopened
 §C-v2-A: empirically it did not. §29 settled whether the
 "smaller i-quant drafter" path (c) opened by §28 was viable:
 empirically it is not — verify is 210 ms/call (83% of cycle),
-so even an infinitely-fast drafter caps the cell at 0.40×.
-The algorithmic levers at the canonical 4-baseline are
+so even an infinitely-fast drafter caps the cell at 0.40×. §30
+was a developer-experience refactor, not a perf lever — the
+heuristic produces bit-identical defaults on every registered
+model. The algorithmic levers at the canonical 4-baseline are
 exhausted; remaining options are deliberate strategic choices,
 not obvious wins.
 
@@ -1969,6 +1997,15 @@ in rough priority order:**
    every llama.cpp rebase. The §27 cycle showed this pays
    off — #22344 was a +80% free win nobody anticipated.
    Mechanical; trigger on demand.
+
+**3 candidates remain open** (in the list above: #2 MEMORY64,
+#3 §D batched encoder, #6 upstream rebase + free-win sweep). All
+three are conditional / external-trigger:
+- #2 needs a concrete 70B+ deployment ask.
+- #3 needs a real batch-encoder-throughput use-case.
+- #6 needs upstream `ggml-webgpu` to actually move (last check
+  2026-04-27 found origin/master at `434b2a1ff` — same SHA we're
+  rebased on; trigger again next session if you want to recheck).
 
 If none of those align with current priorities, the team
 should pick a direction explicitly — there is no obvious
