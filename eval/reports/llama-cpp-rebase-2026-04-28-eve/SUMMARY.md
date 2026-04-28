@@ -216,3 +216,53 @@ crosses this commit** to avoid the misleading "NOTFOUND" link error.
 **Total: ~25 minutes.** Worth it: the data is now on the record;
 future rebases reuse the patch 12 narrative and the cache-staleness
 gotcha.
+
+---
+
+## 10. Post-cycle updates (2026-04-28)
+
+Three follow-on probes ran after this cycle and are referenced here
+for future readers landing on this closure:
+
+- **§32a — profile-mode rebench on `llama-3.1-8b-iq3m`**
+  ([PROFILE-32A.md](PROFILE-32A.md)).
+  Tested §4's "tied embedding × #22456 aliasing-refactor" hypothesis
+  against a same-architecture-class control (qwen3-8b-iq3m post-§27
+  reference). Bucket profile is structurally identical within
+  measurement noise (matmul Δ -0.3%, dispatch delta tracks layer-count
+  delta exactly: 652 = 32 × ~20.4; 805 = 36 × ~22.4). **H1 "tied-
+  embedding × aliasing-refactor" rejected** — would predict matmul or
+  encode-overhead asymmetry vs untied Qwen3-8B; opposite is observed
+  (Llama's lm_head matmul is *faster* per element). **H2 "uniform
+  per-step overhead" supported.** §32 baseline accepted as final. New
+  canonical reference pin: 23.5 tok/s profile-mode / 156-step trace.
+
+- **Patch 12 squash cleanup** (commit
+  [`2850291`](https://github.com/paulrobello/webllm/commit/2850291)).
+  §1's "should be squashed back into patch 3 on a future manual
+  cleanup pass" landed via cherry-pick chain on a temp branch. Tree
+  byte-identical pre/post squash; WASM byte-identical at 2,249,650
+  bytes; ship gate 428/11/0 unchanged. **Patch stack 12 → 11.** New
+  tip `3b8ade2a2` (was `c4af89356`). Safety branches retained:
+  `webllm-browser-patches-pre-squash-2026-04-28` and
+  `webllm-browser-patches-pre-rebase-2026-04-28-eve`. Doc updated
+  in `docs/LLAMA_CPP_PATCHES.md`.
+
+- **§31b — `MAXIMUM_MEMORY` upper-bound probe**
+  (`eval/reports/memory64-probe-2026-04-28/SUMMARY-31b.md`). Bumped
+  `-sMAXIMUM_MEMORY` from `4GB` to `64GB` on the
+  `webllm-wasm-mem64` ctor block; build failed at link with
+  `wasm-ld: error: maximum memory too large, cannot be greater than
+  17179869184` (= 16 GiB exactly, 2^34). **Emscripten 5.0.6's wasm-ld
+  enforces a hard 16 GiB ceiling on `--max-memory`,** independent of
+  the wasm spec's 256 TiB theoretical limit or Chrome's actual
+  runtime cap. Implication for the deferred 30B migration: 30B IQ3_M
+  long-context working set lands within margin of error of the
+  toolchain ceiling — re-probe on every Emscripten upgrade.
+
+**Process improvement noted from §32a for future rebases:** when a
+bench sweep classifies as "small regression, accepted" (§32 template),
+capture pre-rebase profile-mode on the regressing model *before*
+doing the rebase. Cost: ~3 min wall. Pay-off: §32a-style follow-on
+gets a same-model baseline (would have diagnosed conclusively here
+rather than via the cross-model proxy).
