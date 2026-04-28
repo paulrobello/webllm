@@ -295,3 +295,23 @@ test("POST /ingest?kind=eval_started validates payload", async () => {
 	const err = await bad.json();
 	expect(err.code).toBe("bad_request");
 });
+
+test("GET /models returns sorted registry with architecture + paramsB", async () => {
+	const res = await fetch(`http://127.0.0.1:${PORT}/models`);
+	expect(res.ok).toBe(true);
+	const body = (await res.json()) as {
+		models: Array<{ id: string; architecture: string; paramsB?: number }>;
+	};
+	expect(Array.isArray(body.models)).toBe(true);
+	expect(body.models.length).toBeGreaterThan(0);
+	const ids = body.models.map((m) => m.id);
+	expect([...ids].sort()).toEqual(ids);
+	const archValues = new Set(body.models.map((m) => m.architecture));
+	expect(archValues.has("bert")).toBe(true);
+	const llamaModel = body.models.find((m) => m.architecture === "llama");
+	expect(llamaModel).toBeTruthy();
+	expect(
+		typeof llamaModel?.paramsB === "number" ||
+			llamaModel?.paramsB === undefined,
+	).toBe(true);
+});
