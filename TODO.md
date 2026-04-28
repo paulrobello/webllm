@@ -1522,8 +1522,8 @@ dashboard hygiene pass from these sessions:
   broadcast deletes).
 
 **Next target options (pick one — see "Recommended first move"
-below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28/§29/§30
-all closed):**
+below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28/§29/§30/§31
+all closed or partial):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
 B. ~~§A subgroup-cooperative loading.~~ **CLOSED 2026-04-26 — §17.**
@@ -1967,22 +1967,26 @@ Boot sequence for a fresh session:
      `?prefillTile=0` / `--prefill-tile 0` explicitly. FA mode
      is orthogonal.
 
-**Recommended first move:** **No obvious next lever — pick
-deliberately.** §17 (§A matmul kernel), §18 (FA at N=1 decode),
-§19 (§C drafter spec-decode at K=4 with full-row verify), §20
-(§4 FA at prefill / long-decode), the side-branch §C-v2-A
-(greedy spec-decode + GPU-resident K+1 verify), §21 (§D encoder
-perf pass), §22 (7B+ long-prefill graph-buffer tiling), §23
-(§22 default-on flip), §24 (§4 FA revisit at 7B+ long-prefill),
-§26 (§C-v2-A re-measurement under tile=128), §27 (llama.cpp
-rebase + free-win sweep — IQ3_M +70-80%), §28 (§C-v2-A
-re-measurement post-§27 rebase — gates *worsened*, lever
-closed harder), §29 (§C-v2-A path (c) "smaller i-quant
-drafter" closed by direct verify-cost probe — drafter→0 ceiling
-is 0.40× target solo), and **§30 (prefill-tile heuristic
-refactor — §23 dual-registry pattern replaced by
-`computeDefaultPrefillTileSize` ctor heuristic; first
-`src/`-touching commit since §23)** have all closed or landed.
+**Recommended first move:** **§31a follow-up sub-probe is the
+single cheapest open step**, but no perf lever is forced. §17
+(§A matmul kernel), §18 (FA at N=1 decode), §19 (§C drafter
+spec-decode at K=4 with full-row verify), §20 (§4 FA at prefill
+/ long-decode), the side-branch §C-v2-A (greedy spec-decode +
+GPU-resident K+1 verify), §21 (§D encoder perf pass), §22 (7B+
+long-prefill graph-buffer tiling), §23 (§22 default-on flip),
+§24 (§4 FA revisit at 7B+ long-prefill), §26 (§C-v2-A
+re-measurement under tile=128), §27 (llama.cpp rebase +
+free-win sweep — IQ3_M +70-80%), §28 (§C-v2-A re-measurement
+post-§27 rebase — gates *worsened*, lever closed harder), §29
+(§C-v2-A path (c) "smaller i-quant drafter" closed by direct
+verify-cost probe — drafter→0 ceiling is 0.40× target solo),
+**§30 (prefill-tile heuristic refactor — §23 dual-registry
+pattern replaced by `computeDefaultPrefillTileSize` ctor
+heuristic; first `src/`-touching commit since §23)**, and
+**§31 (MEMORY64 cap probe — Phase 1 PASS retires the asyncify
+risk axis; Phase 2 surfaces a stdlib-`_malloc` BigInt-ABI gap;
+lever NOT closed pending §31a sub-probe)** have all closed,
+landed, or hit a measured pause-point.
 The §27 rebase delivered an unexpected +80% throughput win on
 IQ3_M models (`qwen3-8b-iq3m` 15.1 → 27.2 tok/s) via upstream's
 #22344 fast i-quant mat-vec kernels — a free win for the 8B+
@@ -1993,9 +1997,12 @@ empirically it is not — verify is 210 ms/call (83% of cycle),
 so even an infinitely-fast drafter caps the cell at 0.40×. §30
 was a developer-experience refactor, not a perf lever — the
 heuristic produces bit-identical defaults on every registered
-model. The algorithmic levers at the canonical 4-baseline are
-exhausted; remaining options are deliberate strategic choices,
-not obvious wins.
+model. **§31** (MEMORY64 cap probe) confirmed empirically that
+the asyncify-incompatibility fear was overstated — Phase 1 PASS
+retires that risk axis — and surfaced a targeted BigInt-ABI gap
+on stdlib `_malloc` as the actual blocker. The algorithmic
+levers at the canonical 4-baseline are exhausted; remaining
+options are deliberate strategic choices, not obvious wins.
 
 **Candidate next levers (none are forced; pick on need),
 in rough priority order:**
@@ -2009,22 +2016,32 @@ in rough priority order:**
    must scale symmetrically with target speedup or the ratio
    worsens. Side branch retained as archived infra; do not
    merge.
-2. **MEMORY64 for the 8-30B fleet.** The 70B+ framing is
-   **DEFERRED under the 2026-04-28 30B ceiling** — that includes
-   the §C-v2-A "13× → 100× ratio shift via much larger target"
-   resurrection path, which is also deferred (no path to a 100×
-   ratio without crossing the ceiling). What MEMORY64 still
-   buys at ≤30B: 13B Q4_K_S/Q4_K_M (currently above the 4 GiB
-   cap), 30B at IQ3/Q3 quants. Complexity axes (per the
-   complexity-≠-time policy above): bridge surface ≈ 360 LOC C++
-   + ~10 JS heap/pointer call sites; risk surface concentrated
-   in ASYNCIFY interaction (untested combo) and JS-side
-   `Number → BigInt` ABI migration; reversibility good (gated
-   build-flag flip, no public-API change required); external
-   exposure on Emscripten + Chrome MEMORY64 maturity. Gain
-   unmeasured — needs a **probe phase first** (build-flag
-   feasibility + asyncify compatibility check + browser cap
-   probe) before committing. See active brainstorm for spec.
+2. **MEMORY64 for the 8-30B fleet — §31a follow-up sub-probe
+   needed.** The 70B+ framing is **DEFERRED under the 2026-04-28
+   30B ceiling** — that includes the §C-v2-A "13× → 100× ratio
+   shift via much larger target" resurrection path, which is also
+   deferred (no path to a 100× ratio without crossing the ceiling).
+   What MEMORY64 still buys at ≤30B: 13B Q4_K_S/Q4_K_M (currently
+   above the 4 GiB cap), 30B at IQ3/Q3 quants. **§31 cap probe
+   ran 2026-04-28 (closure report:
+   `eval/reports/memory64-probe-2026-04-28/SUMMARY.md`).** Phase 1
+   (ASYNCIFY × MEMORY64) **PASS** — the load-bearing risk axis from
+   §31 spec §4.1 is **retired**. Phase 2 (BigInt ABI smoke) **FAIL**
+   on stdlib `_malloc` only — custom bridge exports get correct
+   BigInt marshaling but `_malloc` returns a JS `Number` (truncated
+   pointer). Phase 3 (cap measurement) was therefore invalid.
+   **Next concrete step (§31a):** narrow follow-up sub-probe —
+   add a thin C wrapper (`bridge_malloc(size_t) → void*` /
+   `bridge_free(void*)`) to `webgpu-bridge.cpp`, export under a
+   distinct name, replace `m._malloc` / `m._free` calls in the
+   harness with the wrapped names, and re-run only Phase 2 +
+   Phase 3 of `mem64-probe.html`. If that produces a credible
+   non-zero cap, decision rule §5.1 from the §31 spec applies to
+   the new value (≥8 GiB → promote to full bridge migration; 6-8
+   GiB → narrow 8B Q4_K_S follow-up; <6 GiB → close lever).
+   Estimated cost: <1 hour wall (build, navigate, capture).
+   Alternative: try a newer Emscripten point release first — may
+   already be fixed upstream; even cheaper to test.
 3. **§D concat-graph batched encoder compute.** Only opens on
    a real batch-encoder-throughput use-case (was non-goal in
    §21). §27 rebase didn't deliver an encoder-side free win
@@ -2059,8 +2076,14 @@ in rough priority order:**
 #3 §D batched encoder, #6 upstream rebase + free-win sweep). All
 three are conditional / external-trigger:
 - #2 reframed under the 2026-04-28 30B ceiling: 70B+ justification
-  is deferred; the ≤30B value (13B at Q4_K, 30B at IQ3/Q3) needs a
-  cheap probe phase before the multi-day cutover commits.
+  is deferred; the ≤30B value (13B at Q4_K, 30B at IQ3/Q3) had its
+  probe phase land 2026-04-28 (§31). ASYNCIFY × MEMORY64 axis is
+  retired — the multi-day-rewrite fear was overstated. Remaining
+  blocker is a stdlib-`_malloc` BigInt-ABI gap; **§31a follow-up
+  sub-probe (a thin `bridge_malloc` wrapper + re-run Phase 2/3)
+  is the cheapest next step** to either get a measured cap value
+  or close the lever. <1 hour wall. Try a newer Emscripten release
+  first if appetite is even narrower.
 - #3 needs a real batch-encoder-throughput use-case.
 - #6 needs upstream `ggml-webgpu` to actually move (last check
   2026-04-28 found origin/master at `516e8d7a8`, 1 commit ahead of
