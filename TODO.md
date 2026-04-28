@@ -845,62 +845,59 @@ appears. Captured as a finding rather than a next step.
 
 ---
 
-### Bucket B follow-ups (post-closure, 2026-04-28)
+### Bucket B follow-ups (post-closure, 2026-04-28) — CLOSED
 
-Five latent bugs surfaced during Phase 3/4 integration (logged in the
-bucket B closure block above). The fixes are committed; the spec they
-contradict is **not** yet updated. Two follow-up items, both honest
-candidates:
+Both queued follow-up items closed 2026-04-28.
 
-11. **Spec accuracy patch** (~15 min, mechanical). Update
-    `docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`
-    §3 to match what actually shipped:
-    - jina-bert-v2 FFN is **GeGLU** (`gelu(gate)*up`), not SwiGLU.
-      llama.cpp truth source: `bert.cpp:122-130`.
-    - nomic-bert RoPE mode is **NEOX**, not NORMAL. llama.cpp truth
-      source: `llama-model.cpp:9266`.
-    - Encoder ALiBi mask is `-|i - j|` populated, not zero-filled.
-      llama.cpp truth source: `llama-graph.cpp:411`.
-    - Tokenizer loader falls back to `bos_token_id`/`eos_token_id`
-      for WordPiece when `cls_token_id`/`mask_token_id` are absent
-      (nomic GGUF omits these; bert convention is bos=cls=101,
-      eos=sep=102).
+11. ~~**Spec accuracy patch**~~ **DONE 2026-04-28.** Patched
+    `docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`:
+    added a top-level "Post-implementation corrections" note enumerating
+    all four spec/reality mismatches with their llama.cpp truth-source
+    line refs; updated §0 (jina FFN GeGLU; nomic RoPE NEOX), §1 Phase 0
+    findings tables, §2 components table (`getRopeModeForArchitecture`
+    row), §3 Point D (softmax mask leaf required + `-|i-j|` populate
+    semantics), §3 Point F (per-arch gate activation: silu for nomic,
+    gelu for jina), §4 Tokenizer (cls/mask → bos/eos fallback for
+    nomic-style GGUFs), and §5 failure-diagnosis notes. The "(Open
+    questions / decisions: None)" §7 block is unchanged — all four
+    corrections are derived from already-shipped code, not from open
+    decisions.
 
-    Why bother: the spec is the load-bearing reference for the next
-    encoder addition (bucket B stretch picks below or any future
-    non-BERT arch). A maintainer reading the spec today gets
-    misleading info on three load-bearing operations and would
-    re-run Phase 3/4 diagnosis to rediscover what's already in the
-    code. Reversibility: trivial (single doc commit). Skip if no
-    encoder work is queued in the next ~3 months — but the cost is
-    low and the doc is short.
-
-12. **Vault-save bucket B doctrines** (~25 min). Three patterns +
-    one debugging note worth capturing across projects:
+12. ~~**Vault-save bucket B doctrines**~~ **DONE 2026-04-28.** All
+    four notes landed at `~/ClaudeVault/`:
     - `Patterns/encoder-parity-gate-via-sentence-transformers.md` —
-      uv-pinned reference capture → browser-driven cosine ≥0.999
-      gate harness. Reusable for any future encoder addition or
-      cross-runtime numerical-parity probe.
-    - `Patterns/llama-cpp-as-arch-truth-source.md` — when an arch
-      decision is ambiguous (RoPE mode, FFN activation, mask fill
-      semantics), `~/Repos/llama.cpp/src/models/<arch>.cpp` and
-      `llama-graph.cpp` are the authoritative reference. Phase 3
-      and Phase 4 each fixed bugs by reading specific line ranges.
-    - `Knowledge/encoder-cosine-degradation-signatures.md` — ALiBi-
-      not-applied = monotonic length-degradation; activation-
-      mismatch = compressed-but-flat near-1.0; tokenizer-mismatch =
-      all-rows-uniform-low. Diagnostic ladder distilled from
-      Phase 3 (ALiBi-mask + GeGLU bugs) and Phase 4 (NEOX-RoPE).
+      uv-pinned reference capture + agentchrome browser-side cosine
+      ≥0.999 gate harness, reusable for any future encoder addition
+      or cross-runtime numerical-parity probe.
+    - `Patterns/llama-cpp-as-arch-truth-source.md` — authoritative
+      file map (`src/models/<arch>.cpp`, `llama-graph.cpp`,
+      `llama-model.cpp`) + 3 worked examples (jina GeGLU, nomic
+      NEOX RoPE, ALiBi `-|i-j|` mask) from bucket B.
+    - `Knowledge/encoder-cosine-degradation-signatures.md` —
+      diagnostic ladder mapping cosine-curve shape to root cause:
+      Signature A (monotonic length-degradation = positional bug),
+      B (compressed-but-flat near-1.0 = activation/scaling bug),
+      C (all-rows-uniform-low = tokenizer/input bug),
+      D (single-row-spike = pooling/edge-case bug). Plus cheap
+      localization tricks (layer-0 cosine, per-block bisect, op-
+      count fingerprint, tokenizer diff).
     - `Debugging/jina-bert-v2-gguf-mirror-omits-alibi-key.md` —
-      gaianet/jina-embeddings-v2-base-en-GGUF doesn't emit
-      `attention.alibi_bias_max`; default value is 8.0. Future
-      mirrors may or may not include it; loader fallback chain in
-      `model-loader.ts` already handles both.
+      `gaianet/jina-embeddings-v2-base-en-GGUF` omits
+      `attention.alibi_bias_max`; default is 8.0; loader fallback
+      handles both mirror cases. Generalizes to any GGUF metadata
+      key with a documented default (rope.freq_base, layer_norm_
+      epsilon, pooling_type, cls/mask token IDs).
 
-    Why bother: every solved-but-not-saved problem is a missed
-    opportunity for the next session. The encoder-parity harness
-    and the llama.cpp-as-truth-source pattern are clearly reusable
-    beyond webllm.
+    Index rebuilt: 3089 notes / 986 tags / 9 MANIFESTs. All 4 notes
+    verified in `Patterns/MANIFEST.md`, `Knowledge/MANIFEST.md`,
+    `Debugging/MANIFEST.md`. Cross-links: the four notes
+    cross-reference each other plus the existing
+    `encoder-architecture-probe-saved-spec-rewrite` (Phase 0 probe)
+    and the four bucket B session-specific debugging notes that
+    captured the original incident timeline (`alibi-mask-fix-
+    insufficient-for-{encoder,jina-v2}-parity`,
+    `jina-bert-v2-encoder-parity-debugging`,
+    `jina-vs-nomic-ffn-activation-mismatch`).
 
 ---
 
