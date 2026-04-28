@@ -20,7 +20,27 @@ sentence-transformers in `capture-refs.py`. Per-row gate: cosine >= 0.999.
 
 ## nomic-embed-text-v1.5 (BERT + RoPE + SwiGLU + fused-QKV)
 
-(filled in Phase 4 / Task 7)
+| Row | Input (truncated)                                    | Cosine    | Pass |
+|----:|------------------------------------------------------|----------:|:----:|
+|   0 | Hello world.                                         | 0.999999  |  Y   |
+|   1 | The quick brown fox jumps …                          | 1.000000  |  Y   |
+|   2 | Embedding models map text …                          | 0.999999  |  Y   |
+|   3 | Café — naïve façade …                                | 1.000000  |  Y   |
+|   4 | .                                                    | 1.000000  |  Y   |
+
+**Result:** 5/5 rows passed.
+**RoPE mode:** NEOX (split-halves, not interleaved). Per
+`llama.cpp/src/llama-model.cpp:9266` (`LLM_ARCH_NOMIC_BERT →
+LLAMA_ROPE_TYPE_NEOX`) and the HF config's
+`rotary_emb_interleaved: false`. The plan template's "NORMAL" hint was
+wrong; cosines under NORMAL stalled at ~0.87-0.94 across all 5 rows.
+**freq_base:** 1000 (loaded from GGUF `nomic-bert.rope.freq_base`;
+nomic-specific value, not 10000).
+**Fused-QKV byte offsets:** nb1=4*headDim, nb2=4*3*E, offsets [0, 4*E, 4*2*E].
+**Tokenizer:** WordPiece. The nomic-embed-text-v1.5 GGUF omits
+`tokenizer.ggml.cls_token_id` and `tokenizer.ggml.mask_token_id`.
+`model-loader.ts` now falls back to `bos_token_id` / `eos_token_id`
+for WordPiece tokenizers (BERT-family convention: [CLS]=bos, [SEP]=eos).
 
 ## Methodology notes
 

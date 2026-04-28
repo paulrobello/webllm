@@ -430,6 +430,26 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "f16",
 	},
 
+	{
+		id: "nomic-embed-text-v1.5-q0f16",
+		name: "Nomic Embed Text v1.5",
+		family: "Nomic Embed",
+		architecture: "nomic-bert",
+		paramsB: 0.137,
+		vramMB: 320,
+		defaultQuant: "q0f16",
+		availableQuants: ["q0f16"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: true },
+		license: "Apache-2.0",
+		contextLength: 2048,
+		tier: "ultrafast",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5",
+		ggufUrl: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF",
+		// Matches `nomic-embed-text-v1.5.f16.gguf` on the mirror.
+		ggufFilePattern: "f16",
+	},
+
 	// --- Specialized models ---
 
 	{

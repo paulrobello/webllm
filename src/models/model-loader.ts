@@ -175,16 +175,23 @@ export class ModelLoader {
 			}
 		}
 
-		const clsTokenId = getMetaNumberOptional(
-			ctx,
-			"tokenizer.ggml.cls_token_id",
-		);
+		// BERT-family WordPiece convention: [CLS] = bos and [SEP] = eos.
+		// Some BERT-family GGUFs (e.g. nomic-embed-text-v1.5) omit
+		// `cls_token_id` and rely on the bos/eos fallback. Mirroring this
+		// fallback keeps WordPiece initialization working across all
+		// BERT-family encoders without per-model special cases.
+		const clsTokenId =
+			getMetaNumberOptional(ctx, "tokenizer.ggml.cls_token_id") ??
+			(type === TokenizerType.WORDPIECE && bosTokenId >= 0
+				? bosTokenId
+				: undefined);
 		// GGUF key is misspelled "seperator" upstream (llama.cpp + Arctic-Embed
 		// GGUFs); do NOT correct to "separator" or bert metadata reads will fail.
-		const sepTokenId = getMetaNumberOptional(
-			ctx,
-			"tokenizer.ggml.seperator_token_id",
-		);
+		const sepTokenId =
+			getMetaNumberOptional(ctx, "tokenizer.ggml.seperator_token_id") ??
+			(type === TokenizerType.WORDPIECE && eosTokenId >= 0
+				? eosTokenId
+				: undefined);
 		const unkTokenId = getMetaNumberOptional(
 			ctx,
 			"tokenizer.ggml.unknown_token_id",

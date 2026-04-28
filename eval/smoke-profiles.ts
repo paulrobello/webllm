@@ -280,6 +280,11 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		model: "jina-embeddings-v2-base-en-q0f16",
 		embedding: true,
 	},
+	{
+		name: "nomic-embed-text-v1.5",
+		model: "nomic-embed-text-v1.5-q0f16",
+		embedding: true,
+	},
 ];
 
 /**
@@ -357,6 +362,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"bge-small",
 		"bge-large",
 		"jina-embeddings-v2-base-en",
+		"nomic-embed-text-v1.5",
 	],
 	embeddings: [
 		"arctic-embed-s",
@@ -364,6 +370,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"bge-small",
 		"bge-large",
 		"jina-embeddings-v2-base-en",
+		"nomic-embed-text-v1.5",
 	],
 };
 

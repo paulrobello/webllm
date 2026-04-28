@@ -83,7 +83,11 @@ export interface ForwardTrace {
 export function getRopeModeForArchitecture(
 	architecture: ModelHyperparams["architecture"],
 ): number {
-	if (architecture === "nomic-bert") return RopeMode.NORMAL;
+	// nomic-bert uses GPT-NeoX-style RoPE (split-halves), per
+	// llama.cpp/src/llama-model.cpp:9266 (LLM_ARCH_NOMIC_BERT →
+	// LLAMA_ROPE_TYPE_NEOX). The HF config also surfaces this as
+	// `rotary_emb_interleaved: false`.
+	if (architecture === "nomic-bert") return RopeMode.NEOX;
 	return String(architecture).startsWith("qwen")
 		? RopeMode.NEOX
 		: RopeMode.NORMAL;
