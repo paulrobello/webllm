@@ -268,6 +268,46 @@
 
 ---
 
+## Project Constraints (set 2026-04-28)
+
+- **Model-size ceiling: 30B parameters.** Anything larger (Llama-3-70B,
+  DeepSeek-V2 236B, etc.) is explicitly out of scope. Plans, specs, and
+  candidate-lever entries that justify their value via 70B+ targets must be
+  **deferred** with this ceiling cited (don't silently drop the lever — record
+  that it's blocked on a scope change). Levers below the ceiling (8-30B) remain
+  in scope.
+- **Quick-wins override on YAGNI.** Speculative or YAGNI-flagged work is
+  allowed when **(a)** there is measured gain (or a cheap probe phase that
+  produces one) and **(b)** the gain outweighs the implementation/maintenance
+  complexity. The §27 free-win sweep is the canonical pattern.
+- **Probe-first is the default.** When a lever's gain is unmeasured,
+  **always start with a probe / measurement phase**. Probes are treated as
+  effectively free — time is not a factor — and they produce the data that
+  drives every subsequent decision. Each probe declares up-front what it
+  measures, the pass/fail thresholds, and which downstream decision it
+  gates. Run probes proactively even when intuition says the answer is
+  obvious; the measurement is the artifact. Templates: §29 verify-cost
+  probe, §27 free-win sweep.
+- **Complexity ≠ implementation time.** Time estimates are chronically
+  overestimated and **do not factor** into whether work is worth doing. Do
+  not reach for "multi-day", "couple of weeks", etc. as a deterrent. Score
+  levers on **maintenance burden**, **surface area**, **risk surface to
+  load-bearing invariants** (ASYNCIFY, JS↔WASM ABI, async readback, patch
+  stack), **reversibility**, and **external-dependency exposure** — not on
+  duration.
+- **Always commit before work.** Commit pending state — specs, plans, TODO
+  updates, policy changes — **before** starting the next implementation
+  chunk. Reason: docs commits carry the load-bearing reasoning behind code
+  changes; bundling them into one big commit destroys revertability (a
+  `git revert` of the implementation nukes the spec that justified it).
+  Use the established cadence — `docs(spec):`, `docs(plan):`,
+  `docs(TODO):`, `feat(...)`, `refactor(...)`, `fix(...)` as separate
+  commits. The `docs/superpowers/` directory is gitignored; specs/plans
+  in it must be force-added (`git add -f`), matching the existing
+  convention (e.g. commits `ae68bbe`, `b23ccc9`, `66bc603`).
+
+---
+
 ## Project Milestones
 
 ### Completed
@@ -1961,13 +2001,22 @@ in rough priority order:**
    must scale symmetrically with target speedup or the ratio
    worsens. Side branch retained as archived infra; do not
    merge.
-2. **MEMORY64 for 70B-class targets.** Multi-day engineering
-   (pointer-type changes through the bridge, asyncify
-   interactions). Only worth it for a concrete 70B+ deployment
-   ask. Bonus: a 70B+ target shifts the §C-v2-A ratio from 13×
-   to ~100×, the regime where Leviathan-style speculation
-   actually pays off — the *only* remaining v2-A resurrection
-   path with measurable headroom.
+2. **MEMORY64 for the 8-30B fleet.** The 70B+ framing is
+   **DEFERRED under the 2026-04-28 30B ceiling** — that includes
+   the §C-v2-A "13× → 100× ratio shift via much larger target"
+   resurrection path, which is also deferred (no path to a 100×
+   ratio without crossing the ceiling). What MEMORY64 still
+   buys at ≤30B: 13B Q4_K_S/Q4_K_M (currently above the 4 GiB
+   cap), 30B at IQ3/Q3 quants. Complexity axes (per the
+   complexity-≠-time policy above): bridge surface ≈ 360 LOC C++
+   + ~10 JS heap/pointer call sites; risk surface concentrated
+   in ASYNCIFY interaction (untested combo) and JS-side
+   `Number → BigInt` ABI migration; reversibility good (gated
+   build-flag flip, no public-API change required); external
+   exposure on Emscripten + Chrome MEMORY64 maturity. Gain
+   unmeasured — needs a **probe phase first** (build-flag
+   feasibility + asyncify compatibility check + browser cap
+   probe) before committing. See active brainstorm for spec.
 3. **§D concat-graph batched encoder compute.** Only opens on
    a real batch-encoder-throughput use-case (was non-goal in
    §21). §27 rebase didn't deliver an encoder-side free win
@@ -2001,11 +2050,17 @@ in rough priority order:**
 **3 candidates remain open** (in the list above: #2 MEMORY64,
 #3 §D batched encoder, #6 upstream rebase + free-win sweep). All
 three are conditional / external-trigger:
-- #2 needs a concrete 70B+ deployment ask.
+- #2 reframed under the 2026-04-28 30B ceiling: 70B+ justification
+  is deferred; the ≤30B value (13B at Q4_K, 30B at IQ3/Q3) needs a
+  cheap probe phase before the multi-day cutover commits.
 - #3 needs a real batch-encoder-throughput use-case.
 - #6 needs upstream `ggml-webgpu` to actually move (last check
-  2026-04-27 found origin/master at `434b2a1ff` — same SHA we're
-  rebased on; trigger again next session if you want to recheck).
+  2026-04-28 found origin/master at `516e8d7a8`, 1 commit ahead of
+  our base `434b2a1ff` — but the new commit is server-side
+  (`tools/server/server-context.cpp`), zero `ggml-webgpu/` touch,
+  so a rebase would replay cleanly with effectively zero free-win
+  measurement. Re-trigger when upstream actually moves on the
+  WebGPU surface).
 
 If none of those align with current priorities, the team
 should pick a direction explicitly — there is no obvious
