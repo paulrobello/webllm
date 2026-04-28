@@ -409,6 +409,27 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "fp16",
 	},
 
+	{
+		id: "jina-embeddings-v2-base-en-q0f16",
+		name: "Jina Embeddings v2 Base EN",
+		family: "Jina Embeddings",
+		architecture: "jina-bert-v2",
+		paramsB: 0.137,
+		vramMB: 320,
+		defaultQuant: "q0f16",
+		availableQuants: ["q0f16"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: true },
+		license: "Apache-2.0",
+		contextLength: 8192,
+		tier: "ultrafast",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/jinaai/jina-embeddings-v2-base-en",
+		ggufUrl: "https://huggingface.co/gaianet/jina-embeddings-v2-base-en-GGUF",
+		// Mirror publishes `jina-embeddings-v2-base-en-f16.gguf`; the `f16`
+		// substring matches uniquely (no q*-quant variants on this mirror).
+		ggufFilePattern: "f16",
+	},
+
 	// --- Specialized models ---
 
 	{

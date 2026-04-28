@@ -29,7 +29,7 @@ interface EncoderLayerWeights {
 	attnNormW: TensorPtr; // post-attn LN gamma
 	attnNormB: TensorPtr; // post-attn LN beta
 
-	ffnGate: TensorPtr | null; // nomic + jina-bert-v2 (SwiGLU)
+	ffnGate: TensorPtr | null; // nomic-bert (SwiGLU) + jina-bert-v2 (GeGLU)
 	ffnUp: TensorPtr; // all
 	ffnUpBias: TensorPtr | null; // bert only
 	ffnDown: TensorPtr; // all
@@ -63,6 +63,10 @@ export class EncoderInference {
 		tokenIdsTensor: TensorPtr;
 		posTensor: TensorPtr;
 		segTensor: TensorPtr;
+		// Zero-filled F32 mask, [nTokens, nTokens]. Required by ggml's
+		// `ggml_soft_max_ext` whenever max_bias > 0 (ALiBi path on
+		// jina-bert-v2). Unused for non-ALiBi encoders — left null.
+		alibiMaskTensor: TensorPtr | null;
 	} | null = null;
 
 	constructor(wasm: GgmlWasm, hyperparams: ModelHyperparams) {
@@ -218,7 +222,20 @@ export class EncoderInference {
 		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const segTensor = wasm.tensorNew1d(GgmlType.I32, 1);
-		this.lastLeaves = { tokenIdsTensor, posTensor, segTensor };
+		// ggml asserts mask != NULL when max_bias > 0 (ggml.c:4012).
+		// Allocate a zero mask only when we'll actually call softmax with
+		// max_bias > 0 (jina-bert-v2 ALiBi path); other encoders keep the
+		// non-mask path that ggml is happy with.
+		const alibiMaskTensor =
+			alibiMaxBias > 0
+				? wasm.tensorNew2d(GgmlType.F32, nTokens, nTokens)
+				: null;
+		this.lastLeaves = {
+			tokenIdsTensor,
+			posTensor,
+			segTensor,
+			alibiMaskTensor,
+		};
 
 		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		if (usesPosEmbedding) {
@@ -332,9 +349,17 @@ export class EncoderInference {
 			// mul_mat that consumes it.
 			const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
-			// Point D (softmax with optional ALiBi)
+			// Point D (softmax with optional ALiBi). ggml's
+			// `ggml_soft_max_ext` requires a non-null mask when max_bias > 0
+			// — we pass an all-zeros [nTokens, nTokens] mask so the bias
+			// term is the only contribution to non-padded slots.
 			const qk = wasm.opMulMat(kp, qp);
-			const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, alibiMaxBias);
+			const aw = wasm.opSoftMaxExt(
+				qk,
+				alibiMaxBias > 0 ? (this.lastLeaves.alibiMaskTensor ?? 0) : 0,
+				invSqrtHd,
+				alibiMaxBias,
+			);
 
 			// Point E (attention output with optional bias)
 			const out = wasm.opMulMat(vp, aw);
@@ -349,14 +374,18 @@ export class EncoderInference {
 			// Post-attention LayerNorm (BERT post-norm: residual then LN).
 			x = this.layerNorm(wasm.opAdd(x, attnProj), lw.attnNormW, lw.attnNormB);
 
-			// Point F (FFN — GeLU two-layer for bert, SwiGLU for jina/nomic)
+			// Point F (FFN — GeLU two-layer for bert, gated for nomic/jina).
+			// Activation per-arch (matches llama.cpp/src/models/bert.cpp:122-130):
+			//   nomic-bert    → SwiGLU = silu(gate) * up
+			//   jina-bert-v2  → GeGLU  = gelu(gate) * up
 			let ffnOut: TensorPtr;
 			if (lw.ffnGate) {
-				// SwiGLU: silu(gate(x)) * up(x), then down(...)
 				const gate = wasm.opMulMat(lw.ffnGate, x);
 				let up = wasm.opMulMat(lw.ffnUp, x);
 				if (lw.ffnUpBias) up = wasm.opAdd(up, lw.ffnUpBias);
-				const mid = wasm.opMul(wasm.opSilu(gate), up);
+				const activated =
+					arch === "nomic-bert" ? wasm.opSilu(gate) : wasm.opGelu(gate);
+				const mid = wasm.opMul(activated, up);
 				ffnOut = wasm.opMulMat(lw.ffnDown, mid);
 				if (lw.ffnDownBias) ffnOut = wasm.opAdd(ffnOut, lw.ffnDownBias);
 			} else {
@@ -472,6 +501,26 @@ export class EncoderInference {
 				);
 			} finally {
 				wasm.free(heap);
+			}
+
+			// ALiBi mask per llama.cpp/src/llama-graph.cpp:411 — encoder is non-causal
+			// and unpadded, so mask[i,j] = -|i - j|. ggml_soft_max_ext multiplies this
+			// by the per-head slope derived from max_bias, producing the standard
+			// ALiBi linear bias.
+			if (leaves.alibiMaskTensor) {
+				const maskBytes = N * N * 4;
+				const maskPtr = wasm.malloc(maskBytes);
+				try {
+					const mask = new Float32Array(wasm.heapU8.buffer, maskPtr, N * N);
+					for (let i = 0; i < N; i++) {
+						for (let j = 0; j < N; j++) {
+							mask[i * N + j] = -Math.abs(i - j);
+						}
+					}
+					wasm.backendTensorSet(leaves.alibiMaskTensor, maskPtr, 0, maskBytes);
+				} finally {
+					wasm.free(maskPtr);
+				}
 			}
 
 			await wasm.graphCompute(graph);

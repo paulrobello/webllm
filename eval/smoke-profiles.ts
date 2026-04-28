@@ -275,6 +275,11 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		model: "bge-large-en-v1.5-q0f16",
 		embedding: true,
 	},
+	{
+		name: "jina-embeddings-v2-base-en",
+		model: "jina-embeddings-v2-base-en-q0f16",
+		embedding: true,
+	},
 ];
 
 /**
@@ -351,8 +356,15 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"arctic-embed-m",
 		"bge-small",
 		"bge-large",
+		"jina-embeddings-v2-base-en",
 	],
-	embeddings: ["arctic-embed-s", "arctic-embed-m", "bge-small", "bge-large"],
+	embeddings: [
+		"arctic-embed-s",
+		"arctic-embed-m",
+		"bge-small",
+		"bge-large",
+		"jina-embeddings-v2-base-en",
+	],
 };
 
 export function getSmokeProfileSet(name: string): readonly string[] | undefined {

@@ -392,8 +392,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// causal LMs. Steps [4-5,7] are routed through EncoderInference for
 		// these models; the causal-LM ModelInference path would crash with
 		// `Weight "output_norm.weight" not found` because that tensor only
-		// exists on causal models.
-		const isEncoderModel = parsed.hyperparams.architecture === "bert";
+		// exists on causal models. Mirrors `isEncoderArchitecture` from
+		// src/core/types.ts — keep both in sync when adding encoder archs.
+		const isEncoderModel =
+			parsed.hyperparams.architecture === "bert" ||
+			parsed.hyperparams.architecture === "nomic-bert" ||
+			parsed.hyperparams.architecture === "jina-bert-v2";
 
 		log("running", "[4/8] Loading weights into GPU...");
 		let loadFailed = false;
@@ -499,6 +503,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				{ wasm: wasmInstance, inference, parsed },
 			);
 			smokeEngineHandleId = smokeEngineHandle.id;
+			// Expose for external harnesses (e.g. eval/encoder-parity.ts):
+			// the parity harness drives engine.embed via agentchrome js-exec.
+			window.engine = smokeEngine;
+			window.handleId = smokeEngineHandleId;
 		} catch (e) {
 			log(
 				"fail",

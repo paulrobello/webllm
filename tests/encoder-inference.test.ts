@@ -611,7 +611,7 @@ describe("EncoderInference.loadWeights arch dispatch", () => {
 		expect(layers[0].qkvFused).toBeNull();
 	});
 
-	test("jina-bert-v2: split QKV + biases; SwiGLU gate; mixed FFN biases", () => {
+	test("jina-bert-v2: split QKV + biases; GeGLU gate; mixed FFN biases", () => {
 		const fake = makeFakeWasm();
 		const enc = new EncoderInference(fake.fake, makeHp("jina-bert-v2"));
 		enc.loadWeights(makeCtx(jinaNames), new Uint8Array(0));
@@ -751,12 +751,15 @@ describe("EncoderInference.buildGraph arch dispatch", () => {
 		expect(r.softmax_max_bias).toEqual([0, 0]);
 	});
 
-	test("jina-bert-v2: no pos-embedding, SwiGLU FFN, no rope, max_bias=8.0", () => {
+	test("jina-bert-v2: no pos-embedding, GeGLU FFN, no rope, max_bias=8.0", () => {
 		const r = buildAndCount("jina-bert-v2");
 		expect(r.getrows).toBe(2);
 		expect(r.rope).toBe(0);
-		expect(r.silu).toBe(2);
-		expect(r.gelu).toBe(0);
+		// GeGLU: gelu(gate) * up — one gelu per layer (×2 layers).
+		// Per llama.cpp/src/models/bert.cpp:122-130, jina-bert-v2 routes
+		// through LLM_FFN_GEGLU; nomic-bert routes through LLM_FFN_SILU.
+		expect(r.silu).toBe(0);
+		expect(r.gelu).toBe(2);
 		expect(r.softmax_max_bias).toEqual([8.0, 8.0]);
 	});
 
