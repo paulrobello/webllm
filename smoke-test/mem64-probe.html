@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MEMORY64 cap probe</title>
+<style>
+  body { font-family: ui-monospace, monospace; padding: 1em; background: #1e1e1e; color: #e6e6e6; line-height: 1.4; }
+  h1 { color: #2196f3; margin-top: 0; }
+  #log { white-space: pre-wrap; font-size: 12px; }
+  .ok { color: #4caf50; }
+  .fail { color: #f44336; }
+  .info { color: #2196f3; }
+  .header { color: #ffc107; font-weight: bold; margin-top: 0.6em; }
+</style>
+</head>
+<body>
+<h1>MEMORY64 cap probe</h1>
+<div id="log"></div>
+<script type="module">
+const logEl = document.getElementById("log");
+const append = (msg, cls = "") => {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+  console.log(msg);
+};
+
+const result = {
+  phase1: null,
+  phase2: null,
+  phase3_cap_bytes: null,
+  phase3_iterations: null,
+  phase4: null,
+  user_agent: navigator.userAgent,
+  module_bytes: null,
+  init_wall_ms: null,
+  started_at: new Date().toISOString(),
+  finished_at: null,
+};
+window.__memory64ProbeResult = result;
+
+const ONE_GIB = 1n << 30n;
+const benignConsoleErrorPattern = /^adapter_info:/;
+
+// Phase 1 calls webgpu_init/shutdown. Phase 4 re-runs init+shutdown
+// after the cap probe, validating the runtime survived heap pressure.
+let m;
+
+try {
+  append("Loading webllm-wasm-mem64.js…", "info");
+  const moduleFactory = (await import(`./webllm-wasm-mem64.js?v=${Date.now()}`)).default;
+  m = await moduleFactory();
+  result.module_bytes = m.HEAPU8?.buffer?.byteLength ?? null;
+  append(`Module loaded. Initial heap: ${result.module_bytes} bytes`, "info");
+} catch (e) {
+  append(`MODULE LOAD FAILED: ${e?.message || e}`, "fail");
+  result.phase1 = `fail: module load — ${e?.message || e}`;
+  result.finished_at = new Date().toISOString();
+  throw e;
+}
+
+// ── Phase 1: ASYNCIFY × MEMORY64 round-trip ──
+try {
+  append("--- Phase 1: ASYNCIFY × MEMORY64 round-trip ---", "header");
+  const t0 = performance.now();
+  const rc = await m._webgpu_init();
+  const dt = performance.now() - t0;
+  result.init_wall_ms = dt;
+  if (rc !== 0) throw new Error(`_webgpu_init returned ${rc}`);
+  append(`_webgpu_init OK in ${dt.toFixed(1)}ms`, "ok");
+  await m._webgpu_shutdown();
+  append("_webgpu_shutdown OK", "ok");
+  result.phase1 = "ok";
+  append("PHASE 1 PASS", "ok");
+} catch (e) {
+  result.phase1 = `fail: ${e?.message || e}`;
+  append(`PHASE 1 FAIL: ${e?.message || e}`, "fail");
+}
+
+// ── Phase 2: BigInt ABI smoke ──
+// Skipped if Phase 1 failed (per spec §5.1: phase 1 fail closes the lever).
+if (result.phase1 === "ok") {
+  try {
+    append("--- Phase 2: BigInt ABI smoke ---", "header");
+
+    const ctxIdx = m._ctx_create(65536);
+    if (ctxIdx < 0) throw new Error(`_ctx_create returned ${ctxIdx}`);
+    append(`_ctx_create returned idx=${ctxIdx}`, "info");
+
+    // _tensor_new_1d returns void* — must come back as bigint under wasm64.
+    const tensorPtr = m._tensor_new_1d(0 /* GGML_TYPE_F32 */, 4);
+    append(`_tensor_new_1d → typeof=${typeof tensorPtr} value=0x${tensorPtr.toString(16)}`, "info");
+    if (typeof tensorPtr !== "bigint") {
+      throw new Error(`tensor ptr typeof=${typeof tensorPtr}, expected bigint`);
+    }
+    if (tensorPtr <= 0n) throw new Error(`tensor ptr <= 0 (${tensorPtr})`);
+
+    // _malloc takes size_t — pass BigInt; returned pointer must be BigInt.
+    const dataPtr = m._malloc(16n);
+    append(`_malloc(16n) → typeof=${typeof dataPtr} value=0x${dataPtr.toString(16)}`, "info");
+    if (typeof dataPtr !== "bigint") {
+      throw new Error(`data ptr typeof=${typeof dataPtr}, expected bigint`);
+    }
+    if (dataPtr <= 0n) throw new Error(`data ptr <= 0`);
+
+    // Heap round-trip: write 4 F32, read back, verify byte-equal.
+    const writeView = new Float32Array(m.HEAPU8.buffer, Number(dataPtr), 4);
+    writeView.set([1, 2, 3, 4]);
+    const readView = new Float32Array(m.HEAPU8.buffer, Number(dataPtr), 4);
+    const expected = [1, 2, 3, 4];
+    for (let i = 0; i < 4; i++) {
+      if (readView[i] !== expected[i]) {
+        throw new Error(`round-trip mismatch at i=${i}: got ${readView[i]}, expected ${expected[i]}`);
+      }
+    }
+    append("Heap round-trip OK (4×F32 byte-equal)", "ok");
+
+    m._free(dataPtr);
+    m._ctx_free();
+    result.phase2 = "ok";
+    append("PHASE 2 PASS", "ok");
+  } catch (e) {
+    result.phase2 = `fail: ${e?.message || e}`;
+    append(`PHASE 2 FAIL: ${e?.message || e}`, "fail");
+  }
+} else {
+  append("Phase 2 SKIPPED (Phase 1 failed)", "info");
+}
+
+// ── Phase 3: Cap probe (sequential 1 GiB malloc with page commit) ──
+// Runs even if Phase 2 failed — the cap measurement is independent of
+// the BigInt ABI quirk that might have caused Phase 2 to fail. Only
+// skipped if Phase 1 failed (no point exercising heap if init broke).
+if (result.phase1 === "ok") {
+  try {
+    append("--- Phase 3: Cap probe (sequential 1 GiB malloc) ---", "header");
+    const heldPtrs = [];
+    let totalCommitted = 0n;
+    let iterations = 0;
+    for (let i = 0; i < 16; i++) {
+      let ptr;
+      try {
+        ptr = m._malloc(ONE_GIB);
+      } catch (mallocErr) {
+        append(`Iter ${i}: _malloc threw — ${mallocErr?.message || mallocErr}`, "info");
+        break;
+      }
+      if (typeof ptr !== "bigint" || ptr === 0n) {
+        append(`Iter ${i}: _malloc returned 0 / wrong type (typeof=${typeof ptr})`, "info");
+        break;
+      }
+      // Commit the first 64 KiB to force actual page allocation, not lazy reservation.
+      try {
+        const commitView = new Uint8Array(m.HEAPU8.buffer, Number(ptr), 64 * 1024);
+        commitView.fill(0xab);
+      } catch (commitErr) {
+        append(`Iter ${i}: page commit threw — ${commitErr?.message || commitErr}`, "info");
+        // Pointer was allocated but page commit failed — count it as a fail and stop.
+        break;
+      }
+      heldPtrs.push(ptr);
+      totalCommitted += ONE_GIB;
+      iterations = i + 1;
+      const gibSoFar = (Number(totalCommitted) / (1 << 30)).toFixed(2);
+      append(`Iter ${i}: malloc(1 GiB) OK, total committed=${gibSoFar} GiB`, "info");
+    }
+    result.phase3_cap_bytes = Number(totalCommitted);
+    result.phase3_iterations = iterations;
+    const gibFinal = (Number(totalCommitted) / (1 << 30)).toFixed(2);
+    append(`PHASE 3 cap = ${gibFinal} GiB across ${iterations} iters`, iterations > 0 ? "ok" : "fail");
+    // Free all probed allocations so Phase 4 starts with a clean heap.
+    for (const ptr of heldPtrs) m._free(ptr);
+    append(`Freed ${heldPtrs.length} cap-probe allocations`, "info");
+  } catch (e) {
+    append(`PHASE 3 unexpected error: ${e?.message || e}`, "fail");
+  }
+} else {
+  append("Phase 3 SKIPPED (Phase 1 failed)", "info");
+}
+
+// ── Phase 4: Post-cap-probe shutdown health ──
+// Re-runs init+shutdown after the heap pressure of Phase 3 to verify
+// the runtime is still healthy.
+if (result.phase1 === "ok") {
+  try {
+    append("--- Phase 4: Post-cap-probe shutdown health ---", "header");
+    const rc = await m._webgpu_init();
+    if (rc !== 0) throw new Error(`_webgpu_init (post-probe) returned ${rc}`);
+    append("_webgpu_init (post-probe) OK", "ok");
+    await m._webgpu_shutdown();
+    append("_webgpu_shutdown (post-probe) OK", "ok");
+    result.phase4 = "ok";
+    append("PHASE 4 PASS", "ok");
+  } catch (e) {
+    result.phase4 = `fail: ${e?.message || e}`;
+    append(`PHASE 4 FAIL: ${e?.message || e}`, "fail");
+  }
+} else {
+  append("Phase 4 SKIPPED (Phase 1 failed)", "info");
+}
+
+result.finished_at = new Date().toISOString();
+window.__memory64ProbeResult = result;
+
+append("--- Result blob (window.__memory64ProbeResult) ---", "header");
+append(JSON.stringify(result, (_k, v) => (typeof v === "bigint" ? Number(v) : v), 2));
+append("=== HARNESS COMPLETE ===", "ok");
+</script>
+</body>
+</html>
