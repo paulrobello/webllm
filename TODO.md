@@ -2558,6 +2558,83 @@ needs to be collected.
     7B+ fleet outgrows hand-curation. All explicitly conditional
     — pick on demand.
 
+    **§26 measured + closed §C-v2-A resurrection.** See §26 below.
+
+26. **§26 §C-v2-A re-measurement under §22 tile=128 — CLOSED.**
+    Direct empirical test of §24's parting recommendation. Cherry-
+    picked the 4 §22 implementation commits (`c38fb8f`, `f281ac3`,
+    `2fcc334`, `18e1677` — skipped `8e21036` Phase-0 diagnostic and
+    `5b5705a` Task-5 matrix; skipped §23 registry auto-default for
+    variable isolation) onto `feat/spec-decode-v2-greedy`. Added one
+    conflict-resolution recipe in `smoke-test/real-model-page.js`
+    (drop §22 Task 3's references to `diagnoseAlloc` and `embedPerf`
+    blocks not present on the side branch). Re-ran the §C-v2-A
+    4-cell gate matrix under explicit `--prefill-tile 128` on both
+    target and drafter `ModelInference` ctors. 3 outer trials × 3
+    perf.ts internal runs = 9 measurements per cell, 36 total.
+
+    **Matrix (median of three 3-run trial-medians):**
+
+    | Cell | Workload         | Drafter | Decode tok/s p50 | Prefill ms p50 |
+    |------|------------------|---------|-----------------:|---------------:|
+    | 1    | prefill-256      | —       | 15.8             | 2684           |
+    | 2    | creative-low-α   | —       | 15.8             | 1721           |
+    | 3    | prefill-256      | K=4     | 6.7              | 3166           |
+    | 4    | creative-low-α   | K=4     | 8.5              | 1530           |
+
+    **Gates (decisive failures):**
+    - **Gate 1 (speedup ≥1.5×):** 6.7 / 15.8 = **0.42×** — FAIL by 3.6×.
+    - **Gate 2 (safety ≥0.95×):** 8.5 / 15.8 = **0.54×** — FAIL by 0.4×.
+
+    **Cross-cycle vs §C-v2-A close (`646320c`, tile=0):** baselines
+    drift -1.3% / -2.5% (within ±10% threshold); cell 3 drifts +17.5%
+    (5.7 → 6.7, marginal improvement, gate-1 gap to 1.5× is still
+    3.6×); cell 4 drifts -33% (12.7 → 8.5, **significant safety
+    regression** — most likely later AdaptiveGate fire or less-
+    effective post-disengage tail under tile=128 plumbing). The
+    cell-4 drift is large enough to flag for any future v2-A
+    resurrection cycle.
+
+    **Verdict:** the K+1=5 verify graph is three orders of magnitude
+    below the 128-token tile threshold and is never split. tile=128
+    therefore cannot affect verify cost on this workload. The
+    +17.5% cell-3 improvement is real but irrelevant to the gate;
+    no incremental lever (better drafter, tighter K, faster cache)
+    closes the 3.6× gap to 1.5×. **§C-v2-A is closed under all
+    known levers.**
+
+    **Resurrection paths still open (architectural change required):**
+    (a) **Faster K+1 verify** via upstream ggml-webgpu dispatch
+    coalescing or fused-graph optimization that drops per-step
+    verify cost below ~30 ms — re-measure if upstream lands such an
+    improvement. (b) **MEMORY64 → 70B-class target** to shift
+    target/drafter param ratio from 13× to ~100× (Leviathan-style
+    speculation regime). Multi-day engineering; conditional on a
+    concrete 70B+ deployment ask.
+
+    **Side branch retained as archived infra.** `feat/spec-decode-
+    v2-greedy` tip moves from `646320c` to **`6b20aad`** with the
+    cherry-picks + matrix + SUMMARY. Driver, AdaptiveGate, K+1
+    verify, contract gate, ~30 unit/integration tests all preserved.
+    **Do not merge to `main`.**
+
+    **Files on `main`:**
+    - `docs/superpowers/specs/2026-04-27-spec-decode-v2-tile128-design.md` (`b23ccc9`).
+    - `docs/superpowers/plans/2026-04-27-spec-decode-v2-tile128.md` (`f0a682c`).
+    - This TODO §26 entry.
+
+    **Files on side branch (`feat/spec-decode-v2-greedy`):**
+    - 4 cherry-picked §22 commits (`c38fb8f` → `832379a` after rebase shas).
+    - `eval/reports/spec-decode-v2-tile128-2026-04-27/{run-matrix.sh, SUMMARY.md, cell-{1,2,3,4}.log}`.
+
+    **Ship gate stamp:** zero `src/` change on `main`. `make checkall`
+    on `main` unchanged from pre-§26 (427 pass / 11 skip / 0 fail).
+    Side-branch checkall: 454 / 15 / 0 (post cherry-pick).
+
+    **Plan reference:** `docs/superpowers/plans/2026-04-27-spec-decode-v2-tile128.md`.
+    **Spec reference:** `docs/superpowers/specs/2026-04-27-spec-decode-v2-tile128-design.md`.
+    **Raw matrix:** `eval/reports/spec-decode-v2-tile128-2026-04-27/SUMMARY.md` on side branch tip `6b20aad`.
+
 ### Resumption checklist (start a fresh session here)
 
 **Wave 1 complete (7/10 done · 2 deferred · 1 optional
@@ -3030,36 +3107,39 @@ deliberately.** §17 (§A matmul kernel), §18 (FA at N=1 decode),
 (§4 FA at prefill / long-decode), the side-branch §C-v2-A
 (greedy spec-decode + GPU-resident K+1 verify), §21 (§D encoder
 perf pass), §22 (7B+ long-prefill graph-buffer tiling), §23
-(§22 default-on flip), and §24 (§4 FA revisit at 7B+
-long-prefill — closed C: zero models meet the gated-ship
-long-short TTFT threshold under tile=128) have all closed or
-landed. §22 + §23 together turn the 7B+ long-prefill unblock
+(§22 default-on flip), §24 (§4 FA revisit at 7B+ long-prefill —
+closed C: zero models meet the gated-ship long-short TTFT
+threshold under tile=128), and **§26 (§C-v2-A re-measurement
+under §22 tile=128 — both gates fail decisively, 0.42× / 0.54×;
+verify graph at K+1=5 is three orders of magnitude below the
+128-token tile threshold and is never split)** have all closed
+or landed. §22 + §23 together turn the 7B+ long-prefill unblock
 from "opt-in workaround" into "default behaviour for the
 registered fleet". §24 measured the FA cells §20 could not
 capture and confirmed FA stays behind the manual chain at 7B+
 on three of four workloads (long-long TTFT being the lone
-exception, but neither §20 rule clause keys on it). The
-algorithmic levers at the canonical 4-baseline are exhausted;
-remaining options are deliberate strategic choices, not
-obvious wins.
+exception, but neither §20 rule clause keys on it). §26 retired
+the last conditional algorithmic lever from §24's parting
+recommendation. The algorithmic levers at the canonical
+4-baseline are exhausted; remaining options are deliberate
+strategic choices, not obvious wins.
 
 **Candidate next levers (none are forced; pick on need),
 in rough priority order:**
 
-1. **§C-v2-A resurrection (conditional).** §22 partially
-   alleviates the per-step K+1 verify cost for short prefills
-   via tile chunking. The 8B+ K+1 verify cost at the canonical
-   target/drafter ratio was **not** measured in §22, so this
-   is a candidate, not a conclusion. Resurrection still hinges
-   on whether tiled-verify drops per-step cost enough to break
-   the K=4 even-α ceiling at 8B IQ3_M × 0.6B Q8. A new
-   measurement cycle on the side branch under
-   `prefillTileSize=128` would settle it. **Cheap to try; do
-   this if speculative decoding is on the roadmap.**
+1. ~~**§C-v2-A resurrection (conditional).**~~ **CLOSED 2026-04-27 — §26.**
+   Re-measured under §22 tile=128: gate 1 = 0.42× (FAIL by 3.6×),
+   gate 2 = 0.54× (FAIL by 0.4×). Resurrection now requires
+   architectural change (faster K+1 verify via upstream ggml-webgpu
+   dispatch coalescing, or 70B-class target via MEMORY64), not an
+   incremental lever. Side branch retained as archived infra;
+   do not merge.
 2. **MEMORY64 for 70B-class targets.** Multi-day engineering
    (pointer-type changes through the bridge, asyncify
    interactions). Only worth it for a concrete 70B+ deployment
-   ask.
+   ask. Bonus: a 70B+ target shifts the §C-v2-A ratio from 13×
+   to ~100×, the regime where Leviathan-style speculation
+   actually pays off — see §26 resurrection path (b).
 3. **§D concat-graph batched encoder compute.** Only opens on
    a real batch-encoder-throughput use-case (was non-goal in
    §21).
@@ -3069,6 +3149,10 @@ in rough priority order:**
    embeddingLength`. Nice-to-have when the registered 7B+
    fleet grows past hand-curation; defer until that pressure
    actually exists.
+5. **Upstream ggml-webgpu rebase.** Re-run §21 embed-perf and
+   §26 spec-decode harnesses on every llama.cpp rebase to spot
+   free wins from upstream dispatch coalescing or kernel
+   fusion. Mechanical; trigger on demand.
 
 If none of those align with current priorities, the team
 should pick a direction explicitly — there is no obvious
