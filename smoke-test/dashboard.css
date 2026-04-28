@@ -326,6 +326,47 @@ header h1 {
 	height: 100% !important;
 }
 
+/* Per-dimension score heatmap (Task #4). HTML table approach: rows are
+   models, cols are dimensions, each cell is coloured by score on a
+   red→yellow→green gradient and shows the rounded percentage as text. */
+.dim-heatmap-host {
+	height: auto;
+	overflow-x: auto;
+}
+.dim-heatmap {
+	border-collapse: collapse;
+	font-size: 11px;
+	color: var(--text);
+}
+.dim-heatmap th,
+.dim-heatmap td {
+	padding: 6px 8px;
+	border: 1px solid #30363d;
+	text-align: center;
+	white-space: nowrap;
+}
+.dim-heatmap thead th {
+	background: #1c2128;
+	color: var(--muted);
+	font-weight: 500;
+}
+.dim-heatmap tbody th {
+	background: #1c2128;
+	color: var(--text);
+	text-align: left;
+	font-weight: 500;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.dim-heatmap td.cell-empty {
+	background: #161b22;
+	color: var(--muted);
+}
+.dim-heatmap td.cell-score {
+	color: #0d1117;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
 /* ── runs table ───────────────────────────────────── */
 
 .controls {

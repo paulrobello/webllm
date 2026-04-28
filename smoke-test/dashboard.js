@@ -332,6 +332,7 @@ function render() {
 	renderScatterChart();
 	renderParamSpeedChart();
 	renderDimGroupedChart();
+	renderDimHeatmap();
 	renderEmbeddingCosineChart();
 	renderEmbeddingLatencyChart();
 	renderEmbeddingThroughputChart();
@@ -1175,6 +1176,112 @@ function renderDimGroupedChart() {
 		dimGroupedChartInstance.update();
 	}
 	sizeChartHost(canvas, labels.length);
+}
+
+// ── 14b. Per-dimension score heatmap ────────────────────────────────
+
+// Map a 0..1 score to a red→yellow→green gradient. Plain HSL ramp so
+// the cell colour reads at a glance without bringing in a colour util
+// library; alpha kept at 1 because cells use dark text on top.
+function _heatmapColor(score) {
+	const s = Math.max(0, Math.min(1, score));
+	// 0 → red (hue 0), 0.5 → yellow (hue 60), 1 → green (hue 120).
+	const hue = Math.round(s * 120);
+	return `hsl(${hue}, 70%, 55%)`;
+}
+
+function renderDimHeatmap() {
+	const host = document.getElementById("dim-heatmap-host");
+	const empty = document.getElementById("dim-heatmap-empty");
+	if (!host || !empty) return;
+
+	// Latest cold eval per (modelId, thinking) — same selection rules as
+	// the grouped bar chart above so the two views stay in sync.
+	const latestColdByKey = new Map();
+	for (const ev of state.evalsByEvalId.values()) {
+		const t = ev.params?.temperature;
+		const bucket = tempBucket(t);
+		if (bucket !== null && bucket !== "cold") continue;
+		const dims = Object.keys(ev.dimensions ?? {});
+		if (dims.length === 1 && dims[0] === "embedding") continue;
+		const thinking = ev.thinking === "on" ? "on" : "off";
+		const key = `${ev.modelId}::${thinking}`;
+		const prev = latestColdByKey.get(key);
+		if (!prev || prev.timestamp < ev.timestamp) latestColdByKey.set(key, ev);
+	}
+
+	if (latestColdByKey.size === 0) {
+		host.hidden = true;
+		empty.hidden = false;
+		host.replaceChildren();
+		return;
+	}
+
+	const dimNames = DIM_NAMES.filter((d) => d !== "embedding");
+
+	// Sort rows by overall accuracy descending so the strongest models
+	// surface first; falls back to model id for stable ordering ties.
+	const rows = Array.from(latestColdByKey.values())
+		.map((ev) => ({
+			ev,
+			label: ev.thinking === "on" ? `${ev.modelId} (think)` : ev.modelId,
+			overall: ev.overall ?? 0,
+		}))
+		.sort((a, b) => b.overall - a.overall || a.label.localeCompare(b.label));
+
+	const table = document.createElement("table");
+	table.className = "dim-heatmap";
+
+	const thead = document.createElement("thead");
+	const headerRow = document.createElement("tr");
+	const cornerTh = document.createElement("th");
+	cornerTh.textContent = "model";
+	headerRow.appendChild(cornerTh);
+	for (const dim of dimNames) {
+		const th = document.createElement("th");
+		th.textContent = dim;
+		headerRow.appendChild(th);
+	}
+	const overallTh = document.createElement("th");
+	overallTh.textContent = "overall";
+	headerRow.appendChild(overallTh);
+	thead.appendChild(headerRow);
+	table.appendChild(thead);
+
+	const tbody = document.createElement("tbody");
+	for (const { ev, label, overall } of rows) {
+		const tr = document.createElement("tr");
+		const rowTh = document.createElement("th");
+		rowTh.scope = "row";
+		rowTh.textContent = label;
+		tr.appendChild(rowTh);
+		for (const dim of dimNames) {
+			const ds = ev.dimensions?.[dim];
+			const td = document.createElement("td");
+			if (!ds || (ds.total ?? 0) === 0) {
+				td.className = "cell-empty";
+				td.textContent = "—";
+			} else {
+				const score = ds.score ?? 0;
+				td.className = "cell-score";
+				td.style.backgroundColor = _heatmapColor(score);
+				td.textContent = `${Math.round(score * 100)}%`;
+				td.title = `${dim}: ${ds.passed ?? "?"}/${ds.total ?? "?"}`;
+			}
+			tr.appendChild(td);
+		}
+		const overallTd = document.createElement("td");
+		overallTd.className = "cell-score";
+		overallTd.style.backgroundColor = _heatmapColor(overall);
+		overallTd.textContent = `${Math.round(overall * 100)}%`;
+		tr.appendChild(overallTd);
+		tbody.appendChild(tr);
+	}
+	table.appendChild(tbody);
+
+	host.replaceChildren(table);
+	host.hidden = false;
+	empty.hidden = true;
 }
 
 let embeddingCosineChartInstance = null;

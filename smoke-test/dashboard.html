@@ -114,6 +114,15 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>Per-dimension score heatmap</h2>
+    <div class="legend dim">rows sorted by overall accuracy (high → low); cell colour by 0–1 score (red → yellow → green)</div>
+  </div>
+  <div id="dim-heatmap-empty" class="bar-empty">no completed evals yet</div>
+  <div id="dim-heatmap-host" class="chart-host dim-heatmap-host" hidden></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Temperature sweep by dimension</h2>
     <div class="legend">
       <span class="legend-chip temp-cold-dot"></span><span>cold (≤0.4)</span>
