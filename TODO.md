@@ -1989,8 +1989,100 @@ squash). All other open work is conditional on external triggers.
 housekeeping items closed 2026-04-28** (#4 dashboard refresh /
 #5 pre-rebase baselines / #6 §32 SUMMARY cross-link — closure
 entries preserved below for reference). **No active perf lever
-in flight; no fresh housekeeping queued.** Next work is gated
-on external triggers (see "External-trigger candidates" section).
+in flight.** All algorithmic levers at the canonical 4-baseline
+are exhausted (§17-§29 closed matmul, FA, drafter, encoder,
+prefill-tiling, spec-decode families). Perf next-work is gated
+entirely on external triggers (see "External-trigger candidates"
+section).
+
+**Fresh observation pinned 2026-04-28 from #5 data:** the encoder
+overhead (`backendEncodeOverheadMs` per step) is a **fixed
+per-dispatch cost of ~5.2-5.7 µs**, remarkably flat across the
+entire 450 → 805 dispatch/token range:
+
+| Model            | Dispatches | Encoder (median, ms) | µs/dispatch |
+|---|---:|---:|---:|
+| tinyllama-q4_0   | 450 | 2.40 | 5.3 |
+| qwen3-0.6b-q8    | 629 | 3.30 | 5.2 |
+| qwen3-1.7b-q8    | 629 | 3.60 | 5.7 |
+| mistral-7b-q4ks  | 650 | 3.60 | 5.5 |
+| llama-3.1-8b-iq3m| 652 | 3.40 | 5.2 |
+| qwen3-8b-iq3m    | 805 | 4.40 | 5.5 |
+
+Implication: **encoder share scales inversely with model size
+because matmul shrinks at small models, not because encoder
+grows.** Encoder is 24-30% at tiny models (TinyLlama, Qwen3-0.6B)
+where matmul is 33-38%; drops to 9-11% at 7-8B where matmul is
+49-58%. **Reducing the per-dispatch encode cost would yield
+~26% relative speedup at TinyLlama scale (11.40 → 9.00 ms/step
+→ 87.9 → 111.1 tok/s).** Lever isn't load-bearing for the
+project's size-30B target ceiling — at large models the
+absolute headroom is <1 tok/s — but is the only real
+opportunity at sub-1B targets if a "tiny-model" deployment
+appears. Captured as a finding rather than a next step.
+
+---
+
+### Fresh next-step candidates (2026-04-28)
+
+Three doc-style candidates surfaced post-housekeeping. None are
+forced; all are independent of external triggers.
+
+7. **TODO.md header pin refresh.** The header block at lines
+   19-32 carries pre-§27 baselines (`tinyllama ~105 tok/s`,
+   `qwen3-0.6b ~85/~93`, `qwen3-1.7b ~66`, `smollm2-360m ~106`)
+   measured 2026-04-25. Post-§27 / §32 canonical (`perf.ts`
+   non-profile 3-run median) is 110.8 / 89.8 / — / 62.2 with
+   no smollm2 re-measurement; mistral-7b-q4ks 35.0; llama-3.1-
+   8b-iq3m 27.2; qwen3-8b-iq3m 27.2. Replace inline; add 7B+
+   entries to make the canonical 6 visible in the header.
+   Cost: ~10 min wall (find/replace + verify against §5
+   baselines). Risk: zero (pure doc). Decision rule: trivial —
+   the header is the public-facing claim surface.
+
+8. **docs/BENCHMARKS.md tier expansion.** The "Performance
+   Tiers" tables (lines 406-440) cap at "Quality (20-30 tok/s)
+   = Qwen3 4B" and don't list 7B+. Post-§32 we have Mistral-7B
+   Q4_K_S (35 tok/s, 4.0 GB), Llama-3.1-8B IQ3_M (27.2 tok/s,
+   3.6 GB), Qwen3-8B IQ3_M (27.2 tok/s, 3.3 GB). Slot Mistral-
+   7B into "Balanced (30+)" or extend with a "Heavy (15-30)"
+   tier housing the 8Bs. Also: Qwen3 4B's actual 35 tok/s
+   measurement (§10 wave 1) places it in "Balanced", not
+   "Quality" — reshuffle. Cost: ~20 min wall (table edits +
+   cross-check against `eval/models.ts` definitions). Risk:
+   zero (pure doc). Decision rule: only if a downstream
+   consumer is pointing at this file as authoritative; if it
+   stays as illustrative-only, low priority.
+
+9. **CLAUDE.md / TODO.md doctrine capture from §27-§32a.**
+   The "Workflow policies (set 2026-04-28)" block in CLAUDE.md
+   already captures the 30B ceiling, quick-wins-override,
+   probe-first, complexity-≠-time, and commit-before-work
+   doctrines. Three additional lessons from §27-§32a are not
+   yet captured anywhere durable:
+   - **Rebase classification template** (§27 free win / §28
+     negative result / §32 small regression accepted) — the
+     three documented outcome shapes for upstream `ggml-webgpu`
+     rebases. Currently embedded in TODO.md prose.
+   - **Cap-probe doctrine** (§31b lesson): when a measurement
+     hits a cap at a configurable value, immediately bump the
+     configuration to confirm whether the cap is configuration-
+     bound or toolchain/runtime-bound. Already inline in TODO.md
+     "Process notes" but not in CLAUDE.md.
+   - **Pre-rebase baseline doctrine** (§32a lesson): when the
+     bench sweep is a planned rebase probe, capture pre-rebase
+     profile-mode on the canonical fleet *before* the rebase.
+     Already inline in TODO.md "Process notes" but not in
+     CLAUDE.md.
+
+   Promotion path: lift the three doctrines from TODO.md
+   "Process notes" into CLAUDE.md "Workflow policies"; cite
+   the closure reports as evidence anchors. Cost: ~15 min
+   wall. Risk: zero (pure doc; doctrines already live as
+   inline notes). Decision rule: **only useful if a future
+   session can short-circuit re-discovery by reading CLAUDE.md
+   first** — if these doctrines stay only in TODO.md, a `/clear`
+   or context decay loses them.
 
 1. ~~**§32a — Profile-mode rebench on `llama-3.1-8b-iq3m`**.~~
    **CLOSED 2026-04-28 — hypothesis rejected, §32 baseline
