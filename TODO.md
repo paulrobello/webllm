@@ -1268,11 +1268,14 @@ rebase delivered exactly that and gates moved *against*
 the thresholds, not toward. Drafter overhead must scale
 symmetrically with target speedup or the relative ratio
 worsens. Resurrection paths still on the table: (b)
-MEMORY64 → 70B+ target (unchanged); (c, new) a smaller
-i-quant drafter that also uses #22344 — no candidate
-model registered today. Side branch tip `9bdd707` carries
-matrix + SUMMARY at
-`eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/`.
+MEMORY64 → 70B+ target (unchanged). Path (c) "smaller
+i-quant drafter that also uses #22344" was opened here as
+a new theoretical path, then **CLOSED 2026-04-28 by direct
+verify-cost probe** — see §29 below. Side branch tip
+`9bdd707` carries the §28 matrix + SUMMARY at
+`eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/`;
+side branch tip `4e11d79` adds VERIFY-COST-PROBE.md in
+the same directory.
 TODO ref: `d10971b` on main. Zero `src/` change on `main`;
 checkall remains 427/11/0.
 
@@ -1351,12 +1354,17 @@ dashboard hygiene pass from these sessions:
     empirically closed: the rebase delivered exactly that and
     the gates moved *against* the thresholds, not toward them.
     Drafter overhead must scale symmetrically with target
-    speedup or the relative ratio worsens. Resurrection paths
-    still on the table: (b) MEMORY64 → 70B+ target (unchanged);
-    (c, new) a smaller i-quant drafter that also uses #22344 —
-    no candidate model registered today. Side branch tip
-    `9bdd707` carries the §28 matrix + SUMMARY at
-    `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/`.
+    speedup or the relative ratio worsens. Resurrection path
+    (c, new in §28) "smaller i-quant drafter that also uses
+    #22344" was **CLOSED 2026-04-28 by §29 verify-cost probe**:
+    verify is 210 ms/call (5.9× a solo-decode step) and 83% of
+    cycle time, so the drafter→0 ceiling is 11.3 tok/s = 0.40×
+    the 28.2 tok/s baseline — fails both gates regardless of
+    drafter cost. Path (b) MEMORY64 → 70B+ target is the only
+    remaining theoretical path. Side branch tip `9bdd707`
+    carries the §28 matrix + SUMMARY at
+    `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/`;
+    side branch tip `4e11d79` adds VERIFY-COST-PROBE.md.
     **§C-v2-A remains closed under all known levers.**
   - **§17 / §A reopening:** §A's lever 1 was reverted because
     `MUL_ACC_Q4_0` showed only -2.9% matmul / +0.6% tok/s on
@@ -1474,7 +1482,7 @@ dashboard hygiene pass from these sessions:
   broadcast deletes).
 
 **Next target options (pick one — see "Recommended first move"
-below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28
+below; A/B/C/F/§4-decode/§C-v1/§4-prefill/§C-v2-A/§D/§22/§24/§26/§27/§28/§29
 all closed):**
 
 A. ~~Add Qwen3-8B IQ3_M as wave-2 model 4.~~ **Done — §16.**
@@ -1488,7 +1496,8 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §D. ~~Encoder/embedding perf pass.~~ **CLOSED 2026-04-27 — §21** (L1 ctx/graph reuse measured + reverted; Phase 2.5 diagnostic surfaced 95.6% graphCompute share = ~390 dispatches × ~80 µs each → encoder is dispatch-bound, not memory- or compute-bound at this scale; L2/L3-sequential project to <5% combined; only viable lever — concat-graph batched compute — is a non-goal in §D and deferred until a real batch-encoder-throughput use-case emerges). Harness (`eval/embed-perf.ts` + `?embedPerf=…` smoke URL params + `make embed-perf{,-baseline}`) shipped to main; cosine baseline pinned at 0.76 ±0.005 (`tests/encoder-cosine-parity.test.ts`).
 §22. ~~7B+ long-prefill graph-buffer tiling.~~ **CLOSED 2026-04-27 — see Completed §22.** Ship-gated default-off; tile=128 unblocks Mistral-7B-Q4_K_S (33.6 tok/s) and Qwen3-8B-IQ3_M (16.2 tok/s) at prefill-512, both within noise of §18 baselines. TinyLlama tile=128 regresses TTFT +81.3% (extra graph dispatches for single-graph-fit models), so the gate stays default-off. Opt in via `?prefillTile=N` (smoke) or `--prefill-tile <n>` (`eval/perf.ts`); ctor option `prefillTileSize` on `ModelInference`. Phase 0 disproved §20's GPU-cap hypothesis: actual abort is the host-side ggml graph allocator at `ggml-alloc.c:82` (not the WebGPU buffer-binding cap). Branch `feat/prefill-tiling-22` (default-off plumbing only — no `recommendedPrefillTile` registry metadata yet; deferred per ship-gated scope). Raw matrix at `eval/reports/prefill-tiling-2026-04-27/SUMMARY.md`.
 §27. ~~llama.cpp rebase + free-win sweep.~~ **LANDED 2026-04-27 — §27.** Rebased `webllm-browser-patches` `78433f606 → 434b2a1ff` (zero conflicts, all 11 patches replayed). Bench sweep on 6 models found **+70-80% free win on IQ3_M** (qwen3-8b-iq3m 15.1 → 27.2 tok/s; llama-3.1-8b-iq3m 16.8 → 29.0) from upstream's #22344 fast i-quant mat-vec kernels. Other quants +4-6%. Profile-mode rebench: matmul **48.04 → 23.07 ms** (-52%), dispatch count unchanged (805/token). §16's 16.2 tok/s baseline for `qwen3-8b-iq3m` is obsolete — canonical bench-inf is now **27.2 tok/s**. Commits `db50d28` / `ccf2abb` / `7402e4b`.
-§28. ~~§C-v2-A re-measurement post-§27 rebase.~~ **CLOSED 2026-04-28 on side branch `feat/spec-decode-v2-greedy` tip `9bdd707`** — gates **worsened**, not improved (gate 1: 0.42×→0.34×; gate 2: 0.54×→0.45×). Target baseline scaled +78% (15.8→28.2 tok/s) but drafted path only +45-49% — drafter qwen3-0.6b is Q8_0 (not i-quant), retains pre-rebase cost; only K+1=5 verify benefits, amortized across 5 tokens. §26 path (a) "faster K+1 verify" is now **empirically closed**. Resurrection paths still open: (b) MEMORY64 → 70B+ target (target/drafter ratio 13×→100×); (c, new) smaller i-quant drafter that also uses #22344 — no candidate model registered today. TODO ref `d10971b` on main; raw matrix at `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/SUMMARY.md` on side branch.
+§28. ~~§C-v2-A re-measurement post-§27 rebase.~~ **CLOSED 2026-04-28 on side branch `feat/spec-decode-v2-greedy` tip `9bdd707`** — gates **worsened**, not improved (gate 1: 0.42×→0.34×; gate 2: 0.54×→0.45×). Target baseline scaled +78% (15.8→28.2 tok/s) but drafted path only +45-49% — drafter qwen3-0.6b is Q8_0 (not i-quant), retains pre-rebase cost; only K+1=5 verify benefits, amortized across 5 tokens. §26 path (a) "faster K+1 verify" is now **empirically closed**. TODO ref `d10971b` on main; raw matrix at `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/SUMMARY.md` on side branch.
+§29. ~~§C-v2-A path (c) "smaller i-quant drafter".~~ **CLOSED 2026-04-28 by direct verify-cost probe on side branch tip `4e11d79`.** §28 opened path (c) as a new theoretical resurrection candidate. Probe directly measured `forwardVerifyArgmax` cost on the §28 cell-3 workload: verify is **210 ms/call** (median, p10=207, p90=213) over 27 unique calls — 5.9× a solo-decode step (35.5 ms) — driven by nTokens=5 mat-mat falling outside #22344's fast i-quant *mat-vec* kernels (matmul 187 ms = 90% of compute; dispatch count 796 vs solo 805 = identical graph topology). Cycle decomposition: 27 verify cycles × 210 ms = 5670 ms of 6842 ms wall (83% of cycle); drafter+overhead = 43 ms/cycle ≈ K=4 × 11 ms/forward. **Counterfactual drafter→0:** cycle = 210 ms / 2.37 tok = 11.3 tok/s = 0.40× the 28.2 tok/s baseline, fails both gates by 3.8× / 0.6×. Path (c) cannot close the gates regardless of drafter cost. Path (b) MEMORY64 → 70B+ target is the only remaining theoretical v2-A path. Probe cost: 1 profile run + 1 agentchrome js-exec ≈ 2 min wall. Saved: multi-day model acquisition campaign. Side branch tip `4e11d79`; report at `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/VERIFY-COST-PROBE.md` on side branch.
 
 D. **Bump `MAXIMUM_MEMORY` (deferred §12, dropped in
    priority).** Confirmed in earlier sessions that 4 GiB
@@ -1576,18 +1585,21 @@ free-win i-quant kernel speedup (#22344, +70-80% on IQ3_M);
 **§28 ruled out §C-v2-A resurrection under §27's faster target
 (gates *worsened* to 0.34× / 0.45× — drafter Q8 doesn't benefit
 from #22344, only target verify does, so the relative ratio
-moved against the thresholds).** **All algorithmic levers at the
-canonical 4-baseline are now exhausted.** Remaining headroom is
-**architectural infrastructure**: MEMORY64 to bring 70B+ targets
-into reach (multi-day, conditional on a deployment ask; only
-remaining v2-A resurrection path with measurable headroom — would
-shift the target/drafter ratio from 13× to ~100×); upstream
-ggml-webgpu dispatch coalescing or fused-graph optimization
-(re-run §27 sweep + §28 harness on every llama.cpp rebase to
-spot the next free win); §D's deferred concat-graph lever
-(encoder-side fallback if a batch-throughput use-case appears);
-or a smaller i-quant drafter for §C-v2-A path (c, new in §28 —
-no candidate model registered today).
+moved against the thresholds); §29 ruled out §C-v2-A path (c)
+"smaller i-quant drafter" by direct verify-cost probe — verify
+is 210 ms/call (83% of cycle), so the drafter→0 ceiling is
+0.40× the target solo baseline regardless of drafter cost.**
+**All algorithmic levers at the canonical 4-baseline are now
+exhausted.** Remaining headroom is **architectural
+infrastructure**: MEMORY64 to bring 70B+ targets into reach
+(multi-day, conditional on a deployment ask; only remaining
+v2-A resurrection path with measurable headroom — would shift
+the target/drafter ratio from 13× to ~100×); upstream
+ggml-webgpu mat-mat fast-path kernels OR dispatch coalescing
+(would attack the verify cost wall directly — re-run §27 sweep
++ §28 harness + §29 probe on every llama.cpp rebase to spot the
+next free win); §D's deferred concat-graph lever
+(encoder-side fallback if a batch-throughput use-case appears).
 
 Boot sequence for a fresh session:
 
@@ -1609,19 +1621,24 @@ Boot sequence for a fresh session:
    change). **§25 dashboard hygiene + new viz cycle added 1 test**
    (`tests/live-server.test.ts` gained a `/models` endpoint contract
    test pinning shape, sort order, and architecture+paramsB
-   coverage; 426 → 427 pass). **§26 / §27 / §28 added 0 tests**
+   coverage; 426 → 427 pass). **§26 / §27 / §28 / §29 added 0 tests**
    each — §26 was a measurement+closure cycle (side-branch matrix +
    3 docs commits on main); §27 was a llama.cpp rebase + bench
    sweep (3 docs commits); §28 was a side-branch re-measurement
-   (1 docs commit on main, side branch tip `9bdd707`). The
-   WebGPU-gated integration tests skip under Bun (no
-   `navigator.gpu`).
-2. **`git log --oneline -30`** — top of `main` is the §28
-   §C-v2-A re-measurement post-rebase (1 commit on `main`; the
-   measurement landed on `feat/spec-decode-v2-greedy` side branch
-   tip `9bdd707`, which is **archived — do not merge**). Tip is
-   `d10971b docs(perf): §28 §C-v2-A re-measurement — gates
-   worsened, lever closed harder`. Below it the §27 cycle (3
+   (1 docs commit on main, side branch tip `9bdd707`); §29 was a
+   side-branch verify-cost probe (1 docs commit on main, side
+   branch tip `4e11d79`). The WebGPU-gated integration tests
+   skip under Bun (no `navigator.gpu`).
+2. **`git log --oneline -30`** — top of `main` is the §29
+   §C-v2-A path (c) closure docs commit (1 commit on `main`;
+   the verify-cost probe writeup landed on
+   `feat/spec-decode-v2-greedy` side branch tip `4e11d79`,
+   which is **archived — do not merge**). Below it: `a7633c4
+   docs(TODO): refresh resumption checklist post-§27 rebase
+   + §28 closure` was the §28 main commit. Below that the §28
+   measurement: `d10971b docs(perf): §28 §C-v2-A re-measurement
+   — gates worsened, lever closed harder`. Below it the §27
+   cycle (3
    commits): `7402e4b docs(perf): qwen3-8b-iq3m profile-mode
    breakdown post-rebase` → `ccf2abb docs(perf): rebase free-win
    sweep — IQ3_M +70-80% from upstream #22344` → `db50d28
@@ -1792,7 +1809,7 @@ Boot sequence for a fresh session:
    benching): `sqlite3 eval/reports/smoke-runs.db "SELECT
    COUNT(*) FROM runs; SELECT COUNT(*) FROM evals;"` —
    should return **29 runs / 30 evals** (unchanged through
-   §17/§18/§19/§20/§21/§22/§23/§24/§26/§27/§28 — none of the
+   §17/§18/§19/§20/§21/§22/§23/§24/§26/§27/§28/§29 — none of the
    ten closures produced new dashboard data, only TODO
    writeups, perf.ts logs, §22's
    `eval/reports/prefill-tiling-2026-04-27/` matrix, §26's
@@ -1823,19 +1840,23 @@ Boot sequence for a fresh session:
    `flashAttn=true`; the wrappers are now live (not dead)
    when the gate is enabled. **Do not delete them.**
 
-   **§26+§28 side-branch state** (no impact on `main`): the
+   **§26+§28+§29 side-branch state** (no impact on `main`): the
    `feat/spec-decode-v2-greedy` branch carries the entire v2-A
    driver, AdaptiveGate, K+1 verify, contract gate, and ~30
    unit/integration tests, plus the four cherry-picked §22
-   commits, §26's matrix evidence, and §28's post-rebase
-   re-measurement. Tip is now **`9bdd707`** (was `6b20aad` at
+   commits, §26's matrix evidence, §28's post-rebase
+   re-measurement, and §29's verify-cost probe writeup. Tip is
+   now **`4e11d79`** (was `9bdd707` at §28 close, `6b20aad` at
    §26 close). **Do not merge to `main`** — §28 found gates
    *worsened* under the §27 rebase (gate 1 0.42× → 0.34×;
    gate 2 0.54× → 0.45×) because drafter Q8 doesn't benefit
-   from #22344, only target verify does. If a future cycle
-   resurrects v2-A, branch fresh from `main` and pick a
-   smaller i-quant drafter (no candidate registered today)
-   or a 70B+ target via MEMORY64.
+   from #22344, only target verify does; **§29 then ruled out
+   the "smaller i-quant drafter" path entirely** by directly
+   measuring verify at 210 ms/call (83% of cycle), so even a
+   zero-time drafter caps the cell at 0.40× target solo. If a
+   future cycle resurrects v2-A, the only path with measurable
+   headroom is a 70B+ target via MEMORY64 (target/drafter ratio
+   13× → ~100×).
 8. **§20 FA gate + §22/§23 prefill-tile gate state (both on `main`).**
    `new ModelInference(wasm, hp)` with no `opts` argument is
    bit-identical to pre-§20/§22 behaviour: FA defaults off,
@@ -1882,19 +1903,22 @@ deliberately.** §17 (§A matmul kernel), §18 (FA at N=1 decode),
 perf pass), §22 (7B+ long-prefill graph-buffer tiling), §23
 (§22 default-on flip), §24 (§4 FA revisit at 7B+ long-prefill),
 §26 (§C-v2-A re-measurement under tile=128), §27 (llama.cpp
-rebase + free-win sweep — IQ3_M +70-80%), and **§28 (§C-v2-A
+rebase + free-win sweep — IQ3_M +70-80%), §28 (§C-v2-A
 re-measurement post-§27 rebase — gates *worsened*, lever
-closed harder)** have all closed or landed. The §27 rebase
-delivered an unexpected +80% throughput win on IQ3_M models
-(`qwen3-8b-iq3m` 15.1 → 27.2 tok/s) via upstream's #22344
-fast i-quant mat-vec kernels — a free win for the 8B+ fleet.
-§28 then settled whether that target speedup reopened §C-v2-A:
-empirically it did not — drafter Q8_0 doesn't use #22344, so
-target baseline scaled +78% but drafted path only +45-49%,
-and both gates worsened (0.42×→0.34×, 0.54×→0.45×). The
-algorithmic levers at the canonical 4-baseline are exhausted;
-remaining options are deliberate strategic choices, not
-obvious wins.
+closed harder), and **§29 (§C-v2-A path (c) "smaller i-quant
+drafter" closed by direct verify-cost probe — drafter→0 ceiling
+is 0.40× target solo)** have all closed or landed. The §27
+rebase delivered an unexpected +80% throughput win on IQ3_M
+models (`qwen3-8b-iq3m` 15.1 → 27.2 tok/s) via upstream's
+#22344 fast i-quant mat-vec kernels — a free win for the 8B+
+fleet. §28 then settled whether that target speedup reopened
+§C-v2-A: empirically it did not. §29 settled whether the
+"smaller i-quant drafter" path (c) opened by §28 was viable:
+empirically it is not — verify is 210 ms/call (83% of cycle),
+so even an infinitely-fast drafter caps the cell at 0.40×.
+The algorithmic levers at the canonical 4-baseline are
+exhausted; remaining options are deliberate strategic choices,
+not obvious wins.
 
 **Candidate next levers (none are forced; pick on need),
 in rough priority order:**
@@ -1925,17 +1949,18 @@ in rough priority order:**
    embeddingLength`. Nice-to-have when the registered 7B+
    fleet grows past hand-curation; defer until that pressure
    actually exists.
-5. **Smaller i-quant drafter for §C-v2-A path (c, new).**
-   §28's negative result opened a new theoretical path: a
-   drafter that also uses the #22344 i-quant code path would
-   scale symmetrically with the target. But the K=4
-   break-even math then requires the drafter to be *much*
-   smaller than the 13× ratio used in §26/§28 (else
-   verify+drafter exceeds baseline). Candidate space is
-   narrow: a ~150M-param IQ3 model that's similar enough to
-   qwen3-8b for α to remain useful. None registered today;
-   would require model acquisition + registration before
-   re-measuring on the side branch.
+5. ~~**Smaller i-quant drafter for §C-v2-A path (c, new).**~~
+   **CLOSED 2026-04-28 — §29.** Direct verify-cost probe on
+   the §28 cell-3 workload measured verify at **210 ms/call**
+   (5.9× a solo-decode step) — 83% of cycle time. nTokens=5
+   mat-mat falls outside the #22344 fast i-quant *mat-vec*
+   kernels that gave §27 its win, so verify cost is intrinsic
+   at this target/drafter ratio. Counterfactual drafter→0
+   cycle = 210 ms / 2.37 tok = 11.3 tok/s = 0.40× target solo,
+   fails both gates by 3.8× / 0.6× regardless of drafter cost.
+   Side branch tip `4e11d79` carries VERIFY-COST-PROBE.md;
+   no model acquisition needed. The probe took ~2 min wall and
+   saved a multi-day campaign.
 6. **Upstream ggml-webgpu rebase + free-win sweep.** Re-run
    the §27 sweep (`make bench-inference` on the canonical
    4-baseline + Mistral-7B) and the §28 §C-v2-A matrix on
