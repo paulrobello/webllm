@@ -55,6 +55,41 @@ docs, and bug fixes alike.
   `docs/superpowers/` directory is gitignored; specs/plans in it must
   be force-added (`git add -f`) — see commits `ae68bbe`, `b23ccc9`,
   `66bc603` for the convention.
+- **Rebase + sweep cycle doctrine.** When upstream `ggml-webgpu` moves
+  and a rebase fires, every cycle classifies into one of three
+  documented templates — pick the matching one and apply its decision
+  rule:
+  - **§27 (free win):** broad upside (e.g. +70-80% on IQ3_M from
+    upstream's #22344 fast i-quant mat-vec). Adopt baseline; update
+    canonical pins; close cycle. No follow-up needed.
+  - **§28 (negative result):** the lever a prior cycle bet on closes
+    *harder* (e.g. §C-v2-A gates moved 0.42× → 0.34× post-§27 because
+    drafter Q8 didn't benefit from #22344). Document, retire the
+    lever's resurrection paths, close cycle.
+  - **§32 (small regression, accepted):** 5-of-6-models neutral, 1
+    held a -6% regression. Don't revert the rebase — staying current
+    has option value (next cycle's free wins land cleanly). Document
+    and accept; pin the new canonical baseline.
+- **Cap-probe doctrine — bump first, characterize second**
+  (§31b lesson). When a measurement hits a cap at a configurable
+  value, immediately try bumping the configuration to confirm whether
+  the cap is configuration-bound or toolchain/runtime-bound. The bump
+  is cheap (1 line + 1 rebuild attempt). §31a missed this step and
+  landed a "configured-ceiling-bound, not hardware-bound" framing
+  that understated the constraint by one layer (the configuration
+  ceiling *was* the toolchain ceiling — Emscripten 5.0.6 wasm-ld
+  hard-caps `--max-memory` at 16 GiB).
+- **Pre-rebase baseline doctrine** (§32a lesson). When a rebase is the
+  planned probe trigger and the previous outcome classified as §32
+  template (small regression, accepted), capture pre-rebase
+  profile-mode (`make smoke-bench PERF_MODEL=<m> PERF_RUNS=3`) on the
+  canonical 6 *before* the rebase. Cost: ~3 min wall per model.
+  Pay-off: a §32a-style follow-on probe gets a same-model baseline
+  for diagnosis (would have diagnosed conclusively here rather than
+  via the cross-model proxy that §32a had to use). Pre-rebase
+  baselines are pinned at
+  `eval/reports/pre-rebase-baselines-<DATE>/SUMMARY.md` with a
+  ~1-month freshness window.
 
 ## Workflows
 
