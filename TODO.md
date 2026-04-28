@@ -2010,12 +2010,17 @@ pin refresh / #8 BENCHMARKS tier expansion / #9 CLAUDE.md
 doctrine capture); **#10 vault-save closed 2026-04-28** (5 notes
 landed under `~/ClaudeVault/Patterns/` + `Knowledge/`; index
 rebuilt, MANIFESTs verified — see closure entry in Watch list).
-**Backlog fully cleared.** All algorithmic levers at the
-canonical 4-baseline are exhausted (§17-§29 closed matmul, FA,
-drafter, encoder, prefill-tiling, spec-decode families). Upstream
-cadence check 2026-04-28: no `ggml-webgpu/` movement → no rebase
-trigger near firing. Next-work is gated entirely on external
-triggers (see "External-trigger candidates").
+**Algorithmic-perf backlog fully cleared.** All algorithmic levers
+at the canonical 4-baseline are exhausted (§17-§29 closed matmul,
+FA, drafter, encoder, prefill-tiling, spec-decode families).
+Upstream cadence check 2026-04-28: no `ggml-webgpu/` movement → no
+rebase trigger near firing. Perf next-work is gated entirely on
+external triggers (see "External-trigger candidates").
+
+**Active scope: embedding-model expansion.** User-driven scope
+queued 2026-04-28 — 3 candidate buckets (A: BERT-arch additions,
+**in progress**; B: non-BERT BERT-derived; C: causal-LM-derived).
+See "Embedding-model expansion candidates" section below.
 
 **Fresh observation pinned 2026-04-28 from #5 data:** the encoder
 overhead (`backendEncodeOverheadMs` per step) is a **fixed
@@ -2042,6 +2047,62 @@ project's size-30B target ceiling — at large models the
 absolute headroom is <1 tok/s — but is the only real
 opportunity at sub-1B targets if a "tiny-model" deployment
 appears. Captured as a finding rather than a next step.
+
+---
+
+### Embedding-model expansion candidates (queued 2026-04-28)
+
+User-driven scope: extend embedding fleet beyond the two registered
+Arctic-Embed entries. Three candidate buckets, in increasing scope.
+**Bucket A is in progress;** B and C tracked here for triage when A
+closes.
+
+**A. Register more BERT-arch embedders** (in progress 2026-04-28).
+The encoder forward path, WordPiece tokenizer, F32 dtype, and CLS-
+or-mean pooling (read from GGUF metadata) all already work — only
+`eval/models.ts` registration + `eval/smoke-profiles.ts` /
+`eval/embed-perf.ts` wiring should be needed. Initial picks:
+- `bge-small-en-v1.5` (~33M, 384-dim) — apples-to-apples with
+  arctic-embed-s; serves as a "encoder generalizes within BERT
+  arch" regression net.
+- `bge-large-en-v1.5` (~335M, 1024-dim) — first 335M encoder in
+  fleet; new scaling point for the dashboard's Embeddings section
+  alongside arctic-S/M.
+
+Stretch picks (defer if either of the above hit unexpected
+loader/tensor-name issues): `bge-base-en-v1.5`,
+`mxbai-embed-large-v1`, `snowflake-arctic-embed-l`. Decision rule
+on close: if A landed without requiring loader changes, the BERT-
+arch lever is essentially free for any future ask; dispatch B or C
+based on deployment need.
+
+**B. Extend `EncoderInference` to non-BERT arch** (deferred). Two
+popular asks both require real engineering on top of A's
+infrastructure:
+- `nomic-embed-text-v1` — modified BERT with rotary positional
+  embeddings instead of absolute. Needs RoPE path in
+  `EncoderInference.forward` and arch branch in the loader.
+- `jina-embeddings-v2` — ALiBi attention (linear bias). Needs
+  ALiBi support in the encoder attention path and a new arch
+  identifier.
+
+Scope estimate: 1-2 day equivalents each; reversible (additive,
+opt-in). Trigger: a deployment ask explicitly naming one of these
+families, OR an MTEB-quality justification beating the BGE
+canonical pick that lands under A.
+
+**C. Causal-LM-derived embedders (`Qwen3-Embedding-0.6B`)**
+(deferred). Reuses the existing causal forward but requires:
+- Embed-mode toggle on `ModelInference` (skip sampling, return
+  hidden state)
+- Last-token (or attention-pooled) pooling head
+- L2 normalize + project to embedding-dim if model has a head
+
+Scope: medium (additive). Trigger: an MTEB top-of-leaderboard ask
+for >1B embedders, where Qwen3-Embedding-4B and Qwen3-Embedding-8B
+become candidates. Highest upside (Qwen3-Embedding tops MTEB at
+0.6B-8B as of 2026); also opens a path to other causal-LM
+embedders (`gte-Qwen2-*`, `e5-mistral-*`).
 
 ---
 
