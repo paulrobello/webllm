@@ -29,6 +29,7 @@ const append = (msg, cls = "") => {
 const result = {
   phase1: null,
   phase2: null,
+  phase3_status: null,
   phase3_cap_bytes: null,
   phase3_iterations: null,
   phase4: null,
@@ -166,15 +167,22 @@ if (result.phase1 === "ok") {
     }
     result.phase3_cap_bytes = Number(totalCommitted);
     result.phase3_iterations = iterations;
+    result.phase3_status = iterations > 0 ? "ok" : "fail: zero iterations";
     const gibFinal = (Number(totalCommitted) / (1 << 30)).toFixed(2);
     append(`PHASE 3 cap = ${gibFinal} GiB across ${iterations} iters`, iterations > 0 ? "ok" : "fail");
     // Free all probed allocations so Phase 4 starts with a clean heap.
-    for (const ptr of heldPtrs) m._free(ptr);
-    append(`Freed ${heldPtrs.length} cap-probe allocations`, "info");
+    // Wrap per-pointer to guarantee Phase 4 sees a clean(er) heap even if one _free throws.
+    let freed = 0;
+    for (const ptr of heldPtrs) {
+      try { m._free(ptr); freed++; } catch (_) { /* ignore — best-effort cleanup */ }
+    }
+    append(`Freed ${freed}/${heldPtrs.length} cap-probe allocations`, "info");
   } catch (e) {
+    result.phase3_status = `fail: ${e?.message || e}`;
     append(`PHASE 3 unexpected error: ${e?.message || e}`, "fail");
   }
 } else {
+  result.phase3_status = "skipped (phase1 failed)";
   append("Phase 3 SKIPPED (Phase 1 failed)", "info");
 }
 
