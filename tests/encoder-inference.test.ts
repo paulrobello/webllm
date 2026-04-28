@@ -147,12 +147,14 @@ interface FakeWasm {
 	fake: GgmlWasm;
 	ops: string[];
 	softmaxMaxBias: number[];
+	view3dCalls: Array<{ nb1: number; nb2: number; offset: number }>;
 }
 
 function makeFakeWasm(): FakeWasm {
 	let next = 1;
 	const ops: string[] = [];
 	const softmaxMaxBias: number[] = [];
+	const view3dCalls: Array<{ nb1: number; nb2: number; offset: number }> = [];
 	const stub = {
 		ctxCreate: () => {},
 		tensorNew1d: () => next++,
@@ -208,8 +210,17 @@ function makeFakeWasm(): FakeWasm {
 			ops.push("rope");
 			return next++;
 		},
-		opView3d: () => {
+		opView3d: (
+			_x: TensorPtr,
+			_ne0: number,
+			_ne1: number,
+			_ne2: number,
+			nb1: number,
+			nb2: number,
+			offset: number,
+		) => {
 			ops.push("view3d");
+			view3dCalls.push({ nb1, nb2, offset });
 			return next++;
 		},
 		opReshape2d: () => next++,
@@ -217,7 +228,7 @@ function makeFakeWasm(): FakeWasm {
 		opPermute: () => next++,
 		opCont: () => next++,
 	} as unknown as GgmlWasm;
-	return { fake: stub, ops, softmaxMaxBias };
+	return { fake: stub, ops, softmaxMaxBias, view3dCalls };
 }
 
 function makeBertHp(layerCount: number): ModelHyperparams {
@@ -687,6 +698,7 @@ describe("EncoderInference.buildGraph arch dispatch", () => {
 		gelu: number;
 		view3d: number;
 		softmax_max_bias: number[];
+		view3dCalls: Array<{ nb1: number; nb2: number; offset: number }>;
 	} {
 		const fake = makeFakeWasm();
 		const hp = makeHp(arch);
@@ -726,6 +738,7 @@ describe("EncoderInference.buildGraph arch dispatch", () => {
 			gelu: fake.ops.filter((o) => o === "gelu").length,
 			view3d: fake.ops.filter((o) => o === "view3d").length,
 			softmax_max_bias: fake.softmaxMaxBias,
+			view3dCalls: fake.view3dCalls,
 		};
 	}
 
@@ -755,5 +768,26 @@ describe("EncoderInference.buildGraph arch dispatch", () => {
 		expect(r.silu).toBe(2);
 		expect(r.gelu).toBe(0);
 		expect(r.softmax_max_bias).toEqual([0, 0]);
+
+		// Verify fused-QKV view3d byte arithmetic per layer. Spec-flagged
+		// High-risk failure mode "Fused-QKV view_3d offsets miscomputed":
+		// without these assertions, an aliased (0, 0, 0) call sequence would
+		// pass the count check above.
+		expect(r.view3dCalls.length).toBe(6); // 2 layers × 3 slices
+		const hp = makeHp("nomic-bert");
+		const elemSize = 4; // F32_BYTES — production uses F32_BYTES
+		const E = hp.embeddingLength;
+		const headDim = hp.embeddingHeadLength;
+		const expectedOffsets = [0, elemSize * E, 2 * elemSize * E];
+		const expectedNb1 = elemSize * headDim;
+		const expectedNb2 = elemSize * 3 * E;
+		for (let layer = 0; layer < 2; layer++) {
+			for (let slice = 0; slice < 3; slice++) {
+				const call = r.view3dCalls[layer * 3 + slice];
+				expect(call.offset).toBe(expectedOffsets[slice]);
+				expect(call.nb1).toBe(expectedNb1);
+				expect(call.nb2).toBe(expectedNb2);
+			}
+		}
 	});
 });

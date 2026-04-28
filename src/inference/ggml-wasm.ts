@@ -37,6 +37,9 @@ export const GgmlPrec = {
 } as const;
 export type GgmlPrec = (typeof GgmlPrec)[keyof typeof GgmlPrec];
 
+/** Byte size of an fp32 matmul output element. Used by encoders for view3d byte arithmetic. */
+export const F32_BYTES = 4;
+
 /** Opaque handle to a ggml tensor (WASM heap pointer). */
 export type TensorPtr = number;
 /** Opaque handle to a ggml computation graph. */

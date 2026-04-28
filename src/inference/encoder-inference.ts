@@ -6,6 +6,7 @@ import {
 import type { GgufContext, GgufTensorInfo } from "../models/gguf-types.js";
 import {
 	type BufferPtr,
+	F32_BYTES,
 	GgmlType,
 	type GgmlWasm,
 	type TensorPtr,
@@ -246,7 +247,7 @@ export class EncoderInference {
 				// Fused QKV: one matmul → 3 view3d slices.
 				// Mirrors llama.cpp/src/llama-graph.cpp:1088-1095 (build_qkv).
 				const qkv = wasm.opMulMat(lw.qkvFused, x); // [3*E, nTokens]
-				const elemSize = 4; // matmul output is fp32
+				const elemSize = F32_BYTES; // matmul output is fp32
 				const headBytes = elemSize * headDim;
 				const tokenBytes = elemSize * 3 * E;
 				q3 = wasm.opView3d(
