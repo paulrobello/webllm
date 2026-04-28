@@ -1952,18 +1952,22 @@ Boot sequence for a fresh session:
      `?prefillTile=0` / `--prefill-tile 0` explicitly. FA mode
      is orthogonal.
 
-**Status (post-§32a):** No perf lever is forced. The algorithmic
+**Status (post-§31b):** No perf lever is forced. The algorithmic
 levers at the canonical 4-baseline are exhausted (§17-§29 closed
 the matmul, FA, drafter, encoder, prefill-tiling, and spec-decode
 families). The MEMORY64 ceiling that gated 13B/30B targets is no
-longer architecturally blocked (§31 + §31a — 15 GiB measured cap),
-but the full bridge migration is gated on deployment ask. §32 ran
-the upstream rebase + sweep cycle and accepted a small regression
-on `llama-3.1-8b-iq3m`. **§32a (2026-04-28) ran the profile-mode
-follow-up probe** — H1 "tied-embedding × #22456 aliasing-refactor"
-rejected (no bucket asymmetry vs untied Qwen3-8B reference); H2
-"uniform per-step overhead" supported; §32 baseline accepted as
-final. All other open work is conditional on external triggers.
+longer architecturally blocked (§31 + §31a — 15 GiB measured;
+§31b — 16 GiB Emscripten 5.0.6 wasm-ld toolchain ceiling), but the
+full bridge migration is gated on deployment ask **and inherits a
+30B-tightness tracking item** (long-context working set lands
+within margin of error of the toolchain ceiling — re-probe on
+every Emscripten upgrade). §32 ran the upstream rebase + sweep
+cycle and accepted a small regression on `llama-3.1-8b-iq3m`.
+**§32a (2026-04-28) ran the profile-mode follow-up probe** — H1
+"tied-embedding × #22456 aliasing-refactor" rejected (no bucket
+asymmetry vs untied Qwen3-8B reference); H2 "uniform per-step
+overhead" supported; §32 baseline accepted as final. All other
+open work is conditional on external triggers.
 
 ### Active next steps (post-§32)
 
@@ -2004,19 +2008,34 @@ direction.** None are forced; pick if appetite + curiosity align.
    diagnosed conclusively here rather than via the cross-model
    proxy).
 
-2. **§31b — `MAXIMUM_MEMORY` upper-bound probe** for the
-   `webllm-wasm-mem64` target. §31a measured 15 GiB at
-   `-sMAXIMUM_MEMORY=16GB` (configured-ceiling-bound, not
-   hardware-bound). Bump to `-sMAXIMUM_MEMORY=64GB` (or higher)
-   and re-run `mem64-probe.html` Phase 3 to find Chrome's actual
-   wasm64 cap. Useful pre-30B-deployment planning data: 30B IQ3_M
-   weights are ~12.8 GiB plus KV+activations could push the
-   working set above 15 GiB on long-context workloads, in which
-   case a `MAXIMUM_MEMORY` bump is part of the migration scope.
-   Procedure: edit `-sMAXIMUM_MEMORY` in `src/wasm/CMakeLists.txt`
-   (mem64 branch), `make mem64-probe`, capture
-   `__memory64ProbeResult.phase3_cap_bytes`. Cost: ~5 min wall.
-   Risk: zero (probe-only; no production-build touch).
+2. ~~**§31b — `MAXIMUM_MEMORY` upper-bound probe**.~~ **CLOSED
+   2026-04-28 — toolchain ceiling identified at 16 GiB; Chrome
+   runtime cap unmeasurable from this toolchain.** Bumped
+   `-sMAXIMUM_MEMORY` to `64GB` in the `webllm-wasm-mem64` ctor
+   block; build failed at link time:
+   `wasm-ld: error: maximum memory too large, cannot be greater
+   than 17179869184` (= **16 GiB exactly**, 2^34). Emscripten
+   5.0.6's wasm-ld enforces a hard 16 GiB ceiling on
+   `--max-memory`, regardless of the wasm spec's 256 TiB
+   theoretical limit or Chrome v8 wasm64's actual runtime cap.
+   §31a's "configured-ceiling-bound, not hardware-bound" framing
+   is correct but understates the constraint: **the configuration
+   ceiling is the toolchain ceiling, not a project knob.** §31a's
+   15 GiB measurement was therefore at the maximum any current
+   Emscripten build can configure. Implications for the 30B
+   migration scope: 30B IQ3_M working set (12.8 GiB weights + KV
+   + activations) can land at ~14.8-15.8 GiB on long-context
+   workloads, **within margin of error of the toolchain ceiling**
+   — the 30B migration inherits a "track the linker cap on every
+   Emscripten upgrade" tracking item. Mitigation paths if the cap
+   bites: lower-bit quant (IQ2_XXS / IQ2_S regains 4-5 GiB), cap
+   context window, wait for upstream Emscripten to lift, or
+   custom wasm-ld patch. **Process improvement noted:** when a
+   cap is hit at a configurable value, immediately bump it to
+   confirm whether the cap is configuration- or toolchain-bound;
+   §31a's report would have been clearer with this 2-minute
+   inline check. Edits reverted (zero net code change). Closure
+   report: `eval/reports/memory64-probe-2026-04-28/SUMMARY-31b.md`.
 
 3. **Patch 12 squash cleanup** on `webllm-browser-patches`. The
    §32 rebase added patch 12 as a forward fix-up to patch 3
