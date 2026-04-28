@@ -265,6 +265,11 @@
   </div>
   <div id="embedding-runs-empty" class="bar-empty">no embedding runs yet</div>
   <div id="embedding-runs-wrap" class="table-wrap" hidden>
+    <!-- B5: Δ total ms column shipped alongside total ms (mirrors the
+         pattern in the main runs table). Δ cosine deferred — cosine lives
+         on `evals.results[].embeddingCosine`, not on run records, so wiring
+         it here would require a per-row evals join we don't currently do
+         on the inference tab either. -->
     <table id="embedding-runs-table">
       <thead>
         <tr>
@@ -272,6 +277,7 @@
           <th data-sort="profile" class="sortable">profile</th>
           <th data-sort="model" class="sortable">model</th>
           <th data-sort="oneShotTotalMs" class="sortable num">total ms</th>
+          <th class="num" title="(this run − previous run for same model+profile) / previous × 100; lower is faster, so a negative Δ is a speedup">Δ total ms</th>
           <th data-sort="oneShotFinishReason" class="sortable">finish</th>
           <th>system</th>
         </tr>

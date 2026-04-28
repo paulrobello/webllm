@@ -2384,7 +2384,13 @@ function renderEmbeddingTable() {
 	const wrapEl = document.getElementById("embedding-runs-wrap");
 	if (!tbody || !countEl || !emptyEl || !wrapEl) return;
 
-	const runs = Array.from(state.runsByRunId.values()).filter(isEmbeddingRun);
+	const allRuns = Array.from(state.runsByRunId.values()).filter(isEmbeddingRun);
+	// B5: compute prior-run map across all encoder runs so per-row Δ total ms
+	// is independent of the current sort order. Reuses buildRunPriorByRunId
+	// from the main table — keys on (model, profile, thinking) but for
+	// encoders thinking is always "off" so it collapses to (model, profile).
+	const priorByRunId = buildRunPriorByRunId(allRuns);
+	const runs = [...allRuns];
 	runs.sort(comparator);
 	const failed = Array.from(state.failedByRunId.values()).filter(isEmbeddingRun);
 	countEl.textContent = String(runs.length);
@@ -2405,11 +2411,19 @@ function renderEmbeddingTable() {
 		const profileCell = run.profile
 			? escapeHtml(run.profile)
 			: `<span class="dim">—</span>`;
+		const prior = priorByRunId.get(run.runId);
+		const curMs = run.oneShot?.totalMs;
+		const priorMs = prior?.oneShot?.totalMs;
+		const deltaMsPct =
+			Number.isFinite(curMs) && Number.isFinite(priorMs) && priorMs > 0
+				? ((curMs - priorMs) / priorMs) * 100
+				: null;
 		tr.innerHTML = `
 			<td>${formatTime(run.timestamp)}</td>
 			<td>${profileCell}</td>
 			<td>${escapeHtml(run.model)}</td>
 			<td class="num">${formatNum(run.oneShot?.totalMs, 0)}</td>
+			${deltaCellHtml(deltaMsPct)}
 			<td>${escapeHtml(run.oneShot?.finishReason ?? "—")}</td>
 			<td>${systemPill(run.systemId)}</td>
 		`;
@@ -2423,7 +2437,7 @@ function renderEmbeddingTable() {
 			<td>${formatTime(new Date().toISOString())}</td>
 			<td>${escapeHtml(f.profile ?? "—")}</td>
 			<td>${escapeHtml(f.model)}</td>
-			<td colspan="3"><span class="pill fail">FAILED</span> ${escapeHtml(f.error)}</td>
+			<td colspan="4"><span class="pill fail">FAILED</span> ${escapeHtml(f.error)}</td>
 		`;
 		tbody.appendChild(tr);
 	}
