@@ -1,8 +1,10 @@
 # Encoder non-BERT architecture support — design
 
 **Date:** 2026-04-28
-**Status:** Revised post-Phase-0 (commit `43df996`). Awaiting user spec re-review.
-**Tracking:** TODO.md "Embedding-model expansion candidates — Bucket B".
+**Status:** Implementation complete (Phase 5 closed). This file captures the
+spec corrected to match what shipped — see "Post-implementation corrections"
+note below.
+**Tracking:** TODO.md "Embedding-model expansion candidates — Bucket B" (DONE).
 **Cycle precedent:** §17/§18/§19/§20 phased plan structure.
 
 > **Revision note (2026-04-28).** A first-pass spec under this filename
@@ -14,6 +16,36 @@
 > survives at git ref `8064f80:docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`
 > as historical context.
 
+> **Post-implementation corrections (2026-04-28, bucket B follow-up #11).**
+> Phase 3 / Phase 4 integration surfaced four spec/reality mismatches; the
+> implementation diverged from the post-Phase-0 spec to match llama.cpp
+> ground truth. This section is the canonical patch. Truth sources cited
+> per item:
+>
+> 1. **jina-bert-v2 FFN is GeGLU** (`gelu(gate) * up`), not SwiGLU.
+>    Truth: `~/Repos/llama.cpp/src/models/bert.cpp:122-130`. The spec's
+>    Point F branch was generalized from "SwiGLU only" to per-arch
+>    activation selection (silu for nomic, gelu for jina).
+> 2. **nomic-bert RoPE mode is NEOX**, not NORMAL. Truth:
+>    `~/Repos/llama.cpp/src/llama-model.cpp:9266` (uses
+>    `LLAMA_ROPE_TYPE_NEOX` for `LLM_ARCH_NOMIC_BERT*`).
+> 3. **Encoder ALiBi mask is `-|i - j|` populated**, not zero-filled
+>    or NULL. Truth: `~/Repos/llama.cpp/src/llama-graph.cpp:411` —
+>    `ggml_soft_max_ext` requires a non-NULL mask leaf when `max_bias
+>    > 0` (`ggml.c:4012`); ALiBi adds the per-head slope to the
+>    `-|i - j|` mask values.
+> 4. **WordPiece tokenizer loader falls back to `bos_token_id` /
+>    `eos_token_id`** when `cls_token_id` / `mask_token_id` are
+>    absent. Nomic GGUF omits the cls/mask metadata; BERT convention
+>    is `cls = bos = 101`, `sep = eos = 102`, so the fallback yields
+>    the correct token IDs. The spec's "Zero changes" note for the
+>    tokenizer was incomplete.
+>
+> Each correction is now reflected in the relevant section below
+> (Goal, Phase 0 findings tables, Per-arch dispatch, Point D softmax,
+> Point F FFN, getRopeModeForArchitecture row, Tokenizer section,
+> failure-diagnosis notes).
+
 ## 0. Goal & non-goals
 
 **Goal.** Extend `EncoderInference` to support two new BERT-family encoder
@@ -21,14 +53,14 @@ architectures by adding the structural variants needed for each:
 
 - **`nomic-embed-text-v1.5`** — `nomic-bert` arch, 137M params, 768-dim,
   2048 ctx, mean pooling. **Fused QKV**, **no biases anywhere**, **SwiGLU
-  FFN**, **RoPE** (NORMAL mode, `freq_base = 1000` from GGUF). First
+  FFN**, **RoPE** (NEOX mode, `freq_base = 1000` from GGUF). First
   encoder in fleet with rotary positional embeddings AND with
   causal-LM-style tensor structure.
 - **`jina-embeddings-v2-base-en`** — `jina-bert-v2` arch, 137M params,
   768-dim, 8192 ctx, mean pooling. Split QKV with biases, **mixed-bias
-  SwiGLU FFN** (gate + up no bias; down has bias), **ALiBi** attention
-  (default `max_bias = 8.0` — GGUF mirror omits the metadata key).
-  First encoder in fleet with ALiBi attention bias.
+  GeGLU FFN** (`gelu(gate) * up`; gate + up no bias; down has bias),
+  **ALiBi** attention (default `max_bias = 8.0` — GGUF mirror omits
+  the metadata key). First encoder in fleet with ALiBi attention bias.
 
 Both register and validate under one design / phased implementation, with
 **jina shipping first** in Phase 2 (smaller delta from BERT — split QKV
@@ -64,7 +96,7 @@ the secondary tensor-list dump:
 | Per-block QKV | `attn_q.weight`, `attn_q.bias`, `attn_k.weight`, `attn_k.bias`, `attn_v.weight`, `attn_v.bias` | `attn_qkv.weight` (fused, **no bias**) | `attn_q.weight`, `attn_q.bias`, `attn_k.weight`, `attn_k.bias`, `attn_v.weight`, `attn_v.bias` |
 | Per-block O | `attn_output.{weight,bias}` | `attn_output.weight` (**no bias**) | `attn_output.{weight,bias}` |
 | Post-attn LN | `attn_output_norm.{weight,bias}` | `attn_output_norm.{weight,bias}` | `attn_output_norm.{weight,bias}` |
-| Per-block FFN | `ffn_up.{weight,bias}`, `ffn_down.{weight,bias}` (GeLU two-layer) | `ffn_gate.weight`, `ffn_up.weight`, `ffn_down.weight` (**no biases**, **SwiGLU**) | `ffn_gate.weight`, `ffn_up.weight` (no bias), `ffn_down.{weight,bias}` (**SwiGLU**, mixed bias) |
+| Per-block FFN | `ffn_up.{weight,bias}`, `ffn_down.{weight,bias}` (GeLU two-layer) | `ffn_gate.weight`, `ffn_up.weight`, `ffn_down.weight` (**no biases**, **SwiGLU**) | `ffn_gate.weight`, `ffn_up.weight` (no bias), `ffn_down.{weight,bias}` (**GeGLU**, mixed bias) |
 | Post-FFN LN | `layer_output_norm.{weight,bias}` | `layer_output_norm.{weight,bias}` | `layer_output_norm.{weight,bias}` |
 
 ### Metadata findings
@@ -90,7 +122,7 @@ the secondary tensor-list dump:
 | Position encoding | learned absolute (add to embedding) | RoPE (Q + K, after reshape) | ALiBi (softmax `max_bias`) |
 | QKV layout | split projections, each + bias | fused matmul + slice via `view_3d` | split projections, each + bias |
 | Attention output bias | yes | no | yes |
-| FFN type | GeLU two-layer | SwiGLU (`silu(gate) * up`) | GEGLU/SwiGLU (`silu(gate) * up`) |
+| FFN type | GeLU two-layer | SwiGLU (`silu(gate) * up`) | GeGLU (`gelu(gate) * up`) |
 | FFN biases | up + down | none | down only |
 | LayerNorm structure | post-norm (residual then LN) | post-norm | post-norm |
 | Pooling | CLS or MEAN | MEAN | MEAN |
@@ -103,7 +135,7 @@ the secondary tensor-list dump:
 | `src/core/types.ts` | Add `"nomic-bert"`, `"jina-bert-v2"` to `ModelArchitecture` union; add `alibiMaxBias?: number`; export `ENCODER_ARCHITECTURES` + `isEncoderArchitecture()` helper. | +5 |
 | `src/models/model-loader.ts` | `extractHyperparams`: broaden `arch === "bert"` branches to `isEncoderArchitecture(arch)`; read jina ALiBi metadata (with 8.0 fallback). | +20 |
 | `src/inference/encoder-inference.ts` | Drop `bert` hard-assert. Make all bias and gate fields nullable in `EncoderLayerWeights`. Add `qkvFused` field. Add `makeTensorOptional` for absent-tolerant lookup. Branch `loadWeights` per arch. Branch `buildGraph` at six load-bearing points (pre-layer pos-embedding, fused-vs-split QKV, RoPE, attn-output bias, softmax max_bias, FFN type/bias). | +180 |
-| `src/inference/model-inference.ts` | `getRopeModeForArchitecture`: `nomic-bert → NORMAL`. | +3 |
+| `src/inference/model-inference.ts` | `getRopeModeForArchitecture`: `nomic-bert → NEOX` (per llama.cpp `llama-model.cpp:9266`). | +3 |
 | `src/core/engine.ts` | `engine.ts:589` routing → `isEncoderArchitecture(arch)`. | +5 |
 | `eval/models.ts` | Two new entries (nomic + jina). | +30 |
 | `eval/smoke-profiles.ts` | Two new profile rows + selector array additions. | +20 |
@@ -154,8 +186,9 @@ interface EncoderLayerWeights {
   attnNormW: TensorPtr;                // all
   attnNormB: TensorPtr;                // all (post-attn LN)
 
-  // FFN — gate is non-null for SwiGLU/GEGLU, null for plain GeLU:
-  ffnGate: TensorPtr | null;           // nomic + jina-bert-v2 (SwiGLU)
+  // FFN — gate is non-null for SwiGLU (nomic) and GeGLU (jina), null
+  // for plain GeLU two-layer (bert):
+  ffnGate: TensorPtr | null;           // nomic (SwiGLU) + jina-bert-v2 (GeGLU)
   ffnUp: TensorPtr;                    // all
   ffnUpBias: TensorPtr | null;         // bert only
   ffnDown: TensorPtr;                  // all
@@ -269,8 +302,10 @@ if (usesRope) {
 
 `hp.ropeFreqBase` for nomic comes from GGUF metadata directly (= 1000;
 the loader's existing fallback chain at `model-loader.ts:95-98` already
-reads `${arch}.rope.freq_base`). `ropeMode = NORMAL` per
-`getRopeModeForArchitecture("nomic-bert")`.
+reads `${arch}.rope.freq_base`). `ropeMode = NEOX` per
+`getRopeModeForArchitecture("nomic-bert")` — matches llama.cpp's
+`LLAMA_ROPE_TYPE_NEOX` for `LLM_ARCH_NOMIC_BERT*`
+(`~/Repos/llama.cpp/src/llama-model.cpp:9266`).
 
 ### Point D — softmax (with optional ALiBi)
 
@@ -280,12 +315,23 @@ const kp = wasm.opPermute(k3, 0, 2, 1, 3);
 const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
 const qk = wasm.opMulMat(kp, qp);
-const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, alibiMaxBias);
+// Mask leaf is REQUIRED for jina (max_bias > 0) and OPTIONAL (NULL)
+// for bert/nomic. When required, populate with -|i - j| per row/col
+// per llama.cpp `llama-graph.cpp:411`; ggml then adds the per-head
+// ALiBi slope to those values during softmax.
+const maskLeaf = alibiMaxBias > 0 ? this.alibiMaskLeaf(nTokens) : 0;
+const aw = wasm.opSoftMaxExt(qk, maskLeaf, invSqrtHd, alibiMaxBias);
 ```
 
 `alibiMaxBias` is `0.0` for bert/nomic and `hp.alibiMaxBias ?? 8.0` for
-jina. ggml's softmax computes per-head linear bias internally when
-`max_bias > 0` (slopes derived as `2^(-8/n_head * h)`).
+jina. ggml's softmax derives per-head linear slopes internally when
+`max_bias > 0` (slopes `2^(-8/n_head * h)`), but **a non-NULL mask
+tensor is still required** (`ggml.c:4012` asserts `mask != NULL` when
+`max_bias > 0`). For an encoder with full bidirectional attention the
+mask values are simply the negative-distance pattern `-|i - j|`; the
+slope-times-distance addition produces the per-head ALiBi bias. For
+bert/nomic (no ALiBi) the mask leaf is omitted (NULL); jina populates
+it once at graph build via `alibiMaskLeaf(nTokens)`.
 
 ### Point E — attention output (with optional bias)
 
@@ -301,16 +347,26 @@ if (lw.oBias) attnProj = wasm.opAdd(attnProj, lw.oBias);
 x = this.layerNorm(wasm.opAdd(x, attnProj), lw.attnNormW, lw.attnNormB);
 ```
 
-### Point F — FFN (GeLU two-layer or SwiGLU)
+### Point F — FFN (GeLU two-layer, SwiGLU, or GeGLU)
+
+The gated branch picks the gate activation per-arch — **silu for nomic
+(SwiGLU)** and **gelu for jina (GeGLU)** — matching llama.cpp
+`bert.cpp:122-130` (jina/jina-bert-v2 uses `ggml_gelu` on the gate
+projection):
 
 ```ts
+const gateAct: "silu" | "gelu" =
+  arch === "jina-bert-v2" ? "gelu" : "silu";
+
 let ffnOut: TensorPtr;
 if (lw.ffnGate) {
-  // SwiGLU: silu(gate(x)) * up(x), then down(...).
+  // SwiGLU (nomic): silu(gate(x)) * up(x).
+  // GeGLU  (jina) : gelu(gate(x)) * up(x).
   const gate = wasm.opMulMat(lw.ffnGate, x);
   let up = wasm.opMulMat(lw.ffnUp, x);
   if (lw.ffnUpBias) up = wasm.opAdd(up, lw.ffnUpBias);   // bert never enters this branch
-  const mid = wasm.opMul(wasm.opSilu(gate), up);
+  const activated = gateAct === "gelu" ? wasm.opGelu(gate) : wasm.opSilu(gate);
+  const mid = wasm.opMul(activated, up);
   ffnOut = wasm.opMulMat(lw.ffnDown, mid);
   if (lw.ffnDownBias) ffnOut = wasm.opAdd(ffnOut, lw.ffnDownBias);  // jina yes, nomic no
 } else {
@@ -425,7 +481,14 @@ tensors.
 
 `buildTokenizerConfig` already routes `tokenizer.ggml.model == "bert"` →
 WordPiece. Both nomic and jina v2 export `tokenizer.ggml.model = "bert"`.
-**Zero changes.**
+
+**Cls/mask token fallback (added in Phase 4).** Nomic GGUF omits
+`tokenizer.ggml.cls_token_id` and `tokenizer.ggml.mask_token_id` (jina
+and the existing arctic/bge entries do export them). The WordPiece
+loader now falls back to `bos_token_id` / `eos_token_id` when the cls/
+mask keys are absent — BERT convention is `cls = bos = 101` and
+`sep = eos = 102`, so the fallback yields the correct token IDs for
+nomic and is a no-op for any GGUF that exports the canonical keys.
 
 (Jina v2 also sets `tokenizer.ggml.pre = "jina-v2-en"`, a BPE pre-tokenizer
 hint. WordPiece tokenization ignores BPE pre-tokenizer settings; the field
@@ -464,12 +527,17 @@ browser smoke page via `agentchrome`, calls
 computes cosine vs the pinned reference per row. **Per-row gate: cosine
 ≥ 0.999.** Fail diagnoses (most-likely first):
 
-For **nomic** specifically: fused-QKV view offsets, RoPE mode (NORMAL vs
-NEOX), `freq_base` (1000 vs 10000 — confirm GGUF reads correctly),
-SwiGLU vs GeLU FFN type, missing-bias add path inadvertently firing.
+For **nomic** specifically: fused-QKV view offsets, RoPE mode (must be
+NEOX — `LLAMA_ROPE_TYPE_NEOX` per `llama-model.cpp:9266`), `freq_base`
+(1000 vs 10000 — confirm GGUF reads correctly), SwiGLU vs GeLU FFN
+type, missing-bias add path inadvertently firing, missing cls/mask
+token fallback to bos/eos.
 
-For **jina** specifically: ALiBi `max_bias` value (8.0 default), SwiGLU
-gate (jina has `ffn_gate.weight`), `ffn_down.bias` add path.
+For **jina** specifically: ALiBi `max_bias` value (8.0 default),
+ALiBi mask must be populated with `-|i - j|` (NULL mask trips
+`ggml.c:4012` assertion), GeGLU gate activation (jina uses `gelu`,
+not `silu` — divergent from nomic's SwiGLU; `bert.cpp:122-130`),
+`ffn_down.bias` add path.
 
 ### Gate 3 — Cosine-task eval (existing 8-task suite)
 
@@ -511,9 +579,9 @@ Five new test groups, each focused and isolated:
    sub-tests (one per arch). Mock `GgmlWasm` records all op calls.
 5. **`loadWeights` arch dispatch** — given a synthesized GGUF tensor map,
    verify that bert loads `attn_q.weight/bias` and rejects `attn_qkv.weight`,
-   nomic loads `attn_qkv.weight` and skips all biases, jina loads split
-   QKV with biases and SwiGLU `ffn_gate.weight` with no `ffn_up.bias`
-   but with `ffn_down.bias`. Three sub-tests.
+   nomic loads `attn_qkv.weight` (SwiGLU `ffn_gate.weight`) and skips all
+   biases, jina loads split QKV with biases and GeGLU `ffn_gate.weight`
+   with no `ffn_up.bias` but with `ffn_down.bias`. Three sub-tests.
 
 `EncoderInference.poolAndNormalize` and `layerNorm` are reused unchanged.
 Integration / smoke is covered by Gate 4.
