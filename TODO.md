@@ -2002,15 +2002,17 @@ squash). All other open work is conditional on external triggers.
 ### Active next steps (post-§31b + squash + housekeeping)
 
 **Status:** all three opt-in probes from the post-§32 list closed
-2026-04-28 (§32a / §31b / patch-12 squash) **and all three fresh
+2026-04-28 (§32a / §31b / patch-12 squash); **all three fresh
 housekeeping items closed 2026-04-28** (#4 dashboard refresh /
-#5 pre-rebase baselines / #6 §32 SUMMARY cross-link — closure
-entries preserved below for reference). **No active perf lever
-in flight.** All algorithmic levers at the canonical 4-baseline
-are exhausted (§17-§29 closed matmul, FA, drafter, encoder,
-prefill-tiling, spec-decode families). Perf next-work is gated
-entirely on external triggers (see "External-trigger candidates"
-section).
+#5 pre-rebase baselines / #6 §32 SUMMARY cross-link); **all three
+doc-style next-step candidates closed 2026-04-28** (#7 TODO header
+pin refresh / #8 BENCHMARKS tier expansion / #9 CLAUDE.md
+doctrine capture). **No active perf lever in flight; no
+documentation backlog.** All algorithmic levers at the canonical
+4-baseline are exhausted (§17-§29 closed matmul, FA, drafter,
+encoder, prefill-tiling, spec-decode families). Perf next-work
+is gated entirely on external triggers (see "External-trigger
+candidates" section).
 
 **Fresh observation pinned 2026-04-28 from #5 data:** the encoder
 overhead (`backendEncodeOverheadMs` per step) is a **fixed
@@ -2042,64 +2044,41 @@ appears. Captured as a finding rather than a next step.
 
 ### Fresh next-step candidates (2026-04-28)
 
-Three doc-style candidates surfaced post-housekeeping. None are
-forced; all are independent of external triggers.
+Three doc-style candidates surfaced post-housekeeping; **all closed
+2026-04-28.** No fresh candidates queued.
 
-7. **TODO.md header pin refresh.** The header block at lines
-   19-32 carries pre-§27 baselines (`tinyllama ~105 tok/s`,
-   `qwen3-0.6b ~85/~93`, `qwen3-1.7b ~66`, `smollm2-360m ~106`)
-   measured 2026-04-25. Post-§27 / §32 canonical (`perf.ts`
-   non-profile 3-run median) is 110.8 / 89.8 / — / 62.2 with
-   no smollm2 re-measurement; mistral-7b-q4ks 35.0; llama-3.1-
-   8b-iq3m 27.2; qwen3-8b-iq3m 27.2. Replace inline; add 7B+
-   entries to make the canonical 6 visible in the header.
-   Cost: ~10 min wall (find/replace + verify against §5
-   baselines). Risk: zero (pure doc). Decision rule: trivial —
-   the header is the public-facing claim surface.
+7. ~~**TODO.md header pin refresh.**~~ **DONE 2026-04-28** (commit
+   `64c5eea`) — header block (lines 19-44 post-edit) replaced
+   pre-§27 baselines with post-§32 canonical 6: tinyllama 110.8,
+   qwen3-0.6b 89.8, qwen3-1.7b 62.2, mistral-7b-q4ks 35.0,
+   llama-3.1-8b-iq3m 27.2, qwen3-8b-iq3m 27.2. Smaller-fleet
+   (smollm2-360m, qwen3-4b) and profile-mode pins kept in separate
+   sub-blocks. "Canonical 6" promoted from inline-prose to
+   header-block-vocabulary as the ship-gate fleet for every rebase
+   + sweep cycle.
 
-8. **docs/BENCHMARKS.md tier expansion.** The "Performance
-   Tiers" tables (lines 406-440) cap at "Quality (20-30 tok/s)
-   = Qwen3 4B" and don't list 7B+. Post-§32 we have Mistral-7B
-   Q4_K_S (35 tok/s, 4.0 GB), Llama-3.1-8B IQ3_M (27.2 tok/s,
-   3.6 GB), Qwen3-8B IQ3_M (27.2 tok/s, 3.3 GB). Slot Mistral-
-   7B into "Balanced (30+)" or extend with a "Heavy (15-30)"
-   tier housing the 8Bs. Also: Qwen3 4B's actual 35 tok/s
-   measurement (§10 wave 1) places it in "Balanced", not
-   "Quality" — reshuffle. Cost: ~20 min wall (table edits +
-   cross-check against `eval/models.ts` definitions). Risk:
-   zero (pure doc). Decision rule: only if a downstream
-   consumer is pointing at this file as authoritative; if it
-   stays as illustrative-only, low priority.
+8. ~~**docs/BENCHMARKS.md tier expansion.**~~ **DONE 2026-04-28**
+   (commit `ffefa00`) — added 7B+ entries (Mistral-7B Q4_K_S,
+   Llama-3.1-8B IQ3_M, Qwen3-8B IQ3_M, Mistral-7B Q3_K_M); moved
+   Qwen3 4B from Quality → Balanced based on measured 35.5 tok/s;
+   moved Qwen3 1.7B from Balanced → Fast based on measured 62.2;
+   added Decode tok/s column to all tier tables; bolded the
+   canonical 6 entries to distinguish ship-gate fleet from wave-1
+   / arch-survey entries; added explicit "Wave-1 deferred" footer
+   for Gemma 2 2B and Phi-3.5 Mini.
 
-9. **CLAUDE.md / TODO.md doctrine capture from §27-§32a.**
-   The "Workflow policies (set 2026-04-28)" block in CLAUDE.md
-   already captures the 30B ceiling, quick-wins-override,
-   probe-first, complexity-≠-time, and commit-before-work
-   doctrines. Three additional lessons from §27-§32a are not
-   yet captured anywhere durable:
-   - **Rebase classification template** (§27 free win / §28
-     negative result / §32 small regression accepted) — the
-     three documented outcome shapes for upstream `ggml-webgpu`
-     rebases. Currently embedded in TODO.md prose.
-   - **Cap-probe doctrine** (§31b lesson): when a measurement
-     hits a cap at a configurable value, immediately bump the
-     configuration to confirm whether the cap is configuration-
-     bound or toolchain/runtime-bound. Already inline in TODO.md
-     "Process notes" but not in CLAUDE.md.
-   - **Pre-rebase baseline doctrine** (§32a lesson): when the
-     bench sweep is a planned rebase probe, capture pre-rebase
-     profile-mode on the canonical fleet *before* the rebase.
-     Already inline in TODO.md "Process notes" but not in
-     CLAUDE.md.
-
-   Promotion path: lift the three doctrines from TODO.md
-   "Process notes" into CLAUDE.md "Workflow policies"; cite
-   the closure reports as evidence anchors. Cost: ~15 min
-   wall. Risk: zero (pure doc; doctrines already live as
-   inline notes). Decision rule: **only useful if a future
-   session can short-circuit re-discovery by reading CLAUDE.md
-   first** — if these doctrines stay only in TODO.md, a `/clear`
-   or context decay loses them.
+9. ~~**CLAUDE.md doctrine capture from §27-§32a.**~~ **DONE
+   2026-04-28** (commit `c514bce`) — promoted three doctrines
+   from TODO process-notes to CLAUDE.md "Workflow policies":
+   - **Rebase + sweep cycle doctrine** with the three template
+     outcomes (§27 free win, §28 negative result, §32 small
+     regression accepted) and matching decision rules.
+   - **Cap-probe doctrine** (§31b lesson — bump first,
+     characterize second).
+   - **Pre-rebase baseline doctrine** (§32a lesson — same-model
+     pre/post bucket comparison beats cross-model proxy).
+   Both #2 and #3 cite closure reports as evidence anchors. The
+   doctrines now survive context decay and session resets.
 
 1. ~~**§32a — Profile-mode rebench on `llama-3.1-8b-iq3m`**.~~
    **CLOSED 2026-04-28 — hypothesis rejected, §32 baseline
