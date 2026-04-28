@@ -4,11 +4,20 @@
 
 **Goal:** Build a separate `webllm-wasm-mem64` build target + standalone harness that answers a single decision-grade question about MEMORY64 viability on the webllm browser stack and produces a closure report citing Chrome's actual heap ceiling on the dev box.
 
-**Architecture:** Mirror the existing `webllm-wasm` CMake target with three flag deltas (`-sMEMORY64=1 -sWASM_BIGINT=1 -sMAXIMUM_MEMORY=16GB`); add a `make mem64-probe` orchestration target; write a self-contained `smoke-test/mem64-probe.html` harness that runs four sequential phases (ASYNCIFY round-trip, BigInt ABI smoke, sequential 1-GiB cap probe, post-probe shutdown health) and emits both a `#log` div and a structured `window.__memory64ProbeResult` JSON blob; execute via the existing agentchrome session; write a closure report and TODO §31 entry citing the decision-rule branch taken.
+**Architecture:** Two parallel CMake build dirs share `src/wasm/CMakeLists.txt`, gated by a new `WEBLLM_BUILD_MEM64` cache option. The wasm32 dir (`src/wasm/build/`) builds `webllm-wasm` + wasm32 ggml as today (default `OFF`). The wasm64 dir (`src/wasm/build-mem64/`) builds `webllm-wasm-mem64` + wasm64 ggml when configured with `-DWEBLLM_BUILD_MEM64=ON -DCMAKE_C_FLAGS=-sMEMORY64=1 -DCMAKE_CXX_FLAGS=-sMEMORY64=1`. The probe binary links wasm64-against-wasm64 archives, side-stepping the wasm32/wasm64 link incompatibility found by the 2026-04-28 sub-probe. `make mem64-probe` orchestrates the parallel build + serves a self-contained `smoke-test/mem64-probe.html` harness that runs four sequential phases (ASYNCIFY round-trip, BigInt ABI smoke, sequential 1-GiB cap probe, post-probe shutdown health) and emits both a `#log` div and a structured `window.__memory64ProbeResult` JSON blob; execute via the existing agentchrome session; write a closure report and TODO §31 entry citing the decision-rule branch taken.
 
-**Tech Stack:** Emscripten (`-sMEMORY64=1` + `-sWASM_BIGINT=1`), CMake (existing pattern in `src/wasm/CMakeLists.txt`), GNU make (existing pattern in `Makefile`), vanilla HTML + ES module JS (no SDK import, no bundler), agentchrome CLI for browser control.
+**Tech Stack:** Emscripten (`-sMEMORY64=1` + `-sWASM_BIGINT=1` + `CMAKE_C/CXX_FLAGS=-sMEMORY64=1` global propagation to ggml), CMake (existing pattern in `src/wasm/CMakeLists.txt` + new cache option for target gating), GNU make (existing pattern in `Makefile` + new `mem64-probe` target with its own cmake configure), vanilla HTML + ES module JS (no SDK import, no bundler), agentchrome CLI for browser control.
 
-**Spec:** [`docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md`](../specs/2026-04-28-memory64-cap-probe-design.md) (commit `f479ce5`).
+**Spec:** [`docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md`](../specs/2026-04-28-memory64-cap-probe-design.md) (commit `c5eb957`, amended after sub-probe finding).
+
+> **Amended 2026-04-28** after a sub-probe found that wasm32 and wasm64
+> object files cannot be linked together
+> (`wasm-ld: error: ... wasm32 object file can't be linked in wasm64 mode`).
+> Phase 1 + Phase 2 + the file-structure table are revised to use parallel
+> CMake build dirs with a cache-option-gated CMakeLists.txt. Sub-probe
+> separately confirmed `ggml-base` and `ggml-webgpu` compile cleanly as
+> wasm64 with `CMAKE_C/CXX_FLAGS=-sMEMORY64=1` propagated, so the rebuild
+> is feasible. Phases 0, 3, 4, 5 are unchanged.
 
 **Project policies in effect** (committed `e23ac03`):
 - 30B model ceiling — out-of-scope justifications must not lean on 70B+ targets.
@@ -22,13 +31,16 @@
 
 | Path | Disposition | Responsibility |
 |---|---|---|
-| `src/wasm/CMakeLists.txt` | **Modify** | Add `webllm-wasm-mem64` `add_executable` block + flag deltas. Existing `webllm-wasm` target unchanged. |
-| `Makefile` | **Modify** | Add `mem64-probe` orchestration target. Add it to `.PHONY`. |
+| `src/wasm/CMakeLists.txt` | **Modify** | Add `option(WEBLLM_BUILD_MEM64 "..." OFF)` cache option. Wrap the existing `add_executable(webllm-wasm ...)` block in `else()` of an `if(WEBLLM_BUILD_MEM64)`; the `if()` branch defines `webllm-wasm-mem64` with the three flag deltas. Default `OFF` reproduces the pre-amendment build graph bit-identically. |
+| `.gitignore` | **Modify** | Add `src/wasm/build-mem64/` to the existing `src/wasm/build/` exclusion line. |
+| `Makefile` | **Modify** | Add `mem64-probe` orchestration target with its own `emcmake cmake` configure step in `src/wasm/build-mem64/`. Add it to `.PHONY`. |
 | `smoke-test/mem64-probe.html` | **Create** | Self-contained HTML harness, ~120 LOC (HTML + inline ES module). Loads `webllm-wasm-mem64.js`, runs four probe phases, populates `#log` and `window.__memory64ProbeResult`. |
 | `eval/reports/memory64-probe-2026-04-28/SUMMARY.md` | **Create** (Phase 5) | Closure report citing phase outcomes, JSON blob, environment versions, decision-rule branch. |
 | `TODO.md` | **Modify** (Phase 5) | Add §31 closure entry referencing the report. |
-| `src/wasm/webgpu-bridge.cpp` | **Untouched** | Already wasm64-clean by inspection (`size_t` casts at all pointer arithmetic sites). |
+| `src/wasm/build-mem64/` | **Generated** | Parallel CMake build dir; wasm64 ggml archives + mem64 binary. Gitignored. |
+| `src/wasm/webgpu-bridge.cpp` | **Untouched** | Sub-probe confirmed wasm64-clean. |
 | `src/inference/*.ts` | **Untouched** | Bridge migration is out of scope for this probe. |
+| `src/wasm/build/` | **Untouched** | Existing wasm32 build dir. |
 
 ---
 
@@ -98,143 +110,263 @@ Expected: JSON with `"active": true` and a CDP `port`. If `"active": false`, run
 
 ---
 
-## Phase 1 — Add `webllm-wasm-mem64` CMake target
+## Phase 1 — Add cache-option-gated mem64 target to CMakeLists.txt + .gitignore
 
-**Purpose:** Produce a separate build target that compiles `webgpu-bridge.cpp` + `ggml-webgpu` against `-sMEMORY64=1`. The existing `webllm-wasm` target is unchanged.
+**Purpose:** Add a `WEBLLM_BUILD_MEM64` cache option that gates which `add_executable` is created in the EMSCRIPTEN branch. Default `OFF` reproduces the pre-amendment build graph bit-identically; `ON` produces the wasm64 mem64 target. Live `make wasm-build` is unaffected.
 
-### Task 1.1: Add the new target to `src/wasm/CMakeLists.txt`
+### Task 1.1: Add the cache option and gate the existing target in `src/wasm/CMakeLists.txt`
 
 **Files:**
-- Modify: `src/wasm/CMakeLists.txt:46-92` (add a sibling `add_executable(webllm-wasm-mem64 ...)` block in the `if(EMSCRIPTEN)` branch).
+- Modify: `src/wasm/CMakeLists.txt`.
+- Modify: `.gitignore`.
 
-- [ ] **Step 1: Read the current `if(EMSCRIPTEN)` block**
+- [ ] **Step 1: Add `option(...)` declaration above the `if(EMSCRIPTEN)` block**
 
-```bash
-sed -n '46,92p' src/wasm/CMakeLists.txt
-```
-
-Confirm the existing structure: `EXPORTED_FUNCTIONS` string built up first, then `add_executable(webllm-wasm webgpu-bridge.cpp)`, then `target_link_libraries`, `target_include_directories`, `target_link_options`, `set_target_properties`.
-
-- [ ] **Step 2: Add the mem64 target inside `if(EMSCRIPTEN)` after the existing `set_target_properties(webllm-wasm ...)` block**
-
-Edit `src/wasm/CMakeLists.txt`. Locate the block:
+Open `src/wasm/CMakeLists.txt`. Locate the existing `WEBLLM_ASSERTIONS` option declaration (around line 17):
 
 ```cmake
-    set_target_properties(webllm-wasm PROPERTIES
-        PREFIX ""
-    )
-else()
+option(WEBLLM_ASSERTIONS "Enable Emscripten -sASSERTIONS=1 in the WASM build" OFF)
 ```
 
-Replace with:
+Add immediately below it:
 
 ```cmake
-    set_target_properties(webllm-wasm PROPERTIES
-        PREFIX ""
-    )
+option(WEBLLM_BUILD_MEM64 "Build the wasm64 webllm-wasm-mem64 target instead of webllm-wasm. Set ON in src/wasm/build-mem64/ for the MEMORY64 cap probe (see docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md). Must be combined with -DCMAKE_C_FLAGS=-sMEMORY64=1 -DCMAKE_CXX_FLAGS=-sMEMORY64=1 so ggml is also built as wasm64." OFF)
+```
 
-    # ── MEMORY64 cap probe target (separate build, dead code on `main`
-    # until promoted; spec: docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md).
-    # Reuses the same source + same exports list as `webllm-wasm`; deltas:
-    #   -sMEMORY64=1            64-bit pointers on the WASM side
-    #   -sWASM_BIGINT=1         BigInt at the JS↔WASM boundary
-    #   -sMAXIMUM_MEMORY=16GB   probes the upper bound of Chrome's heap grant
-    add_executable(webllm-wasm-mem64 webgpu-bridge.cpp)
-    target_link_libraries(webllm-wasm-mem64 PRIVATE ggml-base ggml-webgpu)
-    target_include_directories(webllm-wasm-mem64 PRIVATE
+- [ ] **Step 2: Wrap the existing wasm32 target block in `else()` of an `if(WEBLLM_BUILD_MEM64)`**
+
+Locate the `if(EMSCRIPTEN)` branch (around line 46). Inside it, the existing structure is:
+
+```cmake
+if(EMSCRIPTEN)
+    string(CONCAT EXPORTED_FUNCTIONS
+        ...
+    )
+    add_executable(webllm-wasm webgpu-bridge.cpp)
+    target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)
+    target_include_directories(webllm-wasm PRIVATE
         ${LLAMA_CPP_DIR}/ggml/include
         ${LLAMA_CPP_DIR}/ggml/src
     )
-    target_link_options(webllm-wasm-mem64 PRIVATE
+    target_link_options(webllm-wasm PRIVATE
         "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
-        "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
-        "-sMODULARIZE=1"
-        "-sEXPORT_ES6=1"
-        "-sUSE_ES6_IMPORT_META=1"
-        "-sALLOW_MEMORY_GROWTH=1"
-        "-sMEMORY64=1"
-        "-sWASM_BIGINT=1"
-        "-sMAXIMUM_MEMORY=16GB"
-        "-sSTACK_SIZE=8388608"
-        "-sENVIRONMENT='web'"
-        "-sASYNCIFY_STACK_SIZE=1048576"
-        "-O3"
-        "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
+        ...
     )
-    set_target_properties(webllm-wasm-mem64 PROPERTIES
+    set_target_properties(webllm-wasm PROPERTIES
         PREFIX ""
     )
 else()
+    ...
+endif()
 ```
 
-**Note:** `MAXIMUM_MEMORY=16GB` replaces the `4GB` from the wasm32 target. `MEMORY64=1` and `WASM_BIGINT=1` are the only flag additions; everything else is identical.
+Restructure so the existing `add_executable(webllm-wasm ...)` block (and its 4 sibling calls — `target_link_libraries`, `target_include_directories`, `target_link_options`, `set_target_properties`) becomes the `else()` branch of a new `if(WEBLLM_BUILD_MEM64)`. The `if()` branch defines the mem64 target.
 
-- [ ] **Step 3: Run the build to confirm both targets compile**
+The full revised `if(EMSCRIPTEN)` block:
+
+```cmake
+if(EMSCRIPTEN)
+    string(CONCAT EXPORTED_FUNCTIONS
+        "_webgpu_init,_webgpu_shutdown,_malloc,_free,"
+        "_ctx_create,_ctx_free,"
+        "_tensor_new_1d,_tensor_new_2d,_tensor_new_3d,_tensor_new_4d,"
+        "_tensor_set_name,_tensor_nelements,_tensor_nbytes,_tensor_type,"
+        "_tensor_ne,_tensor_nb,_tensor_data,"
+        "_tensor_set_data,_tensor_get_data,"
+        "_op_mul_mat,_op_add,_op_mul,_op_rms_norm,_op_silu,_op_gelu,"
+        "_op_rope,_op_reshape_2d,_op_reshape_3d,_op_permute,_op_cont,"
+        "_op_view_2d,_op_view_3d,_op_cpy,_op_soft_max,_op_soft_max_ext,_op_swiglu_split,_op_scale,"
+        "_op_flash_attn_ext,_op_flash_attn_ext_set_prec,_op_flash_attn_ext_add_sinks,"
+        "_op_repeat,_op_diag_mask_inf,_op_norm,_op_get_rows,_op_argmax,_op_top_k,"
+        "_graph_new,_graph_build_forward_expand,_graph_compute,"
+        "_backend_alloc_ctx_tensors,_backend_buffer_free,"
+        "_backend_tensor_set,_backend_tensor_set3,_backend_tensor_get,"
+        "_backend_tensor_get_async_begin,_backend_tensor_get_async_poll,"
+        "_backend_tensor_get_async_finish,_backend_tensor_get_async_cancel,"
+        "_backend_tensor_get_async_callback_support,_backend_tensor_alignment,"
+        "_webgpu_set_graph_profiling_enabled,"
+        "_webgpu_last_graph_profile_valid,_webgpu_last_graph_profile_breakdown_available,_webgpu_last_graph_profile_total_ms,"
+        "_webgpu_last_graph_profile_matmul_ms,_webgpu_last_graph_profile_attention_ms,"
+        "_webgpu_last_graph_profile_encode_overhead_ms,_webgpu_last_graph_profile_dispatch_count"
+    )
+
+    if(WEBLLM_BUILD_MEM64)
+        # ── MEMORY64 cap probe target.
+        # Built only when -DWEBLLM_BUILD_MEM64=ON is passed at cmake configure
+        # (driven by `make mem64-probe` in src/wasm/build-mem64/). The probe
+        # binary links wasm64-against-wasm64 archives because the global
+        # CMAKE_C_FLAGS / CMAKE_CXX_FLAGS include `-sMEMORY64=1`, which
+        # propagates to the ggml add_subdirectory above and produces wasm64
+        # ggml-base + ggml-webgpu archives.
+        # Spec: docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md
+        add_executable(webllm-wasm-mem64 webgpu-bridge.cpp)
+        target_link_libraries(webllm-wasm-mem64 PRIVATE ggml-base ggml-webgpu)
+        target_include_directories(webllm-wasm-mem64 PRIVATE
+            ${LLAMA_CPP_DIR}/ggml/include
+            ${LLAMA_CPP_DIR}/ggml/src
+        )
+        target_link_options(webllm-wasm-mem64 PRIVATE
+            "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
+            "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sUSE_ES6_IMPORT_META=1"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMEMORY64=1"
+            "-sWASM_BIGINT=1"
+            "-sMAXIMUM_MEMORY=16GB"
+            "-sSTACK_SIZE=8388608"
+            "-sENVIRONMENT='web'"
+            "-sASYNCIFY_STACK_SIZE=1048576"
+            "-O3"
+            "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
+        )
+        set_target_properties(webllm-wasm-mem64 PROPERTIES
+            PREFIX ""
+        )
+    else()
+        add_executable(webllm-wasm webgpu-bridge.cpp)
+        target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)
+        target_include_directories(webllm-wasm PRIVATE
+            ${LLAMA_CPP_DIR}/ggml/include
+            ${LLAMA_CPP_DIR}/ggml/src
+        )
+        target_link_options(webllm-wasm PRIVATE
+            "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
+            "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sUSE_ES6_IMPORT_META=1"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=4GB"
+            "-sSTACK_SIZE=8388608"
+            "-sENVIRONMENT='web'"
+            "-sASYNCIFY_STACK_SIZE=1048576"
+            "-O3"
+            "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
+        )
+        set_target_properties(webllm-wasm PROPERTIES
+            PREFIX ""
+        )
+    endif()
+else()
+    add_library(webllm-bridge webgpu-bridge.cpp)
+    target_link_libraries(webllm-bridge PRIVATE ggml-base ggml-webgpu)
+    target_include_directories(webllm-bridge PRIVATE
+        ${LLAMA_CPP_DIR}/ggml/include
+        ${LLAMA_CPP_DIR}/ggml/src
+    )
+endif()
+```
+
+**Critical correctness notes:**
+
+- The wasm32 target's `target_link_options` block in the `else()` branch must be **bit-identical** to its current pre-amendment content. The only structural change is that it's now nested inside an `if/else`. Do NOT change any flag, exported-function name, or option order in the wasm32 branch.
+- The mem64 branch's only flag deltas vs the wasm32 branch are: `-sMEMORY64=1`, `-sWASM_BIGINT=1`, and `-sMAXIMUM_MEMORY=16GB` (replacing `-sMAXIMUM_MEMORY=4GB`). All other flags are identical.
+- Do NOT add `target_compile_options` to either branch. The mem64 build dir's cmake configure will set `CMAKE_C_FLAGS=-sMEMORY64=1 -DCMAKE_CXX_FLAGS=-sMEMORY64=1` globally, which propagates to compile via the inherited build-system flags.
+- Do NOT add `EXCLUDE_FROM_ALL` to either target — they're already mutually exclusive via the cache option, so neither needs it.
+
+- [ ] **Step 3: Update `.gitignore` to exclude the new build dir**
+
+Open `.gitignore`. Locate the existing line:
+
+```
+src/wasm/build/
+```
+
+Add immediately below:
+
+```
+src/wasm/build-mem64/
+```
+
+- [ ] **Step 4: Verify the wasm32 build still works (no-regression check)**
+
+Force a fresh configure of the existing build dir to confirm the cache-option gating works under default `OFF`:
 
 ```bash
-source ~/emsdk/emsdk_env.sh && cd src/wasm/build && cmake --build . --config Release -j 2>&1 | tail -40
+source ~/emsdk/emsdk_env.sh && cd src/wasm/build && cmake .. 2>&1 | tail -15
 ```
 
-Expected: both `webllm-wasm.{js,wasm}` (untouched) and new `webllm-wasm-mem64.{js,wasm}` produced. No new errors from the mem64 target.
-
-If cmake configure didn't see the new target (it was added after configure), force a re-configure:
+Expected: cmake reconfigures cleanly. The new option appears in `CMakeCache.txt` as `WEBLLM_BUILD_MEM64:BOOL=OFF`.
 
 ```bash
-cd src/wasm/build && cmake .. 2>&1 | tail -10 && cmake --build . --config Release -j 2>&1 | tail -40
+cd src/wasm/build && cmake --build . --config Release -j 2>&1 | tail -20
 ```
 
-- [ ] **Step 4: Verify both binaries exist**
+Expected: builds `webllm-wasm` (the wasm32 target). The mem64 target does NOT appear because the `if(WEBLLM_BUILD_MEM64)` branch is OFF in this build dir.
 
 ```bash
-ls -la src/wasm/build/webllm-wasm.{js,wasm} src/wasm/build/webllm-wasm-mem64.{js,wasm}
+ls -la src/wasm/build/webllm-wasm.{js,wasm}
+ls src/wasm/build/ | grep -E "^webllm-wasm-mem64" || echo "OK: mem64 target absent in wasm32 build dir"
 ```
 
-All four files must exist. The mem64 wasm will likely be slightly larger than the wasm32 wasm (extra runtime support for 64-bit pointers + BigInt).
+Expected: `webllm-wasm.{js,wasm}` exist; the OK-grep prints. If `webllm-wasm-mem64` files appear here, the if-else gating is broken.
 
-**Phase 1 gate (no-regression check):**
+- [ ] **Step 5: Confirm `make wasm-build` and `make checkall` both pass**
 
-- [ ] **Step 5: Confirm `make checkall` still passes 428/11/0**
+```bash
+make wasm-build 2>&1 | tail -10
+```
+
+Expected: clean build of `webllm-wasm` target only. The `make wasm-build` target runs `cmake --build .` after a re-configure; with default `OFF` cache option, the build graph is identical to pre-amendment.
 
 ```bash
 make checkall
 ```
 
-The existing `webllm-wasm` build is the input to this; if checkall regresses, the change to `CMakeLists.txt` somehow affected the wasm32 path. Investigate before committing.
+Expected: 428 pass / 11 skip / 0 fail.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/wasm/CMakeLists.txt
+git add src/wasm/CMakeLists.txt .gitignore
 git commit -m "$(cat <<'EOF'
-build(wasm): add webllm-wasm-mem64 CMake target for MEMORY64 cap probe
+build(wasm): add WEBLLM_BUILD_MEM64 cache option to gate mem64 target
 
-Mirrors the existing webllm-wasm target with three flag deltas:
-  -sMEMORY64=1        64-bit pointers on the WASM side
-  -sWASM_BIGINT=1     BigInt at the JS↔WASM boundary
-  -sMAXIMUM_MEMORY=16GB  probes Chrome's heap-grant ceiling
+Adds a new `WEBLLM_BUILD_MEM64` CMake cache option (default OFF) that
+gates which add_executable is created inside the EMSCRIPTEN branch:
 
-Same source file (webgpu-bridge.cpp), same exports list. Existing
-webllm-wasm target unchanged; checkall still 428/11/0; binary is
-dead code on main until promoted.
+- OFF (default) → add_executable(webllm-wasm) — current behavior,
+  bit-identical to pre-commit. `make wasm-build` produces the same
+  webllm-wasm.{js,wasm} as before.
+- ON → add_executable(webllm-wasm-mem64) with the three flag deltas
+  -sMEMORY64=1 / -sWASM_BIGINT=1 / -sMAXIMUM_MEMORY=16GB (replacing
+  -sMAXIMUM_MEMORY=4GB). Built only by `make mem64-probe` (Phase 2)
+  in the parallel build dir src/wasm/build-mem64/, where global
+  CMAKE_C/CXX_FLAGS=-sMEMORY64=1 propagate to ggml so the bridge
+  links wasm64-against-wasm64.
 
-Spec: docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md
+Architecture per spec amendment:
+  docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md §3.1
+  (commit c5eb957). Sub-probe on 2026-04-28 found wasm32 and wasm64
+  object files cannot be linked together, requiring this parallel-
+  build-dir architecture.
+
+.gitignore updated to exclude src/wasm/build-mem64/.
+make wasm-build + make checkall both pass post-amendment with
+default OFF; webllm-wasm binary is bit-identical pre/post.
 EOF
 )"
 ```
 
-**Phase 1 gate satisfied** if both binaries built and checkall stayed 428/11/0.
+**Phase 1 gate satisfied** if:
+- `make wasm-build` produces `webllm-wasm.{js,wasm}` and NO `webllm-wasm-mem64.*` files.
+- `make checkall` is 428/11/0.
+- `.gitignore` excludes `src/wasm/build-mem64/`.
+- The commit landed.
 
 ---
 
 ## Phase 2 — Add `make mem64-probe` orchestration target
 
-**Purpose:** One command that builds the mem64 binary, copies it next to the smoke server, restarts the server, and emits a cache-busted URL the user opens via agentchrome.
+**Purpose:** One command that runs cmake configure on the parallel `src/wasm/build-mem64/` dir with `WEBLLM_BUILD_MEM64=ON` + global `CMAKE_C/CXX_FLAGS=-sMEMORY64=1`, builds the wasm64 mem64 target (which transitively rebuilds ggml as wasm64), copies the binary next to the smoke server, restarts the server, and emits a cache-busted URL.
 
-### Task 2.1: Add the target to `Makefile`
+### Task 2.1: Add the `mem64-probe` target to `Makefile`
 
 **Files:**
-- Modify: `Makefile:1-7` (add `mem64-probe` to `.PHONY`).
-- Modify: `Makefile:114-116` (add the `mem64-probe` target body after the existing `smoke-test:` target so it shares the wasm build dependency naturally).
+- Modify: `Makefile` — add `mem64-probe` to `.PHONY` and add the target body.
 
 - [ ] **Step 1: Add `mem64-probe` to the `.PHONY` declaration**
 
@@ -265,10 +397,31 @@ smoke-serve: smoke-test ## Serve smoke-test/ on http://localhost:$(SMOKE_PORT)
 Insert between `smoke-test:` body and `smoke-serve:`:
 
 ```makefile
-mem64-probe: ## Build mem64 WASM, copy to smoke-test/, restart smoke server, print probe URL
-	@source ~/emsdk/emsdk_env.sh 2>/dev/null; \
-	cd src/wasm/build && cmake --build . --target webllm-wasm-mem64 --config Release -j
-	cp src/wasm/build/webllm-wasm-mem64.js src/wasm/build/webllm-wasm-mem64.wasm smoke-test/
+mem64-probe: ## Build wasm64 mem64 binary in build-mem64/, copy to smoke-test/, restart smoke server, print probe URL
+	@cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
+	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
+	emcmake cmake .. \
+		-DGGML_WEBGPU=ON \
+		-DGGML_WEBGPU_JSPI=OFF \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DGGML_CPU=OFF \
+		-DGGML_BLAS=OFF \
+		-DGGML_METAL=OFF \
+		-DGGML_ACCELERATE=OFF \
+		-DGGML_CUDA=OFF \
+		-DGGML_OPENMP=OFF \
+		-DGGML_NATIVE=OFF \
+		-DGGML_LLAMAFILE=OFF \
+		-DGGML_BUILD_TESTS=OFF \
+		-DGGML_BUILD_EXAMPLES=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DGGML_BACKEND_DL=OFF \
+		-DWEBLLM_BUILD_MEM64=ON \
+		-DCMAKE_C_FLAGS="-sMEMORY64=1" \
+		-DCMAKE_CXX_FLAGS="-sMEMORY64=1" \
+		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
+	cmake --build . --target webllm-wasm-mem64 --config Release -j
+	cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
 	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
 	@bun run eval/smoke-serve.ts --port $(SMOKE_PORT) >/dev/null 2>&1 &
 	@sleep 1
@@ -279,7 +432,15 @@ mem64-probe: ## Build mem64 WASM, copy to smoke-test/, restart smoke server, pri
 	@echo "Result blob will be at window.__memory64ProbeResult after the harness completes."
 ```
 
-**Note:** This target deliberately does **not** depend on `wasm-build` or `smoke-test` — those would rebuild the wasm32 target which is unrelated. We invoke the mem64-only build via `cmake --build . --target webllm-wasm-mem64`. This requires Phase 1's `cmake` configure to have already run (i.e. `src/wasm/build/CMakeCache.txt` exists). If a future user runs `make mem64-probe` from a clean tree, the configure step needs to happen first; for the probe execution we'll run it after Phase 1 has already configured the build dir.
+**Critical correctness notes:**
+
+- This target deliberately does **not** depend on `wasm-build` or `smoke-test` — those would rebuild the unrelated wasm32 binary in `src/wasm/build/`.
+- The cmake configure mirrors the wasm-build target's flag list (`GGML_WEBGPU=ON`, the disabled-backends list, `BUILD_SHARED_LIBS=OFF`, etc.) so ggml is configured the same way as the wasm32 build, then adds three flag deltas:
+  - `-DWEBLLM_BUILD_MEM64=ON` — selects the mem64 target in the Phase 1 cache-option-gated CMakeLists.txt.
+  - `-DCMAKE_C_FLAGS=-sMEMORY64=1` and `-DCMAKE_CXX_FLAGS=-sMEMORY64=1` — propagated to the ggml `add_subdirectory` so all of `ggml-base` and `ggml-webgpu` are compiled as wasm64 too.
+- The cmake configure is idempotent — on first run it configures + builds; on subsequent runs the cache is reused and only changed files rebuild.
+- The `cmake --build . --target webllm-wasm-mem64` invocation explicitly names the mem64 target to avoid building any other "all" targets. (In practice the only target in this build dir is the mem64 one because the gating excludes `webllm-wasm`.)
+- The output binary lives at `src/wasm/build-mem64/webllm-wasm-mem64.{js,wasm}` (note: NOT `src/wasm/build/`).
 
 - [ ] **Step 3: Test the target end-to-end**
 
@@ -296,23 +457,35 @@ MEMORY64 cap probe ready. Open in your existing agentchrome tab:
   http://localhost:8031/mem64-probe.html?v=<timestamp>
 ```
 
-And:
+The build itself will take ~30–90 seconds on the first run (configure + compile ggml as wasm64 + link the mem64 target). Subsequent runs are fast (~5 seconds) because nothing changed.
 
 ```bash
 ls -la smoke-test/webllm-wasm-mem64.{js,wasm}
 ```
 
-Both must exist.
+Both must exist. Sanity-check the wasm header to confirm it's wasm64:
 
-- [ ] **Step 4: Confirm `make checkall` still passes**
+```bash
+head -c 16 smoke-test/webllm-wasm-mem64.wasm | xxd
+```
+
+Expected first 4 bytes: `00 61 73 6d` (wasm magic). Bytes 5–8 are the version (`01 00 00 00`). The wasm64 vs wasm32 distinction lives in the type and code sections; we don't need to verify it byte-by-byte here — the fact that the link succeeded against wasm64 ggml archives is sufficient evidence.
+
+- [ ] **Step 4: Verify the wasm32 pipeline is still healthy**
+
+```bash
+make wasm-build 2>&1 | tail -5
+```
+
+Expected: clean rebuild of `src/wasm/build/webllm-wasm.{js,wasm}` (wasm32). The mem64 build dir is a sibling and untouched.
 
 ```bash
 make checkall
 ```
 
-Expected: 428/11/0. Makefile change does not touch any test or `src/` file.
+Expected: 428/11/0.
 
-- [ ] **Step 5: Stop the smoke server before committing (so subsequent phases don't fight a stale server)**
+- [ ] **Step 5: Stop the smoke server before committing**
 
 ```bash
 make smoke-stop
@@ -323,22 +496,35 @@ make smoke-stop
 ```bash
 git add Makefile
 git commit -m "$(cat <<'EOF'
-build(make): add mem64-probe target for MEMORY64 cap probe
+build(make): add mem64-probe target with parallel build-mem64/ build dir
 
-One command that builds the mem64 wasm via cmake's named target,
-copies the binary to smoke-test/, restarts the smoke server, and
-echoes a cache-busted URL for the agentchrome harness page.
+One command that orchestrates the wasm64 mem64 build:
+  1. emcmake cmake on src/wasm/build-mem64/ with -DWEBLLM_BUILD_MEM64=ON
+     plus global CMAKE_C/CXX_FLAGS=-sMEMORY64=1 (propagates to ggml).
+  2. cmake --build . --target webllm-wasm-mem64 (transitively builds
+     wasm64 ggml-base + ggml-webgpu).
+  3. Copy webllm-wasm-mem64.{js,wasm} to smoke-test/.
+  4. Restart smoke-test server on port SMOKE_PORT (default 8031).
+  5. Echo a cache-busted URL for the agentchrome harness.
 
-Does not depend on smoke-test:/wasm-build: targets — those would
-rebuild the unrelated wasm32 binary. Assumes Phase 1 has already
-configured src/wasm/build/.
+Does not depend on wasm-build:/smoke-test: targets — those rebuild
+the unrelated wasm32 binary. Each build dir is independent.
 
-Spec: docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md
+Architecture per spec §3.3 (commit c5eb957). Phase 1 (commit
+<phase1-sha>) gated the mem64 target behind WEBLLM_BUILD_MEM64=ON
+in src/wasm/CMakeLists.txt.
 EOF
 )"
 ```
 
-**Phase 2 gate satisfied** if `make mem64-probe` produces both binaries in `smoke-test/`, prints the URL, checkall stays 428/11/0, and the change is committed.
+(Substitute `<phase1-sha>` with the actual SHA from Phase 1's commit before running.)
+
+**Phase 2 gate satisfied** if:
+- `make mem64-probe` produces `smoke-test/webllm-wasm-mem64.{js,wasm}` (link success against wasm64 ggml).
+- The probe URL is printed.
+- `make wasm-build` still produces a healthy wasm32 binary at `src/wasm/build/`.
+- `make checkall` is 428/11/0.
+- The Makefile change is committed.
 
 ---
 
@@ -992,7 +1178,8 @@ EOF
 
 ## Self-review checklist (writing-plans skill)
 
-- [x] **Spec coverage:** every spec section maps to a phase. §1 context → plan header. §2 goal → Phase 5 decision rule. §3 architecture → Phase 1 + Phase 2 + Phase 3. §4 phases → Phase 3 harness implementation. §5 thresholds → Phase 5 Task 5.1 decision matrix. §6 out-of-scope → enforced by Phase 1 only touching `src/wasm/CMakeLists.txt` and Phase 3 harness being self-contained. §7 risks → addressed in Phase 1 Step 5 (no-regression) and Phase 4 timeout fallback. §8 files touched → matches plan File Structure section. §9 review checklist → Phase 5 closure report fields.
+- [x] **Spec coverage (post-amendment):** every spec section still maps to a phase. §1 context → plan header. §2 goal → Phase 5 decision rule. §3.1 amended architecture (parallel build dirs + cache option) → Phase 1 + Phase 2. §3.2 harness → Phase 3. §3.3 amended Make target → Phase 2. §4 phases → Phase 3 harness implementation. §5 thresholds → Phase 5 Task 5.1 decision matrix. §6 out-of-scope → enforced by Phase 1 + Phase 2 only touching CMakeLists.txt + Makefile + .gitignore (zero `src/inference/*.ts` change) and Phase 3 harness being self-contained. §7 risks → wasm32/wasm64 link risk closed by parallel-build-dir architecture; bridge + ggml wasm64-clean risks closed by sub-probe. §8 files touched → matches revised plan File Structure section. §9 review checklist → Phase 5 closure report fields.
 - [x] **No placeholders:** every code block contains real, executable content. Phase 4 + Phase 5 use `<…>` placeholders only for values that must come from the captured measurement (deliberate — they cannot be predetermined).
-- [x] **Type consistency:** `_tensor_new_1d`, `_malloc`, `_ctx_create`, `_ctx_free`, `_free`, `_webgpu_init`, `_webgpu_shutdown` referenced consistently. `result.phase1` / `phase2` / `phase3_cap_bytes` / `phase3_iterations` / `phase4` / `init_wall_ms` / `module_bytes` referenced consistently across spec §3.2, harness JS, Phase 4 capture, and Phase 5 decision matrix.
+- [x] **Type consistency:** `_tensor_new_1d`, `_malloc`, `_ctx_create`, `_ctx_free`, `_free`, `_webgpu_init`, `_webgpu_shutdown` referenced consistently. `result.phase1` / `phase2` / `phase3_cap_bytes` / `phase3_iterations` / `phase4` / `init_wall_ms` / `module_bytes` referenced consistently across spec §3.2, harness JS, Phase 4 capture, and Phase 5 decision matrix. `WEBLLM_BUILD_MEM64` cache option referenced consistently across Phase 1 Steps 1-4 + Phase 2 Step 2.
 - [x] **Scope check:** single subsystem, single decision-grade question. No decomposition needed.
+- [x] **Amendment-specific cross-checks:** Phase 1's wasm32 `else()` branch preserves all flags from the original target bit-identically (verified by reading the existing `if(EMSCRIPTEN)` block in `src/wasm/CMakeLists.txt`); Phase 2's cmake configure flag list mirrors the wasm-build target's flag list (verified by reading lines 75-96 of `Makefile`); the three flag deltas (`MEMORY64=1`, `WASM_BIGINT=1`, `MAXIMUM_MEMORY=16GB`) are isolated to the mem64 branch and the parallel build dir.
