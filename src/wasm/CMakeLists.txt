@@ -48,6 +48,7 @@ add_subdirectory(${LLAMA_CPP_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml)
 if(EMSCRIPTEN)
     string(CONCAT EXPORTED_FUNCTIONS
         "_webgpu_init,_webgpu_shutdown,_malloc,_free,"
+        "_bridge_malloc,_bridge_free,"
         "_ctx_create,_ctx_free,"
         "_tensor_new_1d,_tensor_new_2d,_tensor_new_3d,_tensor_new_4d,"
         "_tensor_set_name,_tensor_nelements,_tensor_nbytes,_tensor_type,"

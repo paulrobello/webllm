@@ -3,6 +3,7 @@
 #include "ggml-alloc.h"
 #include "ggml-webgpu.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -14,6 +15,21 @@ static struct ggml_context* current_ctx() {
 }
 
 extern "C" {
+
+// ── Heap allocator wrappers ────────────────────────────────────────────
+// Thin shims around stdlib malloc/free with explicit signatures the
+// Emscripten linker can see during EXPORTED_FUNCTIONS marshaling. Under
+// -sMEMORY64=1 -sWASM_BIGINT=1, custom exports correctly return BigInt
+// pointers to JS, while stdlib _malloc/_free in Emscripten 5.0.6 return
+// JS Number (truncated). Used by the §31a sub-probe to measure the
+// MEMORY64 heap cap; see eval/reports/memory64-probe-2026-04-28/SUMMARY.md.
+void* bridge_malloc(size_t size) {
+    return std::malloc(size);
+}
+
+void bridge_free(void* ptr) {
+    std::free(ptr);
+}
 
 // ── Backend lifecycle ───────────────────────────────────────────────────
 

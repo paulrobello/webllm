@@ -78,11 +78,16 @@ try {
   append(`PHASE 1 FAIL: ${e?.message || e}`, "fail");
 }
 
-// ── Phase 2: BigInt ABI smoke ──
+// ── Phase 2: BigInt ABI smoke (§31a — via bridge_malloc/bridge_free) ──
 // Skipped if Phase 1 failed (per spec §5.1: phase 1 fail closes the lever).
+// §31a swaps stdlib _malloc/_free for _bridge_malloc/_bridge_free wrappers
+// declared in webgpu-bridge.cpp. The §31 closure showed stdlib malloc
+// returns JS Number under MEMORY64 in Emscripten 5.0.6 while custom exports
+// correctly return BigInt; the wrappers should get explicit-signature
+// shims and marshal as BigInt like the rest of the bridge surface.
 if (result.phase1 === "ok") {
   try {
-    append("--- Phase 2: BigInt ABI smoke ---", "header");
+    append("--- Phase 2: BigInt ABI smoke (bridge_malloc) ---", "header");
 
     const ctxIdx = m._ctx_create(65536);
     if (ctxIdx < 0) throw new Error(`_ctx_create returned ${ctxIdx}`);
@@ -96,13 +101,19 @@ if (result.phase1 === "ok") {
     }
     if (tensorPtr <= 0n) throw new Error(`tensor ptr <= 0 (${tensorPtr})`);
 
-    // _malloc takes size_t — pass BigInt; returned pointer must be BigInt.
-    const dataPtr = m._malloc(16n);
-    append(`_malloc(16n) → typeof=${typeof dataPtr} value=0x${dataPtr.toString(16)}`, "info");
+    // Diagnostic: call stdlib _malloc once to confirm the §31 asymmetry
+    // still exists in this build (the wrappers are the fix, not a stdlib upgrade).
+    const stdlibPtr = m._malloc(16n);
+    append(`_malloc(16n) [stdlib, diagnostic] → typeof=${typeof stdlibPtr} value=0x${stdlibPtr.toString(16)}`, "info");
+    try { m._free(stdlibPtr); } catch (_) { /* ignore — stdlib free may also be broken */ }
+
+    // _bridge_malloc takes size_t — pass BigInt; returned pointer must be BigInt.
+    const dataPtr = m._bridge_malloc(16n);
+    append(`_bridge_malloc(16n) → typeof=${typeof dataPtr} value=0x${dataPtr.toString(16)}`, "info");
     if (typeof dataPtr !== "bigint") {
-      throw new Error(`data ptr typeof=${typeof dataPtr}, expected bigint`);
+      throw new Error(`bridge data ptr typeof=${typeof dataPtr}, expected bigint`);
     }
-    if (dataPtr <= 0n) throw new Error(`data ptr <= 0`);
+    if (dataPtr <= 0n) throw new Error(`bridge data ptr <= 0`);
 
     // Heap round-trip: write 4 F32, read back, verify byte-equal.
     const writeView = new Float32Array(m.HEAPU8.buffer, Number(dataPtr), 4);
@@ -116,7 +127,7 @@ if (result.phase1 === "ok") {
     }
     append("Heap round-trip OK (4×F32 byte-equal)", "ok");
 
-    m._free(dataPtr);
+    m._bridge_free(dataPtr);
     m._ctx_free();
     result.phase2 = "ok";
     append("PHASE 2 PASS", "ok");
@@ -134,20 +145,20 @@ if (result.phase1 === "ok") {
 // skipped if Phase 1 failed (no point exercising heap if init broke).
 if (result.phase1 === "ok") {
   try {
-    append("--- Phase 3: Cap probe (sequential 1 GiB malloc) ---", "header");
+    append("--- Phase 3: Cap probe (sequential 1 GiB bridge_malloc) ---", "header");
     const heldPtrs = [];
     let totalCommitted = 0n;
     let iterations = 0;
     for (let i = 0; i < 16; i++) {
       let ptr;
       try {
-        ptr = m._malloc(ONE_GIB);
+        ptr = m._bridge_malloc(ONE_GIB);
       } catch (mallocErr) {
-        append(`Iter ${i}: _malloc threw — ${mallocErr?.message || mallocErr}`, "info");
+        append(`Iter ${i}: _bridge_malloc threw — ${mallocErr?.message || mallocErr}`, "info");
         break;
       }
       if (typeof ptr !== "bigint" || ptr === 0n) {
-        append(`Iter ${i}: _malloc returned 0 / wrong type (typeof=${typeof ptr})`, "info");
+        append(`Iter ${i}: _bridge_malloc returned 0 / wrong type (typeof=${typeof ptr})`, "info");
         break;
       }
       // Commit the first 64 KiB to force actual page allocation, not lazy reservation.
@@ -163,7 +174,7 @@ if (result.phase1 === "ok") {
       totalCommitted += ONE_GIB;
       iterations = i + 1;
       const gibSoFar = (Number(totalCommitted) / (1 << 30)).toFixed(2);
-      append(`Iter ${i}: malloc(1 GiB) OK, total committed=${gibSoFar} GiB`, "info");
+      append(`Iter ${i}: bridge_malloc(1 GiB) OK, total committed=${gibSoFar} GiB`, "info");
     }
     result.phase3_cap_bytes = Number(totalCommitted);
     result.phase3_iterations = iterations;
@@ -171,10 +182,10 @@ if (result.phase1 === "ok") {
     const gibFinal = (Number(totalCommitted) / (1 << 30)).toFixed(2);
     append(`PHASE 3 cap = ${gibFinal} GiB across ${iterations} iters`, iterations > 0 ? "ok" : "fail");
     // Free all probed allocations so Phase 4 starts with a clean heap.
-    // Wrap per-pointer to guarantee Phase 4 sees a clean(er) heap even if one _free throws.
+    // Wrap per-pointer to guarantee Phase 4 sees a clean(er) heap even if one free throws.
     let freed = 0;
     for (const ptr of heldPtrs) {
-      try { m._free(ptr); freed++; } catch (_) { /* ignore — best-effort cleanup */ }
+      try { m._bridge_free(ptr); freed++; } catch (_) { /* ignore — best-effort cleanup */ }
     }
     append(`Freed ${freed}/${heldPtrs.length} cap-probe allocations`, "info");
   } catch (e) {
