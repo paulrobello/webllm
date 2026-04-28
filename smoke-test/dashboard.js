@@ -595,10 +595,11 @@ function baseChartOptions({ xTitle, tooltipLabel } = {}) {
 
 // Each bar row needs vertical space; chart-host height scales with count
 // so 14-row charts don't cram rows together at a default 360px canvas.
-function sizeChartHost(canvas, rowCount) {
+// Pass `rowHeight` to override the default 30px slot for charts that want
+// thinner rows (e.g. TTFT, finish-reason breakdown).
+function sizeChartHost(canvas, rowCount, rowHeight = 30) {
 	const host = canvas.parentElement;
 	if (!host) return;
-	const rowHeight = 30;
 	const padding = 60;
 	host.style.height = `${Math.max(180, rowCount * rowHeight + padding)}px`;
 }
@@ -1957,8 +1958,8 @@ function renderTtftChart() {
 					data,
 					backgroundColor: CHART_COLORS.blue,
 					borderRadius: 3,
-					barPercentage: 0.6,
-					categoryPercentage: 0.9,
+					barPercentage: 0.45,
+					categoryPercentage: 0.95,
 				}],
 			},
 			options: baseChartOptions({
@@ -1971,7 +1972,7 @@ function renderTtftChart() {
 		ttftChartInstance.data.datasets[0].data = data;
 		ttftChartInstance.update();
 	}
-	sizeChartHost(canvas, labels.length);
+	sizeChartHost(canvas, labels.length, 18);
 }
 
 // ── 18. Finish reason breakdown ─────────────────────────────────────
@@ -2037,7 +2038,8 @@ function renderFinishChart() {
 		data: rows.map(([, reasons]) => reasons[reason] ?? 0),
 		backgroundColor: reasonColors[reason] ?? CHART_COLORS.muted,
 		borderRadius: 2,
-		barPercentage: 0.9,
+		barPercentage: 0.45,
+		categoryPercentage: 0.9,
 	}));
 
 	if (!finishChartInstance) {
@@ -2082,7 +2084,7 @@ function renderFinishChart() {
 		finishChartInstance.data.datasets = datasets;
 		finishChartInstance.update();
 	}
-	sizeChartHost(canvas, labels.length);
+	sizeChartHost(canvas, labels.length, 18);
 }
 
 // ── 19. Score over time (regression detection) ──────────────────────
@@ -2216,7 +2218,6 @@ function renderSeriesChartImpl(canvas, host, empty) {
 		seriesChartInstance.data.datasets = datasets;
 		seriesChartInstance.update();
 	}
-	sizeChartHost(canvas, profiles.length * 2);
 }
 
 function isEmbeddingRun(run) {
@@ -2898,7 +2899,9 @@ function escapeHtml(v) {
 function formatTime(iso) {
 	try {
 		const d = new Date(iso);
-		return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+		const date = d.toLocaleDateString([], { month: "2-digit", day: "2-digit" });
+		const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+		return `${date} ${time}`;
 	} catch {
 		return iso;
 	}

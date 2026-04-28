@@ -325,6 +325,9 @@ header h1 {
 	width: 100% !important;
 	height: 100% !important;
 }
+#series-host {
+	min-height: 512px;
+}
 
 /* Per-dimension score heatmap (Task #4). HTML table approach: rows are
    models, cols are dimensions, each cell is coloured by score on a
