@@ -829,7 +829,42 @@ function renderScatterChart() {
 		pointHoverRadius: 8,
 	}));
 
-	const data = { datasets };
+	// Quant connector lines: group every plotted point by its base-model
+	// stem; whenever ≥2 points share a stem (i.e. multiple quants of the
+	// same base model), draw a thin neutral line through them so the
+	// quant ladder is visible at a glance. Connector datasets carry
+	// `_isConnector: true` so the existing legend / tooltip filters skip
+	// them, and they render under the family-coloured dots via order: 99
+	// + array prepend.
+	const pointsByStem = new Map();
+	for (const points of pointsByFamily.values()) {
+		for (const p of points) {
+			const stem = getModelStem(p.modelId);
+			if (!pointsByStem.has(stem)) pointsByStem.set(stem, []);
+			pointsByStem.get(stem).push(p);
+		}
+	}
+	const connectorDatasets = [];
+	for (const [stem, pts] of pointsByStem) {
+		if (pts.length < 2) continue;
+		const sorted = [...pts].sort((a, b) => a.x - b.x);
+		connectorDatasets.push({
+			label: `__connector_${stem}`,
+			data: sorted.map((p) => ({ x: p.x, y: p.y })),
+			showLine: true,
+			borderColor: "rgba(180, 180, 180, 0.4)",
+			borderWidth: 1,
+			backgroundColor: "rgba(180, 180, 180, 0.4)",
+			pointRadius: 0,
+			pointHoverRadius: 0,
+			fill: false,
+			_isConnector: true,
+			order: 99,
+		});
+	}
+
+	// Connectors first so the family-coloured dots render on top.
+	const data = { datasets: [...connectorDatasets, ...datasets] };
 
 	const options = {
 		responsive: true,
