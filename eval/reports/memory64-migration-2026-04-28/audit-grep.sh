@@ -18,7 +18,7 @@ echo "=== JS-side stack allocator (stackAlloc/Save/Restore) ===" >"$REPORT_DIR/a
 grep -rn 'stackAlloc\|stackSave\|stackRestore' \
   --include='*.ts' --include='*.js' --include='*.html' \
   src/ smoke-test/ tests/ 2>/dev/null \
-  | grep -v 'node_modules' \
+  | grep -v 'build/\|build-mem64/\|node_modules\|webllm-bundle\|webllm-wasm' \
   >>"$REPORT_DIR/audit-stack.txt" || true
 
 echo "=== Bridge int32_t size/offset params ===" >"$REPORT_DIR/audit-bridge.txt"

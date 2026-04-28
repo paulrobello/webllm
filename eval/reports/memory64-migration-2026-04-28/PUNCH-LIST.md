@@ -80,13 +80,19 @@ baseline tables above. Findings:
 - **Line numbers — all confirmed.** Every Phase 1 / Phase 2 / Phase 3
   entry's line number in the canonical baseline matches the live source
   tree on `main` at the start of the migration.
-- **Stack-allocator audit (`audit-stack.txt`) is large (~370 KB) by
-  design.** The script does not exclude `src/wasm/build/` or
-  `src/wasm/build-mem64/`, so it captures the Emscripten-emitted
-  `a.out.js` / `webllm-wasm.js` minified glue (which contain the
+- **Stack-allocator audit filter tightened post-review.** The
+  initial `audit-grep.sh` excluded only `node_modules` from the
+  stack-section grep, which let the Emscripten-emitted minified glue
+  in `src/wasm/build/webllm-wasm.js` and `src/wasm/build-mem64/a.out.js`
+  dominate `audit-stack.txt` (~370 KB / 5500 lines, mostly
   `stackAlloc` / `stackSave` / `stackRestore` runtime definitions).
-  Real first-party stack-allocator usage is confined to:
-  - `src/inference/ggml-wasm.ts:264-282` — wrapper definitions.
+  Code review flagged this as unfit for the script's "re-run after
+  each phase as a regression check" purpose. The filter was tightened
+  to mirror the JS-section filter (also excludes
+  `build/|build-mem64/|webllm-bundle|webllm-wasm`). `audit-stack.txt`
+  is now 17 lines of first-party callers only:
+  - `src/inference/ggml-wasm.ts:264-282` — wrapper definitions
+    (`stackSave`, `stackRestore`, `stackAlloc`, `withStack`).
   - `src/inference/model-inference.ts:2013-2022, 2060-2066` — two
     callers using `withStack`/manual save-restore for 4-byte scalar
     pos/id pointers. **Outside MEMORY64 migration scope** (stack
