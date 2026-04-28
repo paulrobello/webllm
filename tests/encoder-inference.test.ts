@@ -6,7 +6,7 @@ import {
 } from "../src/core/types.js";
 import { EncoderInference } from "../src/inference/encoder-inference.js";
 import type { GgmlWasm, TensorPtr } from "../src/inference/ggml-wasm.js";
-import type { GgufContext } from "../src/models/gguf-types.js";
+import type { GgufContext, GgufTensorInfo } from "../src/models/gguf-types.js";
 import { ModelLoader } from "../src/models/model-loader.js";
 
 describe("isEncoderArchitecture", () => {
@@ -103,9 +103,9 @@ describe("ModelLoader.extractHyperparams non-BERT encoder branches", () => {
 });
 
 describe("EncoderInference construction", () => {
-	test("rejects non-bert hyperparams", () => {
-		const hp: ModelHyperparams = {
-			architecture: "llama",
+	function makeHp(arch: ModelHyperparams["architecture"]): ModelHyperparams {
+		return {
+			architecture: arch,
 			contextLength: 512,
 			embeddingLength: 384,
 			headCount: 12,
@@ -120,20 +120,39 @@ describe("EncoderInference construction", () => {
 			expertCount: 0,
 			expertUsedCount: 0,
 		};
-		expect(() => new EncoderInference({} as never, hp)).toThrow(
-			/requires architecture "bert"/,
+	}
+	test("rejects causal LM hyperparams", () => {
+		expect(() => new EncoderInference({} as never, makeHp("llama"))).toThrow(
+			/not yet support architecture "llama"/,
 		);
+	});
+	test("accepts bert", () => {
+		expect(
+			() => new EncoderInference({} as never, makeHp("bert")),
+		).not.toThrow();
+	});
+	test("accepts nomic-bert", () => {
+		expect(
+			() => new EncoderInference({} as never, makeHp("nomic-bert")),
+		).not.toThrow();
+	});
+	test("accepts jina-bert-v2", () => {
+		expect(
+			() => new EncoderInference({} as never, makeHp("jina-bert-v2")),
+		).not.toThrow();
 	});
 });
 
 interface FakeWasm {
 	fake: GgmlWasm;
 	ops: string[];
+	softmaxMaxBias: number[];
 }
 
 function makeFakeWasm(): FakeWasm {
 	let next = 1;
 	const ops: string[] = [];
+	const softmaxMaxBias: number[] = [];
 	const stub = {
 		ctxCreate: () => {},
 		tensorNew1d: () => next++,
@@ -166,12 +185,31 @@ function makeFakeWasm(): FakeWasm {
 			ops.push("mulmat");
 			return next++;
 		},
-		opSoftMaxExt: (_q: TensorPtr, mask: TensorPtr) => {
+		opSoftMaxExt: (
+			_q: TensorPtr,
+			mask: TensorPtr,
+			_scale: number,
+			maxBias: number,
+		) => {
+			ops.push("softmaxext");
 			ops.push(mask === 0 ? "softmax-nullmask" : "softmax-mask");
+			softmaxMaxBias.push(maxBias);
 			return next++;
 		},
 		opGelu: () => {
 			ops.push("gelu");
+			return next++;
+		},
+		opSilu: () => {
+			ops.push("silu");
+			return next++;
+		},
+		opRope: () => {
+			ops.push("rope");
+			return next++;
+		},
+		opView3d: () => {
+			ops.push("view3d");
 			return next++;
 		},
 		opReshape2d: () => next++,
@@ -179,7 +217,7 @@ function makeFakeWasm(): FakeWasm {
 		opPermute: () => next++,
 		opCont: () => next++,
 	} as unknown as GgmlWasm;
-	return { fake: stub, ops };
+	return { fake: stub, ops, softmaxMaxBias };
 }
 
 function makeBertHp(layerCount: number): ModelHyperparams {
@@ -406,5 +444,283 @@ describe("EncoderInference embed() validation", () => {
 		await expect(enc.embed(new Int32Array([1, 2, 3]))).rejects.toThrow(
 			/weights not loaded/,
 		);
+	});
+});
+
+describe("EncoderInference.makeTensorOptional", () => {
+	test("returns null when tensor name absent", () => {
+		const fake = makeFakeWasm();
+		const enc = new EncoderInference(fake.fake, {
+			architecture: "bert",
+			contextLength: 512,
+			embeddingLength: 384,
+			headCount: 12,
+			headCountKv: 12,
+			layerCount: 1,
+			vocabularySize: 30522,
+			embeddingHeadLength: 32,
+			feedForwardLength: 1536,
+			ropeFreqBase: 10000,
+			ropeScale: 1,
+			normEpsilon: 1e-12,
+			expertCount: 0,
+			expertUsedCount: 0,
+		});
+		const empty = new Map();
+		const result = (
+			enc as unknown as {
+				makeTensorOptional: (m: unknown, n: string) => unknown;
+			}
+		).makeTensorOptional(empty, "missing.weight");
+		expect(result).toBeNull();
+	});
+});
+
+interface EncoderLayerWeightsForTest {
+	qkvFused: TensorPtr | null;
+	qProj: TensorPtr | null;
+	qBias: TensorPtr | null;
+	kProj: TensorPtr | null;
+	kBias: TensorPtr | null;
+	vProj: TensorPtr | null;
+	vBias: TensorPtr | null;
+	oProj: TensorPtr;
+	oBias: TensorPtr | null;
+	attnNormW: TensorPtr;
+	attnNormB: TensorPtr;
+	ffnGate: TensorPtr | null;
+	ffnUp: TensorPtr;
+	ffnUpBias: TensorPtr | null;
+	ffnDown: TensorPtr;
+	ffnDownBias: TensorPtr | null;
+	ffnNormW: TensorPtr;
+	ffnNormB: TensorPtr;
+}
+
+describe("EncoderInference.loadWeights arch dispatch", () => {
+	function dim(name: string): GgufTensorInfo {
+		return {
+			name,
+			dimensions: [768, 768],
+			type: 0,
+			offset: 0,
+		} as GgufTensorInfo;
+	}
+	function makeCtx(names: string[]): GgufContext {
+		return {
+			metadata: new Map(),
+			tensors: names.map(dim),
+			dataOffset: 0,
+			totalDataSize: 0,
+		} as unknown as GgufContext;
+	}
+	function makeHp(arch: ModelHyperparams["architecture"]): ModelHyperparams {
+		return {
+			architecture: arch,
+			contextLength: 512,
+			embeddingLength: 768,
+			headCount: 12,
+			headCountKv: 12,
+			layerCount: 1,
+			vocabularySize: 30522,
+			embeddingHeadLength: 64,
+			feedForwardLength: 3072,
+			ropeFreqBase: 10000,
+			ropeScale: 1,
+			normEpsilon: 1e-12,
+			expertCount: 0,
+			expertUsedCount: 0,
+			poolingType: "mean",
+			causalAttention: false,
+			...(arch === "jina-bert-v2" ? { alibiMaxBias: 8.0 } : {}),
+		};
+	}
+
+	const bertNames = [
+		"token_embd.weight",
+		"token_embd_norm.weight",
+		"token_embd_norm.bias",
+		"token_types.weight",
+		"position_embd.weight",
+		"blk.0.attn_q.weight",
+		"blk.0.attn_q.bias",
+		"blk.0.attn_k.weight",
+		"blk.0.attn_k.bias",
+		"blk.0.attn_v.weight",
+		"blk.0.attn_v.bias",
+		"blk.0.attn_output.weight",
+		"blk.0.attn_output.bias",
+		"blk.0.attn_output_norm.weight",
+		"blk.0.attn_output_norm.bias",
+		"blk.0.ffn_up.weight",
+		"blk.0.ffn_up.bias",
+		"blk.0.ffn_down.weight",
+		"blk.0.ffn_down.bias",
+		"blk.0.layer_output_norm.weight",
+		"blk.0.layer_output_norm.bias",
+	];
+	const jinaNames = [
+		"token_embd.weight",
+		"token_embd_norm.weight",
+		"token_embd_norm.bias",
+		"token_types.weight",
+		"blk.0.attn_q.weight",
+		"blk.0.attn_q.bias",
+		"blk.0.attn_k.weight",
+		"blk.0.attn_k.bias",
+		"blk.0.attn_v.weight",
+		"blk.0.attn_v.bias",
+		"blk.0.attn_output.weight",
+		"blk.0.attn_output.bias",
+		"blk.0.attn_output_norm.weight",
+		"blk.0.attn_output_norm.bias",
+		"blk.0.ffn_gate.weight",
+		"blk.0.ffn_up.weight",
+		"blk.0.ffn_down.weight",
+		"blk.0.ffn_down.bias",
+		"blk.0.layer_output_norm.weight",
+		"blk.0.layer_output_norm.bias",
+	];
+
+	test("bert: full-bias path; ffnGate null", () => {
+		const fake = makeFakeWasm();
+		const enc = new EncoderInference(fake.fake, makeHp("bert"));
+		enc.loadWeights(makeCtx(bertNames), new Uint8Array(0));
+		const layers = (
+			enc as unknown as {
+				weights: { layers: EncoderLayerWeightsForTest[] };
+			}
+		).weights.layers;
+		expect(layers[0].qProj).not.toBeNull();
+		expect(layers[0].qBias).not.toBeNull();
+		expect(layers[0].oBias).not.toBeNull();
+		expect(layers[0].ffnUpBias).not.toBeNull();
+		expect(layers[0].ffnDownBias).not.toBeNull();
+		expect(layers[0].ffnGate).toBeNull();
+		expect(layers[0].qkvFused).toBeNull();
+	});
+
+	test("jina-bert-v2: split QKV + biases; SwiGLU gate; mixed FFN biases", () => {
+		const fake = makeFakeWasm();
+		const enc = new EncoderInference(fake.fake, makeHp("jina-bert-v2"));
+		enc.loadWeights(makeCtx(jinaNames), new Uint8Array(0));
+		const layers = (
+			enc as unknown as {
+				weights: { layers: EncoderLayerWeightsForTest[] };
+			}
+		).weights.layers;
+		expect(layers[0].qProj).not.toBeNull();
+		expect(layers[0].qBias).not.toBeNull();
+		expect(layers[0].oBias).not.toBeNull();
+		expect(layers[0].ffnGate).not.toBeNull();
+		expect(layers[0].ffnUpBias).toBeNull();
+		expect(layers[0].ffnDownBias).not.toBeNull();
+		expect(layers[0].qkvFused).toBeNull();
+	});
+
+	test("nomic-bert: throws (Phase 2b not landed)", () => {
+		const fake = makeFakeWasm();
+		const enc = new EncoderInference(fake.fake, makeHp("nomic-bert"));
+		expect(() =>
+			enc.loadWeights(
+				makeCtx([
+					"token_embd.weight",
+					"token_embd_norm.weight",
+					"token_embd_norm.bias",
+					"token_types.weight",
+				]),
+				new Uint8Array(0),
+			),
+		).toThrow(/not enabled until Phase 2b/);
+	});
+});
+
+describe("EncoderInference.buildGraph arch dispatch", () => {
+	function makeHp(arch: ModelHyperparams["architecture"]): ModelHyperparams {
+		return {
+			architecture: arch,
+			contextLength: 512,
+			embeddingLength: 384,
+			headCount: 12,
+			headCountKv: 12,
+			layerCount: 2,
+			vocabularySize: 30522,
+			embeddingHeadLength: 32,
+			feedForwardLength: 1536,
+			ropeFreqBase: 10000,
+			ropeScale: 1,
+			normEpsilon: 1e-12,
+			expertCount: 0,
+			expertUsedCount: 0,
+			poolingType: "mean",
+			causalAttention: false,
+			...(arch === "jina-bert-v2" ? { alibiMaxBias: 8.0 } : {}),
+		};
+	}
+	function buildAndCount(arch: ModelHyperparams["architecture"]): {
+		getrows: number;
+		rope: number;
+		silu: number;
+		gelu: number;
+		view3d: number;
+		softmax_max_bias: number[];
+	} {
+		const fake = makeFakeWasm();
+		const hp = makeHp(arch);
+		const enc = new EncoderInference(fake.fake, hp);
+		(enc as unknown as { weights: unknown }).weights = {
+			tokEmb: 1,
+			positionEmb: arch === "bert" ? 2 : null,
+			tokenTypes: 3,
+			inputNormW: 4,
+			inputNormB: 5,
+			layers: Array.from({ length: hp.layerCount }, () => ({
+				qkvFused: arch === "nomic-bert" ? 100 : null,
+				qProj: arch === "nomic-bert" ? null : 10,
+				qBias: arch === "bert" || arch === "jina-bert-v2" ? 11 : null,
+				kProj: arch === "nomic-bert" ? null : 12,
+				kBias: arch === "bert" || arch === "jina-bert-v2" ? 13 : null,
+				vProj: arch === "nomic-bert" ? null : 14,
+				vBias: arch === "bert" || arch === "jina-bert-v2" ? 15 : null,
+				oProj: 16,
+				oBias: arch === "bert" || arch === "jina-bert-v2" ? 17 : null,
+				attnNormW: 18,
+				attnNormB: 19,
+				ffnGate: arch === "nomic-bert" || arch === "jina-bert-v2" ? 20 : null,
+				ffnUp: 21,
+				ffnUpBias: arch === "bert" ? 22 : null,
+				ffnDown: 23,
+				ffnDownBias: arch === "bert" || arch === "jina-bert-v2" ? 24 : null,
+				ffnNormW: 25,
+				ffnNormB: 26,
+			})),
+		};
+		(enc as unknown as { buildGraph: (n: number) => unknown }).buildGraph(4);
+		return {
+			getrows: fake.ops.filter((o) => o === "getrows").length,
+			rope: fake.ops.filter((o) => o === "rope").length,
+			silu: fake.ops.filter((o) => o === "silu").length,
+			gelu: fake.ops.filter((o) => o === "gelu").length,
+			view3d: fake.ops.filter((o) => o === "view3d").length,
+			softmax_max_bias: fake.softmaxMaxBias,
+		};
+	}
+
+	test("bert: pos-embedding + GeLU FFN, no rope, no silu, max_bias=0", () => {
+		const r = buildAndCount("bert");
+		expect(r.getrows).toBe(3);
+		expect(r.rope).toBe(0);
+		expect(r.silu).toBe(0);
+		expect(r.gelu).toBe(2);
+		expect(r.softmax_max_bias).toEqual([0, 0]);
+	});
+
+	test("jina-bert-v2: no pos-embedding, SwiGLU FFN, no rope, max_bias=8.0", () => {
+		const r = buildAndCount("jina-bert-v2");
+		expect(r.getrows).toBe(2);
+		expect(r.rope).toBe(0);
+		expect(r.silu).toBe(2);
+		expect(r.gelu).toBe(0);
+		expect(r.softmax_max_bias).toEqual([8.0, 8.0]);
 	});
 });

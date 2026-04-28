@@ -41,13 +41,14 @@ import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
 import { PipelineCache } from "./pipeline-cache.js";
 import { Scheduler } from "./scheduler.js";
-import type {
-	EventHandler,
-	ModelEntry,
-	ModelHandle,
-	ModelHyperparams,
-	ModelLoadOptions,
-	WebLLMConfig,
+import {
+	type EventHandler,
+	isEncoderArchitecture,
+	type ModelEntry,
+	type ModelHandle,
+	type ModelHyperparams,
+	type ModelLoadOptions,
+	type WebLLMConfig,
 } from "./types.js";
 
 interface ConversationSession {
@@ -586,7 +587,7 @@ export class WebLLM {
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl });
 
-		const isEncoder = parsed.hyperparams.architecture === "bert";
+		const isEncoder = isEncoderArchitecture(parsed.hyperparams.architecture);
 		let inference: ModelInference | EncoderInference;
 		if (isEncoder) {
 			const enc = new EncoderInference(wasm, parsed.hyperparams);

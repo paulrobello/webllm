@@ -1,4 +1,8 @@
-import type { ModelHyperparams } from "../core/types.js";
+import {
+	ENCODER_ARCHITECTURES,
+	isEncoderArchitecture,
+	type ModelHyperparams,
+} from "../core/types.js";
 import type { GgufContext, GgufTensorInfo } from "../models/gguf-types.js";
 import {
 	type BufferPtr,
@@ -8,27 +12,35 @@ import {
 } from "./ggml-wasm.js";
 
 interface EncoderLayerWeights {
-	qProj: TensorPtr;
-	qBias: TensorPtr;
-	kProj: TensorPtr;
-	kBias: TensorPtr;
-	vProj: TensorPtr;
-	vBias: TensorPtr;
-	oProj: TensorPtr;
-	oBias: TensorPtr;
-	attnNormW: TensorPtr;
-	attnNormB: TensorPtr;
-	ffnUp: TensorPtr;
-	ffnUpBias: TensorPtr;
-	ffnDown: TensorPtr;
-	ffnDownBias: TensorPtr;
-	ffnNormW: TensorPtr;
-	ffnNormB: TensorPtr;
+	// QKV — exactly one path is populated per arch:
+	qkvFused: TensorPtr | null; // nomic-bert: fused single matrix
+	qProj: TensorPtr | null; // bert + jina-bert-v2
+	qBias: TensorPtr | null; // bert + jina-bert-v2
+	kProj: TensorPtr | null;
+	kBias: TensorPtr | null;
+	vProj: TensorPtr | null;
+	vBias: TensorPtr | null;
+
+	oProj: TensorPtr; // all
+	oBias: TensorPtr | null; // bert + jina-bert-v2 (not nomic)
+
+	attnNormW: TensorPtr; // post-attn LN gamma
+	attnNormB: TensorPtr; // post-attn LN beta
+
+	ffnGate: TensorPtr | null; // nomic + jina-bert-v2 (SwiGLU)
+	ffnUp: TensorPtr; // all
+	ffnUpBias: TensorPtr | null; // bert only
+	ffnDown: TensorPtr; // all
+	ffnDownBias: TensorPtr | null; // bert + jina-bert-v2 (not nomic)
+
+	ffnNormW: TensorPtr; // post-FFN LN gamma
+	ffnNormB: TensorPtr; // post-FFN LN beta
 }
 
 interface EncoderWeights {
 	tokEmb: TensorPtr;
-	positionEmb: TensorPtr;
+	/** Null for nomic-bert / jina-bert-v2 — RoPE / ALiBi handle position. */
+	positionEmb: TensorPtr | null;
 	tokenTypes: TensorPtr;
 	inputNormW: TensorPtr;
 	inputNormB: TensorPtr;
@@ -52,9 +64,9 @@ export class EncoderInference {
 	} | null = null;
 
 	constructor(wasm: GgmlWasm, hyperparams: ModelHyperparams) {
-		if (hyperparams.architecture !== "bert") {
+		if (!isEncoderArchitecture(hyperparams.architecture)) {
 			throw new Error(
-				`EncoderInference requires architecture "bert", got "${hyperparams.architecture}"`,
+				`EncoderInference does not yet support architecture "${hyperparams.architecture}"; supported: ${ENCODER_ARCHITECTURES.join(", ")}`,
 			);
 		}
 		this.wasm = wasm;
@@ -83,29 +95,40 @@ export class EncoderInference {
 		wasm.ctxCreate(memSize);
 
 		const tokEmb = this.makeTensor(tensorMap, "token_embd.weight");
-		const positionEmb = this.makeTensor(tensorMap, "position_embd.weight");
+		const positionEmb =
+			hp.architecture === "bert"
+				? this.makeTensor(tensorMap, "position_embd.weight")
+				: null;
 		const tokenTypes = this.makeTensor(tensorMap, "token_types.weight");
 		const inputNormW = this.makeTensor(tensorMap, "token_embd_norm.weight");
 		const inputNormB = this.makeTensor(tensorMap, "token_embd_norm.bias");
+
+		if (hp.architecture === "nomic-bert") {
+			throw new Error(
+				"EncoderInference: nomic-bert forward not enabled until Phase 2b",
+			);
+		}
 
 		const layers: EncoderLayerWeights[] = [];
 		for (let i = 0; i < hp.layerCount; i++) {
 			const p = (s: string) => `blk.${i}.${s}`;
 			layers.push({
+				qkvFused: null,
 				qProj: this.makeTensor(tensorMap, p("attn_q.weight")),
-				qBias: this.makeTensor(tensorMap, p("attn_q.bias")),
+				qBias: this.makeTensorOptional(tensorMap, p("attn_q.bias")),
 				kProj: this.makeTensor(tensorMap, p("attn_k.weight")),
-				kBias: this.makeTensor(tensorMap, p("attn_k.bias")),
+				kBias: this.makeTensorOptional(tensorMap, p("attn_k.bias")),
 				vProj: this.makeTensor(tensorMap, p("attn_v.weight")),
-				vBias: this.makeTensor(tensorMap, p("attn_v.bias")),
+				vBias: this.makeTensorOptional(tensorMap, p("attn_v.bias")),
 				oProj: this.makeTensor(tensorMap, p("attn_output.weight")),
-				oBias: this.makeTensor(tensorMap, p("attn_output.bias")),
+				oBias: this.makeTensorOptional(tensorMap, p("attn_output.bias")),
 				attnNormW: this.makeTensor(tensorMap, p("attn_output_norm.weight")),
 				attnNormB: this.makeTensor(tensorMap, p("attn_output_norm.bias")),
+				ffnGate: this.makeTensorOptional(tensorMap, p("ffn_gate.weight")),
 				ffnUp: this.makeTensor(tensorMap, p("ffn_up.weight")),
-				ffnUpBias: this.makeTensor(tensorMap, p("ffn_up.bias")),
+				ffnUpBias: this.makeTensorOptional(tensorMap, p("ffn_up.bias")),
 				ffnDown: this.makeTensor(tensorMap, p("ffn_down.weight")),
-				ffnDownBias: this.makeTensor(tensorMap, p("ffn_down.bias")),
+				ffnDownBias: this.makeTensorOptional(tensorMap, p("ffn_down.bias")),
 				ffnNormW: this.makeTensor(tensorMap, p("layer_output_norm.weight")),
 				ffnNormB: this.makeTensor(tensorMap, p("layer_output_norm.bias")),
 			});
@@ -160,6 +183,13 @@ export class EncoderInference {
 		return tensor;
 	}
 
+	private makeTensorOptional(
+		tensorMap: Map<string, GgufTensorInfo>,
+		name: string,
+	): TensorPtr | null {
+		return tensorMap.has(name) ? this.makeTensor(tensorMap, name) : null;
+	}
+
 	private layerNorm(
 		x: TensorPtr,
 		gamma: TensorPtr,
@@ -171,24 +201,36 @@ export class EncoderInference {
 
 	private buildGraph(nTokens: number): TensorPtr {
 		if (!this.weights) throw new Error("weights not loaded");
-		const { wasm, weights } = this;
+		const { wasm, weights, hp } = this;
+		const arch = hp.architecture;
 
-		// Leaf inputs — uploaded after backendAllocCtxTensors. Mirrors the
-		// causal-LM pattern in model-inference.ts.
+		// Phase 2a: nomic-bert reaches loadWeights and throws there. If somehow
+		// it gets here (no loadWeights in test path), fail loudly.
+		if (arch === "nomic-bert") {
+			throw new Error(
+				"EncoderInference: nomic-bert forward not enabled until Phase 2b",
+			);
+		}
+
+		const usesPosEmbedding = arch === "bert";
+		const alibiMaxBias =
+			arch === "jina-bert-v2" ? (hp.alibiMaxBias ?? 8.0) : 0.0;
+
 		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const segTensor = wasm.tensorNew1d(GgmlType.I32, 1);
 		this.lastLeaves = { tokenIdsTensor, posTensor, segTensor };
 
-		// Token + position + segment embeddings. Position and segment are added
-		// to the per-token embedding before the input LayerNorm. Single-text
-		// usage hard-codes segment 0.
 		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
-		x = wasm.opAdd(x, wasm.opGetRows(weights.positionEmb, posTensor));
+		if (usesPosEmbedding) {
+			if (!weights.positionEmb) {
+				throw new Error("bert path requires positionEmb weight");
+			}
+			x = wasm.opAdd(x, wasm.opGetRows(weights.positionEmb, posTensor));
+		}
 		x = wasm.opAdd(x, wasm.opGetRows(weights.tokenTypes, segTensor));
 		x = this.layerNorm(x, weights.inputNormW, weights.inputNormB);
 
-		const { hp } = this;
 		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
 		const E = hp.embeddingLength;
@@ -197,14 +239,28 @@ export class EncoderInference {
 		for (let il = 0; il < hp.layerCount; il++) {
 			const lw = weights.layers[il];
 
-			// Self-attention with biases, bidirectional (null mask).
-			const q = wasm.opAdd(wasm.opMulMat(lw.qProj, x), lw.qBias);
-			const k = wasm.opAdd(wasm.opMulMat(lw.kProj, x), lw.kBias);
-			const v = wasm.opAdd(wasm.opMulMat(lw.vProj, x), lw.vBias);
-
+			// Point B (split QKV path; fused arrives in Phase 2b)
+			if (lw.qkvFused) {
+				throw new Error(
+					"EncoderInference: fused-QKV path not enabled until Phase 2b",
+				);
+			}
+			if (!lw.qProj || !lw.kProj || !lw.vProj) {
+				throw new Error(
+					`split-QKV path requires qProj/kProj/vProj for ${arch}`,
+				);
+			}
+			let q = wasm.opMulMat(lw.qProj, x);
+			let k = wasm.opMulMat(lw.kProj, x);
+			let v = wasm.opMulMat(lw.vProj, x);
+			if (lw.qBias) q = wasm.opAdd(q, lw.qBias);
+			if (lw.kBias) k = wasm.opAdd(k, lw.kBias);
+			if (lw.vBias) v = wasm.opAdd(v, lw.vBias);
 			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
 			const k3 = wasm.opReshape3d(k, headDim, nHeads, nTokens);
 			const v3 = wasm.opReshape3d(v, headDim, nHeads, nTokens);
+
+			// Point C (RoPE) — only nomic-bert; not exercised in Phase 2a.
 
 			const qp = wasm.opPermute(q3, 0, 2, 1, 3);
 			const kp = wasm.opPermute(k3, 0, 2, 1, 3);
@@ -214,26 +270,44 @@ export class EncoderInference {
 			// mul_mat that consumes it.
 			const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
+			// Point D (softmax with optional ALiBi)
 			const qk = wasm.opMulMat(kp, qp);
-			const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, 0.0);
+			const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, alibiMaxBias);
+
+			// Point E (attention output with optional bias)
 			const out = wasm.opMulMat(vp, aw);
 			const merged = wasm.opReshape2d(
 				wasm.opCont(wasm.opPermute(out, 0, 2, 1, 3)),
 				E,
 				nTokens,
 			);
-			const attnProj = wasm.opAdd(wasm.opMulMat(lw.oProj, merged), lw.oBias);
+			let attnProj = wasm.opMulMat(lw.oProj, merged);
+			if (lw.oBias) attnProj = wasm.opAdd(attnProj, lw.oBias);
 
 			// Post-attention LayerNorm (BERT post-norm: residual then LN).
 			x = this.layerNorm(wasm.opAdd(x, attnProj), lw.attnNormW, lw.attnNormB);
 
-			// FFN: up-project + bias, GeLU, down-project + bias.
-			let h = wasm.opAdd(wasm.opMulMat(lw.ffnUp, x), lw.ffnUpBias);
-			h = wasm.opGelu(h);
-			const ffnProj = wasm.opAdd(wasm.opMulMat(lw.ffnDown, h), lw.ffnDownBias);
+			// Point F (FFN — GeLU two-layer for bert, SwiGLU for jina/nomic)
+			let ffnOut: TensorPtr;
+			if (lw.ffnGate) {
+				// SwiGLU: silu(gate(x)) * up(x), then down(...)
+				const gate = wasm.opMulMat(lw.ffnGate, x);
+				let up = wasm.opMulMat(lw.ffnUp, x);
+				if (lw.ffnUpBias) up = wasm.opAdd(up, lw.ffnUpBias);
+				const mid = wasm.opMul(wasm.opSilu(gate), up);
+				ffnOut = wasm.opMulMat(lw.ffnDown, mid);
+				if (lw.ffnDownBias) ffnOut = wasm.opAdd(ffnOut, lw.ffnDownBias);
+			} else {
+				// GeLU two-layer (bert)
+				let h = wasm.opMulMat(lw.ffnUp, x);
+				if (lw.ffnUpBias) h = wasm.opAdd(h, lw.ffnUpBias);
+				h = wasm.opGelu(h);
+				ffnOut = wasm.opMulMat(lw.ffnDown, h);
+				if (lw.ffnDownBias) ffnOut = wasm.opAdd(ffnOut, lw.ffnDownBias);
+			}
 
 			// Post-FFN LayerNorm (BERT post-norm: residual then LN).
-			x = this.layerNorm(wasm.opAdd(x, ffnProj), lw.ffnNormW, lw.ffnNormB);
+			x = this.layerNorm(wasm.opAdd(x, ffnOut), lw.ffnNormW, lw.ffnNormB);
 		}
 
 		return x;
