@@ -590,7 +590,12 @@ function renderChart() {
 	const empty = document.getElementById("chart-empty");
 	if (!canvas) return;
 
-	const runs = Array.from(state.runsByRunId.values());
+	// Main inference tab is LLM-only — encoder/bert runs belong to the
+	// Embeddings tab below. Filter at the data-flow boundary so every
+	// downstream aggregation is encoder-free.
+	const runs = Array.from(state.runsByRunId.values()).filter(
+		(r) => !isEncoderModel(r),
+	);
 	if (runs.length === 0) {
 		if (empty) empty.hidden = false;
 		canvas.hidden = true;
@@ -671,6 +676,9 @@ function renderToolChart() {
 	const empty = document.getElementById("tool-empty");
 	if (!canvas) return;
 
+	// Main tab is LLM-only — encoder evals carry only an `embedding`
+	// dimension, so the `dimensions["tool-calling"]` gate below excludes
+	// them implicitly. No isEncoderModel() call needed here.
 	// Collect latest eval per key that has a tool-calling dim.
 	const latestByKey = new Map();
 	for (const ev of state.evalsByEvalId.values()) {
@@ -773,14 +781,20 @@ function renderScatterChart() {
 	if (!canvas) return;
 
 	// Join speed runs (latest per key) with evals (latest per key).
+	// Main tab is LLM-only — encoder/bert rows would otherwise bin under
+	// family "Other" and plot on the same accuracy×speed axes as chat
+	// models, which is meaningless. Filter both sides upstream so the
+	// downstream family-binning never sees encoder data.
 	const runByKey = new Map();
 	for (const run of state.runsByRunId.values()) {
+		if (isEncoderModel(run)) continue;
 		const key = run.profile ?? run.model;
 		const prev = runByKey.get(key);
 		if (!prev || prev.timestamp < run.timestamp) runByKey.set(key, run);
 	}
 	const evalByKey = new Map();
 	for (const ev of state.evalsByEvalId.values()) {
+		if (isEncoderModel(ev)) continue;
 		const key = ev.profile ?? ev.modelId;
 		const prev = evalByKey.get(key);
 		if (!prev || prev.timestamp < ev.timestamp) evalByKey.set(key, ev);
@@ -947,12 +961,18 @@ function renderParamSpeedChart() {
 	const empty = document.getElementById("param-speed-empty");
 	if (!canvas) return;
 
+	// Main tab is LLM-only — encoder ids (arctic-embed-s/m, bge-…) lack
+	// the recognised PARAM_TOKENS (-1.1b-, -7b-, …), so inferParamCountB
+	// returns null for them and they're skipped naturally below. Belt-and-
+	// braces: the explicit isEncoderModel filter ensures we never plot a
+	// future encoder that happens to grow a -Nb- token in its id.
 	// Group all decode-speed samples by modelId; pull the highest of
 	// (one-shot, interactive) tok/s per run as the "decode tok/s" sample,
 	// then take the median across runs of each model. Skip models whose
 	// id has no recognised param-count token.
 	const samplesByModel = new Map();
 	for (const run of state.runsByRunId.values()) {
+		if (isEncoderModel(run)) continue;
 		const oneShot = run.oneShot?.tokensPerSecond ?? 0;
 		const interactive = run.interactive?.tokensPerSecond ?? 0;
 		const tps = Math.max(oneShot, interactive);
@@ -1455,6 +1475,10 @@ function renderTempSweepChart() {
 	const empty = document.getElementById("temp-sweep-empty");
 	if (!canvas) return;
 
+	// Main tab is LLM-only — encoder evals run at a single (cold)
+	// temperature, so the "≥2 buckets" filter inside
+	// buildTempSweepChartData() drops them implicitly. Documented here for
+	// the contract; no explicit isEncoderModel filter needed.
 	const data = buildTempSweepChartData(state.evalsByEvalId.values());
 	if (data.labels.length === 0) {
 		if (host) host.hidden = true;
@@ -1601,7 +1625,11 @@ function renderTtftChart() {
 	const empty = document.getElementById("ttft-empty");
 	if (!canvas) return;
 
-	const runs = Array.from(state.runsByRunId.values());
+	// Encoder forward passes don't have prefill in the chat sense; exclude
+	// them so the TTFT axis stays comparable across LLM profiles only.
+	const runs = Array.from(state.runsByRunId.values()).filter(
+		(r) => !isEncoderModel(r),
+	);
 	const latestByKey = new Map();
 	for (const run of runs) {
 		const key = run.profile ?? run.model;
@@ -1659,7 +1687,12 @@ function renderFinishChart() {
 	const empty = document.getElementById("finish-empty");
 	if (!canvas) return;
 
-	const runs = Array.from(state.runsByRunId.values());
+	// Finish reasons (eos / stop-token / max-tokens / …) are chat-decode
+	// specific; encoder runs don't generate text and would slot under
+	// "unknown". Filter so this chart stays LLM-only.
+	const runs = Array.from(state.runsByRunId.values()).filter(
+		(r) => !isEncoderModel(r),
+	);
 	const latestByKey = new Map();
 	for (const run of runs) {
 		const key = run.profile ?? run.model;
@@ -1786,7 +1819,10 @@ function renderSeriesChart() {
 }
 
 function renderSeriesChartImpl(canvas, host, empty) {
-	const series = state.evalSeries ?? [];
+	// /evals/series returns every eval (including encoder/embedding ones
+	// whose `overall` is the cosine score, not chat accuracy). Filter
+	// encoders out so this LLM regression timeline doesn't mix axes.
+	const series = (state.evalSeries ?? []).filter((pt) => !isEncoderModel(pt));
 	if (series.length < 2) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
@@ -1892,6 +1928,27 @@ function renderSeriesChartImpl(canvas, host, empty) {
 function isEmbeddingRun(run) {
 	const haystack = `${run.profile ?? ""} ${run.model ?? ""}`.toLowerCase();
 	return /\bembed/.test(haystack);
+}
+
+// Encoder/BERT-architecture models (e.g. snowflake-arctic-embed-s/m, bge-…,
+// gte-…) belong in the dedicated Embeddings tab, never in the main inference
+// charts. The SSE feed doesn't surface `architecture` from eval/models.ts, so
+// we id-prefix-match on the conventional encoder family names. Accepts either
+// a model object (run/eval record) or a plain id string.
+const ENCODER_ID_PREFIXES = [
+	"arctic-embed",
+	"snowflake-arctic-embed",
+	"bge-",
+	"gte-",
+];
+function isEncoderModel(modelOrId) {
+	if (modelOrId == null) return false;
+	const id =
+		typeof modelOrId === "string"
+			? modelOrId
+			: (modelOrId.modelId ?? modelOrId.model ?? "");
+	const s = String(id).toLowerCase();
+	return ENCODER_ID_PREFIXES.some((p) => s.startsWith(p));
 }
 
 function passesFilter(run) {
