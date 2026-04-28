@@ -1,25 +1,39 @@
 # Encoder non-BERT architecture support — design
 
 **Date:** 2026-04-28
-**Status:** Draft, awaiting user spec review.
+**Status:** Revised post-Phase-0 (commit `43df996`). Awaiting user spec re-review.
 **Tracking:** TODO.md "Embedding-model expansion candidates — Bucket B".
 **Cycle precedent:** §17/§18/§19/§20 phased plan structure.
+
+> **Revision note (2026-04-28).** A first-pass spec under this filename
+> assumed both encoders were paper-BERT clones with split QKV, attention
+> biases, and GeLU FFN. The Phase 0 GGUF discovery probe (`43df996`,
+> `eval/reports/encoder-parity-2026-04-28/00-gguf-discovery.txt`) showed
+> material structural divergences. This document is the post-probe rewrite
+> that the implementation actually uses. The original (incorrect) spec
+> survives at git ref `8064f80:docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`
+> as historical context.
 
 ## 0. Goal & non-goals
 
 **Goal.** Extend `EncoderInference` to support two new BERT-family encoder
-architectures by adding RoPE and ALiBi positional-encoding paths to the
-existing forward graph:
+architectures by adding the structural variants needed for each:
 
-- **`nomic-embed-text-v1.5`** — BERT + RoPE, 137M params, 768-dim, 8192 ctx,
-  mean pooling. First encoder in fleet with rotary positional embeddings.
-- **`jina-embeddings-v2-base-en`** — BERT + ALiBi, 137M params, 768-dim,
-  8192 ctx, mean pooling. First encoder in fleet with ALiBi attention bias.
+- **`nomic-embed-text-v1.5`** — `nomic-bert` arch, 137M params, 768-dim,
+  2048 ctx, mean pooling. **Fused QKV**, **no biases anywhere**, **SwiGLU
+  FFN**, **RoPE** (NORMAL mode, `freq_base = 1000` from GGUF). First
+  encoder in fleet with rotary positional embeddings AND with
+  causal-LM-style tensor structure.
+- **`jina-embeddings-v2-base-en`** — `jina-bert-v2` arch, 137M params,
+  768-dim, 8192 ctx, mean pooling. Split QKV with biases, **mixed-bias
+  SwiGLU FFN** (gate + up no bias; down has bias), **ALiBi** attention
+  (default `max_bias = 8.0` — GGUF mirror omits the metadata key).
+  First encoder in fleet with ALiBi attention bias.
 
-Both models register and validate under one design / one PR cycle, with
-phased implementation (nomic first since RoPE is the harder change; jina is
-a trivial follow-on once RoPE lands and the encoder dispatch broadening is
-in place).
+Both register and validate under one design / phased implementation, with
+**jina shipping first** in Phase 2 (smaller delta from BERT — split QKV
+and biases match) and **nomic shipping second** in a new Phase 2b (fused
+QKV + bias-less is the bigger structural delta).
 
 **Non-goals.**
 
@@ -29,43 +43,85 @@ in place).
 - Causal-LM-derived embedders (Bucket C, untouched).
 - Continuous numerical-parity test fixtures (one-time integration probes
   only; no checked-in continuous-CI parity gate).
+- `nomic-bert-moe`, `jina-bert-v3`, `modern-bert`, `neo-bert`, `eurobert`,
+  `gemma-embedding` (other BERT-family arches in upstream llama.cpp).
+  Each has its own structural surprises (MoE FFN, different RoPE
+  orientation, etc.) and lands only on a deployment ask.
 
-**Scope ceiling.** All changes are additive and reversible. Existing BERT
-path bit-identical post-change (gated by `arch === "bert"` branch in
-`buildGraph`).
+**Scope ceiling.** All changes are additive and reversible. Existing
+`bert` path bit-identical post-change.
 
-## 1. Key insight
+## 1. Phase 0 findings (canonical reference)
 
-`opRope` and `opSoftMaxExt(qk, mask, scale, max_bias)` are **already
-available** in the WASM bindings. ALiBi is essentially free — `max_bias > 0`
-is an existing argument to the existing softmax call, and ggml computes
-per-head linear bias internally from this scalar. RoPE adds two `opRope`
-calls (Q and K) per layer, paired with dropping the position-embedding
-sum at input. Net code surface: ~140 LOC across 7 modified files. No new
-ops, no new modules, no WASM rebuild required.
+From `eval/reports/encoder-parity-2026-04-28/00-gguf-discovery.txt` plus
+the secondary tensor-list dump:
+
+### Tensor structure per arch
+
+| | bert (existing) | nomic-bert | jina-bert-v2 |
+|---|---|---|---|
+| Top-level | `token_embd.weight`, `token_embd_norm.{weight,bias}`, `token_types.weight`, `position_embd.weight` | `token_embd.weight`, `token_embd_norm.{weight,bias}`, `token_types.weight` (no `position_embd`) | `token_embd.weight`, `token_embd_norm.{weight,bias}`, `token_types.weight` (no `position_embd`) |
+| Per-block QKV | `attn_q.weight`, `attn_q.bias`, `attn_k.weight`, `attn_k.bias`, `attn_v.weight`, `attn_v.bias` | `attn_qkv.weight` (fused, **no bias**) | `attn_q.weight`, `attn_q.bias`, `attn_k.weight`, `attn_k.bias`, `attn_v.weight`, `attn_v.bias` |
+| Per-block O | `attn_output.{weight,bias}` | `attn_output.weight` (**no bias**) | `attn_output.{weight,bias}` |
+| Post-attn LN | `attn_output_norm.{weight,bias}` | `attn_output_norm.{weight,bias}` | `attn_output_norm.{weight,bias}` |
+| Per-block FFN | `ffn_up.{weight,bias}`, `ffn_down.{weight,bias}` (GeLU two-layer) | `ffn_gate.weight`, `ffn_up.weight`, `ffn_down.weight` (**no biases**, **SwiGLU**) | `ffn_gate.weight`, `ffn_up.weight` (no bias), `ffn_down.{weight,bias}` (**SwiGLU**, mixed bias) |
+| Post-FFN LN | `layer_output_norm.{weight,bias}` | `layer_output_norm.{weight,bias}` | `layer_output_norm.{weight,bias}` |
+
+### Metadata findings
+
+| | bert | nomic-bert | jina-bert-v2 |
+|---|---|---|---|
+| `general.architecture` | `bert` | `nomic-bert` | `jina-bert-v2` |
+| `<arch>.attention.layer_norm_epsilon` | 1e-12 | 1e-12 | 1e-12 |
+| `<arch>.attention.causal` | false | false | false |
+| `<arch>.pooling_type` | 1 (MEAN) or 2 (CLS) | 1 (MEAN) | 1 (MEAN) |
+| `<arch>.context_length` | varies | 2048 | 8192 |
+| `<arch>.head_count` | 12 | 12 | 12 |
+| `<arch>.embedding_length` | 384/768 | 768 | 768 |
+| RoPE `freq_base` | — | `nomic-bert.rope.freq_base = 1000` | — |
+| ALiBi `bias_max` | — | — | **absent** — fall back to 8.0 |
+| `position_embd.weight` | present | absent | absent |
+| `tokenizer.ggml.model` | bert (WordPiece) | bert (WordPiece) | bert (WordPiece) |
+
+### Forward-pass capability matrix
+
+| Axis | bert | nomic-bert | jina-bert-v2 |
+|---|---|---|---|
+| Position encoding | learned absolute (add to embedding) | RoPE (Q + K, after reshape) | ALiBi (softmax `max_bias`) |
+| QKV layout | split projections, each + bias | fused matmul + slice via `view_3d` | split projections, each + bias |
+| Attention output bias | yes | no | yes |
+| FFN type | GeLU two-layer | SwiGLU (`silu(gate) * up`) | GEGLU/SwiGLU (`silu(gate) * up`) |
+| FFN biases | up + down | none | down only |
+| LayerNorm structure | post-norm (residual then LN) | post-norm | post-norm |
+| Pooling | CLS or MEAN | MEAN | MEAN |
+| WordPiece tokenizer | yes | yes | yes |
 
 ## 2. Components & files affected
 
 | File | Change | LOC est. |
 |---|---|---|
-| `src/core/types.ts` | Add `"nomic-bert"`, `"jina-bert-v2"` to `ModelArchitecture` union; add `alibiMaxBias?: number` to `ModelHyperparams`; export `ENCODER_ARCHITECTURES` + `isEncoderArchitecture()` helper. | +5 |
-| `src/models/model-loader.ts` | `extractHyperparams`: broaden the existing pooling/causal/normEpsilon branches from `arch === "bert"` to `isEncoderArchitecture(arch)`; read jina ALiBi metadata. | +20 |
-| `src/inference/encoder-inference.ts` | Drop `arch === "bert"` hard-assert; `loadWeights`: conditional `position_embd.weight` lookup; `buildGraph`: arch-branched positional handling at three points (pre-layer pos-embedding sum, per-layer Q/K, softmax). | +60 |
-| `src/inference/model-inference.ts` | `getRopeModeForArchitecture`: add `nomic-bert` → `RopeMode.NORMAL` (sentence-transformers convention; verify in Phase 0). | +3 |
-| `src/core/engine.ts` (line 589) | Replace `architecture === "bert"` check with `isEncoderArchitecture(...)`. | +5 |
-| `eval/models.ts` | Two new entries: `nomic-embed-text-v1.5` and `jina-embeddings-v2-base-en` with pinned `ggufFilePattern`. | +25 |
-| `eval/smoke-profiles.ts` | Two new profile rows mirroring BGE-base shape. | +20 |
-| `eval/encoder-parity.ts` | New harness for the per-model numerical-parity probe (see §5). | +60 |
+| `src/core/types.ts` | Add `"nomic-bert"`, `"jina-bert-v2"` to `ModelArchitecture` union; add `alibiMaxBias?: number`; export `ENCODER_ARCHITECTURES` + `isEncoderArchitecture()` helper. | +5 |
+| `src/models/model-loader.ts` | `extractHyperparams`: broaden `arch === "bert"` branches to `isEncoderArchitecture(arch)`; read jina ALiBi metadata (with 8.0 fallback). | +20 |
+| `src/inference/encoder-inference.ts` | Drop `bert` hard-assert. Make all bias and gate fields nullable in `EncoderLayerWeights`. Add `qkvFused` field. Add `makeTensorOptional` for absent-tolerant lookup. Branch `loadWeights` per arch. Branch `buildGraph` at six load-bearing points (pre-layer pos-embedding, fused-vs-split QKV, RoPE, attn-output bias, softmax max_bias, FFN type/bias). | +180 |
+| `src/inference/model-inference.ts` | `getRopeModeForArchitecture`: `nomic-bert → NORMAL`. | +3 |
+| `src/core/engine.ts` | `engine.ts:589` routing → `isEncoderArchitecture(arch)`. | +5 |
+| `eval/models.ts` | Two new entries (nomic + jina). | +30 |
+| `eval/smoke-profiles.ts` | Two new profile rows + selector array additions. | +20 |
+| `eval/encoder-parity.ts` | New parity harness (browser-driven via agentchrome). | +110 |
+| `tests/encoder-inference.test.ts` | New tests: helper truth-table, loader routing per arch, optional-tensor loader, buildGraph dispatch per arch (now covers fused-QKV, SwiGLU, bias-presence, RoPE/ALiBi). | +120 |
 
-**No-touch but verified-current:** `src/inference/ggml-wasm.ts` (`opRope` +
-`opSoftMaxExt` already exposed), `src/inference/tokenizer.ts` (WordPiece
-works for both — both inherit BERT-base tokenizer with the same
-`[CLS]`/`[SEP]` framing), `eval/embed-perf.ts` (generic over registered
-embed-profile entries).
+**No-touch but verified-current:** `src/inference/ggml-wasm.ts` (already
+exposes `opRope`, `opSoftMaxExt`, `opMulMat`, `opMul`, `opSilu`,
+`opView3d`), `src/inference/tokenizer.ts` (WordPiece works for all three
+— `tokenizer.ggml.model = bert` for both new arches), `eval/embed-perf.ts`
+(generic over registered embed-profile entries).
 
-**Total estimate:** ~200 LOC across 7 modified + 1 new file.
+**Total estimate:** ~490 LOC across 8 modified + 1 new file (vs original
+~200 LOC). The increase is concentrated in `encoder-inference.ts` (+180
+vs +60) and tests (+120 vs ~30) — both linear in the number of arch
+branches, not architectural complexity.
 
-**New helper in `types.ts`:**
+**New helper in `types.ts`** (unchanged from v1):
 
 ```ts
 export const ENCODER_ARCHITECTURES = ["bert", "nomic-bert", "jina-bert-v2"] as const;
@@ -76,59 +132,52 @@ export function isEncoderArchitecture(a: ModelArchitecture): boolean {
 
 ## 3. Forward-pass deltas
 
-The current `buildGraph` (`encoder-inference.ts:172-240`) has three
-load-bearing arch-sensitive points.
+The current `buildGraph` (`encoder-inference.ts:172-240`) has six
+load-bearing arch-sensitive points after this revision (vs three in v1).
 
-### Point A — pre-layer positional addition (line 187)
+### `EncoderLayerWeights` — nullable shape
 
 ```ts
-let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
-if (usesPosEmbedding) {                                       // bert only
-  x = wasm.opAdd(x, wasm.opGetRows(weights.positionEmb, posTensor));
+interface EncoderLayerWeights {
+  // QKV — exactly one path is populated per arch:
+  qkvFused: TensorPtr | null;          // nomic-bert: fused single matrix
+  qProj: TensorPtr | null;             // bert + jina-bert-v2
+  qBias: TensorPtr | null;             // bert + jina-bert-v2
+  kProj: TensorPtr | null;
+  kBias: TensorPtr | null;
+  vProj: TensorPtr | null;
+  vBias: TensorPtr | null;
+
+  oProj: TensorPtr;                    // all
+  oBias: TensorPtr | null;             // bert + jina-bert-v2 (not nomic)
+
+  attnNormW: TensorPtr;                // all
+  attnNormB: TensorPtr;                // all (post-attn LN)
+
+  // FFN — gate is non-null for SwiGLU/GEGLU, null for plain GeLU:
+  ffnGate: TensorPtr | null;           // nomic + jina-bert-v2 (SwiGLU)
+  ffnUp: TensorPtr;                    // all
+  ffnUpBias: TensorPtr | null;         // bert only
+  ffnDown: TensorPtr;                  // all
+  ffnDownBias: TensorPtr | null;       // bert + jina-bert-v2 (not nomic)
+
+  ffnNormW: TensorPtr;                 // all
+  ffnNormB: TensorPtr;                 // all
 }
-x = wasm.opAdd(x, wasm.opGetRows(weights.tokenTypes, segTensor));
-x = this.layerNorm(x, weights.inputNormW, weights.inputNormB);
 ```
 
-`token_types` and the segment-zero leaf stay for **all three arches**: both
-nomic and jina inherit BERT's segment-embedding table (single segment in
-practice; ggml expects the weight tensor present).
-
-### Point B — Q/K projections inside the per-layer loop (lines 201-210)
+### `EncoderWeights` (top-level)
 
 ```ts
-const q = wasm.opAdd(wasm.opMulMat(lw.qProj, x), lw.qBias);
-const k = wasm.opAdd(wasm.opMulMat(lw.kProj, x), lw.kBias);
-const v = wasm.opAdd(wasm.opMulMat(lw.vProj, x), lw.vBias);
-
-let q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
-let k3 = wasm.opReshape3d(k, headDim, nHeads, nTokens);
-const v3 = wasm.opReshape3d(v, headDim, nHeads, nTokens);
-
-if (usesRope) {                                               // nomic-bert only
-  q3 = wasm.opRope(q3, posTensor, headDim, ropeMode, hp.contextLength,
-                   hp.ropeFreqBase, hp.ropeScale, /* attn_factor */ 1.0,
-                   /* beta_fast */ 32.0, /* beta_slow */ 1.0);
-  k3 = wasm.opRope(k3, posTensor, headDim, ropeMode, hp.contextLength,
-                   hp.ropeFreqBase, hp.ropeScale, 1.0, 32.0, 1.0);
+interface EncoderWeights {
+  tokEmb: TensorPtr;                   // all
+  positionEmb: TensorPtr | null;       // bert only
+  tokenTypes: TensorPtr;               // all (segment 0 hardcoded)
+  inputNormW: TensorPtr;               // all
+  inputNormB: TensorPtr;               // all
+  layers: EncoderLayerWeights[];
 }
-
-const qp = wasm.opPermute(q3, 0, 2, 1, 3);
-const kp = wasm.opPermute(k3, 0, 2, 1, 3);
 ```
-
-Exact `opRope` arity will be matched against the existing causal-LM call
-sites in `model-inference.ts:483-503` during implementation.
-
-### Point C — softmax over qk (line 218)
-
-```ts
-const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, alibiMaxBias);
-```
-
-ggml's softmax computes per-head linear bias internally when
-`max_bias > 0`. Standard ALiBi slopes (`2^(-8/n_head * h)`) are derived
-from `max_bias` automatically — no extra weight tensor needed.
 
 ### Per-arch dispatch (added pre-loop)
 
@@ -140,58 +189,160 @@ const alibiMaxBias = arch === "jina-bert-v2" ? (hp.alibiMaxBias ?? 8.0) : 0.0;
 const ropeMode = usesRope ? getRopeModeForArchitecture(arch) : 0;
 ```
 
-### `EncoderWeights` interface (line 29) becomes
+### Point A — pre-layer positional addition
 
 ```ts
-interface EncoderWeights {
-  tokEmb: TensorPtr;
-  positionEmb: TensorPtr | null;   // null for nomic-bert / jina-bert-v2
-  tokenTypes: TensorPtr;
-  inputNormW: TensorPtr;
-  inputNormB: TensorPtr;
-  layers: EncoderLayerWeights[];
+let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+if (usesPosEmbedding) {
+  if (!weights.positionEmb) throw new Error("bert path requires positionEmb");
+  x = wasm.opAdd(x, wasm.opGetRows(weights.positionEmb, posTensor));
+}
+x = wasm.opAdd(x, wasm.opGetRows(weights.tokenTypes, segTensor));
+x = this.layerNorm(x, weights.inputNormW, weights.inputNormB);
+```
+
+### Point B — Q/K/V production (split or fused)
+
+Mirrors llama.cpp's `build_qkv()` (`src/llama-graph.cpp:1064-1138`).
+
+```ts
+let q3: TensorPtr;          // shape: [headDim, nHeads, nTokens]
+let k3: TensorPtr;
+let v3: TensorPtr;
+
+if (lw.qkvFused) {
+  // Fused: one matmul produces [3*E, nTokens]; slice via opView3d into
+  // three [headDim, nHeads, nTokens] sub-views. Element size is 4 (the
+  // matmul output is fp32 regardless of weight dtype).
+  const qkv = wasm.opMulMat(lw.qkvFused, x);   // [3*E, nTokens]
+  const elemSize = 4;
+  const headBytes = elemSize * headDim;
+  const tokenBytes = elemSize * 3 * E;
+  // q starts at byte 0, k at byte E*4, v at byte 2*E*4 within each token.
+  q3 = wasm.opView3d(qkv, headDim, nHeads, nTokens, headBytes, tokenBytes, 0);
+  k3 = wasm.opView3d(qkv, headDim, nHeads, nTokens, headBytes, tokenBytes, elemSize * E);
+  v3 = wasm.opView3d(qkv, headDim, nHeads, nTokens, headBytes, tokenBytes, elemSize * 2 * E);
+} else {
+  // Split: three separate matmuls + biases (BERT/Jina pattern).
+  if (!lw.qProj || !lw.kProj || !lw.vProj) {
+    throw new Error(`split-QKV path requires qProj/kProj/vProj for ${arch}`);
+  }
+  let q = wasm.opMulMat(lw.qProj, x);
+  let k = wasm.opMulMat(lw.kProj, x);
+  let v = wasm.opMulMat(lw.vProj, x);
+  if (lw.qBias) q = wasm.opAdd(q, lw.qBias);
+  if (lw.kBias) k = wasm.opAdd(k, lw.kBias);
+  if (lw.vBias) v = wasm.opAdd(v, lw.vBias);
+  q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
+  k3 = wasm.opReshape3d(k, headDim, nHeads, nTokens);
+  v3 = wasm.opReshape3d(v, headDim, nHeads, nTokens);
 }
 ```
 
-`loadWeights` guards the `makeTensor("position_embd.weight")` call site
-(currently throws on absence) with `if (usesPosEmbedding)`.
+**Note on the fused-QKV view layout:** ggml stores tensors with `nb[]`
+strides; `view_3d`'s `nb1` is the byte stride between rows of `ne0`, and
+`nb2` is the byte stride between rows of `ne1`. For the fused matmul
+output of shape `[3*E, nTokens]` (fp32 contiguous), the per-element row
+size of an `[headDim, nHeads, nTokens]` view is `4 * headDim` (nb1) and
+the per-token stride is `4 * 3 * E` (nb2). The starting byte offsets
+(`0`, `4*E`, `4*2*E`) place the three views over the consecutive Q, K,
+V chunks within each token. **This is `nHeads == nKvHeads` only;** if a
+fused encoder ever has GQA with `nHeads != nKvHeads`, the K/V slicing
+must use the smaller `n_embd_kv` for nb2 — flagged but not in scope.
 
-**Total inside `buildGraph`:** ~25 added lines, ~3 modified lines.
-Everything else (FFN, post-norm, residuals, pooling) is identical across
-all three arches.
+### Point C — RoPE (nomic-bert only)
+
+```ts
+if (usesRope) {
+  q3 = wasm.opRope(
+    q3, posTensor, headDim, ropeMode, hp.contextLength,
+    hp.ropeFreqBase, hp.ropeScale,
+    0.0, 1.0, 0.0, 0.0,
+  );
+  k3 = wasm.opRope(
+    k3, posTensor, headDim, ropeMode, hp.contextLength,
+    hp.ropeFreqBase, hp.ropeScale,
+    0.0, 1.0, 0.0, 0.0,
+  );
+}
+```
+
+`hp.ropeFreqBase` for nomic comes from GGUF metadata directly (= 1000;
+the loader's existing fallback chain at `model-loader.ts:95-98` already
+reads `${arch}.rope.freq_base`). `ropeMode = NORMAL` per
+`getRopeModeForArchitecture("nomic-bert")`.
+
+### Point D — softmax (with optional ALiBi)
+
+```ts
+const qp = wasm.opPermute(q3, 0, 2, 1, 3);
+const kp = wasm.opPermute(k3, 0, 2, 1, 3);
+const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
+
+const qk = wasm.opMulMat(kp, qp);
+const aw = wasm.opSoftMaxExt(qk, 0, invSqrtHd, alibiMaxBias);
+```
+
+`alibiMaxBias` is `0.0` for bert/nomic and `hp.alibiMaxBias ?? 8.0` for
+jina. ggml's softmax computes per-head linear bias internally when
+`max_bias > 0` (slopes derived as `2^(-8/n_head * h)`).
+
+### Point E — attention output (with optional bias)
+
+```ts
+const out = wasm.opMulMat(vp, aw);
+const merged = wasm.opReshape2d(
+  wasm.opCont(wasm.opPermute(out, 0, 2, 1, 3)),
+  E, nTokens,
+);
+let attnProj = wasm.opMulMat(lw.oProj, merged);
+if (lw.oBias) attnProj = wasm.opAdd(attnProj, lw.oBias);
+
+x = this.layerNorm(wasm.opAdd(x, attnProj), lw.attnNormW, lw.attnNormB);
+```
+
+### Point F — FFN (GeLU two-layer or SwiGLU)
+
+```ts
+let ffnOut: TensorPtr;
+if (lw.ffnGate) {
+  // SwiGLU: silu(gate(x)) * up(x), then down(...).
+  const gate = wasm.opMulMat(lw.ffnGate, x);
+  let up = wasm.opMulMat(lw.ffnUp, x);
+  if (lw.ffnUpBias) up = wasm.opAdd(up, lw.ffnUpBias);   // bert never enters this branch
+  const mid = wasm.opMul(wasm.opSilu(gate), up);
+  ffnOut = wasm.opMulMat(lw.ffnDown, mid);
+  if (lw.ffnDownBias) ffnOut = wasm.opAdd(ffnOut, lw.ffnDownBias);  // jina yes, nomic no
+} else {
+  // GeLU two-layer (current bert path).
+  let h = wasm.opMulMat(lw.ffnUp, x);
+  if (lw.ffnUpBias) h = wasm.opAdd(h, lw.ffnUpBias);
+  h = wasm.opGelu(h);
+  ffnOut = wasm.opMulMat(lw.ffnDown, h);
+  if (lw.ffnDownBias) ffnOut = wasm.opAdd(ffnOut, lw.ffnDownBias);
+}
+
+x = this.layerNorm(wasm.opAdd(x, ffnOut), lw.ffnNormW, lw.ffnNormB);
+```
+
+The bert path is bit-identical — for bert, `ffnGate === null`, both
+biases are non-null, and the `else` branch executes exactly as before.
 
 ## 4. Loader & metadata
 
-`ModelLoader.extractHyperparams` reads metadata under `${arch}.*`
-namespacing. With the arch enum extended, the existing pattern works
-directly. Verified-by-upstream-source keys (from
-`llama.cpp/convert_hf_to_gguf.py` for nomic and jina v2):
-
-| Field | bert | nomic-bert | jina-bert-v2 |
-|---|---|---|---|
-| `embedding_length` | `bert.embedding_length` | `nomic-bert.embedding_length` | `jina-bert-v2.embedding_length` |
-| `block_count` | `bert.block_count` | `nomic-bert.block_count` | `jina-bert-v2.block_count` |
-| `attention.head_count` | `bert.attention.head_count` | `nomic-bert.attention.head_count` | `jina-bert-v2.attention.head_count` |
-| `attention.layer_norm_epsilon` | `bert.attention.layer_norm_epsilon` | `nomic-bert.attention.layer_norm_epsilon` | `jina-bert-v2.attention.layer_norm_epsilon` |
-| `feed_forward_length` | `bert.feed_forward_length` | `nomic-bert.feed_forward_length` | `jina-bert-v2.feed_forward_length` |
-| `pooling_type` | `bert.pooling_type` | `nomic-bert.pooling_type` | `jina-bert-v2.pooling_type` |
-| `causal_attention` | `bert.attention.causal` | `nomic-bert.attention.causal` | `jina-bert-v2.attention.causal` |
-| RoPE freq base | — | `nomic-bert.rope.freq_base` | — |
-| ALiBi bias max | — | — | `jina-bert-v2.attention.alibi_bias_max` |
-
-### `extractHyperparams` deltas
+### `extractHyperparams` deltas (unchanged from v1)
 
 ```ts
+import { isEncoderArchitecture } from "../core/types.js";
+
 // existing arch lookup unchanged
 const arch = getMetaString(ctx, "general.architecture", "llama") as
   ModelHyperparams["architecture"];
 
-// existing normEpsilon branch broadens to "is encoder-style"
 const normEpsilon = isEncoderArchitecture(arch)
   ? getMetaFloat(ctx, `${arch}.attention.layer_norm_epsilon`, 1e-12)
   : getMetaFloat(ctx, `${arch}.attention.layer_norm_rms_epsilon`, 1e-5);
 
-// existing pooling/causal block broadens
 let poolingType: ModelHyperparams["poolingType"];
 let causalAttention: boolean | undefined;
 let alibiMaxBias: number | undefined;
@@ -205,224 +356,251 @@ if (isEncoderArchitecture(arch)) {
       getMetaNumberOptional(ctx, `${arch}.attention.alibi_bias_max`) ?? 8.0;
   }
 }
-
-// ropeFreqBase already reads `${arch}.rope_freq_base` / `${arch}.rope.freq_base`
-// (lines 95-98) — works for nomic-bert without modification.
 ```
 
-**Tokenizer:** `buildTokenizerConfig` already routes
-`tokenizer.ggml.model == "bert"` → WordPiece. Both nomic and jina v2
-export `tokenizer.ggml.model = "bert"` and use the same `[CLS]`/`[SEP]`
-framing as BERT-base. **Zero changes.**
+`ropeFreqBase` already reads `${arch}.rope_freq_base` / `${arch}.rope.freq_base`
+(model-loader.ts:95-98) — works for `nomic-bert.rope.freq_base = 1000`
+without modification.
 
-**Risks for Phase 0 to verify:**
+### `EncoderInference.loadWeights` — arch-branched tensor lookup
 
-- nomic GGUF metadata key for RoPE freq is `nomic-bert.rope.freq_base`
-  per upstream convention; if the actual file uses
-  `nomic-bert.rope_freq_base` (older format) the existing fallback chain
-  at `extractHyperparams` lines 95-98 covers both.
-- jina v2's `alibi_bias_max` key spelling is unverified — upstream
-  `convert_hf_to_gguf.py` writes `jina-bert-v2.attention.alibi_bias_max`,
-  but mirrors may have repacked. The 8.0 fallback is the standard
-  `2^(-8/n_head * h)` slope generator value for 12-head models.
-- Whether `position_embd.weight` is present-but-unused or absent for
-  each model.
+The existing `makeTensor` throws on absent weights. Add a sibling
+`makeTensorOptional` that returns `null` instead:
 
-All three resolve in Phase 0's GGUF-discovery probe before code lands.
+```ts
+private makeTensorOptional(
+  tensorMap: Map<string, GgufTensorInfo>,
+  name: string,
+): TensorPtr | null {
+  return tensorMap.has(name) ? this.makeTensor(tensorMap, name) : null;
+}
+```
+
+Per-arch loadWeights body becomes (replacing current lines 85-122):
+
+```ts
+const tokEmb = this.makeTensor(tensorMap, "token_embd.weight");
+const positionEmb = this.hp.architecture === "bert"
+  ? this.makeTensor(tensorMap, "position_embd.weight")
+  : null;
+const tokenTypes = this.makeTensor(tensorMap, "token_types.weight");
+const inputNormW = this.makeTensor(tensorMap, "token_embd_norm.weight");
+const inputNormB = this.makeTensor(tensorMap, "token_embd_norm.bias");
+
+const layers: EncoderLayerWeights[] = [];
+for (let i = 0; i < hp.layerCount; i++) {
+  const p = (s: string) => `blk.${i}.${s}`;
+  const arch = hp.architecture;
+  const isFused = arch === "nomic-bert";
+
+  layers.push({
+    qkvFused: isFused ? this.makeTensor(tensorMap, p("attn_qkv.weight")) : null,
+    qProj: isFused ? null : this.makeTensor(tensorMap, p("attn_q.weight")),
+    qBias: isFused ? null : this.makeTensorOptional(tensorMap, p("attn_q.bias")),
+    kProj: isFused ? null : this.makeTensor(tensorMap, p("attn_k.weight")),
+    kBias: isFused ? null : this.makeTensorOptional(tensorMap, p("attn_k.bias")),
+    vProj: isFused ? null : this.makeTensor(tensorMap, p("attn_v.weight")),
+    vBias: isFused ? null : this.makeTensorOptional(tensorMap, p("attn_v.bias")),
+    oProj: this.makeTensor(tensorMap, p("attn_output.weight")),
+    oBias: this.makeTensorOptional(tensorMap, p("attn_output.bias")),
+    attnNormW: this.makeTensor(tensorMap, p("attn_output_norm.weight")),
+    attnNormB: this.makeTensor(tensorMap, p("attn_output_norm.bias")),
+    ffnGate: this.makeTensorOptional(tensorMap, p("ffn_gate.weight")),
+    ffnUp: this.makeTensor(tensorMap, p("ffn_up.weight")),
+    ffnUpBias: this.makeTensorOptional(tensorMap, p("ffn_up.bias")),
+    ffnDown: this.makeTensor(tensorMap, p("ffn_down.weight")),
+    ffnDownBias: this.makeTensorOptional(tensorMap, p("ffn_down.bias")),
+    ffnNormW: this.makeTensor(tensorMap, p("layer_output_norm.weight")),
+    ffnNormB: this.makeTensor(tensorMap, p("layer_output_norm.bias")),
+  });
+}
+```
+
+The `isFused` branching is the *only* arch-specific switch in the loader
+beyond `position_embd.weight` and the optional-bias gating. Everything
+else degrades cleanly via `makeTensorOptional`'s null return on absent
+tensors.
+
+### Tokenizer
+
+`buildTokenizerConfig` already routes `tokenizer.ggml.model == "bert"` →
+WordPiece. Both nomic and jina v2 export `tokenizer.ggml.model = "bert"`.
+**Zero changes.**
+
+(Jina v2 also sets `tokenizer.ggml.pre = "jina-v2-en"`, a BPE pre-tokenizer
+hint. WordPiece tokenization ignores BPE pre-tokenizer settings; the field
+is informational.)
 
 ## 5. Validation strategy
 
-Four gates, in order, each blocking the next.
+Four gates per model, each blocking the next. Same shape as v1; gate
+thresholds unchanged.
 
 ### Gate 1 — Parsing & loading (no metric)
 
 Both models must:
-
-1. Parse the GGUF without errors (loader exits cleanly through the new
-   metadata branches).
+1. Parse the GGUF without errors.
 2. Stream into the WASM heap and pass `backendAllocCtxTensors`.
-3. Run a single `engine.embed("Hello world.")` call without throwing
-   and return a vector of the expected dim (768 each).
+3. Run a single `engine.embed(handleId, "Hello world.")` call without
+   throwing and return a vector of the expected dim (768 each).
 
-Fail mode: stops the work; no metric collected. Captured as a one-line
-probe artifact.
+Fail mode: stops the work; no metric collected.
 
 ### Gate 2 — Numerical-parity probe (per model, ≥0.999 cosine)
 
 Fixture pinned at `eval/reports/encoder-parity-2026-04-28/`:
 
 ```
-inputs.json        # 5 fixed strings (short / medium / long / unicode / empty-after-tokenize)
+inputs.json        # 5 fixed strings (committed in 43df996)
 nomic-ref.json     # 5 reference embeddings from sentence-transformers (768-dim each, F32)
-jina-ref.json     # 5 reference embeddings from sentence-transformers (768-dim each, F32)
+jina-ref.json      # 5 reference embeddings from sentence-transformers (768-dim each, F32)
 capture-refs.py    # Reference-capture script (one-shot)
 SUMMARY.md         # cosine sim per input × model, pass/fail per row, methodology
 ```
 
-**Reference capture (one-time, off-process):** a short Python script
-run in a temp `uv run --no-project` venv invokes `sentence-transformers`
-directly (`SentenceTransformer.encode(..., normalize_embeddings=True)`).
-Script + venv requirements live alongside the fixture; results are
-checked in.
+WebLLM-side capture: bun harness `eval/encoder-parity.ts` drives the
+browser smoke page via `agentchrome`, calls
+`window.engine.embed(window.handleId, text)` for each fixture input,
+computes cosine vs the pinned reference per row. **Per-row gate: cosine
+≥ 0.999.** Fail diagnoses (most-likely first):
 
-**WebLLM-side capture:** new bun harness `eval/encoder-parity.ts` loads
-each model via the public `engine` API, runs the same 5 inputs through
-`engine.embed()`, computes cosine vs the pinned reference per row,
-writes pass/fail to `SUMMARY.md`.
+For **nomic** specifically: fused-QKV view offsets, RoPE mode (NORMAL vs
+NEOX), `freq_base` (1000 vs 10000 — confirm GGUF reads correctly),
+SwiGLU vs GeLU FFN type, missing-bias add path inadvertently firing.
 
-**Per-row gate:** cosine ≥ 0.999. (BGE shows >0.9999 on this metric in
-informal post-hoc comparison; 0.999 is a soft floor for F32/F16
-mixed-precision noise.)
-
-Fail mode for any row: implementation is wrong. Diagnoses, in order of
-likelihood: RoPE mode (NORMAL vs NEOX), `freq_base` (10000 vs file
-value), `headDim`, ALiBi `max_bias` value, or pooling (mean vs cls).
-Probe artifact records which row failed at which cosine — direct signal
-for the bug.
+For **jina** specifically: ALiBi `max_bias` value (8.0 default), SwiGLU
+gate (jina has `ffn_gate.weight`), `ffn_down.bias` add path.
 
 ### Gate 3 — Cosine-task eval (existing 8-task suite)
 
 After parity probes pass, both models run through `make bench-full`.
 Apples-to-apples comparison rows added to the dashboard's Embeddings
-section:
-
-| Model | dim | params | p50 single-text short | 8-task cosine | New scaling lever |
-|---|---:|---:|---:|---:|---|
-| arctic-embed-s | 384 | 33M | … | … | (existing) |
-| arctic-embed-m | 768 | 109M | … | … | (existing) |
-| bge-small | 384 | 33M | 17.0 ms | 91% | (existing) |
-| bge-large | 1024 | 335M | 59.3 ms | 89% | (existing) |
-| **nomic-embed-text-v1.5** | 768 | 137M | tbd | tbd | **first encoder w/ RoPE** |
-| **jina-embeddings-v2-base-en** | 768 | 137M | tbd | tbd | **first encoder w/ ALiBi** |
-
-**No hard accuracy gate** — the cosine-task suite is informational at
-this stage (precedent from Bucket A: BGE-large posted 89% and was
-accepted). The interesting question is whether either encoder beats
-BGE-base equivalents at the same scale, which is signal for future
-deployment-ask routing, not pass/fail for landing.
+section. **No hard accuracy gate** — the cosine-task suite is
+informational at this stage.
 
 ### Gate 4 — Browser smoke (end-to-end)
 
-Standard `make smoke-serve` + agentchrome flow on
-`smoke-test/real-model.html` with each new model selected. Verifies the
-engine routing change at `engine.ts:589` (the `isEncoderArchitecture`
-broadening) survived end-to-end.
+Standard `make smoke-serve` + agentchrome flow with each new model
+selected. Verifies the engine routing change at `engine.ts:589`
+(the `isEncoderArchitecture` broadening) survived end-to-end.
 
 ### "Done" definition
 
-- Both models registered in `eval/models.ts` and `eval/smoke-profiles.ts`
-- Both pass Gates 1-4
+- Both models registered in `eval/models.ts` and `eval/smoke-profiles.ts`.
+- Both pass Gates 1-4.
 - Parity probe artifacts committed under
-  `eval/reports/encoder-parity-2026-04-28/`
-- Dashboard Embeddings section shows 6 rows
-- TODO.md "Bucket B" entry transitions from "queued" to "DONE 2026-MM-DD"
-  with cycle-closure summary
+  `eval/reports/encoder-parity-2026-04-28/`.
+- Dashboard Embeddings section shows 6 rows.
+- TODO.md "Bucket B" entry transitions from "queued" to "DONE 2026-MM-DD".
 
 ## 6. Testing, error handling, rollout & risks
 
 ### Unit tests (`tests/encoder-inference.test.ts` extension)
 
-Three new tests, each focused and isolated:
+Five new test groups, each focused and isolated:
 
-1. **Loader metadata routing** — fake GGUF metadata with
-   `general.architecture = "nomic-bert"` produces hyperparams with
-   `architecture: "nomic-bert"`, `causalAttention: false`,
-   `poolingType: "mean"`, populated `ropeFreqBase`. Same for
-   `jina-bert-v2` with `alibiMaxBias` populated.
-2. **`isEncoderArchitecture()`** — table-driven: returns true for
-   `bert | nomic-bert | jina-bert-v2`, false for
-   `llama | qwen3 | mistral | …`.
-3. **`buildGraph` arch dispatch** — assert that the position-embedding
-   `opGetRows` is called for `bert` only, that `opRope` is called for
-   `nomic-bert` only, and that `opSoftMaxExt`'s 4th arg is `0.0` for
-   bert/nomic and the configured `alibiMaxBias` for jina. Mock
-   `GgmlWasm` records the call sequence; assertion is on the recorded
-   call list.
+1. **`isEncoderArchitecture()`** — table-driven truth-table.
+2. **Loader metadata routing** — `nomic-bert` (RoPE freq_base = 1000),
+   `jina-bert-v2` (alibiMaxBias = 8.0 fallback when key absent), bert
+   unchanged.
+3. **`makeTensorOptional`** — returns null on absent tensor; populates
+   correctly when present.
+4. **`buildGraph` arch dispatch** — for each arch, assert the recorded
+   `(opGetRows, opRope, opMulMat, opMul, opSilu, opGelu, opSoftMaxExt
+   max_bias)` call sequence matches the expected per-arch shape. Three
+   sub-tests (one per arch). Mock `GgmlWasm` records all op calls.
+5. **`loadWeights` arch dispatch** — given a synthesized GGUF tensor map,
+   verify that bert loads `attn_q.weight/bias` and rejects `attn_qkv.weight`,
+   nomic loads `attn_qkv.weight` and skips all biases, jina loads split
+   QKV with biases and SwiGLU `ffn_gate.weight` with no `ffn_up.bias`
+   but with `ffn_down.bias`. Three sub-tests.
 
-`EncoderInference.poolAndNormalize` and `layerNorm` are reused unchanged
-— no new tests. Integration / smoke is covered by Gate 4 (not by
-automated tests — smoke requires a real WebGPU adapter and isn't
-reachable from `bun test`). Matches BGE precedent.
+`EncoderInference.poolAndNormalize` and `layerNorm` are reused unchanged.
+Integration / smoke is covered by Gate 4.
 
 ### Error handling (boundary policy)
 
-- Unknown encoder arch in GGUF → `extractHyperparams` propagates the
-  unknown string; `EncoderInference` constructor throws with a clear
-  message: `EncoderInference does not yet support architecture
-  "<arch>"; supported: bert, nomic-bert, jina-bert-v2`.
+- Unknown encoder arch in GGUF → constructor throws with supported list.
+- Missing required weight (e.g. `attn_qkv.weight` for nomic) → `makeTensor`
+  throws as before; `makeTensorOptional` returns null instead.
+- `buildGraph` reaches a path requiring a null tensor → throws with a
+  diagnostic message naming the missing weight (e.g. `"split-QKV path
+  requires qProj/kProj/vProj for ${arch}"`).
 - Missing required RoPE / ALiBi metadata → log a warning and use the
-  documented fallback (10000 / 8.0). Don't throw; the parity probe
-  (Gate 2) catches semantic bugs that fall through.
-- Missing `position_embd.weight` for `bert` → unchanged behavior. For
-  `nomic-bert` / `jina-bert-v2` the call site is now guarded so absence
-  is non-fatal.
-- WordPiece tokenizer mismatch → existing `buildTokenizerConfig` already
-  throws on unsupported `tokenizer.ggml.model`; no new handling needed.
+  documented fallback (10000 / 8.0). Gate 2 catches semantic bugs.
 
-No defensive code beyond the boundary. Internal arch branches use
-`if`/`else if`/`else` exhaustive shape — adding a fourth encoder arch
-later forces a compile-time / runtime error if the new branch is missed.
+No defensive code beyond the boundary.
 
-### Rollout phasing (mirrors §17/§18/§19/§20 plan structure)
+### Rollout phasing (revised — 6 commits within plan, jina first)
 
-- **Phase 0 — Probe.** Download both GGUFs, parse, dump tensor names +
-  metadata keys. ~30 min wall; produces
-  `eval/reports/encoder-parity-2026-04-28/00-gguf-discovery.txt`.
-  Confirms exact `rope.freq_base` / `alibi_bias_max` key spelling and
-  presence/absence of `position_embd.weight`. Gate: artifacts committed
-  before any code lands.
-- **Phase 1 — Types + loader + helper** (commit 1, ~50 LOC): arch enum
+- **Phase 0 — Probe** (commit `43df996`, already landed): GGUF discovery
+  artifacts.
+- **Phase 1 — Types + loader + RoPE helper** (commit 1 of 5): arch enum
   extension, `isEncoderArchitecture`, `extractHyperparams` deltas,
-  `getRopeModeForArchitecture` extension. Unit tests #1 + #2.
-  `make checkall` passes.
-- **Phase 2 — Encoder forward (nomic + jina) + engine routing** (commit 2,
-  ~80 LOC): `EncoderInference.buildGraph` branching, `loadWeights`
-  conditional position-embedding, `engine.ts:589` broadening. Unit
-  test #3. `make checkall` passes.
-- **Phase 3 — Model registration + parity probe (nomic)** (commit 3):
-  `eval/models.ts` + `smoke-profiles.ts` rows for nomic. Capture HF
-  reference vectors. Run `eval/encoder-parity.ts`. Gate: 5/5 rows
-  ≥0.999. Artifact committed.
-- **Phase 4 — Same for jina** (commit 4): same shape. Gate: 5/5 rows
-  ≥0.999.
-- **Phase 5 — Cosine-task eval + dashboard** (commit 5): `make
-  bench-full`, dashboard refresh, screenshot artifact, TODO.md
-  transition.
+  `getRopeModeForArchitecture` extension. Tests #1, #2.
+- **Phase 2a — Encoder forward (jina-bert-v2 first) + engine routing**
+  (commit 2 of 5): `EncoderInference` broadens to encoder-arch
+  isEncoder check, nullable bias fields, `makeTensorOptional`,
+  buildGraph branches Points A/D/E/F (and split-QKV in Point B).
+  Tests #3, #4 (jina + bert sub-tests), #5 (bert + jina). Engine
+  routing change. **bert path bit-identical.** Excludes nomic-specific
+  fused-QKV slicing and RoPE (Point B fused branch + Point C).
+- **Phase 2b — Encoder forward (nomic-bert)** (commit 3 of 5): adds
+  Point B fused-QKV slicing + Point C RoPE. Tests #4 (nomic sub-test),
+  #5 (nomic sub-test).
+- **Phase 3a — Reference-vector capture** (out-of-band, separate commit):
+  one-shot Python via `uv run --no-project --with-requirements`.
+- **Phase 3 — Parity harness + jina registration** (commit 4 of 5):
+  `eval/encoder-parity.ts`, `eval/models.ts` jina entry, parity gate.
+- **Phase 4 — Nomic registration + parity gate** (commit 5 of 5):
+  same shape, jina-experience-applied.
+- **Phase 5 — Bench-full + dashboard refresh + TODO close** (commit 6
+  of 5 — NB: revised count): `make bench-full`, dashboard screenshot,
+  TODO transition.
 
-Five commits, each `make checkall` clean, each independently revertable.
-The TODO doctrine "always commit before work" is honored at every phase
-boundary.
+Note: numbering inverted vs v1 (jina-first / nomic-second instead of
+nomic-first / jina-second) because jina shares more with bert and is
+the better incremental step. Splitting Phase 2 into 2a + 2b also lets
+the bert path's bit-identity be verified before the nomic-only fused
+QKV machinery lands.
 
-### Risk register
+### Risk register (revised)
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| GGUF mirror unavailable for jina (gaianet/...) | Medium | Phase 0 probe fails fast → search alternative mirror or convert from HF source via `convert_hf_to_gguf.py` against local `~/Repos/llama.cpp` |
-| nomic uses NEOX instead of NORMAL RoPE mode | Low | Parity probe (Gate 2) catches with one of the failing 5 rows; flip mode and re-run; total cost ~5 min |
-| jina ALiBi expects per-head custom slopes (not max_bias-derived) | Low | Gate 2 catches; if true, ALiBi becomes non-trivial (need new ggml op) → escalate to user, do not paper over |
-| `position_embd.weight` is present in GGUF but unused for nomic/jina | Low | Loader skips loading it; no semantic effect; harmless extra bytes |
-| `convert_hf_to_gguf.py` rope_freq_base key changes between llama.cpp versions | Low | Loader fallback chain at `${arch}.rope.freq_base` → `${arch}.rope_freq_base` → 10000 |
-| Existing BERT path bit-non-identical post-change | Low | Phase 1+2 commits each pass `make checkall` AND `bench-full` shows BGE row unchanged within ±2% |
-| Test fixture vector serialization corrupts F32 | Low | Use `Buffer.from(f32.buffer).toString('base64')` round-trip; verify on the reference machine before checking in |
+| Fused-QKV `view_3d` offsets miscomputed | High | Phase 2b parity probe catches; cross-reference against `llama-graph.cpp:1088-1095` exactly. The byte-offset arithmetic is ggml-specific and has bitten upstream contributors. |
+| Nomic SwiGLU output diverges from reference | Medium | Parity probe catches; first diagnosis is `silu(gate) * up` order vs `up * silu(gate)` (commutative — same); second is `ffn_gate` and `ffn_up` swapped (asymmetric — produces ~0.5 cosine collapse). |
+| Jina ALiBi sign inverted | Low | Gate 2 catches; if true escalates to user (ggml-side ALiBi sign convention is settled but worth verifying). |
+| `f_clamp_kqv` (referenced in `build_qkv`) needed | Low | Phase 0 didn't surface a `clamp_kqv` metadata key for either arch; only Falcon-style models use it. We omit the clamp branch entirely. |
+| `attn_q_norm` / `attn_k_norm` (referenced at `bert.cpp:44-58`) | Low | Phase 0 tensor list shows neither arch has these. We omit the branch. |
+| `attn_norm_2` (referenced at `bert.cpp:91`) | Low | Not present in either arch. Omit. |
+| RoPE `freq_base = 1000` instead of 10000 | Resolved | Phase 0 confirmed; loader reads from GGUF correctly. |
+| `position_embd.weight` present-but-unused in one of the arches | Resolved | Phase 0 confirmed absent in both. |
+| `attn_output.bias` absence breaks bert | Low | bert always has it; `makeTensorOptional` returns null only when truly absent. Bert tests verify this. |
+| Existing BERT path bit-non-identical | Medium | Each phase commit runs `make checkall` AND a BGE/Arctic-Embed bench-full row check; if BGE row drifts beyond ±2%, revert and investigate. |
 
 **Reversibility:** any single phase can be reverted via `git revert`
-without affecting others. The arch enum extension (Phase 1) is the only
-widening change; all subsequent phases are additive.
+without affecting others.
 
 ## 7. Open questions / decisions
 
-**None at design level.** Phase 0 will resolve the three Phase 0-tagged
-unknowns (RoPE key spelling, ALiBi key spelling, `position_embd.weight`
-presence) before any code lands.
+**None at the design level.** Phase 0 resolved all spec-tagged unknowns.
+The remaining unknowns (fused-QKV byte offsets matching ggml exactly,
+SwiGLU operand order, ALiBi sign) are caught by the Gate 2 parity probe
+— first failure becomes a one-line fix + re-run.
 
 ## 8. Cross-references
 
-- TODO.md → "Embedding-model expansion candidates — Bucket B" (queued
-  2026-04-28, this doc closes the queued status by promoting to
-  in-progress).
+- TODO.md → "Embedding-model expansion candidates — Bucket B".
 - `docs/superpowers/specs/2026-04-24-encoder-forward-pass-design.md` —
   original BERT-encoder bring-up; this spec is a delta on it.
+- `docs/superpowers/plans/2026-04-28-encoder-non-bert-arch.md` —
+  matching implementation plan.
+- `eval/reports/encoder-parity-2026-04-28/00-gguf-discovery.txt` —
+  Phase 0 probe artifact (commit `43df996`).
+- `~/Repos/llama.cpp/src/models/bert.cpp`,
+  `~/Repos/llama.cpp/src/llama-graph.cpp:1064-1138` — canonical
+  reference for the encoder forward pass across BERT-family arches.
 - CLAUDE.md → "Workflow policies (set 2026-04-28)" — probe-first,
   always-commit-before-work, complexity ≠ time.
-- `~/ClaudeVault/Patterns/probe-first-methodology-validates-architecture-pivots.md`
-  — methodology precedent.
+- Original (deprecated) v1 spec at `8064f80:docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`.
