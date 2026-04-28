@@ -47,6 +47,8 @@ docs/superpowers
 smoke-test/webllm-bundle.js
 smoke-test/webllm-wasm.js
 smoke-test/webllm-wasm.wasm
+smoke-test/webllm-wasm-mem64.js
+smoke-test/webllm-wasm-mem64.wasm
 
 # Downloaded model files
 smoke-test/models/
