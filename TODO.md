@@ -1279,19 +1279,28 @@ dashboard hygiene pass from these sessions:
   - The 8B fleet's effective throughput nearly doubled. §16's
     "16.2 tok/s" baseline for `qwen3-8b-iq3m` is now obsolete;
     canonical bench-inf number is **27.2 tok/s**.
-  - **§C-v2-A target/drafter ratio analysis shifts.** §26's
-    closure cited "drafter 4×~12 ms ≈ 48 ms + verify K+1 ≈
-    70-80 ms = ~120 ms/step" against a 16 tok/s target baseline.
-    With 8B IQ3_M now at ~27 tok/s (~37 ms/step), the
-    theoretical even-α ceiling at K=4 is ~74 tok/s vs ~27
-    baseline (~2.7×) — wider than the §22.5 1.5× gate.
-    **Does NOT necessarily reopen §C-v2-A** — measured α was
-    0.2-0.25, far below the K=4 break-even ceiling, and the
-    drafter overhead also benefits proportionally so the
-    relative cost picture may not actually move much. A fresh
-    re-measurement on the side branch would settle it; flag
-    this as the natural next "conditional resurrection" trigger
-    if v2-A interest revives.
+  - **§C-v2-A target/drafter ratio analysis shifts —
+    EMPIRICALLY SETTLED 2026-04-28 (§28).** Re-ran §26's 4-cell
+    gate matrix on side branch `feat/spec-decode-v2-greedy`
+    against the rebuilt WASM. Both gates **worsened**, not
+    improved: gate 1 = 9.7 / 28.2 = **0.34×** (was 0.42×);
+    gate 2 = 12.7 / 28.4 = **0.45×** (was 0.54×). Target
+    baseline scaled +78% (15.8 → 28.2 tok/s) but drafted path
+    only +45-49% — the drafter (qwen3-0.6b Q8_0) doesn't use
+    the i-quant code path, so K=4 drafter forwards retain their
+    pre-rebase cost; only the K+1=5 verify pass got faster, and
+    that saving is amortized across 5 tokens. The §26
+    "resurrection path (a) — faster K+1 verify" is now
+    empirically closed: the rebase delivered exactly that and
+    the gates moved *against* the thresholds, not toward them.
+    Drafter overhead must scale symmetrically with target
+    speedup or the relative ratio worsens. Resurrection paths
+    still on the table: (b) MEMORY64 → 70B+ target (unchanged);
+    (c, new) a smaller i-quant drafter that also uses #22344 —
+    no candidate model registered today. Side branch tip
+    `9bdd707` carries the §28 matrix + SUMMARY at
+    `eval/reports/spec-decode-v2-tile128-postrebase-2026-04-28/`.
+    **§C-v2-A remains closed under all known levers.**
   - **§17 / §A reopening:** §A's lever 1 was reverted because
     `MUL_ACC_Q4_0` showed only -2.9% matmul / +0.6% tok/s on
     TinyLlama; the wave-2 7B+ fleet was structurally
