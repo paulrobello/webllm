@@ -10,6 +10,7 @@ import {
 	type GgmlWasm,
 	type TensorPtr,
 } from "./ggml-wasm.js";
+import { getRopeModeForArchitecture } from "./model-inference.js";
 
 interface EncoderLayerWeights {
 	// QKV — exactly one path is populated per arch:
@@ -103,23 +104,26 @@ export class EncoderInference {
 		const inputNormW = this.makeTensor(tensorMap, "token_embd_norm.weight");
 		const inputNormB = this.makeTensor(tensorMap, "token_embd_norm.bias");
 
-		if (hp.architecture === "nomic-bert") {
-			throw new Error(
-				"EncoderInference: nomic-bert forward not enabled until Phase 2b",
-			);
-		}
-
+		const isFused = hp.architecture === "nomic-bert";
 		const layers: EncoderLayerWeights[] = [];
 		for (let i = 0; i < hp.layerCount; i++) {
 			const p = (s: string) => `blk.${i}.${s}`;
 			layers.push({
-				qkvFused: null,
-				qProj: this.makeTensor(tensorMap, p("attn_q.weight")),
-				qBias: this.makeTensorOptional(tensorMap, p("attn_q.bias")),
-				kProj: this.makeTensor(tensorMap, p("attn_k.weight")),
-				kBias: this.makeTensorOptional(tensorMap, p("attn_k.bias")),
-				vProj: this.makeTensor(tensorMap, p("attn_v.weight")),
-				vBias: this.makeTensorOptional(tensorMap, p("attn_v.bias")),
+				qkvFused: isFused
+					? this.makeTensor(tensorMap, p("attn_qkv.weight"))
+					: null,
+				qProj: isFused ? null : this.makeTensor(tensorMap, p("attn_q.weight")),
+				qBias: isFused
+					? null
+					: this.makeTensorOptional(tensorMap, p("attn_q.bias")),
+				kProj: isFused ? null : this.makeTensor(tensorMap, p("attn_k.weight")),
+				kBias: isFused
+					? null
+					: this.makeTensorOptional(tensorMap, p("attn_k.bias")),
+				vProj: isFused ? null : this.makeTensor(tensorMap, p("attn_v.weight")),
+				vBias: isFused
+					? null
+					: this.makeTensorOptional(tensorMap, p("attn_v.bias")),
 				oProj: this.makeTensor(tensorMap, p("attn_output.weight")),
 				oBias: this.makeTensorOptional(tensorMap, p("attn_output.bias")),
 				attnNormW: this.makeTensor(tensorMap, p("attn_output_norm.weight")),
@@ -204,17 +208,11 @@ export class EncoderInference {
 		const { wasm, weights, hp } = this;
 		const arch = hp.architecture;
 
-		// Phase 2a: nomic-bert reaches loadWeights and throws there. If somehow
-		// it gets here (no loadWeights in test path), fail loudly.
-		if (arch === "nomic-bert") {
-			throw new Error(
-				"EncoderInference: nomic-bert forward not enabled until Phase 2b",
-			);
-		}
-
 		const usesPosEmbedding = arch === "bert";
+		const usesRope = arch === "nomic-bert";
 		const alibiMaxBias =
 			arch === "jina-bert-v2" ? (hp.alibiMaxBias ?? 8.0) : 0.0;
+		const ropeMode = usesRope ? getRopeModeForArchitecture(arch) : 0;
 
 		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
@@ -239,28 +237,91 @@ export class EncoderInference {
 		for (let il = 0; il < hp.layerCount; il++) {
 			const lw = weights.layers[il];
 
-			// Point B (split QKV path; fused arrives in Phase 2b)
-			if (lw.qkvFused) {
-				throw new Error(
-					"EncoderInference: fused-QKV path not enabled until Phase 2b",
-				);
-			}
-			if (!lw.qProj || !lw.kProj || !lw.vProj) {
-				throw new Error(
-					`split-QKV path requires qProj/kProj/vProj for ${arch}`,
-				);
-			}
-			let q = wasm.opMulMat(lw.qProj, x);
-			let k = wasm.opMulMat(lw.kProj, x);
-			let v = wasm.opMulMat(lw.vProj, x);
-			if (lw.qBias) q = wasm.opAdd(q, lw.qBias);
-			if (lw.kBias) k = wasm.opAdd(k, lw.kBias);
-			if (lw.vBias) v = wasm.opAdd(v, lw.vBias);
-			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
-			const k3 = wasm.opReshape3d(k, headDim, nHeads, nTokens);
-			const v3 = wasm.opReshape3d(v, headDim, nHeads, nTokens);
+			// Point B (QKV): fused (nomic-bert) or split (bert / jina-bert-v2)
+			let q3: TensorPtr;
+			let k3: TensorPtr;
+			let v3: TensorPtr;
 
-			// Point C (RoPE) — only nomic-bert; not exercised in Phase 2a.
+			if (lw.qkvFused) {
+				// Fused QKV: one matmul → 3 view3d slices.
+				// Mirrors llama.cpp/src/llama-graph.cpp:1088-1095 (build_qkv).
+				const qkv = wasm.opMulMat(lw.qkvFused, x); // [3*E, nTokens]
+				const elemSize = 4; // matmul output is fp32
+				const headBytes = elemSize * headDim;
+				const tokenBytes = elemSize * 3 * E;
+				q3 = wasm.opView3d(
+					qkv,
+					headDim,
+					nHeads,
+					nTokens,
+					headBytes,
+					tokenBytes,
+					0,
+				);
+				k3 = wasm.opView3d(
+					qkv,
+					headDim,
+					nHeads,
+					nTokens,
+					headBytes,
+					tokenBytes,
+					elemSize * E,
+				);
+				v3 = wasm.opView3d(
+					qkv,
+					headDim,
+					nHeads,
+					nTokens,
+					headBytes,
+					tokenBytes,
+					elemSize * 2 * E,
+				);
+			} else {
+				if (!lw.qProj || !lw.kProj || !lw.vProj) {
+					throw new Error(
+						`split-QKV path requires qProj/kProj/vProj for ${arch}`,
+					);
+				}
+				let q = wasm.opMulMat(lw.qProj, x);
+				let k = wasm.opMulMat(lw.kProj, x);
+				let v = wasm.opMulMat(lw.vProj, x);
+				if (lw.qBias) q = wasm.opAdd(q, lw.qBias);
+				if (lw.kBias) k = wasm.opAdd(k, lw.kBias);
+				if (lw.vBias) v = wasm.opAdd(v, lw.vBias);
+				q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
+				k3 = wasm.opReshape3d(k, headDim, nHeads, nTokens);
+				v3 = wasm.opReshape3d(v, headDim, nHeads, nTokens);
+			}
+
+			// Point C (RoPE) — nomic-bert only
+			if (usesRope) {
+				q3 = wasm.opRope(
+					q3,
+					posTensor,
+					headDim,
+					ropeMode,
+					hp.contextLength,
+					hp.ropeFreqBase,
+					hp.ropeScale,
+					0.0,
+					1.0,
+					0.0,
+					0.0,
+				);
+				k3 = wasm.opRope(
+					k3,
+					posTensor,
+					headDim,
+					ropeMode,
+					hp.contextLength,
+					hp.ropeFreqBase,
+					hp.ropeScale,
+					0.0,
+					1.0,
+					0.0,
+					0.0,
+				);
+			}
 
 			const qp = wasm.opPermute(q3, 0, 2, 1, 3);
 			const kp = wasm.opPermute(k3, 0, 2, 1, 3);

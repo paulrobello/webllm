@@ -618,20 +618,43 @@ describe("EncoderInference.loadWeights arch dispatch", () => {
 		expect(layers[0].qkvFused).toBeNull();
 	});
 
-	test("nomic-bert: throws (Phase 2b not landed)", () => {
+	test("nomic-bert: fused QKV; no biases; SwiGLU gate", () => {
 		const fake = makeFakeWasm();
 		const enc = new EncoderInference(fake.fake, makeHp("nomic-bert"));
-		expect(() =>
-			enc.loadWeights(
-				makeCtx([
-					"token_embd.weight",
-					"token_embd_norm.weight",
-					"token_embd_norm.bias",
-					"token_types.weight",
-				]),
-				new Uint8Array(0),
-			),
-		).toThrow(/not enabled until Phase 2b/);
+		enc.loadWeights(
+			makeCtx([
+				"token_embd.weight",
+				"token_embd_norm.weight",
+				"token_embd_norm.bias",
+				"token_types.weight",
+				"blk.0.attn_qkv.weight",
+				"blk.0.attn_output.weight",
+				"blk.0.attn_output_norm.weight",
+				"blk.0.attn_output_norm.bias",
+				"blk.0.ffn_gate.weight",
+				"blk.0.ffn_up.weight",
+				"blk.0.ffn_down.weight",
+				"blk.0.layer_output_norm.weight",
+				"blk.0.layer_output_norm.bias",
+			]),
+			new Uint8Array(0),
+		);
+		const layers = (
+			enc as unknown as {
+				weights: { layers: EncoderLayerWeightsForTest[] };
+			}
+		).weights.layers;
+		expect(layers[0].qkvFused).not.toBeNull();
+		expect(layers[0].qProj).toBeNull();
+		expect(layers[0].qBias).toBeNull();
+		expect(layers[0].kProj).toBeNull();
+		expect(layers[0].kBias).toBeNull();
+		expect(layers[0].vProj).toBeNull();
+		expect(layers[0].vBias).toBeNull();
+		expect(layers[0].oBias).toBeNull();
+		expect(layers[0].ffnGate).not.toBeNull();
+		expect(layers[0].ffnUpBias).toBeNull();
+		expect(layers[0].ffnDownBias).toBeNull();
 	});
 });
 
@@ -722,5 +745,15 @@ describe("EncoderInference.buildGraph arch dispatch", () => {
 		expect(r.silu).toBe(2);
 		expect(r.gelu).toBe(0);
 		expect(r.softmax_max_bias).toEqual([8.0, 8.0]);
+	});
+
+	test("nomic-bert: fused QKV (3 view3d/layer) + RoPE (Q+K/layer) + SwiGLU, max_bias=0", () => {
+		const r = buildAndCount("nomic-bert");
+		expect(r.getrows).toBe(2);
+		expect(r.view3d).toBe(6); // 2 layers × 3 slices (Q, K, V)
+		expect(r.rope).toBe(4); // 2 layers × (Q + K)
+		expect(r.silu).toBe(2);
+		expect(r.gelu).toBe(0);
+		expect(r.softmax_max_bias).toEqual([0, 0]);
 	});
 });
