@@ -9,6 +9,8 @@ type MockModule = {
 	};
 	_malloc(size: number): number;
 	_free(ptr: number): void;
+	_bridge_malloc(size: number): number;
+	_bridge_free(ptr: number): void;
 	_graph_compute?(graph: number): number;
 	_webgpu_set_graph_profiling_enabled?(enabled: number): void;
 	_webgpu_last_graph_profile_valid?(): number;
@@ -52,6 +54,13 @@ function createWasm(overrides: Partial<MockModule> = {}) {
 		_free: (ptr: number) => {
 			calls.push(`free:${ptr}`);
 		},
+		_bridge_malloc: (size: number) => {
+			calls.push(`malloc:${size}`);
+			return 8;
+		},
+		_bridge_free: (ptr: number) => {
+			calls.push(`free:${ptr}`);
+		},
 		_backend_tensor_get: () => {
 			calls.push("blocking-get");
 			throw new Error("blocking _backend_tensor_get should not be used");
@@ -63,6 +72,61 @@ function createWasm(overrides: Partial<MockModule> = {}) {
 	(wasm as unknown as { m: MockModule }).m = module;
 	return { wasm, heapU8, calls };
 }
+
+describe("GgmlWasm.malloc/free routes through bridge_malloc/bridge_free", () => {
+	test("malloc calls _bridge_malloc, not _malloc", () => {
+		let bridgeCalled = 0;
+		let stdlibCalled = 0;
+		const fakeModule = {
+			_bridge_malloc: (size: number) => {
+				bridgeCalled++;
+				return 0xac0000 + size;
+			},
+			_bridge_free: (_ptr: number) => {},
+			_malloc: (_size: number) => {
+				stdlibCalled++;
+				return 0;
+			},
+			_free: (_ptr: number) => {},
+			HEAPU8: new Uint8Array(64),
+			HEAPF32: new Float32Array(16),
+		};
+		const wasm = new GgmlWasm();
+		// biome-ignore lint/suspicious/noExplicitAny: test injection
+		(wasm as any).m = fakeModule;
+		// biome-ignore lint/suspicious/noExplicitAny: test injection
+		(wasm as any).is64 = false;
+
+		const ptr = wasm.malloc(16);
+		expect(ptr).toBe(0xac0010);
+		wasm.free(ptr);
+
+		expect(bridgeCalled).toBe(1);
+		expect(stdlibCalled).toBe(0);
+	});
+
+	test("malloc normalizes BigInt return value to number under wasm64", () => {
+		const fakeModule = {
+			_bridge_malloc: (size: bigint) => {
+				expect(typeof size).toBe("bigint");
+				return BigInt(0xac0000) + size;
+			},
+			_bridge_free: (_ptr: bigint) => {},
+			HEAPU8: new Uint8Array(64),
+			HEAPF32: new Float32Array(16),
+		};
+		const wasm = new GgmlWasm();
+		// biome-ignore lint/suspicious/noExplicitAny: test injection
+		(wasm as any).m = fakeModule;
+		// biome-ignore lint/suspicious/noExplicitAny: test injection
+		(wasm as any).is64 = true;
+
+		const ptr = wasm.malloc(16);
+		expect(typeof ptr).toBe("number");
+		expect(ptr).toBe(0xac0010);
+		wasm.free(ptr);
+	});
+});
 
 describe("GgmlWasm async readback wrappers", () => {
 	test("forwards async readback wrapper calls to wasm exports", () => {

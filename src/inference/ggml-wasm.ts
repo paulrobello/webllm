@@ -100,6 +100,17 @@ export class GgmlWasm {
 	private readonly asyncTensorGetStates = new Map<number, number>();
 	private graphComputeQueue: Promise<void> = Promise.resolve();
 
+	/**
+	 * Set during `init()`. `true` if the loaded module was built with
+	 * `-sMEMORY64=1 -sWASM_BIGINT=1` — pointer-returning custom exports
+	 * (`_bridge_malloc`, `_tensor_new_*`, etc.) return BigInt values
+	 * that the wrappers narrow to `number` because no single allocation
+	 * in this codebase exceeds 2^53 bytes (largest tensor at 30B IQ3_M
+	 * ≈ 850 MB; full 13B Q4_K_S model file ≈ 7.4 GiB ≪ 2^53). See the
+	 * MEMORY64 migration plan for the cap analysis.
+	 */
+	private is64 = false;
+
 	private async enqueueGraphCompute<T>(op: () => Promise<T>): Promise<T> {
 		const run = this.graphComputeQueue.then(op, op);
 		this.graphComputeQueue = run.then(
@@ -226,6 +237,21 @@ export class GgmlWasm {
 			},
 		});
 		this.installAsyncTensorGetNotifier();
+		// Detect wasm32 vs wasm64 ABI shape: under MEMORY64 + WASM_BIGINT,
+		// custom-export pointer returns are BigInt and pointer args must
+		// be BigInt; under wasm32 they're Number. Try the wasm32 (Number)
+		// shape first — under wasm64 the call throws TypeError because
+		// the i64 arg can't accept a JS Number. The catch path retries
+		// with BigInt and pins is64=true.
+		try {
+			const probe = this.m._bridge_malloc(0);
+			this.is64 = typeof probe === "bigint";
+			this.m._bridge_free(probe);
+		} catch {
+			const probe = this.m._bridge_malloc(0n);
+			this.is64 = true;
+			this.m._bridge_free(probe);
+		}
 		const result = await this.callWithAsyncify<number>(() =>
 			this.m._webgpu_init(),
 		);
@@ -254,11 +280,19 @@ export class GgmlWasm {
 	// ── Memory helpers ─────────────────────────────────────────────────
 
 	malloc(size: number): number {
-		return this.m._malloc(size);
+		if (this.is64) {
+			const ptr = this.m._bridge_malloc(BigInt(size));
+			return Number(ptr);
+		}
+		return this.m._bridge_malloc(size);
 	}
 
 	free(ptr: number): void {
-		this.m._free(ptr);
+		if (this.is64) {
+			this.m._bridge_free(BigInt(ptr));
+			return;
+		}
+		this.m._bridge_free(ptr);
 	}
 
 	stackSave(): number {
