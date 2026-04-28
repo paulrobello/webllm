@@ -1,0 +1,212 @@
+
+=== nomic-embed-text-v1.5 ===
+URL: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf
+Downloading…
+Saved 274290560 bytes to eval/reports/encoder-parity-2026-04-28/cache/nomic-embed-text-v1.5.gguf
+general.architecture = "nomic-bert"
+Metadata keys (22):
+  general.architecture = nomic-bert
+  general.file_type = 1
+  general.name = nomic-embed-text-v1.5
+  nomic-bert.attention.causal = false
+  nomic-bert.attention.head_count = 12
+  nomic-bert.attention.layer_norm_epsilon = 9.999999960041972e-13
+  nomic-bert.block_count = 12
+  nomic-bert.context_length = 2048
+  nomic-bert.embedding_length = 768
+  nomic-bert.feed_forward_length = 3072
+  nomic-bert.pooling_type = 1
+  nomic-bert.rope.freq_base = 1000
+  tokenizer.ggml.bos_token_id = 101
+  tokenizer.ggml.eos_token_id = 102
+  tokenizer.ggml.model = bert
+  tokenizer.ggml.padding_token_id = 0
+  tokenizer.ggml.scores = <object>
+  tokenizer.ggml.seperator_token_id = 102
+  tokenizer.ggml.token_type = <object>
+  tokenizer.ggml.token_type_count = 2
+  tokenizer.ggml.tokens = <object>
+  tokenizer.ggml.unknown_token_id = 100
+Tensors (112):
+  blk.0.attn_output.weight
+  blk.0.attn_output_norm.bias
+  blk.0.attn_output_norm.weight
+  blk.0.attn_qkv.weight
+  blk.0.ffn_down.weight
+  blk.0.ffn_gate.weight
+  blk.0.ffn_up.weight
+  blk.0.layer_output_norm.bias
+  blk.0.layer_output_norm.weight
+  blk.1.attn_output.weight
+  blk.1.attn_output_norm.bias
+  blk.1.attn_output_norm.weight
+  blk.1.attn_qkv.weight
+  blk.1.ffn_down.weight
+  blk.1.ffn_gate.weight
+  blk.1.ffn_up.weight
+  blk.1.layer_output_norm.bias
+  blk.1.layer_output_norm.weight
+  blk.10.attn_output.weight
+  blk.10.attn_output_norm.bias
+  blk.10.attn_output_norm.weight
+  blk.10.attn_qkv.weight
+  blk.10.ffn_down.weight
+  blk.10.ffn_gate.weight
+  blk.10.ffn_up.weight
+  blk.10.layer_output_norm.bias
+  blk.10.layer_output_norm.weight
+  blk.11.attn_output.weight
+  blk.11.attn_output_norm.bias
+  blk.11.attn_output_norm.weight
+  blk.11.attn_qkv.weight
+  blk.11.ffn_down.weight
+  blk.11.ffn_gate.weight
+  blk.11.ffn_up.weight
+  blk.11.layer_output_norm.bias
+  blk.11.layer_output_norm.weight
+  blk.2.attn_output.weight
+  blk.2.attn_output_norm.bias
+  blk.2.attn_output_norm.weight
+  blk.2.attn_qkv.weight
+  blk.2.ffn_down.weight
+  blk.2.ffn_gate.weight
+  blk.2.ffn_up.weight
+  blk.2.layer_output_norm.bias
+  blk.2.layer_output_norm.weight
+  blk.3.attn_output.weight
+  blk.3.attn_output_norm.bias
+  blk.3.attn_output_norm.weight
+  blk.3.attn_qkv.weight
+  blk.3.ffn_down.weight
+  … (62 more)
+HAS position_embd.weight: false
+
+=== jina-embeddings-v2-base-en ===
+URL: https://huggingface.co/gaianet/jina-embeddings-v2-base-en-GGUF/resolve/main/jina-embeddings-v2-base-en-f16.gguf
+Downloading…
+Saved 274367296 bytes to eval/reports/encoder-parity-2026-04-28/cache/jina-embeddings-v2-base-en.gguf
+general.architecture = "jina-bert-v2"
+Metadata keys (34):
+  general.architecture = jina-bert-v2
+  general.dataset.0.name = C4
+  general.dataset.0.organization = Allenai
+  general.dataset.0.repo_url = https://huggingface.co/allenai/c4
+  general.dataset.count = 1
+  general.file_type = 1
+  general.languages = <object>
+  general.license = apache-2.0
+  general.name = Jina Bert Implementation
+  general.organization = Jinaai
+  general.quantization_version = 2
+  general.size_label = 137M
+  general.tags = <object>
+  general.type = model
+  jina-bert-v2.attention.causal = false
+  jina-bert-v2.attention.head_count = 12
+  jina-bert-v2.attention.layer_norm_epsilon = 9.999999960041972e-13
+  jina-bert-v2.block_count = 12
+  jina-bert-v2.context_length = 8192
+  jina-bert-v2.embedding_length = 768
+  jina-bert-v2.feed_forward_length = 3072
+  jina-bert-v2.pooling_type = 1
+  tokenizer.ggml.add_bos_token = true
+  tokenizer.ggml.add_eos_token = true
+  tokenizer.ggml.cls_token_id = 101
+  tokenizer.ggml.mask_token_id = 103
+  tokenizer.ggml.model = bert
+  tokenizer.ggml.padding_token_id = 0
+  tokenizer.ggml.pre = jina-v2-en
+  tokenizer.ggml.seperator_token_id = 102
+  tokenizer.ggml.token_type = <object>
+  tokenizer.ggml.token_type_count = 2
+  tokenizer.ggml.tokens = <object>
+  tokenizer.ggml.unknown_token_id = 100
+Tensors (196):
+  blk.0.attn_k.bias
+  blk.0.attn_k.weight
+  blk.0.attn_output.bias
+  blk.0.attn_output.weight
+  blk.0.attn_output_norm.bias
+  blk.0.attn_output_norm.weight
+  blk.0.attn_q.bias
+  blk.0.attn_q.weight
+  blk.0.attn_v.bias
+  blk.0.attn_v.weight
+  blk.0.ffn_down.bias
+  blk.0.ffn_down.weight
+  blk.0.ffn_gate.weight
+  blk.0.ffn_up.weight
+  blk.0.layer_output_norm.bias
+  blk.0.layer_output_norm.weight
+  blk.1.attn_k.bias
+  blk.1.attn_k.weight
+  blk.1.attn_output.bias
+  blk.1.attn_output.weight
+  blk.1.attn_output_norm.bias
+  blk.1.attn_output_norm.weight
+  blk.1.attn_q.bias
+  blk.1.attn_q.weight
+  blk.1.attn_v.bias
+  blk.1.attn_v.weight
+  blk.1.ffn_down.bias
+  blk.1.ffn_down.weight
+  blk.1.ffn_gate.weight
+  blk.1.ffn_up.weight
+  blk.1.layer_output_norm.bias
+  blk.1.layer_output_norm.weight
+  blk.10.attn_k.bias
+  blk.10.attn_k.weight
+  blk.10.attn_output.bias
+  blk.10.attn_output.weight
+  blk.10.attn_output_norm.bias
+  blk.10.attn_output_norm.weight
+  blk.10.attn_q.bias
+  blk.10.attn_q.weight
+  blk.10.attn_v.bias
+  blk.10.attn_v.weight
+  blk.10.ffn_down.bias
+  blk.10.ffn_down.weight
+  blk.10.ffn_gate.weight
+  blk.10.ffn_up.weight
+  blk.10.layer_output_norm.bias
+  blk.10.layer_output_norm.weight
+  blk.11.attn_k.bias
+  blk.11.attn_k.weight
+  … (146 more)
+HAS position_embd.weight: false
+
+=== Phase 0 unknowns — resolution summary ===
+Mirrors used (no fallback fired):
+  nomic: huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF (f16, primary URL)
+  jina:  huggingface.co/gaianet/jina-embeddings-v2-base-en-GGUF (f16, primary URL)
+
+1. nomic-bert RoPE freq-base key spelling
+   FOUND: "nomic-bert.rope.freq_base" = 1000  (dotted form)
+   Loader fallback chain in src/models/model-loader.ts:95-98 already covers
+   this branch (it tries `${arch}.rope_freq_base` then `${arch}.rope.freq_base`).
+   NOTE: value is 1000, not the typical 10000 default — Task 2 RoPE setup
+   must read the metadata, not hardcode 10000.
+
+2. jina-bert-v2 ALiBi bias-max key spelling
+   FOUND: NO alibi_bias_max / alibi_max_bias key present in the gaianet GGUF.
+   The spec assumed key "jina-bert-v2.attention.alibi_bias_max" would exist;
+   this mirror omits it entirely. Implications for Task 2:
+     - jina v2 uses ALiBi (no rope.freq_base key here either, confirming
+       positional encoding is purely ALiBi).
+     - Bias-max must come from a default constant. The Jina v2 published
+       default is alibi_bias_max = 8 (per the upstream config). Task 2
+       should hardcode 8 with a metadata-override fallback so future
+       mirrors that DO emit the key are honored.
+   FLAG: Spec's "Phase 0 to verify" assumption diverged — flag DONE_WITH_CONCERNS
+   so the controller decides whether to update the plan.
+
+3. position_embd.weight presence
+   ABSENT for both nomic-embed-text-v1.5 and jina-embeddings-v2-base-en.
+   Matches spec expectation (both use rotary/ALiBi positional encoding,
+   no learned absolute position embeddings).
+
+Other observations:
+  - nomic-bert tensors use fused QKV (blk.N.attn_qkv.weight), no biases.
+  - jina-bert-v2 tensors use split Q/K/V with biases (blk.N.attn_{q,k,v}.{weight,bias}).
+  - Both use `tokenizer.ggml.model = bert` (WordPiece).
+  - jina-bert-v2 has tokenizer.ggml.pre = "jina-v2-en" (BPE pre-tokenizer hint).
