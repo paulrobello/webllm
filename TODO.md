@@ -1952,176 +1952,120 @@ Boot sequence for a fresh session:
      `?prefillTile=0` / `--prefill-tile 0` explicitly. FA mode
      is orthogonal.
 
-**Recommended first move:** **No perf lever is forced.** §32
-just landed (a routine rebase + sweep cycle triggered by
-upstream `ggml-webgpu` movement) — outcome was "rebase-clean,
-small regression, accepted" with `llama-3.1-8b-iq3m` baseline
-dropping 29.0 → 27.2 tok/s. §31a just before that resolved the
-last open question on the MEMORY64 lever — cap is 15 GiB, lever
-viable, full bridge migration is the gated next step but only
-when a 13B/30B target deployment is asked for. §17
-(§A matmul kernel), §18 (FA at N=1 decode), §19 (§C drafter
-spec-decode at K=4 with full-row verify), §20 (§4 FA at prefill
-/ long-decode), the side-branch §C-v2-A (greedy spec-decode +
-GPU-resident K+1 verify), §21 (§D encoder perf pass), §22 (7B+
-long-prefill graph-buffer tiling), §23 (§22 default-on flip),
-§24 (§4 FA revisit at 7B+ long-prefill), §26 (§C-v2-A
-re-measurement under tile=128), §27 (llama.cpp rebase +
-free-win sweep — IQ3_M +70-80%), §28 (§C-v2-A re-measurement
-post-§27 rebase — gates *worsened*, lever closed harder), §29
-(§C-v2-A path (c) "smaller i-quant drafter" closed by direct
-verify-cost probe — drafter→0 ceiling is 0.40× target solo),
-**§30 (prefill-tile heuristic refactor — §23 dual-registry
-pattern replaced by `computeDefaultPrefillTileSize` ctor
-heuristic; first `src/`-touching commit since §23)**, **§31
-(MEMORY64 cap probe — Phase 1 PASS retires the asyncify risk
-axis; Phase 2 surfaces a stdlib-`_malloc` BigInt-ABI gap;
-lever NOT closed)**, and **§31a (MEMORY64 sub-probe —
-`bridge_malloc`/`bridge_free` wrappers fix the BigInt ABI gap;
-all 4 phases PASS; 15 GiB cap measured under
-`MAXIMUM_MEMORY=16GB`; lever VIABLE, full bridge migration
-gated on deployment ask)**, and **§32 (llama.cpp rebase
-2026-04-28-eve + free-win sweep — rebase-clean after fix-up
-patch 12, 5/6 models within noise band, llama-3.1-8b-iq3m
-regresses ~6%, accepted; new "small regression, accepted"
-template added)** have all closed, landed, or hit a measured
-pause-point.
-The §27 rebase delivered an unexpected +80% throughput win on
-IQ3_M models (`qwen3-8b-iq3m` 15.1 → 27.2 tok/s) via upstream's
-#22344 fast i-quant mat-vec kernels — a free win for the 8B+
-fleet. §28 then settled whether that target speedup reopened
-§C-v2-A: empirically it did not. §29 settled whether the
-"smaller i-quant drafter" path (c) opened by §28 was viable:
-empirically it is not — verify is 210 ms/call (83% of cycle),
-so even an infinitely-fast drafter caps the cell at 0.40×. §30
-was a developer-experience refactor, not a perf lever — the
-heuristic produces bit-identical defaults on every registered
-model. **§31 + §31a** together established that MEMORY64 is
-viable at 15 GiB cap — the algorithmic levers at the canonical
-4-baseline remain exhausted, but the **memory ceiling that
-gated 13B/30B targets is no longer architecturally blocked**.
-Remaining options are deliberate strategic choices, not obvious
-wins.
+**Status (post-§32):** No perf lever is forced. The algorithmic
+levers at the canonical 4-baseline are exhausted (§17-§29 closed
+the matmul, FA, drafter, encoder, prefill-tiling, and spec-decode
+families). The MEMORY64 ceiling that gated 13B/30B targets is no
+longer architecturally blocked (§31 + §31a — 15 GiB measured cap),
+but the full bridge migration is gated on deployment ask. §32 ran
+the upstream rebase + sweep cycle and accepted a small regression
+on `llama-3.1-8b-iq3m`. All other open work is conditional on
+external triggers.
 
-**Candidate next levers (none are forced; pick on need),
-in rough priority order:**
+### Active next steps (post-§32)
 
-1. ~~**§C-v2-A resurrection (post-§27 rebase).**~~ **CLOSED
-   2026-04-28 — §28.** Re-measured under §27's faster target:
-   gates worsened (0.34× / 0.45×). The "faster K+1 verify"
-   resurrection path (a) from §26 is now empirically closed —
-   the rebase delivered exactly that and the relative ratio
-   moved against, not toward, the thresholds. Drafter overhead
-   must scale symmetrically with target speedup or the ratio
-   worsens. Side branch retained as archived infra; do not
-   merge.
-2. **MEMORY64 for the 8-30B fleet — full bridge migration is the
-   gated next step.** The 70B+ framing remains **DEFERRED under
-   the 2026-04-28 30B ceiling** (and so does the §C-v2-A "13× →
-   100× ratio shift via much larger target" resurrection path —
-   no path to a 100× ratio without crossing the ceiling). What
-   MEMORY64 buys at ≤30B: 13B Q4_K_S/Q4_K_M and 30B IQ3/Q3, both
-   currently above the 4 GiB cap. **§31a closed the probe phase
-   2026-04-28 (closure report:
-   `eval/reports/memory64-probe-2026-04-28/SUMMARY-31a.md`):**
-   `bridge_malloc`/`bridge_free` wrappers landed, all 4 phases
-   PASS, **15 GiB cap measured** at `MAXIMUM_MEMORY=16GB`
-   (configured-ceiling-bound, not hardware-bound). Decision-rule
-   §5.1 branch: **≥8 GiB → promote to full bridge migration.**
-   That migration is the **P2-class follow-up spec**, not work
-   that runs without a deployment ask. Scope: (i) replace stdlib
-   malloc/free at every JS call site with `_bridge_malloc` /
-   `_bridge_free`, (ii) audit `int32_t size`/offset params in
-   `webgpu-bridge.cpp` for >2 GiB transfer signatures, (iii)
-   keep BigInt offsets across the GGUF loader's JS↔WASM boundary,
-   (iv) re-run smoke + bench-inf + bench-profile under MEMORY64
-   to confirm zero regression on the existing ≤4 GiB fleet, (v)
-   decide single-binary vs dual-binary deploy. **Trigger condition:**
-   a 13B or 30B target lands as a real ask. Until then, leave the
-   `webllm-wasm-mem64` build target dormant in the tree (it's
-   already wired up via `make mem64-probe` and the parallel build
-   dir).
-3. **§D concat-graph batched encoder compute.** Only opens on
-   a real batch-encoder-throughput use-case (was non-goal in
-   §21). §27 rebase didn't deliver an encoder-side free win
-   (encoder is dispatch-bound, not memory-bound).
-4. ~~**Heuristic-based prefill-tile default in `ModelInference`.**~~
-   **CLOSED 2026-04-28 — §30.** §23 lever (b) landed: registry
-   field `recommendedPrefillTile` and smoke mirror map deleted;
-   ctor now derives from `hyperparams.layerCount ×
-   embeddingLength` via `computeDefaultPrefillTileSize`. All 18
-   downloaded registered models classify identically to the prior
-   registry (Phase 0 probe). Override surfaces unchanged.
-5. ~~**Smaller i-quant drafter for §C-v2-A path (c, new).**~~
-   **CLOSED 2026-04-28 — §29.** Direct verify-cost probe on
-   the §28 cell-3 workload measured verify at **210 ms/call**
-   (5.9× a solo-decode step) — 83% of cycle time. nTokens=5
-   mat-mat falls outside the #22344 fast i-quant *mat-vec*
-   kernels that gave §27 its win, so verify cost is intrinsic
-   at this target/drafter ratio. Counterfactual drafter→0
-   cycle = 210 ms / 2.37 tok = 11.3 tok/s = 0.40× target solo,
-   fails both gates by 3.8× / 0.6× regardless of drafter cost.
-   Side branch tip `4e11d79` carries VERIFY-COST-PROBE.md;
-   no model acquisition needed. The probe took ~2 min wall and
-   saved a multi-day campaign.
-6. **Upstream ggml-webgpu rebase + free-win sweep.** Re-run
-   the §27 sweep (`make bench-inference` on the canonical
-   4-baseline + Mistral-7B) and the §28 §C-v2-A matrix on
-   every llama.cpp rebase. The §27 cycle showed this pays
-   off — #22344 was a +80% free win nobody anticipated. **§32
-   ran 2026-04-28-eve and produced a "no free win, small
-   regression, accepted" outcome** — added to the rebase-
-   trigger template alongside §27 (free-win) and §28
-   (negative result). Trigger condition: upstream actually
-   moves on the `ggml-webgpu/` surface. Mechanical; trigger
-   on demand.
+**Opt-in probes — cheap, executable now, useful data either
+direction.** None are forced; pick if appetite + curiosity align.
 
-**3 candidates remain open** (in the list above: #2 MEMORY64
-full bridge migration, #3 §D batched encoder, #6 upstream rebase
-+ free-win sweep). All three are conditional / external-trigger:
-- #2 reframed under the 2026-04-28 30B ceiling: 70B+ justification
-  is deferred; the ≤30B value (13B at Q4_K, 30B at IQ3/Q3) had its
-  probe phase land 2026-04-28 (§31 + §31a). All four probe phases
-  PASS; **15 GiB cap measured** at `MAXIMUM_MEMORY=16GB`. ASYNCIFY
-  × MEMORY64 risk axis retired; BigInt ABI gap closed by
-  `bridge_malloc`/`bridge_free` wrappers. Remaining work is the
-  full bridge migration (P2-class spec — replace stdlib malloc
-  call sites, audit `int32_t` signatures, re-run all gates under
-  MEMORY64); **gated on a 13B or 30B deployment ask, not on
-  technical readiness.**
-- #3 needs a real batch-encoder-throughput use-case.
-- #6 was exercised 2026-04-28-eve (§32). Upstream had moved 10
-  commits since the morning check (`434b2a1ff → f9f33654a`), one
-  in `ggml-webgpu/` (#22456 ssm_scan aliasing refactor). Sweep
-  outcome: rebase-clean (after fix-up patch 12), 5/6 models within
-  noise band, `llama-3.1-8b-iq3m` regresses ~6%, accepted. Re-trigger
-  when upstream moves again on the WebGPU surface — running base
-  is now `f9f33654a`.
+1. **§32a — Profile-mode rebench on `llama-3.1-8b-iq3m`** to
+   characterize the §32 -6% regression (29.0 → 27.2 tok/s).
+   Tests the **tied-embedding × #22456 aliasing-refactor**
+   hypothesis from §32 §4: qwen3-8b-iq3m has the same GQA shape
+   but untied embeddings and is essentially flat post-rebase, so
+   tied weights exercising the buffer-aliasing path more heavily
+   is the leading suspect. Procedure: `make smoke-bench
+   PERF_MODEL=llama-3.1-8b-instruct-iq3m PERF_RUNS=3` for the
+   60-step trace, compare the bucket breakdown (matmul / encode-
+   overhead / attention / dispatch count) against the §16/§27
+   pre-rebase profile-mode numbers if they exist (or just to the
+   qwen3-8b-iq3m post-§27 profile from §27). Decision rule: if a
+   specific bucket scales with the -6%, file a follow-up; if the
+   regression is uniform across buckets, accept and move on
+   (matches the "buffer-aliasing constant overhead" alternative
+   hypothesis). Cost: ~5 min wall. Risk: zero (read-only
+   measurement; no `src/` change).
 
-If none of those align with current priorities, the team
-should pick a direction explicitly — there is no obvious
-next perf lever waiting to be measured.
+2. **§31b — `MAXIMUM_MEMORY` upper-bound probe** for the
+   `webllm-wasm-mem64` target. §31a measured 15 GiB at
+   `-sMAXIMUM_MEMORY=16GB` (configured-ceiling-bound, not
+   hardware-bound). Bump to `-sMAXIMUM_MEMORY=64GB` (or higher)
+   and re-run `mem64-probe.html` Phase 3 to find Chrome's actual
+   wasm64 cap. Useful pre-30B-deployment planning data: 30B IQ3_M
+   weights are ~12.8 GiB plus KV+activations could push the
+   working set above 15 GiB on long-context workloads, in which
+   case a `MAXIMUM_MEMORY` bump is part of the migration scope.
+   Procedure: edit `-sMAXIMUM_MEMORY` in `src/wasm/CMakeLists.txt`
+   (mem64 branch), `make mem64-probe`, capture
+   `__memory64ProbeResult.phase3_cap_bytes`. Cost: ~5 min wall.
+   Risk: zero (probe-only; no production-build touch).
 
-**~~Secondary option:~~ §D encoder/embedding perf pass — CLOSED 2026-04-27 (see §21).**
-Measured, characterized, closed. Single-text levers (L1 ctx/graph
-reuse measured + reverted; L2 readback shrink projected at <3% based
-on Phase 2.5 diagnostic; L3 sequential embedBatch projected at 0% on
-the dispatch-bound bottleneck) are exhausted; the only structural
-lever (concat-graph batched compute) was non-goal in this cycle and
-is deferred until a real use-case for batch encoder throughput
-emerges. Net characterization: encoder embed is **dispatch-bound
-(95.6% of step time is `graphCompute` and ~31 ms of that is ~390
-dispatches × ~80 µs)**, not memory-bound or compute-bound. The
-harness (`eval/embed-perf.ts` + smoke-page `?embedPerf=…` URL params)
-is shipped infra; re-run after any future llama.cpp rebase to spot
-free wins from upstream `ggml-webgpu` dispatch coalescing.
+3. **Patch 12 squash cleanup** on `webllm-browser-patches`. The
+   §32 rebase added patch 12 as a forward fix-up to patch 3
+   rather than amending in place. Squashing into patch 3 cleans
+   up the stack. Best done at the *next* rebase trigger (so the
+   history rewrite is amortized into work already in flight) —
+   not worth a standalone history-rewrite cycle. Lower priority
+   than #1 or #2.
 
-**Recommended path (any option):** invoke
-`superpowers:writing-plans` with the chosen scope, then
-execute via `superpowers:subagent-driven-development` (per
-global preference). Mirror §17 / §18 / §19 / §20 plan
-structure: explicit phases, measurable gates, and a
-measure-and-close decision rule.
+### External-trigger candidates
+
+Three open candidates, all conditional:
+
+- **MEMORY64 full bridge migration** (P2-class spec). Trigger:
+  a 13B or 30B target lands as a real deployment ask. Scope: (i)
+  replace stdlib `malloc`/`free` at every JS call site with
+  `_bridge_malloc` / `_bridge_free`, (ii) audit `int32_t
+  size`/offset params in `webgpu-bridge.cpp` for >2 GiB transfer
+  signatures, (iii) keep BigInt offsets across the GGUF loader's
+  JS↔WASM boundary, (iv) re-run smoke + bench-inf + bench-profile
+  under MEMORY64 to confirm zero regression on the existing
+  ≤4 GiB fleet, (v) decide single-binary vs dual-binary deploy.
+  Probe phase complete (§31 + §31a — `eval/reports/memory64-
+  probe-2026-04-28/SUMMARY-31a.md`); ASYNCIFY × MEMORY64 risk
+  axis retired; BigInt ABI gap closed; 15 GiB cap viable.
+
+- **§D concat-graph batched encoder compute.** Trigger: a real
+  batch-encoder-throughput use-case (was non-goal in §21). The
+  encoder is dispatch-bound; the only structural lever left is
+  amortizing dispatches across a batched concat-graph. §27
+  rebase didn't deliver an encoder-side free win.
+
+- **Upstream `ggml-webgpu` rebase + free-win sweep.** Trigger:
+  upstream actually moves on the `ggml-webgpu/` surface again.
+  Running base is now `f9f33654a` (post-§32). Mechanical sweep
+  on the 6-model fleet against the new baselines (tinyllama-q4_0
+  ~107, qwen3-0.6b ~87, qwen3-1.7b ~61, mistral-7b-q4ks ~35,
+  llama-3.1-8b-iq3m ~27, qwen3-8b-iq3m ~26). Three documented
+  outcome templates: §27 (free-win), §28 (negative result, lever
+  closed harder), §32 (small regression, accepted). Pick the
+  template that matches the data and document.
+
+### Deferred (out of scope per current ceilings)
+
+- **§C-v2-A resurrection.** Side branch `feat/spec-decode-v2-greedy`
+  retains the entire driver, AdaptiveGate, K+1 verify, contract gate,
+  and ~30 tests. The only remaining theoretical resurrection path is
+  a 70B+ target via MEMORY64 (target/drafter ratio 13× → ~100×), but
+  the 30B project ceiling (set 2026-04-28) defers that. Tip
+  `4e11d79`. **Do not merge.** Re-evaluate only if the 30B ceiling
+  lifts.
+
+- **Wave-1 architectures Gemma 2, Phi 3.** 5+ gaps for Gemma; mostly
+  fused-QKV for Phi 3. Re-evaluate if a model in either family lands
+  as a real deployment ask.
+
+### Process notes
+
+- For any non-trivial lever pick, the established pattern is:
+  invoke `superpowers:writing-plans` with the chosen scope, then
+  execute via `superpowers:subagent-driven-development` (per
+  global preference). Mirror §17/§18/§19/§20 plan structure:
+  explicit phases, measurable gates, measure-and-close decision
+  rule.
+- Probes (§32a, §31b) are short enough to skip the formal plan
+  cycle and execute inline against the existing spec/closure
+  reports — match the §29 verify-cost-probe pattern (one
+  agentchrome js-exec, one writeup commit, done).
 
 #### Archived: How to test §A lever 1 — see `TODO_ARCHIVE.md`
 
