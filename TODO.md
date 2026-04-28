@@ -2596,6 +2596,29 @@ encoders (only opens on a batch-throughput use-case) plus
 MEMORY64 for 70B-class targets, and §C-v2-A resurrection (§22
 partially alleviates per-step K+1 verify cost — never
 re-measured under tile=128 since §22 landed).
+**§25 (2026-04-27 — LANDED, 10+ commits) dashboard hygiene +
+new visualization cycle.** Five new charts on the main inference
+tab (`f8e0ae6` family-coloured accuracy×speed scatter,
+`b33f019` quant connector lines, `e4978ae` decode tok/s vs
+param-count scatter, `5af0370` per-dim score heatmap, `504c837`
+latest-vs-prior delta columns on runs+evals tables); explicit
+encoder/BERT filter so the main tab is strictly chat-only
+(`02f7872`); three encoder-side analogs under the Embeddings
+section (`845b687` cosine×latency scatter, `cf4c49d` param×
+throughput scatter, `88f3df5` Δ total ms on embeddings table);
+delta polarity fix so lower-is-better metrics (`Δ total ms`)
+read green=speedup / red=regression (`620407e`). DB audit
+during the cycle confirmed `smoke-runs.db` is clean (29 runs /
+30 evals, no purge candidates). **In flight at the time of this
+writeup:** a `/models` endpoint refactor on `eval/live-server.ts`
+that drives `isEncoderModel` / `inferParamCountB` from the
+registry instead of hand-maintained id-prefix maps — eliminates
+the latent footgun where registering a new encoder family
+(nomic-embed-*, e5-*) would silently leak encoder rows back
+onto the main tab. Expected as a single commit on top of
+`620407e`; check `git log --oneline -3` to verify it landed.
+Zero `src/` / `tests/` change throughout the cycle; ship gate
+(426/11/0) maintained on every commit.
 
 Findings, one bug fix, one upstream rebase, one
 quant-promotion, encoder perf characterization, plus a
@@ -2793,11 +2816,23 @@ Boot sequence for a fresh session:
    registry-shape tests in `tests/eval-models.test.ts` (424 → 426).
    The §24 §4 FA revisit at 7B+ long-prefill cycle added 0 tests
    (closure C — measurement campaign + closure writeup; zero `src/`
-   change). The WebGPU-gated integration tests skip under Bun (no
-   `navigator.gpu`).
-2. **`git log --oneline -25`** — §24 (§4 FA revisit at 7B+
-   long-prefill, CLOSED) landed on `main` on 2026-04-27 as a single
-   docs/measurement commit (zero `src/` change). Below it: §23
+   change). **§25 dashboard hygiene + new viz cycle added 0 tests**
+   (10+ commits, dashboard-only — `smoke-test/dashboard.{html,js,css}`
+   and possibly `eval/live-server.ts` if the in-flight `/models`
+   endpoint refactor has landed). The WebGPU-gated integration tests
+   skip under Bun (no `navigator.gpu`).
+2. **`git log --oneline -25`** — top of `main` is the §25
+   dashboard cycle (~10-11 commits). Tip should be either
+   `620407e fix(dashboard): polarity-aware deltaCellHtml` or
+   the in-flight `/models` endpoint commit on top of it. Below
+   the §25 cycle (in reverse-chronological order):
+   `620407e` polarity fix → `88f3df5` #B5 → `cf4c49d` #B3 →
+   `845b687` #B1 → `02f7872` chore: encoder filter on main tab →
+   `504c837` #5 → `5af0370` #4 → `e4978ae` #3 → `b33f019` #2 →
+   `f8e0ae6` #1. Then `85988c8 docs(TODO): §24 — §4 FA revisit
+   at 7B+ long-prefill MEASURED + CLOSED` is the §24
+   closure (single docs/measurement commit, zero `src/` change).
+   Below §24: §23
    (§22 default-on auto-tile via `recommendedPrefillTile`) landed
    on `main` on 2026-04-27 as a single commit `0c50e03 feat(eval):
    §22 default-on auto-tile via recommendedPrefillTile`. Below it:
