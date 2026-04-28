@@ -332,6 +332,14 @@ probe scope expansion.
   configure step in `src/wasm/build-mem64/`.
 - `.gitignore` — adds `src/wasm/build-mem64/` to the existing
   `src/wasm/build/` exclusion line.
+- `tsconfig.json` — adds `src/wasm/build-mem64` to the existing
+  `exclude` array (which already lists `src/wasm/build`). Required
+  because `make mem64-probe` emits `.js` files into the new build
+  dir that `tsc --noEmit` would otherwise scan and reject as
+  type-check input. Discovered post-Phase-2 amendment 2026-04-28
+  when `make checkall` failed on the cmake-generated runtime
+  scaffolding inside the mem64 build dir; the parallel exclusion
+  mirrors the existing wasm32 build-dir pattern.
 
 **New:**
 - `smoke-test/mem64-probe.html` — standalone harness.
