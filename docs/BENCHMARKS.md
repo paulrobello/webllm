@@ -403,40 +403,55 @@ Context window adds ~30-50% overhead to base VRAM. Models at Q4_K_M quantization
 
 ### Performance Tiers
 
+Decode tok/s pinned post-§32 (perf.ts non-profile 3-run median,
+2026-04-27/28). Tier brackets are guidance — actual throughput
+varies by GPU class and quantization. Models in **bold** are
+exercised in the canonical 6-model rebase fleet; others are
+wave-1 / wave-2 / arch-survey entries (see TODO.md `§10`–`§16`).
+
 #### Ultrafast (100+ tok/s, <1 GB VRAM)
 
-| Model | Params | VRAM | Tool Use | License |
-|-------|--------|------|----------|---------|
-| SmolLM2 360M Instruct | 360M | 376 MB | No | Apache 2.0 |
-| Snowflake Arctic Embed S | 33M | 239 MB | Embedding | Apache 2.0 |
-| Snowflake Arctic Embed M | 109M | 539 MB | Embedding | Apache 2.0 |
+| Model | Params | VRAM | Decode tok/s | Tool Use | License |
+|-------|--------|------|-------------:|----------|---------|
+| **TinyLlama 1.1B Chat** (Q4_0) | 1.1B | 638 MB | **110.8** | No | Apache 2.0 |
+| SmolLM2 360M Instruct (Q4_0) | 360M | 376 MB | ~106 | No | Apache 2.0 |
+| Snowflake Arctic Embed S | 33M | 239 MB | embedding | Embedding | Apache 2.0 |
+| Snowflake Arctic Embed M | 109M | 539 MB | embedding | Embedding | Apache 2.0 |
 
 #### Fast (60+ tok/s, 1-2 GB VRAM)
 
-| Model | Params | VRAM | Tool Use | License |
-|-------|--------|------|----------|---------|
-| Llama 3.2 1B Instruct | 1.23B | 879 MB | No | Llama 3.2 |
-| Qwen3 0.6B | 0.6B | 1403 MB | Native | Apache 2.0 |
-| Gemma 2 2B IT | 2.61B | 1584 MB | No | Gemma |
-| Qwen2.5 1.5B Instruct | 1.54B | 1630 MB | No | Apache 2.0 |
-| Qwen2.5 Coder 1.5B | 1.54B | 1630 MB | Structured | Apache 2.0 |
-| SmolLM2 1.7B Instruct | 1.71B | 1774 MB | No | Apache 2.0 |
+| Model | Params | VRAM | Decode tok/s | Tool Use | License |
+|-------|--------|------|-------------:|----------|---------|
+| **Qwen3 0.6B** (Q8_0) | 0.6B | 1403 MB | **89.8** | Native | Apache 2.0 |
+| SmolLM2 1.7B Instruct (Q4_0) | 1.71B | 1774 MB | 86 | No | Apache 2.0 |
+| Qwen2.5 1.5B Instruct (Q4_0) | 1.54B | 1630 MB | 84 | No | Apache 2.0 |
+| Llama 3.2 1B Instruct | 1.23B | 879 MB | ~75 | No | Llama 3.2 |
+| **Qwen3 1.7B** (Q8_0) | 1.7B | 2037 MB | **62.2** | Native | Apache 2.0 |
+| Qwen2.5 Coder 1.5B | 1.54B | 1630 MB | ~80 | Structured | Apache 2.0 |
+| Hermes 3 Llama 3.2 3B (Q4_0) | 3.21B | 2264 MB | 60 | ChatML | Llama 3.2 |
 
-#### Balanced (30+ tok/s, 2-3 GB VRAM)
+#### Balanced (30+ tok/s, 2-4 GB VRAM)
 
-| Model | Params | VRAM | Tool Use | License |
-|-------|--------|------|----------|---------|
-| Qwen3 1.7B | 1.7B | 2037 MB | Native | Apache 2.0 |
-| Hermes 3 Llama 3.2 3B | 3.21B | 2264 MB | ChatML | Llama 3.2 |
-| Llama 3.2 3B Instruct | 3.21B | 2264 MB | No | Llama 3.2 |
-| Qwen2.5 3B Instruct | 3.09B | 2505 MB | No | Apache 2.0 |
-| Phi-3.5 Mini Instruct | 3.82B | 2520 MB | No | MIT |
+| Model | Params | VRAM | Decode tok/s | Tool Use | License |
+|-------|--------|------|-------------:|----------|---------|
+| Llama 3.2 3B Instruct (Q4_0) | 3.21B | 2264 MB | 58 | No | Llama 3.2 |
+| Qwen2.5 3B Instruct (Q4_0) | 3.09B | 2505 MB | 45 | No | Apache 2.0 |
+| Qwen3 4B (Q4_0) | 4.0B | 3432 MB | 35.5 | Native | Apache 2.0 |
+| **Mistral-7B Instruct v0.3** (Q4_K_S) | 7.2B | 3953 MB | **35.0** | No | Apache 2.0 |
 
 #### Quality (20-30 tok/s, 3-4 GB VRAM)
 
-| Model | Params | VRAM | Tool Use | License |
-|-------|--------|------|----------|---------|
-| Qwen3 4B | 4.0B | 3432 MB | Native | Apache 2.0 |
+| Model | Params | VRAM | Decode tok/s | Tool Use | License |
+|-------|--------|------|-------------:|----------|---------|
+| **Llama 3.1 8B Instruct** (IQ3_M) | 8.0B | 3609 MB | **27.2** | No | Llama 3.1 |
+| **Qwen3 8B** (IQ3_M) | 8.0B | 3252 MB | **27.2** | Native | Apache 2.0 |
+| Mistral-7B Instruct v0.3 (Q3_K_M) | 7.2B | 3360 MB | 19.7 | No | Apache 2.0 |
+
+Wave-1 deferred (registered but not yet integrated — see
+TODO.md §10 wave-1 entry): Gemma 2 2B IT (pre+post norm pairs,
+logit/attn soft-cap, sliding-window, (1+w) RMSNorm); Phi-3.5
+Mini Instruct (fused QKV). Re-evaluate if a model in either
+family lands as a real deployment ask.
 
 ### Recommended Models by Use Case
 
