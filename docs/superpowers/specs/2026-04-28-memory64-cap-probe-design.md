@@ -141,12 +141,18 @@ window.__memory64ProbeResult = {
   phase3_cap_bytes: <Number>,
   phase3_iterations: <Number>,
   phase4: "ok" | "fail: <reason>",
-  emscripten_version: "<string>",
   user_agent: "<string>",
   module_bytes: <Number>,
   init_wall_ms: <Number>,
+  started_at: "<ISO-8601>",
+  finished_at: "<ISO-8601>",
 };
 ```
+
+`emscripten_version` is **not** part of this blob — it isn't accessible
+to JS at runtime. The Phase 4 controller captures it separately by
+running `emcc --version` and includes it in the environment-metadata
+section of the closure report.
 
 ### 3.3 Make target
 
