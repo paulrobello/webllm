@@ -121,7 +121,20 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	const promptOverride = params.get("prompt");
 	const profileName = params.get("profile");
 	const benchTaskListId = params.get("bench");
-	const benchIngestUrl = params.get("ingest") || "";
+	// Resolve dashboard ingest URL with a "default-on" policy:
+	//   • `?ingest=<url>`   → use that URL.
+	//   • `?ingest=off`     → disable ingest entirely.
+	//   • (no `?ingest=`)   → default to http://localhost:8033 so plain
+	//                         smoke runs auto-record. Failed POSTs are
+	//                         best-effort and never block the run.
+	const ingestParam = params.get("ingest");
+	const benchIngestUrl = (() => {
+		if (ingestParam === null) return "http://localhost:8033";
+		const trimmed = ingestParam.trim();
+		if (trimmed.length === 0) return "";
+		if (trimmed.toLowerCase() === "off") return "";
+		return trimmed;
+	})();
 	const DEFAULT_MODEL_ID = "qwen3-0.6b-q4f16";
 	const DEFAULT_CONTEXT_LENGTH = 4096;
 	const modelId = params.get("model") || DEFAULT_MODEL_ID;
@@ -886,6 +899,42 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					smokeResult.outputText
 				: smokeResult.displayOutputText || smokeResult.outputText;
 			log("pass", `Assistant: ${assistantText}`);
+			// Stash a SmokeRunRecord so the post-[8/8] dashboard ingest hook
+			// can POST `run_complete`. We snapshot here (instead of re-deriving
+			// later) because `userMessage` and `smokeResult` are scoped to
+			// this try-block.
+			const decodeMs = Math.round(smokeResult.genTime ?? 0);
+			const totalMs = Math.round(smokeResult.totalTime ?? 0);
+			const prefillMs = Math.round(smokeResult.prefillMs ?? 0);
+			const tps =
+				decodeMs > 0
+					? Math.round(((smokeResult.genTokens ?? 0) / (decodeMs / 1000)) * 10) / 10
+					: 0;
+			window.__webllmSmokeRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			window.__webllmSmokeRecord = {
+				schemaVersion: 1,
+				timestamp: new Date().toISOString(),
+				profile: profileName ?? undefined,
+				model: modelId,
+				page: "smoke",
+				thinking: thinkingEnabled ? "on" : "off",
+				prompt: userMessage,
+				params: {
+					contextLength: Number.isFinite(requestedContextLength)
+						? requestedContextLength
+						: undefined,
+					...samplingOverrides,
+				},
+				oneShot: {
+					assistantText,
+					finishReason: smokeResult.finishReason,
+					genTokens: smokeResult.genTokens ?? 0,
+					prefillMs,
+					decodeMs,
+					totalMs,
+					tokensPerSecond: tps,
+				},
+			};
 			setProgress(100);
 		} catch (e) {
 			log("fail", `[7/8] Generation failed: ${e.message}\n${e.stack || ""}`);
@@ -1018,6 +1067,43 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				}
 			} catch (err) {
 				console.warn(`system-profile collection failed: ${err}`);
+			}
+		}
+
+		// Best-effort: post the [7/8] one-shot run as run_complete to the
+		// dashboard. Default-on (see `?ingest=` resolution above); a
+		// connection refused on a stopped dashboard is logged once and
+		// swallowed. Bench mode posts its own eval_complete; we still post
+		// the one-shot here so a single page load yields one row in `runs`
+		// regardless of whether bench mode was requested.
+		if (benchIngestUrl && window.__webllmSmokeRecord) {
+			try {
+				const payload = {
+					...window.__webllmSmokeRecord,
+					runId: window.__webllmSmokeRunId,
+				};
+				if (window.__webllmSystemId) payload.systemId = window.__webllmSystemId;
+				const res = await fetch(`${benchIngestUrl}/ingest?kind=run_complete`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(payload),
+				});
+				if (res.ok) {
+					log(
+						"pass",
+						`[ingest] run_complete → ${benchIngestUrl} (runId ${window.__webllmSmokeRunId})`,
+					);
+				} else {
+					log(
+						"fail",
+						`[ingest] run_complete failed: HTTP ${res.status} ${res.statusText}`,
+					);
+				}
+			} catch (err) {
+				log(
+					"fail",
+					`[ingest] dashboard not reachable at ${benchIngestUrl} — skipping (use ?ingest=off to silence): ${err?.message ?? String(err)}`,
+				);
 			}
 		}
 

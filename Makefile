@@ -3,7 +3,7 @@
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full bench-all \
         smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench mem64-probe \
-        dashboard-serve dashboard-stop dashboard-db-reset agentchrome-stop stop-all \
+        dashboard-serve dashboard-stop dashboard-db-reset import-reports agentchrome-stop stop-all \
         run-all help
 
 # ---------------------------------------------------------------------------
@@ -185,6 +185,9 @@ dashboard-db-reset: ## Stop the dashboard, delete its SQLite file (+WAL/SHM), ne
 	@sleep 1
 	@rm -f $(DASHBOARD_DB) $(DASHBOARD_DB)-wal $(DASHBOARD_DB)-shm
 	@echo "removed $(DASHBOARD_DB) (and -wal/-shm sidecars if any)"
+
+import-reports: ## Backfill JSON reports under eval/reports/ into the live dashboard (idempotent)
+	bun run eval/import-reports.ts
 
 stop-all: smoke-stop dashboard-stop agentchrome-stop ## Stop smoke server, dashboard server, and agentchrome session
 
