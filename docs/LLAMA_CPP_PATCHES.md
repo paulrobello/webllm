@@ -34,12 +34,10 @@ binary that crashes the page during inference.
 
 ## Patch Inventory
 
-The branch currently carries **twelve commits** on top of upstream
+The branch currently carries **eleven commits** on top of upstream
 `master`, in the order shown (oldest first). Commit 7 and its revert
 (commit 8) are kept as a pair pending a proper replacement; treat them
-as a no-op until you hear otherwise. Patch 12 is a forward fix-up for
-patch 3 introduced by the 2026-04-28-eve rebase (see below); on a
-future cleanup pass it should be squashed back into patch 3.
+as a no-op until you hear otherwise.
 
 Last rebased onto upstream master 2026-04-28-eve (§32) to tip
 `f9f33654a` ("vulkan: Coalesce Q4_K/Q5_K scale loads (#21751)"). The
@@ -49,10 +47,16 @@ helper `webgpu_tensor_offset` renamed to `ggml_webgpu_tensor_offset`
 and `view_offs` folded into the helper body). The rebase replayed all
 11 patches cleanly but the renamed helper produced a compile error in
 patch 3 (request-based browser readback API still referenced the old
-name). Patch 12 was added as a forward fix-up rather than amending
-patch 3 to avoid history rewriting on the long-lived branch. Safety
-branch `webllm-browser-patches-pre-rebase-2026-04-28-eve` preserves
-the pre-rebase tip (`981859864`).
+name). The §32 rebase initially landed the rename adoption as a
+forward fix-up (patch 12) to avoid history rewriting on the
+long-lived branch. **Patch 12 was subsequently squashed back into
+patch 3** (2026-04-28, post-§31b cleanup pass) — patch 3's diff for
+the affected line now reads `ggml_webgpu_tensor_offset(tensor) +
+offset` directly. WASM byte-identical pre/post squash (2,249,650
+bytes); ship gate 428/11/0 unchanged. Safety branches preserved:
+`webllm-browser-patches-pre-rebase-2026-04-28-eve` (pre-§32 tip
+`981859864`), `webllm-browser-patches-pre-squash-2026-04-28`
+(pre-squash tip `c4af89356`).
 
 WASM rebuild + checkall (428/11/0) + 6-model bench sweep verified
 post-§32. Sweep result: 5 of 6 models within ±5% noise band of §27
@@ -161,19 +165,6 @@ on `byte_in_word == 0` and returns the aligned word directly, never
 executing the UB shift. Verified: Mistral-7B Q3_K_M coherent at
 24.4 tok/s (was gibberish); Q4_K_S regression-safe at 36.0 tok/s.
 Closes webllm bug #28.
-
-### 12. ggml-webgpu: rebase fix-up — adopt #22456 helper rename
-
-Forward fix-up for patch 3 added during the §32 rebase (2026-04-28-eve)
-when upstream's `ggml-webgpu: fix buffer aliasing for ssm_scan and
-refactor aliasing logic (#22456)` renamed `webgpu_tensor_offset()` →
-`ggml_webgpu_tensor_offset()` and folded `tensor->view_offs` into the
-helper body. Patch 3 (request-based browser readback API) still
-referenced the old name and added `view_offs` at the call site, which
-no longer compiles after #22456. This single-line fix renames the call
-and drops the redundant `view_offs` (the helper already includes it).
-Bit-identical post-rename behavior. Should be squashed back into patch
-3 on a future manual cleanup pass.
 
 ### Note: FA browser engagement (2026-04-25)
 

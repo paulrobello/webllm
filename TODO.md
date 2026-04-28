@@ -1515,7 +1515,7 @@ F. ~~Promote or retire the Q3_K_M test entry.~~ **Done — §15.**
 §30. ~~Heuristic-based prefill-tile default in `ModelInference`.~~ **CLOSED 2026-04-28 — refactor landed on `main`.** Replaced §23's dual-source-of-truth pattern (`recommendedPrefillTile` field on `BenchmarkModel` + mirrored `RECOMMENDED_PREFILL_TILE` map in `smoke-test/real-model-page.js`) with `computeDefaultPrefillTileSize(hp)` exported from `src/inference/model-inference.ts`. Rule: `layerCount >= 32 AND embeddingLength >= 4096` → 128, else 0. Maps directly to the §22 abort signature ("32 layers × seq=512 of F32 intermediates"). Pre-edit Phase 0 probe validated all 18 downloaded registered models classify identically to the prior registry. Tile pill in the smoke page now renders post-ctor from `inference.prefillTileSize` so the auto-default is visible without page-side duplication. Override surfaces unchanged: `{ prefillTileSize: N }` ctor opt, `?prefillTile=N` URL, `--prefill-tile <n>` CLI all win, including the explicit-zero force-disable path. Browser smoke regression (B.1-B.4 from spec) verified all four overrides + auto-defaults work. Net change: −31 LOC (88 ins / 89 del across 6 files), 427 → 428 tests. Spec: `docs/superpowers/specs/2026-04-28-prefill-tile-heuristic-design.md`. Plan: `docs/superpowers/plans/2026-04-28-prefill-tile-heuristic.md`.
 §31. ~~MEMORY64 cap probe.~~ **CLOSED 2026-04-28 — partial result, lever NOT closed.** Probe target `webllm-wasm-mem64` built clean (133K js / 2.28M wasm) under `-sMEMORY64=1 -sWASM_BIGINT=1 -sMAXIMUM_MEMORY=16GB` via `make mem64-probe`; standalone `smoke-test/mem64-probe.html` ran four sequential phases against Chrome 147 + Emscripten 5.0.6 on M4 Max / macOS 26.4.1. **Outcomes:** Phase 1 (ASYNCIFY × MEMORY64 round-trip) **PASS** — `_webgpu_init` 1.4 ms wall, `_webgpu_shutdown` clean. **The single load-bearing risk axis from spec §4.1 is retired.** Phase 2 (BigInt ABI) **FAIL** — asymmetric: custom bridge exports (`_tensor_new_1d`) correctly return `BigInt`, but stdlib `_malloc` returns JS `Number` (`0xac6548` truncated). Phase 3 (cap probe) **invalid** — bailed at iter 0 because `_malloc(1 GiB)` returned a `Number`, indistinguishable from "actually 0" vs "high pointer mangled by JS shim"; no measured cap. Phase 4 (post-probe re-init) **PASS** — runtime stable. **Decision-rule branch (spec §5.1):** "Phase 1 passes, Phase 2 fails — narrower follow-up: investigate the specific ABI failure before committing more surface." Likely fix is a thin C wrapper (`bridge_malloc`/`bridge_free`) so the build emits explicit-signature shims, or a newer Emscripten release. Few-line change. **Probe paid for itself:** surfaced the actual blocker (a config gap, not architectural incompat) in same-day cost. Six commits across CMake / Make / harness / two review-fix rounds: `314f3a3` `e43244d` `2631eb5` `005c522` `e153e92` `53db417` `f3aad4a` plus a sub-probe revert (`b9c0c09`). Spec: `docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md`. Plan: `docs/superpowers/plans/2026-04-28-memory64-cap-probe.md`. Closure report: `eval/reports/memory64-probe-2026-04-28/SUMMARY.md`.
 
-§32. ~~llama.cpp rebase 2026-04-28-eve + free-win sweep.~~ **CLOSED 2026-04-28 — rebase-clean (after fix-up patch 12), small regression, accepted; new pattern recorded ("no free win, small regression, accepted").** Triggered by upstream `ggml-webgpu` movement (#22456 buffer aliasing refactor for `ssm_scan` landed). Rebased `webllm-browser-patches` `434b2a1ff → f9f33654a` (10 upstream commits, 1 in `ggml-webgpu/`); all 11 patches replayed cleanly via `git rebase --onto`, but compile error surfaced in patch 3 because #22456 renamed `webgpu_tensor_offset` → `ggml_webgpu_tensor_offset` and folded `view_offs` into the helper body. **Resolved by adding patch 12 as a forward fix-up** (single-line rename + drop redundant `view_offs`; bit-identical post-rename behavior; should be squashed back into patch 3 on a future cleanup pass — chose not to amend in-place to avoid history rewriting on the long-lived patches branch). Build gotcha encountered + documented: stale `src/wasm/build/CMakeCache.txt` carries `MATH_LIBRARY=NOTFOUND` from the pre-revert ggml CMake which the post-revert `if (DEFINED MATH_LIBRARY)` then incorrectly trips — **always nuke `src/wasm/build/` before a build that crosses upstream `d530d6e7a`**. WASM build clean post-fix (2,249,650 bytes, +9 KB from #22456 refactor); checkall 428/11/0; smoke clean. **Sweep result (vs §27 post-rebase baselines):** tinyllama-q4_0 110.8→107.4 (-3.1%), qwen3-0.6b 89.8→86.9 (-3.2%), qwen3-1.7b 62.2→60.9 (-2.1%), mistral-7b-q4ks 35.8→35.0 (-2.2%, 5-run), **llama-3.1-8b-iq3m 29.0→27.2 (-6.2%, 5-run)**, qwen3-8b-iq3m 27.2→26.2 (-3.7%). 5 of 6 within ±5% noise band; llama-3.1-8b-iq3m holds a real ~6% regression at 5 runs. **Likely cause:** #22456's aliasing-logic refactor interacting with tied-embedding + GQA + IQ3_M kernels (qwen3-8b-iq3m has identical GQA shape but untied embeddings and is essentially flat; the buffer-aliasing path is exercised more heavily by tied weights). Profile-mode rebench queued as optional follow-up but not done — 6% on a single non-canonical-baseline model fits the §27 doctrine "document and move on, unless a free win opens." **Decision: accept the rebase as new baseline.** Reverting costs ~6% on llama-3.1-8b-iq3m but loses upstream's option value for the next ggml-webgpu kernel cycle (Vulkan tuning + #22296 backend dedup landed here as setup work). Cherry-picking around #22456 specifically would diverge further from upstream and increase per-rebase maintenance. **Updates to canonical baselines:** `llama-3.1-8b-iq3m` 29.0 → 27.2 tok/s. Other 5 unchanged within noise. Closure report: `eval/reports/llama-cpp-rebase-2026-04-28-eve/SUMMARY.md`. Patch doc updated: `docs/LLAMA_CPP_PATCHES.md` (new patch 12 entry + 2026-04-28-eve rebase narrative + cache-staleness gotcha). Safety branch `webllm-browser-patches-pre-rebase-2026-04-28-eve` preserves pre-rebase tip `981859864`. **§32 is the first "small regression, accepted" close** in the rebase-trigger pattern; future rebases follow §27 ("free win") or §28 ("negative result, lever closed harder") or §32 ("rebase-clean, small regression, accepted") templates depending on outcome.
+§32. ~~llama.cpp rebase 2026-04-28-eve + free-win sweep.~~ **CLOSED 2026-04-28 — rebase-clean (after fix-up patch 12), small regression, accepted; new pattern recorded ("no free win, small regression, accepted").** Triggered by upstream `ggml-webgpu` movement (#22456 buffer aliasing refactor for `ssm_scan` landed). Rebased `webllm-browser-patches` `434b2a1ff → f9f33654a` (10 upstream commits, 1 in `ggml-webgpu/`); all 11 patches replayed cleanly via `git rebase --onto`, but compile error surfaced in patch 3 because #22456 renamed `webgpu_tensor_offset` → `ggml_webgpu_tensor_offset` and folded `view_offs` into the helper body. **Resolved by adding patch 12 as a forward fix-up** (single-line rename + drop redundant `view_offs`; bit-identical post-rename behavior; **squashed back into patch 3 on 2026-04-28 post-§31b cleanup pass** — patch stack now 11 patches again, WASM byte-identical pre/post squash, safety branch `webllm-browser-patches-pre-squash-2026-04-28` retained at `c4af89356`). Build gotcha encountered + documented: stale `src/wasm/build/CMakeCache.txt` carries `MATH_LIBRARY=NOTFOUND` from the pre-revert ggml CMake which the post-revert `if (DEFINED MATH_LIBRARY)` then incorrectly trips — **always nuke `src/wasm/build/` before a build that crosses upstream `d530d6e7a`**. WASM build clean post-fix (2,249,650 bytes, +9 KB from #22456 refactor); checkall 428/11/0; smoke clean. **Sweep result (vs §27 post-rebase baselines):** tinyllama-q4_0 110.8→107.4 (-3.1%), qwen3-0.6b 89.8→86.9 (-3.2%), qwen3-1.7b 62.2→60.9 (-2.1%), mistral-7b-q4ks 35.8→35.0 (-2.2%, 5-run), **llama-3.1-8b-iq3m 29.0→27.2 (-6.2%, 5-run)**, qwen3-8b-iq3m 27.2→26.2 (-3.7%). 5 of 6 within ±5% noise band; llama-3.1-8b-iq3m holds a real ~6% regression at 5 runs. **Likely cause:** #22456's aliasing-logic refactor interacting with tied-embedding + GQA + IQ3_M kernels (qwen3-8b-iq3m has identical GQA shape but untied embeddings and is essentially flat; the buffer-aliasing path is exercised more heavily by tied weights). Profile-mode rebench queued as optional follow-up but not done — 6% on a single non-canonical-baseline model fits the §27 doctrine "document and move on, unless a free win opens." **Decision: accept the rebase as new baseline.** Reverting costs ~6% on llama-3.1-8b-iq3m but loses upstream's option value for the next ggml-webgpu kernel cycle (Vulkan tuning + #22296 backend dedup landed here as setup work). Cherry-picking around #22456 specifically would diverge further from upstream and increase per-rebase maintenance. **Updates to canonical baselines:** `llama-3.1-8b-iq3m` 29.0 → 27.2 tok/s. Other 5 unchanged within noise. Closure report: `eval/reports/llama-cpp-rebase-2026-04-28-eve/SUMMARY.md`. Patch doc updated: `docs/LLAMA_CPP_PATCHES.md` (new patch 12 entry + 2026-04-28-eve rebase narrative + cache-staleness gotcha). Safety branch `webllm-browser-patches-pre-rebase-2026-04-28-eve` preserves pre-rebase tip `981859864`. **§32 is the first "small regression, accepted" close** in the rebase-trigger pattern; future rebases follow §27 ("free win") or §28 ("negative result, lever closed harder") or §32 ("rebase-clean, small regression, accepted") templates depending on outcome.
 
 §31a. ~~MEMORY64 cap probe — bridge_malloc sub-probe.~~ **CLOSED 2026-04-28 — lever now VIABLE; ready for full bridge migration scoping.** Direct execution of §31's spec §6 follow-up: added thin C wrappers `bridge_malloc(size_t) → void*` and `bridge_free(void*)` to `src/wasm/webgpu-bridge.cpp`, exported `_bridge_malloc,_bridge_free` from `src/wasm/CMakeLists.txt`, and swapped Phase 2 + Phase 3 of `smoke-test/mem64-probe.html` to use them. Re-ran probe: **all four phases PASS.** Phase 2 — `_bridge_malloc(16n) → typeof=bigint value=0xac6548` with byte-equal F32 round-trip; stdlib `_malloc` diagnostic confirms the §31 asymmetry persists in the same build (`typeof=number`), so the wrapper is the targeted fix not a stdlib upgrade. Phase 3 — sequential 1 GiB allocations succeeded for **15 iterations × 1 GiB = 16,106,127,360 bytes ≈ 15.00 GiB** with 64 KiB page-commit per allocation; iter 15 hit BigInt `0n` (allocator out of headroom under the configured `-sMAXIMUM_MEMORY=16GB`). All 15 freed cleanly via `_bridge_free`. **Decision-rule branch (parent spec §5.1): "≥8 GiB → promote to full bridge migration."** 15 GiB covers every model size that fits the 2026-04-28 30B project ceiling: 8B Q4_K_S (~4.5 GiB weights), 13B Q4_K_S (~7.4 GiB), 30B IQ3_M (~12.8 GiB; tight against 15 GiB once KV+activations land — `MAXIMUM_MEMORY` bump may be needed). **Cap is configured-ceiling-bound, not hardware-bound** — actual Chrome wasm64 upper bound is presumably higher; raise `MAXIMUM_MEMORY` only if the 30B working set demands it. Net code change: **+18 LOC** across 3 files. Probe wall-clock: 19 ms. Implementation took ~5 minutes; build ~30 seconds (incremental). **§31a does NOT migrate the production `webllm-wasm` build to MEMORY64** — that is the P2-class follow-up spec, scoped at: (i) replace stdlib malloc/free call sites in `src/inference/` + `src/wasm/` TS code, (ii) audit `int32_t size`/offset params in `webgpu-bridge.cpp` for >2 GiB transfer signatures, (iii) update GGUF loader to keep BigInt offsets across JS↔WASM, (iv) re-run smoke + bench-inf + bench-profile gates under MEMORY64 to confirm zero regression on the existing ≤4 GiB fleet, (v) decide single-binary vs dual-binary deploy. Open as a separate spec/plan cycle when a 13B or 30B target is asked for. Closure report: `eval/reports/memory64-probe-2026-04-28/SUMMARY-31a.md`.
 
@@ -1755,40 +1755,49 @@ Boot sequence for a fresh session:
    long-decode` is also already merged; if it's still in your
    local checkout, `git branch -d` is safe (it points at
    `b872b5f` already on `main`).
-3. **`git -C ~/Repos/llama.cpp log --oneline -13 webllm-browser-patches`**
-   — confirm the **12-patch stack** is intact (was 11; §32 added
-   patch 12) and the base is upstream `f9f33654a vulkan:
-   Coalesce Q4_K/Q5_K scale loads (#21751)` (rebased 2026-04-28-eve
-   via §32). Tip is `c4af89356 ggml-webgpu: rebase fix-up — adopt
-   #22456 helper rename` — patch 12, the forward fix-up for #22456
-   that should be squashed back into patch 3 on a future cleanup
-   pass. Patch 11 (bug #28 UB shift fix) is now `ab09f14eb`
-   (SHA shifted from §27's `981859864` by the §32 rebase). Safety
-   branches `webllm-browser-patches-pre-rebase-2026-04-28-eve`
-   (preserves §27 tip `981859864`) and `pre-rebase-2026-04-27`
-   (preserves the prior pre-rebase tip `a536df4f4`) are kept as
-   roll-back targets. The 2026-04-27 → 2026-04-28-eve delta was
-   10 upstream commits, 1 of them in `ggml-webgpu/` (#22456 buffer
-   aliasing refactor for ssm_scan; renamed `webgpu_tensor_offset`
-   helper, folded `view_offs` into the helper body). **Zero `git
-   rebase` conflicts**; the compile error in patch 3 was a
-   semantic conflict that surfaced post-replay and was fixed by
-   adding patch 12. **§17 through §31a added zero patches**;
-   **§32 added patch 12** (single-line fix-up). The
-   `__EMSCRIPTEN__` guard around FA was already removed in the
-   2026-04-25 rebase; §20 re-uses the bridge wrappers from §18
-   with no new shader work; §21-§23 + §30 are pure-TS / pure-JS
-   work above the bridge with no shader changes.
+3. **`git -C ~/Repos/llama.cpp log --oneline -12 webllm-browser-patches`**
+   — confirm the **11-patch stack** is intact (was 12 between §32
+   and the post-§31b cleanup; patch 12 squashed back into patch 3
+   2026-04-28) and the base is upstream `f9f33654a vulkan: Coalesce
+   Q4_K/Q5_K scale loads (#21751)` (rebased 2026-04-28-eve via §32).
+   Tip is `3b8ade2a2 ggml-webgpu: fix UB shift-by-32 in
+   load_u32_at_src{,0} for aligned offsets` (patch 11, bug #28 UB
+   shift fix; SHA shifted from `ab09f14eb` by the squash since
+   patch 3's content changed and downstream cherry-picks re-hash).
+   Patch 3 (`d10d41a13 ggml-webgpu: add request-based browser
+   readback API`) now incorporates the #22456 helper rename
+   directly (`ggml_webgpu_tensor_offset(tensor) + offset`) — no
+   separate fix-up commit. Safety branches:
+   `webllm-browser-patches-pre-squash-2026-04-28` (pre-squash tip
+   `c4af89356`), `webllm-browser-patches-pre-rebase-2026-04-28-eve`
+   (pre-§32 tip `981859864`), `pre-rebase-2026-04-27` (pre-§27 tip
+   `a536df4f4`) — all kept as roll-back targets. The 2026-04-27 →
+   2026-04-28-eve delta was 10 upstream commits, 1 of them in
+   `ggml-webgpu/` (#22456 buffer aliasing refactor for ssm_scan;
+   renamed `webgpu_tensor_offset` helper, folded `view_offs` into
+   the helper body). **Zero `git rebase` conflicts**; the compile
+   error in patch 3 was a semantic conflict that the §32 rebase
+   first resolved via forward-fix-up patch 12 and the post-§31b
+   cleanup pass folded back into patch 3 itself. **§17 through
+   §31a added zero patches**; **§32 added patch 12** which the
+   post-§31b cleanup folded into patch 3 (net stack delta: zero
+   patch additions across §17-§31b). The `__EMSCRIPTEN__` guard
+   around FA was already removed in the 2026-04-25 rebase; §20
+   re-uses the bridge wrappers from §18 with no new shader work;
+   §21-§23 + §30 are pure-TS / pure-JS work above the bridge
+   with no shader changes.
 4. **WASM build state.** `smoke-test/webllm-bundle.js` mtime
-   is 2026-04-28 ~09:50 (§32 rebuild against rebased llama.cpp
-   tip `c4af89356`); size is 189574 bytes (unchanged since §30
-   — §32 was llama.cpp-only). `smoke-test/webllm-wasm.{js,wasm}`
-   mtimes are 2026-04-28 ~09:50; `webllm-wasm.wasm` is **2249650
-   bytes** (was 2240603 pre-§32 — +9 KB from upstream's #22456
-   aliasing refactor; was 2207801 pre-§27 — +42 KB cumulative
-   since the §27 rebase from new Q1_0 + i-quant kernels +
-   aliasing refactor). Built against §32 rebased llama.cpp base
-   `f9f33654a`. **`MATH_LIBRARY=NOTFOUND` cache-staleness gotcha**
+   is 2026-04-28 ~10:50 (post-§31b squash rebuild against
+   squashed llama.cpp tip `3b8ade2a2`); size is 189574 bytes
+   (unchanged since §30 — §32 and the §31b-postlude squash were
+   llama.cpp-only). `smoke-test/webllm-wasm.{js,wasm}` mtimes
+   are 2026-04-28 ~10:50; `webllm-wasm.wasm` is **2249650 bytes**
+   (byte-identical to the pre-squash artifact, confirming the
+   squash was semantically a no-op; was 2240603 pre-§32 — +9 KB
+   from upstream's #22456 aliasing refactor; was 2207801 pre-§27
+   — +42 KB cumulative since the §27 rebase from new Q1_0 +
+   i-quant kernels + aliasing refactor). Built against the
+   squashed §32 rebased llama.cpp base `f9f33654a`. **`MATH_LIBRARY=NOTFOUND` cache-staleness gotcha**
    from the §32 rebase: upstream's `d530d6e7a` revert tripped the
    stale `find_library` result in the build cache; **always nuke
    `src/wasm/build/` before a build that crosses this commit**
@@ -1952,22 +1961,26 @@ Boot sequence for a fresh session:
      `?prefillTile=0` / `--prefill-tile 0` explicitly. FA mode
      is orthogonal.
 
-**Status (post-§31b):** No perf lever is forced. The algorithmic
-levers at the canonical 4-baseline are exhausted (§17-§29 closed
-the matmul, FA, drafter, encoder, prefill-tiling, and spec-decode
-families). The MEMORY64 ceiling that gated 13B/30B targets is no
-longer architecturally blocked (§31 + §31a — 15 GiB measured;
-§31b — 16 GiB Emscripten 5.0.6 wasm-ld toolchain ceiling), but the
-full bridge migration is gated on deployment ask **and inherits a
-30B-tightness tracking item** (long-context working set lands
-within margin of error of the toolchain ceiling — re-probe on
+**Status (post-§31b + patch-12-squash):** No perf lever is forced.
+The algorithmic levers at the canonical 4-baseline are exhausted
+(§17-§29 closed the matmul, FA, drafter, encoder, prefill-tiling,
+and spec-decode families). The MEMORY64 ceiling that gated 13B/30B
+targets is no longer architecturally blocked (§31 + §31a — 15 GiB
+measured; §31b — 16 GiB Emscripten 5.0.6 wasm-ld toolchain ceiling),
+but the full bridge migration is gated on deployment ask **and
+inherits a 30B-tightness tracking item** (long-context working set
+lands within margin of error of the toolchain ceiling — re-probe on
 every Emscripten upgrade). §32 ran the upstream rebase + sweep
 cycle and accepted a small regression on `llama-3.1-8b-iq3m`.
 **§32a (2026-04-28) ran the profile-mode follow-up probe** — H1
 "tied-embedding × #22456 aliasing-refactor" rejected (no bucket
 asymmetry vs untied Qwen3-8B reference); H2 "uniform per-step
-overhead" supported; §32 baseline accepted as final. All other
-open work is conditional on external triggers.
+overhead" supported; §32 baseline accepted as final. **Post-§31b
+cleanup squashed §32's forward-fix-up patch 12 back into patch 3**;
+patch stack 12 → 11; WASM byte-identical (2,249,650 bytes); ship
+gate 428/11/0 unchanged. All three opt-in probes from the
+post-§32 next-steps list are now closed (§32a / §31b / patch-12
+squash). All other open work is conditional on external triggers.
 
 ### Active next steps (post-§32)
 
@@ -2037,13 +2050,19 @@ direction.** None are forced; pick if appetite + curiosity align.
    inline check. Edits reverted (zero net code change). Closure
    report: `eval/reports/memory64-probe-2026-04-28/SUMMARY-31b.md`.
 
-3. **Patch 12 squash cleanup** on `webllm-browser-patches`. The
-   §32 rebase added patch 12 as a forward fix-up to patch 3
-   rather than amending in place. Squashing into patch 3 cleans
-   up the stack. Best done at the *next* rebase trigger (so the
-   history rewrite is amortized into work already in flight) —
-   not worth a standalone history-rewrite cycle. Lower priority
-   than #1 or #2.
+3. ~~**Patch 12 squash cleanup** on `webllm-browser-patches`.~~
+   **DONE 2026-04-28** — patch 12 (§32 forward fix-up) folded
+   back into patch 3 via cherry-pick chain on a temp branch;
+   trees byte-identical pre/post squash; new branch tip
+   `3b8ade2a2` (was `c4af89356`); patch stack now **11 patches**
+   (down from 12). WASM rebuild byte-identical at 2,249,650
+   bytes; checkall 428/11/0 unchanged. Safety branches retained:
+   `webllm-browser-patches-pre-squash-2026-04-28` (pre-squash
+   tip `c4af89356`) and `webllm-browser-patches-pre-rebase-
+   2026-04-28-eve` (pre-§32 tip `981859864`). Doc updated:
+   `docs/LLAMA_CPP_PATCHES.md` (count line 12 → 11; patch 12
+   section removed; §32 narrative augmented with squash-pass
+   note).
 
 ### External-trigger candidates
 
