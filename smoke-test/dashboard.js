@@ -2274,14 +2274,20 @@ function valueFor(run, key) {
 
 // Render a percentage delta as a coloured table cell. `pct` is already
 // the (latest - prior) / prior * 100 value; pass null when no prior is
-// available so we render an em-dash. Used by both the runs table
-// (Δ tok/s) and the evals table (Δ accuracy).
-function deltaCellHtml(pct) {
+// available so we render an em-dash. Pass lowerIsBetter=true for
+// metrics where a smaller value is the win (e.g. latency in ms) — the
+// sign and value still display unchanged, only the green/red mapping
+// flips. Used by the runs table (Δ tok/s, higher better), the evals
+// table (Δ accuracy, higher better), and the embeddings runs table
+// (Δ total ms, lower better).
+function deltaCellHtml(pct, lowerIsBetter = false) {
 	if (pct == null || !Number.isFinite(pct)) {
 		return `<td class="num delta-cell delta-none">—</td>`;
 	}
 	const sign = pct > 0 ? "+" : "";
-	const cls = pct > 0 ? "delta-pos" : pct < 0 ? "delta-neg" : "delta-none";
+	const isWin = lowerIsBetter ? pct < 0 : pct > 0;
+	const isLoss = lowerIsBetter ? pct > 0 : pct < 0;
+	const cls = isWin ? "delta-pos" : isLoss ? "delta-neg" : "delta-none";
 	return `<td class="num delta-cell ${cls}">${sign}${pct.toFixed(1)}%</td>`;
 }
 
@@ -2423,7 +2429,7 @@ function renderEmbeddingTable() {
 			<td>${profileCell}</td>
 			<td>${escapeHtml(run.model)}</td>
 			<td class="num">${formatNum(run.oneShot?.totalMs, 0)}</td>
-			${deltaCellHtml(deltaMsPct)}
+			${deltaCellHtml(deltaMsPct, true)}
 			<td>${escapeHtml(run.oneShot?.finishReason ?? "—")}</td>
 			<td>${systemPill(run.systemId)}</td>
 		`;
