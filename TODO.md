@@ -1299,11 +1299,39 @@ dashboard hygiene pass from these sessions:
     `mul_mat.wgsl` not `mul_mat_vec.wgsl`). With IQ3_M now
     fast, §A remains closed for the wrong reason that already
     closed it (lever shape doesn't apply); no change.
-  - **Net characterization update at 8B IQ3_M (post-rebase):**
-    matmul share of decode is now lower than §16's
-    65-69% measurement (kernel got faster, share drops). A
-    fresh `make smoke-bench --profile` would re-rank the
-    decode budget, but no obvious next lever has appeared.
+  - **Net characterization update at 8B IQ3_M (post-rebase,
+    measured 2026-04-27 via `make smoke-bench
+    PERF_MODEL=qwen3-8b-iq3m PERF_RUNS=3`, 60-step trace):**
+
+    | Bucket                  | §17 baseline (profile) | Post-rebase (profile) | Δ |
+    |---|---:|---:|---:|
+    | tok/s (profile mode)    | 14.3                   | 22.0                  | +54% |
+    | graphComputeMs (median) | ~68 ms                 | 42.60 ms              | -37% |
+    | backendMatmulMs (median)| 48.04 ms               | 23.07 ms              | **-52%** |
+    | backendMatmulMs %graph  | 70.5%                  | 55.0%                 | -15.5 pp |
+    | backendEncodeOverheadMs |  ~?                    |  4.50 ms / 10.7%      | — |
+    | backendAttentionMs      |  ~?                    |  0.72 ms /  1.7%      | — |
+    | backendDispatchCount    | 805/token              | 805/token             | unchanged |
+
+    Dispatch count is bit-identical pre/post — the win is
+    pure kernel speedup (#22344 i-quant mat-vec) on the same
+    graph, not a graph-shape change. Matmul share dropped
+    **15.5 percentage points** but is still the lead bucket
+    (55.0% of graph). Encode overhead is now the secondary
+    suspect at ~10.7%; attention is negligible (1.7%).
+
+    Profile-mode perturbation also shrank: 27.2 (non-profile)
+    → 22.0 (profile) is **-19%** vs the historical -29 to -34%
+    on Q4_0/Q8_0 — fewer per-dispatch timestamp samples are
+    bottlenecking IQ3_M now that the kernel itself is faster.
+
+    **No new lever exposed.** Matmul still leads at 55% but the
+    absolute win remaining (halve again → ~10% step gain) is
+    smaller than the levers already closed (§A 0.6%, §18 -5.8%,
+    §19 0.20× regress). Encode overhead at 10.7% × ~22 tok/s
+    means a hypothetical encode-elimination would max out at
+    ~10% gain — also below the 1.5× ship-gate threshold for
+    new infrastructure work.
 
   Free-win sweep duration: ~5 minutes wall (one rebuild +
   smoke-restart per model). Sweep done — no follow-on work
