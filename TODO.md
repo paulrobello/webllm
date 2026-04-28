@@ -2007,14 +2007,15 @@ housekeeping items closed 2026-04-28** (#4 dashboard refresh /
 #5 pre-rebase baselines / #6 §32 SUMMARY cross-link); **all three
 doc-style next-step candidates closed 2026-04-28** (#7 TODO header
 pin refresh / #8 BENCHMARKS tier expansion / #9 CLAUDE.md
-doctrine capture). **Backlog fully cleared.** All algorithmic
-levers at the canonical 4-baseline are exhausted (§17-§29 closed
-matmul, FA, drafter, encoder, prefill-tiling, spec-decode
-families). Upstream cadence check 2026-04-28: no `ggml-webgpu/`
-movement → no rebase trigger near firing. **One optional candidate
-remains:** #10 vault-save the reusable doctrines for cross-project
-value (see Watch list section). Otherwise next-work is gated
-entirely on external triggers (see "External-trigger candidates").
+doctrine capture); **#10 vault-save closed 2026-04-28** (5 notes
+landed under `~/ClaudeVault/Patterns/` + `Knowledge/`; index
+rebuilt, MANIFESTs verified — see closure entry in Watch list).
+**Backlog fully cleared.** All algorithmic levers at the
+canonical 4-baseline are exhausted (§17-§29 closed matmul, FA,
+drafter, encoder, prefill-tiling, spec-decode families). Upstream
+cadence check 2026-04-28: no `ggml-webgpu/` movement → no rebase
+trigger near firing. Next-work is gated entirely on external
+triggers (see "External-trigger candidates").
 
 **Fresh observation pinned 2026-04-28 from #5 data:** the encoder
 overhead (`backendEncodeOverheadMs` per step) is a **fixed
@@ -2220,32 +2221,26 @@ reasoning-budget helper) — **neither touches `ggml/src/ggml-webgpu/`**;
 no rebase trigger near firing. Below items are honest candidates if
 appetite remains; none are forced.
 
-10. **Vault-save the project's reusable doctrines** (one real
-    candidate). Per `~/.claude/CLAUDE-VAULT.md` "After solving a
-    non-obvious problem or implementing a reusable pattern, save it"
-    — several patterns developed this cycle have **cross-project**
-    value and are not yet in `~/ClaudeVault/Patterns/`:
-    - **Rebase + sweep cycle template** (§27 free-win / §28 negative-
-      result / §32 small-regression-accepted) — applies to any
-      project on a long-lived patches branch tracking upstream.
-    - **Cap-probe doctrine** (§31b: bump first, characterize second)
-      — applies to any toolchain / runtime / linker cap measurement.
-    - **Pre-rebase baseline doctrine** (§32a: same-model pre/post
-      bucket comparison beats cross-model proxy).
-    - **Probe-first doctrine generalization** — declare what the
-      probe measures, the pass/fail thresholds, and the downstream
-      decision the probe gates. Run probes proactively even when
-      intuition says the answer is obvious.
-    - **Encoder-fixed-µs/dispatch finding** — empirical pattern;
-      worth a `Knowledge/` entry with the µs/dispatch table from §5.
-    - **Patch-stack squash via cherry-pick chain** (post-§32 patch-12
-      cleanup) — confidence gate is artifact byte-identity pre/post.
+10. ~~**Vault-save the project's reusable doctrines.**~~ **DONE
+    2026-04-28** — 5 notes landed:
+    - `Patterns/rebase-and-sweep-cycle-template.md` (§27 / §28 / §32
+      templates with decision rules)
+    - `Patterns/cap-probe-bump-first-doctrine.md` (§31b lesson —
+      bump first, characterize second)
+    - `Patterns/pre-rebase-baseline-doctrine.md` (§32a lesson —
+      same-model pre/post bucket comparison)
+    - `Patterns/patch-stack-squash-via-cherry-pick-chain.md`
+      (post-§32 patch-12 cleanup; confidence gate = artifact
+      byte-identity pre/post)
+    - `Knowledge/wasm-webgpu-encoder-fixed-cost-per-dispatch.md`
+      (~5.2-5.7 µs/dispatch flat across the canonical 6 fleet)
 
-    Cost: ~30 min wall (5-6 short notes + index rebuild). Risk: zero.
-    Decision rule: do this if you intend to bring these patterns to
-    other projects (almost certainly worth doing — the rebase-cycle
-    template alone is a reusable artifact). Skip only if confident
-    these patterns are webllm-specific (they aren't).
+    Probe-first doctrine generalization deliberately *not* duplicated
+    — `Patterns/probe-first-methodology-validates-architecture-pivots.md`
+    (2026-04-28, pre-existing) already covers the general doctrine
+    via the §31 wasm64 narrative. The 5 new notes cross-link to it.
+    Index rebuilt: 3056 notes / 970 tags / 9 MANIFESTs. All 5 notes
+    verified in their respective folder MANIFESTs.
 
 **Watch-list items (no action now; flag for next session):**
 
