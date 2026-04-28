@@ -251,6 +251,15 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>Parameter count vs throughput</h2>
+    <div class="legend dim">one dot per encoder; x = parameters in millions, y = throughput (texts / sec). Encoder param counts are hardcoded by id-prefix mirror of <code>eval/models.ts</code>.</div>
+  </div>
+  <div id="embedding-param-empty" class="bar-empty">need throughput data for at least one encoder with a known param count</div>
+  <div id="embedding-param-host" class="chart-host scatter-host" hidden><canvas id="embedding-param-chart"></canvas></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Runs <span id="embedding-run-count" class="dim">0</span></h2>
     <div class="legend dim">embedding-only profiles</div>
   </div>

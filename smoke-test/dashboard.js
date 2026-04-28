@@ -337,6 +337,7 @@ function render() {
 	renderEmbeddingLatencyChart();
 	renderEmbeddingThroughputChart();
 	renderEmbeddingScatterChart();
+	renderEmbeddingParamChart();
 	renderTempSweepChart();
 	renderThinkingDeltaChart();
 	renderTtftChart();
@@ -1424,7 +1425,26 @@ const ENCODER_COLORS = [
 	"#d29922", // yellow
 ];
 
+// Encoder parameter counts in millions, keyed by id-prefix. Mirrors the
+// `paramsB` field in eval/models.ts (which is server-side, not surfaced
+// through SSE). Add new encoder rows here when registering new encoder
+// models — same hand-maintenance contract as PARAM_TOKENS above.
+const ENCODER_PARAM_COUNTS_M = [
+	["snowflake-arctic-embed-s", 33],
+	["snowflake-arctic-embed-m", 109],
+	["arctic-embed-s", 33],
+	["arctic-embed-m", 109],
+];
+function inferEncoderParamCountM(id) {
+	const s = String(id ?? "").toLowerCase();
+	for (const [prefix, m] of ENCODER_PARAM_COUNTS_M) {
+		if (s.startsWith(prefix)) return m;
+	}
+	return null;
+}
+
 let embeddingScatterChartInstance = null;
+let embeddingParamChartInstance = null;
 
 // B1 (Phase B): cosine × latency scatter, the encoder analog of the main
 // tab's accuracy × speed scatter. One dot per encoder modelId; x-axis is
@@ -1549,6 +1569,127 @@ function renderEmbeddingScatterChart() {
 		embeddingScatterChartInstance.data = { datasets };
 		embeddingScatterChartInstance.options = options;
 		embeddingScatterChartInstance.update();
+	}
+}
+
+// B3 (Phase B): encoder param-count vs throughput, the encoder analog of
+// the main tab's #param-speed-chart. One dot per encoder modelId; x in M
+// params (linear scale — encoders today span 33M–109M, no need for log),
+// y in texts/sec derived as 1000 / median latency.
+function renderEmbeddingParamChart() {
+	const canvas = document.getElementById("embedding-param-chart");
+	const host = document.getElementById("embedding-param-host");
+	const empty = document.getElementById("embedding-param-empty");
+	if (!canvas) return;
+
+	// Latest eval per encoder modelId, same selection rule as B1.
+	const latestByModel = new Map();
+	for (const ev of state.evalsByEvalId.values()) {
+		if (!isEncoderModel(ev)) continue;
+		const dims = Object.keys(ev.dimensions ?? {});
+		if (!(dims.length === 1 && dims[0] === "embedding")) continue;
+		const prev = latestByModel.get(ev.modelId);
+		if (!prev || prev.timestamp < ev.timestamp) {
+			latestByModel.set(ev.modelId, ev);
+		}
+	}
+
+	const points = [];
+	for (const ev of latestByModel.values()) {
+		const params = inferEncoderParamCountM(ev.modelId);
+		if (params == null) continue;
+		const results = Array.isArray(ev.results) ? ev.results : [];
+		const latencies = [];
+		for (const r of results) {
+			if (r?.dimension !== "embedding") continue;
+			if (typeof r.latencyMs === "number" && Number.isFinite(r.latencyMs) && r.latencyMs > 0) {
+				latencies.push(r.latencyMs);
+			}
+		}
+		if (latencies.length === 0) continue;
+		const medMs = _medianNum(latencies);
+		if (medMs == null || medMs <= 0) continue;
+		const throughput = 1000 / medMs;
+		points.push({
+			x: params,
+			y: Number(throughput.toFixed(2)),
+			modelId: ev.modelId,
+		});
+	}
+
+	if (points.length === 0) {
+		if (host) host.hidden = true;
+		if (empty) empty.hidden = false;
+		if (embeddingParamChartInstance) {
+			embeddingParamChartInstance.destroy();
+			embeddingParamChartInstance = null;
+		}
+		return;
+	}
+	if (host) host.hidden = false;
+	if (empty) empty.hidden = true;
+
+	points.sort((a, b) => a.modelId.localeCompare(b.modelId));
+	const datasets = points.map((p, i) => ({
+		label: p.modelId,
+		data: [p],
+		backgroundColor: ENCODER_COLORS[i % ENCODER_COLORS.length],
+		borderColor: ENCODER_COLORS[i % ENCODER_COLORS.length],
+		pointRadius: 7,
+		pointHoverRadius: 9,
+	}));
+
+	const options = {
+		responsive: true,
+		maintainAspectRatio: false,
+		animation: { duration: 400 },
+		scales: {
+			x: {
+				beginAtZero: true,
+				title: { display: true, text: "parameters (M)", color: CHART_COLORS.muted },
+				ticks: { color: CHART_COLORS.muted },
+				grid: { color: CHART_COLORS.grid },
+			},
+			y: {
+				beginAtZero: true,
+				title: { display: true, text: "throughput (texts / sec)", color: CHART_COLORS.muted },
+				ticks: { color: CHART_COLORS.muted },
+				grid: { color: CHART_COLORS.grid },
+			},
+		},
+		plugins: {
+			legend: {
+				display: true,
+				position: "top",
+				labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+			},
+			tooltip: {
+				backgroundColor: "#161b22",
+				titleColor: CHART_COLORS.text,
+				bodyColor: CHART_COLORS.text,
+				borderColor: "#30363d",
+				borderWidth: 1,
+				callbacks: {
+					label: (ctx) => {
+						const p = ctx.raw;
+						if (!p) return "";
+						return `${p.modelId}: ${p.x}M params · ${p.y} texts/s`;
+					},
+				},
+			},
+		},
+	};
+
+	if (!embeddingParamChartInstance) {
+		embeddingParamChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "scatter",
+			data: { datasets },
+			options,
+		});
+	} else {
+		embeddingParamChartInstance.data = { datasets };
+		embeddingParamChartInstance.options = options;
+		embeddingParamChartInstance.update();
 	}
 }
 
