@@ -1932,12 +1932,52 @@ function valueFor(run, key) {
 	}
 }
 
+// Render a percentage delta as a coloured table cell. `pct` is already
+// the (latest - prior) / prior * 100 value; pass null when no prior is
+// available so we render an em-dash. Used by both the runs table
+// (Δ tok/s) and the evals table (Δ accuracy).
+function deltaCellHtml(pct) {
+	if (pct == null || !Number.isFinite(pct)) {
+		return `<td class="num delta-cell delta-none">—</td>`;
+	}
+	const sign = pct > 0 ? "+" : "";
+	const cls = pct > 0 ? "delta-pos" : pct < 0 ? "delta-neg" : "delta-none";
+	return `<td class="num delta-cell ${cls}">${sign}${pct.toFixed(1)}%</td>`;
+}
+
+// For each (modelId, profile, thinking) key, return a map runId → prior
+// run object (the run with the largest timestamp strictly less than this
+// run's timestamp within the same key). Runs whose key has no prior get
+// no entry. Used by renderTable() to compute Δ tok/s without leaking
+// the comparison into the row sort.
+function buildRunPriorByRunId(runs) {
+	const byKey = new Map();
+	for (const run of runs) {
+		const key = `${run.model}::${run.profile ?? ""}::${run.thinking ?? "off"}`;
+		if (!byKey.has(key)) byKey.set(key, []);
+		byKey.get(key).push(run);
+	}
+	const priorByRunId = new Map();
+	for (const list of byKey.values()) {
+		list.sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
+		for (let i = 1; i < list.length; i++) {
+			priorByRunId.set(list[i].runId, list[i - 1]);
+		}
+	}
+	return priorByRunId;
+}
+
 function renderTable() {
 	const tbody = document.getElementById("runs-tbody");
 	const countEl = document.getElementById("run-count");
-	const runs = Array.from(state.runsByRunId.values())
-		.filter((r) => !isEmbeddingRun(r))
-		.filter(passesFilter);
+	const allRuns = Array.from(state.runsByRunId.values()).filter(
+		(r) => !isEmbeddingRun(r),
+	);
+	// Build the prior-run map across all inference runs (not just the
+	// filtered view) so toggling the filter doesn't change which run is
+	// considered "previous" for a given key.
+	const priorByRunId = buildRunPriorByRunId(allRuns);
+	const runs = allRuns.filter(passesFilter);
 	runs.sort(comparator);
 	countEl.textContent = String(runs.length);
 	tbody.innerHTML = "";
@@ -1950,6 +1990,13 @@ function renderTable() {
 		const profileCell = run.profile
 			? escapeHtml(run.profile)
 			: `<span class="dim">—</span>`;
+		const prior = priorByRunId.get(run.runId);
+		const curTps = run.oneShot?.tokensPerSecond;
+		const priorTps = prior?.oneShot?.tokensPerSecond;
+		const deltaTpsPct =
+			Number.isFinite(curTps) && Number.isFinite(priorTps) && priorTps > 0
+				? ((curTps - priorTps) / priorTps) * 100
+				: null;
 		tr.innerHTML = `
 			<td class="col-pick"><input type="checkbox" ${state.selected.has(run.runId) ? "checked" : ""} data-pick="${run.runId}"></td>
 			<td>${formatTime(run.timestamp)}</td>
@@ -1957,6 +2004,7 @@ function renderTable() {
 			<td>${escapeHtml(run.model)}</td>
 			<td><span class="pill ${thinkPill}">${run.thinking}</span></td>
 			<td class="num">${formatNum(run.oneShot?.tokensPerSecond, 1)}</td>
+			${deltaCellHtml(deltaTpsPct)}
 			<td class="num">${formatNum(run.oneShot?.prefillMs, 0)}</td>
 			<td class="num">${formatNum(run.oneShot?.totalMs, 0)}</td>
 			<td>${escapeHtml(run.oneShot?.finishReason ?? "—")}</td>
@@ -1981,7 +2029,7 @@ function renderTable() {
 			<td>${escapeHtml(failed.profile ?? "—")}</td>
 			<td>${escapeHtml(failed.model)}</td>
 			<td></td>
-			<td colspan="5"><span class="pill fail">FAILED</span> ${escapeHtml(failed.error)}</td>
+			<td colspan="6"><span class="pill fail">FAILED</span> ${escapeHtml(failed.error)}</td>
 		`;
 		tbody.appendChild(tr);
 	}
@@ -2204,6 +2252,23 @@ function renderEvalsTable(evals) {
 		const dims = Object.keys(rep.dimensions ?? {});
 		return !(dims.length === 1 && dims[0] === "embedding");
 	});
+	// Build a per-eval prior map keyed by (modelId, profile, thinking) so
+	// each row can show Δ overall vs. the previous eval for the same
+	// configuration. Computed across all filtered evals (independent of
+	// the current sort order) so it's deterministic.
+	const evalsByKey = new Map();
+	for (const ev of filtered) {
+		const key = `${ev.modelId}::${ev.profile ?? ""}::${ev.thinking ?? "off"}`;
+		if (!evalsByKey.has(key)) evalsByKey.set(key, []);
+		evalsByKey.get(key).push(ev);
+	}
+	const priorByEvalId = new Map();
+	for (const list of evalsByKey.values()) {
+		list.sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
+		for (let i = 1; i < list.length; i++) {
+			priorByEvalId.set(list[i].evalId, list[i - 1]);
+		}
+	}
 	const sorted = [...filtered].sort(evalComparator);
 	tbody.innerHTML = "";
 	for (const rep of sorted) {
@@ -2222,6 +2287,15 @@ function renderEvalsTable(evals) {
 			? escapeHtml(rep.profile)
 			: `<span class="dim">—</span>`;
 		const tempCell = renderTempCell(rep);
+		const prior = priorByEvalId.get(rep.evalId);
+		const curOverall = rep.overall;
+		const priorOverall = prior?.overall;
+		const deltaAccPct =
+			Number.isFinite(curOverall) &&
+			Number.isFinite(priorOverall) &&
+			priorOverall > 0
+				? ((curOverall - priorOverall) / priorOverall) * 100
+				: null;
 		tr.innerHTML = `
 			<td>${formatTime(rep.timestamp)}</td>
 			<td>${escapeHtml(rep.modelId)}</td>
@@ -2230,6 +2304,7 @@ function renderEvalsTable(evals) {
 			<td>${tempCell}</td>
 			<td class="num">${rep.totalTasks}</td>
 			<td class="num"><strong>${Math.round((rep.overall ?? 0) * 100)}%</strong></td>
+			${deltaCellHtml(deltaAccPct)}
 			<td>${dimensionChips}</td>
 			<td>${systemPill(rep.systemId)}</td>
 		`;

@@ -367,6 +367,22 @@ header h1 {
 	font-variant-numeric: tabular-nums;
 }
 
+/* Latest-vs-prior delta cells (Task #5). Positive deltas read green,
+   negative deltas read red, missing prior is muted em-dash. Aligned to
+   the existing num column convention. */
+.delta-cell {
+	font-variant-numeric: tabular-nums;
+}
+.delta-cell.delta-pos {
+	color: #3fb950;
+}
+.delta-cell.delta-neg {
+	color: #f85149;
+}
+.delta-cell.delta-none {
+	color: var(--muted);
+}
+
 /* ── runs table ───────────────────────────────────── */
 
 .controls {
