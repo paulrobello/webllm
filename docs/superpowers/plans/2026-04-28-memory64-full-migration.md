@@ -749,7 +749,7 @@ make smoke-bench PERF_MODEL=tinyllama-1.1b-chat-q4_0 PERF_RUNS=3
 
 Expected:
 - `make checkall` PASS.
-- `make smoke-bench` median tok/s within ±3% of the 110.8 baseline.
+- `make smoke-bench` median tok/s within ±3% of the **profile-mode** 87.9 baseline (`make smoke-bench` always passes `--profile`; see Plan corrections log for the §32a acceptance window — bucket-uniform <=5% with overlapping run-spread envelopes is also acceptable).
   Phase 2 is a pure type-promotion at the ABI boundary — under wasm32
   `size_t` is already 32-bit so the binary is bit-identical at the
   amalgamated `int32_t`-cast layer. Any drift is noise.
@@ -803,7 +803,7 @@ Verified:
 - make wasm-build (wasm32) clean
 - make mem64-probe (wasm64 link) clean
 - make checkall clean
-- smoke-bench tinyllama within ±3% of 110.8 baseline
+- smoke-bench tinyllama within ±3% of profile-mode 87.9 baseline (or §32a acceptance: bucket-uniform <=5% with overlapping run-spread envelopes)
 - agentchrome smoke chat: coherent reply
 EOF
 )"
@@ -1790,6 +1790,9 @@ agent transcript where the defect was identified.
 | 2026-04-28 | Task 2 Step 4 probe code | `HEAPU8 ? 0n : 0` ternary unreachable; wasm32 has no WASM_BIGINT, so always-`0n` arg throws TypeError. Replaced with try/catch shape. | Phase 1 commit `65cd0a8` |
 | 2026-04-28 | Task 2 Step 8 baseline | Conflated non-profile (110.8) and profile-mode (87.9) baselines. `make smoke-bench` is profile-mode; corrected citation. | Phase 1 commit `65cd0a8` |
 | 2026-04-28 | Task 2 Step 9 commit-msg template | Inherited the wrong baseline figure. Future phases now reference 87.9. | Phase 1 commit `65cd0a8` |
+| 2026-04-28 | Task 3 Step 4 baseline | Inherited the wrong 110.8 figure from Task 2's pre-correction state. Cited profile-mode 87.9 + §32a acceptance. | Phase 1 commit `65cd0a8` (defect surfaced retroactively while patching Task 2) |
+| 2026-04-28 | Task 3 Step 6 commit-msg template | Same root cause as Step 4. | Phase 1 commit `65cd0a8` |
+| **OPEN** | Task 6 (Phase 5) canonical-6 baseline table | Non-profile vs profile-mode framing inconsistency: prose says "non-profile" but `make smoke-bench` is profile. Resolve when Phase 5 dispatches; defer until then to avoid premature framing change. | flagged 2026-04-28 during Phase 1 corrections cycle |
 
 The Phase 1 commit body (`65cd0a8`) is permanent and still cites 110.8;
 this section is the canonical correction for any future bisect.
