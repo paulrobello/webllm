@@ -1982,14 +1982,15 @@ gate 428/11/0 unchanged. All three opt-in probes from the
 post-§32 next-steps list are now closed (§32a / §31b / patch-12
 squash). All other open work is conditional on external triggers.
 
-### Active next steps (post-§31b + squash)
+### Active next steps (post-§31b + squash + housekeeping)
 
 **Status:** all three opt-in probes from the post-§32 list closed
-2026-04-28 (§32a / §31b / patch-12 squash — closure entries
-preserved below for reference). No active perf lever in flight.
-The fresh optional items at the bottom of this list (#4-#6) are
-housekeeping / banked-data candidates — none are forced; pick if
-appetite + curiosity align.
+2026-04-28 (§32a / §31b / patch-12 squash) **and all three fresh
+housekeeping items closed 2026-04-28** (#4 dashboard refresh /
+#5 pre-rebase baselines / #6 §32 SUMMARY cross-link — closure
+entries preserved below for reference). **No active perf lever
+in flight; no fresh housekeeping queued.** Next work is gated
+on external triggers (see "External-trigger candidates" section).
 
 1. ~~**§32a — Profile-mode rebench on `llama-3.1-8b-iq3m`**.~~
    **CLOSED 2026-04-28 — hypothesis rejected, §32 baseline
@@ -2070,48 +2071,56 @@ appetite + curiosity align.
 
 ---
 
-**Fresh optional items (post-§31b housekeeping, not yet started).**
-Pick if curious; none required for ship correctness.
+**Fresh optional items (post-§31b housekeeping).** All three closed
+2026-04-28 — closure entries preserved below for reference.
 
-4. **Dashboard refresh sweep on the 6-model fleet.** The
-   `smoke-runs.db` dashboard backing store still pins
-   `qwen3-8b-iq3m` at §16's pre-§27 baseline (16.2 tok/s) and
-   does not have post-§32 entries for `llama-3.1-8b-iq3m`
-   (29.0 → 27.2 tok/s) or the other 5 models. Boot-sequence
-   step 6 already documents the staleness. Procedure: `make
-   bench-profile PROFILES=<list>` for the canonical fleet
-   (tinyllama-q4_0, qwen3-0.6b cold/warm × off/on, qwen3-1.7b,
-   mistral-7b-q4ks, llama-3.1-8b-iq3m, qwen3-8b-iq3m × off/on,
-   plus warm/hot if useful) — SSE feeds into the database;
-   live dashboard at `localhost:8033` shows the refresh in
-   real time. Cost: ~30 min wall (mostly model load + decode).
-   Risk: zero (read-only DB writes; existing rows aren't
-   overwritten). Decision rule: trivial — refreshes the
-   visible state to match the canonical claims.
+4. ~~**Dashboard refresh sweep on the 6-model fleet.**~~ **DONE
+   2026-04-28** — `bun run eval/bench.ts --profiles "<list>"` on the
+   canonical fleet (tinyllama-warm, qwen3-0.6b off/on × cold/warm,
+   qwen3-1.7b off/on warm, mistral-7b-v0.3-warm, llama-3.1-8b-warm,
+   qwen3-8b-warm/thinking-warm — 11 profiles total). 19/20 PASS;
+   1 transient timeout on qwen3-0.6b-thinking-cold speed retried
+   PASS (cold model warmup window). DB went 148 → 182 runs / 34 → 45
+   evals; all 9 canonical model/thinking cells refreshed with
+   2026-04-28 entries. Smoke-harness throughput numbers are 15-25%
+   below `perf.ts` steady-state pins (CLAUDE.md harness-overhead
+   note): tinyllama 84.8, qwen3-0.6b off 66.4 / on 65.0,
+   qwen3-1.7b off 41.6 / on 45.2, mistral-7b 29.3, llama-3.1-8b 23.6,
+   qwen3-8b off 22.0 / on 22.7. **§16's "16.2 tok/s" pin for
+   qwen3-8b-iq3m on the dashboard is now superseded** by 22.7 tok/s
+   (smoke harness) and the post-§27 27.2 tok/s perf.ts steady-state.
+   Zero `src/` change; DB is gitignored (per `eval/reports/`).
 
-5. **Pre-rebase profile-mode capture on the canonical 6.** Per
-   the §32a process-improvement note: when a `bench` sweep is
-   the planned probe for the *next* rebase trigger, captured
-   pre-rebase profile-mode lets a §32a-style follow-on probe
-   diagnose regressions via same-model pre/post deltas instead
-   of a cross-model proxy. Procedure: `make smoke-bench
-   PERF_MODEL=<m> PERF_RUNS=3` on each of the 6 canonical
-   models; save trace + bucket breakdown to
-   `eval/reports/pre-rebase-baselines-<DATE>/`. Cost: ~15 min
-   wall (6 × 90 sec profile run + ~30 sec build setup, mostly
-   serialised by smoke-restart). Risk: zero. **Pay-off only
-   accrues if a rebase trigger fires within the data's freshness
-   window** (~weeks; bench-mode noise is small but model
-   selection / fleet drift could outdate the comparison if a
-   month+ passes). Skip if no rebase ETA in sight.
+5. ~~**Pre-rebase profile-mode capture on the canonical 6.**~~ **DONE
+   2026-04-28** — `make smoke-bench PERF_MODEL=<m> PERF_RUNS=3` on
+   each canonical model; logs + SUMMARY in
+   `eval/reports/pre-rebase-baselines-2026-04-28/`. Headline pins
+   (3-run median, profile-mode):
 
-6. **§32 SUMMARY cross-link refresh.** Append a "Post-cycle
-   updates" stanza to
-   `eval/reports/llama-cpp-rebase-2026-04-28-eve/SUMMARY.md`
-   pointing at PROFILE-32A.md (hypothesis test outcome) and the
-   patch-12 squash commit. Pure doc cross-link; future readers
-   land on §32 closure → see follow-up cycle outcomes inline.
-   Cost: 5 min wall. Risk: zero.
+   | Model                      | tok/s | matmul (med, %) | dispatch |
+   |---|---:|---:|---:|
+   | tinyllama-1.1b-q4_0        | 87.9  | 3.74 / 37.8%    | 450 |
+   | qwen3-0.6b-q8              | 68.2  | 3.87 / 33.6%    | 629 |
+   | qwen3-1.7b-q8              | 44.0  | 6.75 / 36.9%    | 629 |
+   | mistral-7b-v0.3-q4ks       | 29.7  | 15.86 / 48.7%   | 650 |
+   | llama-3.1-8b-iq3m          | 23.5  | 23.00 / 57.5%   | 652 |
+   | qwen3-8b-iq3m              | 21.8  | 23.20 / 55.4%   | 805 |
+
+   llama-3.1-8b is bit-identical to §32a's PROFILE-32A.md (same-day
+   reproducibility verified). Use when next upstream `ggml-webgpu`
+   rebase trigger fires: same-model pre/post bucket comparison
+   beats §32a's cross-model proxy. Freshness window: ~1 month;
+   re-capture if rebase ETA slips. SUMMARY.md in the directory
+   carries the full procedure + use-case + cross-references against
+   §27 / §32 baselines.
+
+6. ~~**§32 SUMMARY cross-link refresh.**~~ **DONE 2026-04-28**
+   (commit `439bf7a`) — appended §10 "Post-cycle updates" stanza
+   to `eval/reports/llama-cpp-rebase-2026-04-28-eve/SUMMARY.md`
+   pointing at PROFILE-32A.md (H1 rejected / H2 supported), the
+   patch-12 squash commit (`2850291`, stack 12 → 11), and §31b
+   (16 GiB Emscripten 5.0.6 wasm-ld toolchain ceiling). Future
+   readers landing on §32 closure see follow-up outcomes inline.
 
 ### External-trigger candidates
 
