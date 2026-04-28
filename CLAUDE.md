@@ -71,8 +71,20 @@ before a change is "done". `make help` lists every target.
 4. Check **both** the page `#log` text and the browser console.
 5. The smoke test passes only when visible steps succeed AND no relevant runtime console errors are emitted. `adapter_info:` from the WebGPU backend is benign informational output and is not a failure.
 
-**Live dashboard:** `make dashboard-serve` on port 8033, then stream
-browser benches into it with `WEBLLM_LIVE_BENCH_URL=http://localhost:8033`.
+**Live dashboard:** `make dashboard-serve` on port 8033. Two ingest paths:
+
+- **Browser smoke runs** (`smoke-test/real-model.html`) auto-post `run_complete`
+  to `http://localhost:8033` by default — no flag required. Override with
+  `?ingest=<url>`. **Disable per-run** with `?ingest=off` (use this for
+  throwaway sanity checks you don't want polluting the dashboard, e.g. when
+  iterating on a patched WASM build before committing).
+- **Bun harnesses** (`eval/chat-smoke.ts`, `eval/bench.ts`, etc.) require
+  `WEBLLM_LIVE_BENCH_URL=http://localhost:8033` to publish events.
+
+**Backfill missed runs:** `make import-reports` walks `eval/reports/` and
+imports any speed-run / eval-report JSONs the dashboard hasn't already
+recorded. Idempotent (skips by `runId` / `evalId`); safe to re-run after
+the dashboard comes back online.
 
 ## Ports
 
