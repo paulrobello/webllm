@@ -369,6 +369,46 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "f16",
 	},
 
+	{
+		id: "bge-small-en-v1.5-q0f16",
+		name: "BGE Small EN v1.5",
+		family: "BGE",
+		architecture: "bert",
+		paramsB: 0.033,
+		vramMB: 240,
+		defaultQuant: "q0f16",
+		availableQuants: ["q0f16"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: true },
+		license: "MIT",
+		contextLength: 512,
+		tier: "ultrafast",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/BAAI/bge-small-en-v1.5",
+		ggufUrl: "https://huggingface.co/ChristianAzinn/bge-small-en-v1.5-gguf",
+		// File on the mirror is `bge-small-en-v1.5_fp16.gguf`; substring
+		// `fp16` matches uniquely (won't collide with `fp32`).
+		ggufFilePattern: "fp16",
+	},
+
+	{
+		id: "bge-large-en-v1.5-q0f16",
+		name: "BGE Large EN v1.5",
+		family: "BGE",
+		architecture: "bert",
+		paramsB: 0.335,
+		vramMB: 1500,
+		defaultQuant: "q0f16",
+		availableQuants: ["q0f16"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: true },
+		license: "MIT",
+		contextLength: 512,
+		tier: "ultrafast",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/BAAI/bge-large-en-v1.5",
+		ggufUrl: "https://huggingface.co/ChristianAzinn/bge-large-en-v1.5-gguf",
+		ggufFilePattern: "fp16",
+	},
+
 	// --- Specialized models ---
 
 	{

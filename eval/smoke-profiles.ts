@@ -265,6 +265,16 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		model: "snowflake-arctic-embed-m-q0f32-b4",
 		embedding: true,
 	},
+	{
+		name: "bge-small",
+		model: "bge-small-en-v1.5-q0f16",
+		embedding: true,
+	},
+	{
+		name: "bge-large",
+		model: "bge-large-en-v1.5-q0f16",
+		embedding: true,
+	},
 ];
 
 /**
@@ -339,8 +349,10 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen3-8b-thinking-warm",
 		"arctic-embed-s",
 		"arctic-embed-m",
+		"bge-small",
+		"bge-large",
 	],
-	embeddings: ["arctic-embed-s", "arctic-embed-m"],
+	embeddings: ["arctic-embed-s", "arctic-embed-m", "bge-small", "bge-large"],
 };
 
 export function getSmokeProfileSet(name: string): readonly string[] | undefined {

@@ -32,6 +32,8 @@ import { getModelById, type BenchmarkModel } from "./models.js";
 const ENCODER_MODELS = [
 	"snowflake-arctic-embed-s-q0f32-b4",
 	"snowflake-arctic-embed-m-q0f32-b4",
+	"bge-small-en-v1.5-q0f16",
+	"bge-large-en-v1.5-q0f16",
 ] as const;
 
 type Mode = "single" | "batch";
