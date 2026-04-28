@@ -2,7 +2,7 @@
         wasm-build wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full bench-all \
-        smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench \
+        smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench mem64-probe \
         dashboard-serve dashboard-stop dashboard-db-reset agentchrome-stop stop-all \
         run-all help
 
@@ -114,6 +114,40 @@ vendor-refresh: ## Refresh smoke-test/vendor/ from node_modules after bumping ch
 smoke-test: wasm-build ## Bundle + copy WASM artifacts into smoke-test/
 	bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
 	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
+
+mem64-probe: ## Build wasm64 mem64 binary in build-mem64/, copy to smoke-test/, restart smoke server, print probe URL
+	@cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
+	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
+	emcmake cmake .. \
+		-DGGML_WEBGPU=ON \
+		-DGGML_WEBGPU_JSPI=OFF \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DGGML_CPU=OFF \
+		-DGGML_BLAS=OFF \
+		-DGGML_METAL=OFF \
+		-DGGML_ACCELERATE=OFF \
+		-DGGML_CUDA=OFF \
+		-DGGML_OPENMP=OFF \
+		-DGGML_NATIVE=OFF \
+		-DGGML_LLAMAFILE=OFF \
+		-DGGML_BUILD_TESTS=OFF \
+		-DGGML_BUILD_EXAMPLES=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DGGML_BACKEND_DL=OFF \
+		-DWEBLLM_BUILD_MEM64=ON \
+		-DCMAKE_C_FLAGS="-sMEMORY64=1" \
+		-DCMAKE_CXX_FLAGS="-sMEMORY64=1" \
+		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
+	cmake --build . --target webllm-wasm-mem64 --config Release -j
+	cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
+	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
+	@bun run eval/smoke-serve.ts --port $(SMOKE_PORT) >/dev/null 2>&1 &
+	@sleep 1
+	@echo ""
+	@echo "MEMORY64 cap probe ready. Open in your existing agentchrome tab:"
+	@echo "  http://localhost:$(SMOKE_PORT)/mem64-probe.html?v=$$(date +%s)"
+	@echo ""
+	@echo "Result blob will be at window.__memory64ProbeResult after the harness completes."
 
 smoke-serve: smoke-test ## Serve smoke-test/ on http://localhost:$(SMOKE_PORT)
 	bun run eval/smoke-serve.ts --port $(SMOKE_PORT)
