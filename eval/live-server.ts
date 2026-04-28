@@ -20,6 +20,7 @@ import {
 import { openLiveDb } from "./live-db.ts";
 import type { SmokeRunRecord } from "./smoke-runs.ts";
 import { loadEvalSeries } from "./live-db.ts";
+import { BENCHMARK_MODELS } from "./models.ts";
 
 const DEFAULT_PORT = 8033;
 const DEFAULT_HOST = "0.0.0.0";
@@ -368,6 +369,18 @@ export function createLiveServer(options: ServerOptions) {
 			if (url.pathname === "/evals/series" && req.method === "GET") {
 				if (!db) return jsonResponse({ series: [] });
 				return jsonResponse({ series: loadEvalSeries(db) });
+			}
+
+			// ── Model registry ─────────────────────────────────────────
+			// Serves the full BenchmarkModel registry from eval/models.ts
+			// so the dashboard can drive encoder / param-count filters
+			// from `architecture` and `paramsB` instead of hand-maintained
+			// id-prefix maps. Sorted by id for stable client-side hashing.
+			if (url.pathname === "/models" && req.method === "GET") {
+				const models = [...BENCHMARK_MODELS].sort((a, b) =>
+					a.id.localeCompare(b.id),
+				);
+				return jsonResponse({ models });
 			}
 
 			// ── System profile registry ────────────────────────────────

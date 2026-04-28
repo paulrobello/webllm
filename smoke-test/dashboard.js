@@ -32,6 +32,11 @@ const state = {
 	renderedDimModels: new Set(),
 	// Historical eval series for score-over-time chart (fetched from server).
 	evalSeries: [],
+	// Model registry from /models, keyed by id. Drives encoder / paramsB
+	// filters so registering a new encoder family in eval/models.ts flows
+	// here automatically — no parallel update in this file. Populated once
+	// at page load (kickoff below); empty Map until the fetch resolves.
+	modelRegistry: new Map(),
 };
 
 // ── persisted filter / sort state ─────────────────────────────────
@@ -520,9 +525,18 @@ function getModelStem(id) {
 	return s;
 }
 
-// Map id substrings → param count in billions. Used by the
-// param-count vs decode tok/s scatter; ids that don't match any token
-// are omitted from that panel rather than guessed.
+// Look up a model entry from the /models registry by id. Returns null
+// before the fetch resolves or for ids absent from the registry (e.g.
+// stale DB rows whose registration was removed).
+function getRegisteredModel(modelId) {
+	const reg = state.modelRegistry;
+	if (!reg || typeof reg.get !== "function") return null;
+	return reg.get(modelId) ?? null;
+}
+
+// Map id substrings → param count in billions. Used as a fallback for
+// ids the registry doesn't know about (page-load race, stale DB rows);
+// the primary path reads `paramsB` straight from the registry entry.
 const PARAM_TOKENS = [
 	["-1.1b-", 1.1],
 	["-0.6b-", 0.6],
@@ -535,6 +549,8 @@ const PARAM_TOKENS = [
 	["-8b-", 8],
 ];
 function inferParamCountB(id) {
+	const entry = getRegisteredModel(id);
+	if (entry && typeof entry.paramsB === "number") return entry.paramsB;
 	const s = String(id ?? "").toLowerCase();
 	for (const [tok, n] of PARAM_TOKENS) {
 		if (s.includes(tok)) return n;
@@ -1425,20 +1441,15 @@ const ENCODER_COLORS = [
 	"#d29922", // yellow
 ];
 
-// Encoder parameter counts in millions, keyed by id-prefix. Mirrors the
-// `paramsB` field in eval/models.ts (which is server-side, not surfaced
-// through SSE). Add new encoder rows here when registering new encoder
-// models — same hand-maintenance contract as PARAM_TOKENS above.
-const ENCODER_PARAM_COUNTS_M = [
-	["snowflake-arctic-embed-s", 33],
-	["snowflake-arctic-embed-m", 109],
-	["arctic-embed-s", 33],
-	["arctic-embed-m", 109],
-];
+// Encoder parameter counts in millions, sourced from the /models
+// registry (`paramsB` × 1000 for any model with `architecture === "bert"`).
+// Returns null for ids absent from the registry — the embedding param
+// chart skips those points rather than guessing, which matches the
+// prior hand-maintained-prefix behaviour for unknown encoders.
 function inferEncoderParamCountM(id) {
-	const s = String(id ?? "").toLowerCase();
-	for (const [prefix, m] of ENCODER_PARAM_COUNTS_M) {
-		if (s.startsWith(prefix)) return m;
+	const entry = getRegisteredModel(id);
+	if (entry && entry.architecture === "bert" && typeof entry.paramsB === "number") {
+		return entry.paramsB * 1000;
 	}
 	return null;
 }
@@ -2215,9 +2226,11 @@ function isEmbeddingRun(run) {
 
 // Encoder/BERT-architecture models (e.g. snowflake-arctic-embed-s/m, bge-…,
 // gte-…) belong in the dedicated Embeddings tab, never in the main inference
-// charts. The SSE feed doesn't surface `architecture` from eval/models.ts, so
-// we id-prefix-match on the conventional encoder family names. Accepts either
-// a model object (run/eval record) or a plain id string.
+// charts. Primary path: consult the /models registry and check
+// `architecture === "bert"`. Fallback (registry not yet loaded, or a
+// stale DB row whose id was removed from the registry): id-prefix match
+// on the conventional encoder family names. Accepts either a model
+// object (run/eval record) or a plain id string.
 const ENCODER_ID_PREFIXES = [
 	"arctic-embed",
 	"snowflake-arctic-embed",
@@ -2230,6 +2243,9 @@ function isEncoderModel(modelOrId) {
 		typeof modelOrId === "string"
 			? modelOrId
 			: (modelOrId.modelId ?? modelOrId.model ?? "");
+	if (!id) return false;
+	const entry = getRegisteredModel(id);
+	if (entry) return entry.architecture === "bert";
 	const s = String(id).toLowerCase();
 	return ENCODER_ID_PREFIXES.some((p) => s.startsWith(p));
 }
@@ -2995,5 +3011,27 @@ try {
 	const saved = localStorage.getItem(TAB_STORAGE_KEY);
 	if (saved === "embeddings" || saved === "inference") activateTab(saved);
 } catch {}
+
+// Fetch the model registry once at page load. Drives encoder /
+// paramsB filters from `architecture` and `paramsB` instead of
+// hand-maintained id-prefix maps. On failure or empty response we
+// leave state.modelRegistry empty and the helpers fall through to
+// their id-prefix fallbacks — the dashboard still renders.
+fetch("/models")
+	.then((res) => (res.ok ? res.json() : { models: [] }))
+	.then((json) => {
+		const models = Array.isArray(json?.models) ? json.models : [];
+		const reg = new Map();
+		for (const m of models) {
+			if (m && typeof m.id === "string") reg.set(m.id, m);
+		}
+		state.modelRegistry = reg;
+		// Re-render so charts that already painted with the prefix
+		// fallback now reflect the registry-driven filters.
+		try { render(); } catch {}
+	})
+	.catch(() => {
+		// Network error — keep empty registry; helpers fall back.
+	});
 
 connect();
