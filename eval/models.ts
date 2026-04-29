@@ -522,12 +522,12 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 	// `pickWasmUrl` (src/core/engine.ts) auto-routes this entry to
 	// webllm-wasm-mem64.{js,wasm} since file size > 3.5 GiB.
 	//
-	// CURRENTLY FAILING under wasm64: warmup graph dies in the JS
-	// `_wgpuDeviceCreateBindGroup` shim with "Required member is
-	// undefined" on `GPUBufferBinding.buffer`. Phase 5's parity gate
-	// did not exercise Q5_K (canonical pins are Q4_0/Q4_K_S/Q3_K_M/
-	// IQ3_M/IQ4_XS). Kept as the standing reproducer; see
-	// `eval/reports/memory64-migration-2026-04-28/PHASE-7-BLOCKED.md`.
+	// Originally the standing wasm64 reproducer for the
+	// `_wgpuDeviceCreateBindGroup` HEAPU32-truncation bug. Now decodes
+	// end-to-end on wasm64 (34.6 tok/s greedy single-pass) under the
+	// vendored Dawn `v20260423.175430` port (post-`8d78be5`); kept as
+	// a Q5_K-family probe for future regressions until the canonical-6
+	// parity sweep grows a Q5_K row.
 	{
 		id: "mistral-7b-instruct-v0.3-q5km",
 		name: "Mistral 7B Instruct v0.3 (Q5_K_M)",

@@ -824,18 +824,15 @@ surfaced three small follow-ups that aren't blocking and deserve
 their own scope. None gates further work; pick them up when
 convenient.
 
-1. **Verify Mistral-7B Q5_K_M decodes under the shim fix.** The
-   prior reproducer (`mistral-7b-instruct-v0.3-q5km`, registered
-   at `ca01d4f`) failed with the bind-group bug pre-fix. The
-   `_wgpuDeviceCreateBindGroup` patch from commit `7260eff` is
-   kernel-family-independent in theory; this confirms it's so in
-   practice and rules out an accidentally-Q4_K-specific fix.
-   Smoke probe: `agentchrome navigate http://localhost:8031/real-model.html?model=mistral-7b-instruct-v0.3-q5km&wasm=mem64&ctx=4096&temp=0.6&prompt=hi&ingest=off`,
-   wait for `[7/8] Generated`. Expected: warmup completes, decode
-   in 25-30 tok/s band. Cost: ~10 min (model already on HF, ~5 GiB
-   download on first run, can also pre-cache via `make smoke-bench`
-   on that model id). If it works, update PHASE-7-VALIDATION.md
-   with the additional confirmation.
+1. **Verify Mistral-7B Q5_K_M decodes under the shim fix.**
+   **CLOSED 2026-04-29.** Smoke probe under the new vendored Dawn
+   port (`v20260423.175430`, post-`8d78be5`): the original Phase 7
+   reproducer `mistral-7b-instruct-v0.3-q5km` (~5.1 GiB) decodes
+   end-to-end on wasm64 at **34.6 tok/s** (greedy single-pass, 64
+   tokens, no bind-group errors). Confirms the upstream
+   `makeGetValue '*'` fix is kernel-family-agnostic — Q5_K_M now
+   works alongside Q4_K_S. The model registration comment in
+   `eval/models.ts` was updated to reflect the closed status.
 
 2. **Add a Q5_K-family row to the Phase 5 canonical 6.** The
    original parity sweep (PHASE-5-PARITY.md) covered Q4_0 / Q4_K_S
