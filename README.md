@@ -37,26 +37,50 @@ bun add @paulrobello/webllm
 
 ## Quick Start
 
+The library ships a WebAssembly module (`webllm-wasm.js` + `webllm-wasm.wasm`,
+plus a `webllm-wasm-mem64.*` variant for models > 3.5 GiB) that must be served
+from your application alongside the JS bundle. `WebLLM.loadModelFromBuffer`
+picks the right variant based on the model file size; pass an explicit
+`wasmUrl` to override.
+
 ```typescript
 import { WebLLM } from "@paulrobello/webllm";
 
+// 1. Acquire a WebGPU device.
+if (!navigator.gpu) throw new Error("WebGPU unavailable");
 const adapter = await navigator.gpu.requestAdapter();
+if (!adapter) throw new Error("requestAdapter() returned null");
 const device = await adapter.requestDevice();
 
-const engine = await WebLLM.init({
-  device,
-  cacheDir: "indexeddb://webllm-cache",
-  memoryBudget: 2048 * 1024 * 1024, // 2 GB VRAM
-  frameBudgetMs: 8,
-});
+// 2. Fetch the GGUF model into memory.
+const buffer = await fetch("/models/llama-3.2-3b-q4_k_m.gguf")
+  .then((r) => r.arrayBuffer());
 
-const model = await engine.loadModel("llama-3.2-3b-q4_k_m.gguf", {
-  priority: 0,
-  contextLength: 4096,
-});
+// 3. Load the model. This parses the GGUF, instantiates the WASM backend,
+//    uploads weights to the GPU, and returns an engine bound to the model.
+const { engine, handle } = await WebLLM.loadModelFromBuffer(
+  buffer,
+  "shopkeeper",
+  {
+    device,
+    memoryBudget: 2048 * 1024 * 1024, // 2 GB VRAM headroom for KV cache
+    cacheDir: "indexeddb://webllm-cache",
+    frameBudgetMs: 8,
+  },
+);
 
+// 4a. Streaming chat completion (OpenAI-style messages):
+for await (const chunk of engine.chatCompletion(handle.id, [
+  { role: "system", content: "You are a friendly shopkeeper." },
+  { role: "user", content: "What do you sell?" },
+], { maxTokens: 256, temperature: 0.7 })) {
+  if (chunk.text) process.stdout.write(chunk.text);
+  if (chunk.done) console.log("\nstats:", chunk.stats);
+}
+
+// 4b. …or build a Character with a persistent system prompt and tools:
 const npc = engine.createCharacter({
-  modelId: model.id,
+  modelId: handle.id,
   systemPrompt: "You are a friendly shopkeeper in a fantasy village.",
   temperature: 0.7,
   maxTokens: 256,
@@ -66,7 +90,7 @@ const npc = engine.createCharacter({
     parameters: {
       item: { type: "string", required: true, description: "The item to check" },
     },
-    handler: async (args) => db.query(args.item),
+    handler: async (args) => db.query(args.item as string),
   }],
 });
 
@@ -77,6 +101,12 @@ for await (const token of npc.chat("What do you sell?")) {
 await engine.removeCharacter(npc.id);
 await engine.shutdown();
 ```
+
+> **Heads-up.** The `loadModelFromBuffer` factory creates the engine for you.
+> If you need to wire several models against a shared engine instance, build
+> additional models with the same pattern and reuse the returned `engine`
+> reference, or pre-build the inference pipeline by hand and call
+> `engine.adoptPreloadedModel(name, pipeline)` instead.
 
 ## Architecture
 
