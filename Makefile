@@ -80,6 +80,7 @@ wasm-build-wasm32: ## Build only the wasm32 production binary (current default)
 	emcmake cmake .. \
 		-DGGML_WEBGPU=ON \
 		-DGGML_WEBGPU_JSPI=OFF \
+		-DEMDAWNWEBGPU_DIR=$(CURDIR)/vendor/emdawnwebgpu \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DGGML_CPU=OFF \
 		-DGGML_BLAS=OFF \
@@ -102,6 +103,7 @@ wasm-build-mem64: ## Build only the wasm64 (MEMORY64) production binary
 	emcmake cmake .. \
 		-DGGML_WEBGPU=ON \
 		-DGGML_WEBGPU_JSPI=OFF \
+		-DEMDAWNWEBGPU_DIR=$(CURDIR)/vendor/emdawnwebgpu \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DGGML_CPU=OFF \
 		-DGGML_BLAS=OFF \
@@ -120,7 +122,6 @@ wasm-build-mem64: ## Build only the wasm64 (MEMORY64) production binary
 		-DCMAKE_CXX_FLAGS="-sMEMORY64=1" \
 		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --target webllm-wasm-mem64 --config Release -j
-	python3 scripts/fix-mem64-bindgroup-shim.py src/wasm/build-mem64/webllm-wasm-mem64.js
 
 wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
 wasm-build-debug: wasm-clean wasm-build

@@ -845,22 +845,17 @@ convenient.
    a 7th row, kernel-family coverage matrix expanded.
 
 3. **Upgrade Emscripten past `8d78be5` to drop the shim patch.**
-   Confirmed via upstream source diff (2026-04-29): the bug is
-   already fixed in `google/dawn` `third_party/emdawnwebgpu/pkg/
-   webgpu/src/library_webgpu.js` at commit
-   [`8d78be5`](https://github.com/google/dawn/commit/8d78be5)
-   (2025-10-07, "[emscripten] Audit and fix makeGetValue calls").
-   That commit changes the five `WGPUBindGroupEntry::buffer/sampler/
-   textureView` and `WGPURenderPass{Color,DepthStencil}Attachment::view`
-   reads from `'u32'` to `'*'` — the pointer-width-aware mode that
-   correctly emits HEAPU64 under MEMORY64. **No upstream bug report
-   needed** (the fix has already landed). Our Emscripten 5.0.6
-   snapshot (ref `6ea9c28c38cdd40c1032fa04400c9d16230ee180`)
-   predates `8d78be5` — when we next bump Emscripten, verify the
-   target version includes this commit, then `scripts/fix-mem64-
-   bindgroup-shim.py` becomes a no-op (idempotent: detects already
-   patched and exits 0) and can be deleted along with the Makefile
-   wire-in. Cost: deletion only, post-bump.
+   **CLOSED 2026-04-29.** Vendored
+   `vendor/emdawnwebgpu/emdawnwebgpu.port.py`
+   from Dawn release `v20260423.175430` (well past the
+   `8d78be5` Oct-07-2025 fix). Wired through both `wasm-build`
+   targets via `-DEMDAWNWEBGPU_DIR=$(CURDIR)/vendor/emdawnwebgpu`.
+   The new shim emits `Number(HEAPU64[(entryPtr+OFF)/8])`
+   directly at all three sites — bit-identical to what our patch
+   script was producing. `scripts/fix-mem64-bindgroup-shim.py`
+   and the Makefile wire-in were deleted in the same commit.
+   Validation: Mistral-Nemo Q4_K_S decodes end-to-end on wasm64
+   at 26.7 tok/s with no patch-script intervention.
 
 **Lower-priority follow-ups** (no rush, do during a housekeeping
 sweep):
@@ -900,10 +895,12 @@ The Phase 7 cycle also discovered and fixed an Emscripten 5.0.6
 codegen bug: `_wgpuDeviceCreateBindGroup` reads 8-byte
 `WGPUBindGroupEntry::buffer/sampler/textureView` pointer fields
 with `HEAPU32` (low-32 only). Under MEMORY64, when a handle is
-allocated above 2³², the lookup misses by `1_00000000`. Fix lives
-in `scripts/fix-mem64-bindgroup-shim.py` and is wired into
-`make wasm-build-mem64` so every fresh build has the patch
-applied. Full diagnosis at
+allocated above 2³², the lookup misses by `1_00000000`. Initially
+mitigated by `scripts/fix-mem64-bindgroup-shim.py` (since deleted
+2026-04-29 — see follow-up #3 above); now fixed at the source by
+vendoring Dawn release `v20260423.175430` via
+`vendor/emdawnwebgpu/emdawnwebgpu.port.py`, which post-dates the
+upstream `8d78be5` fix. Full diagnosis at
 [`eval/reports/memory64-migration-2026-04-28/PHASE-7-BLOCKED.md`](eval/reports/memory64-migration-2026-04-28/PHASE-7-BLOCKED.md).
 The lever is closed for the ≤30B ceiling. Next ask: register a
 real 13B / 30B target if a deployment need surfaces (no
@@ -1365,10 +1362,11 @@ appetite remains; none are forced.
 Three open candidates, all conditional:
 
 - ~~**MEMORY64 full bridge migration**~~ → **CLOSED 2026-04-29.**
-  All 8 phases shipped. Production wasm64 ships with bind-group
-  shim patch (`scripts/fix-mem64-bindgroup-shim.py`); >4 GiB
-  validation on Mistral-Nemo Q4_K_S = 72% eval / 19.3 tok/s
-  median. Closure report:
+  All 8 phases shipped. Production wasm64 originally needed a
+  build-time bind-group shim patch; on 2026-04-29 the Emdawnwebgpu
+  port was bumped to Dawn `v20260423.175430` (post `8d78be5`), the
+  patch script was deleted, and Mistral-Nemo Q4_K_S validated
+  end-to-end at 26.7 tok/s. Closure report:
   [`eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md`](eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md).
 
 - **§D concat-graph batched encoder compute.** Trigger: a real
