@@ -4133,3 +4133,144 @@ HuggingFace GGUF that bartowski has packaged.
   cleanest size-ladder data point in the project.
 
 ---
+
+## TS API audit follow-ups (closed 2026-04-29; archived from TODO.md)
+
+The full closure narrative for items (a)-(f) of the TS API audit
+follow-ups, originally queued under "Next session pickup" item 4 in
+TODO.md and shipped 2026-04-29 in one work cycle.
+
+### Phase 1 audit + Phase 2 (a-e) remediations (earlier commits)
+
+Phase 1 audit + Phase 2 (a-e) remediations landed 2026-04-29 across
+5 commits:
+- `a125baf` README quick-start fix
+- `f119540` slim public surface
+- `ca630d0` unify `load*` taxonomy
+- `308c912` `WebLLMError` taxonomy + readonly types
+- `15049da` `AbortSignal` on `Character.chat` + bounded `StreamRouter`
+  queue
+
+Net: 14 exports removed from public surface, broken stub `loadModel`
+demoted to private helper, 5-class `WebLLMError` hierarchy exposed for
+programmatic dispatch, 4 new tests (495 total).
+
+### Phase 3 follow-ups (a)-(f) — shipped 2026-04-29
+
+All six items shipped in one cycle as a coherent "public API hygiene"
+pass.
+
+- Spec: [`docs/superpowers/specs/2026-04-29-ts-api-audit-followups-design.md`](docs/superpowers/specs/2026-04-29-ts-api-audit-followups-design.md)
+- Plan: [`docs/superpowers/plans/2026-04-29-ts-api-audit-followups.md`](docs/superpowers/plans/2026-04-29-ts-api-audit-followups.md)
+
+**(a) Split `GenerationConfig`** — rename current 22-field type to
+`InternalGenerationOptions` (engine-internal, unexported); new public
+7-field `GenerationConfig` with `signal` inline; drop unused `prompt`
+field. Compile-fail `@ts-expect-error` test locks in the steering-field
+exclusion. Commits `91a5ee6` + `34ad33c` (test type fix).
+
+**(b) Drop `WebLLMConfig.device`** — caller passes device directly to
+`engine.loadLightweightModel(LightweightModelConfig)`. Smoke harness +
+tests updated. Commit `f639e2e`.
+
+**(c) Sampling flag + Qwen profile export** — new
+`src/core/sampling-profiles.ts` exports `QWEN_THINKING_DEFAULTS` /
+`QWEN_NON_THINKING_DEFAULTS` (now `Object.freeze`d for runtime safety);
+`CompletionConfig.sampling`: `"auto" | "qwen-thinking" | "qwen-default" | "raw"`
+(default `"auto"` = current magic). Commits `104a846` + `f8e56b0`
+(freeze fix).
+
+**(d) Engine accessor migration** — `getMemoryPool` / `getScheduler` /
+`getModelManager` → property getters with underscore-prefixed backing
+fields. Test mocks that seeded via `Object.create(WebLLM.prototype) +
+direct field assign` swept to assign the new `_modelManager` backing
+field. Commit `2fcad35`.
+
+**(e) `Character.setTools`** — runtime tool reconfiguration with
+defensive-copy semantics (`[...tools]` decouples caller's array from
+internal state). Strict YAGNI: no `attachToolSystem(custom)` — no
+consumer ask for parser swap. Commits `d0dc96f` + `e4c402e` (defensive
+copy).
+
+**(f) Polish bundle** — `ChatToolSchema.parameters[*].type` literal
+union (`"string" | "number" | "integer" | "boolean" | "array" | "object"`)
+with parallel mirrors in `chat-template.ts` (`ChatTemplateToolSchema`)
+and `tool-system.ts` (`ToolParameter`) aligned in lock-step;
+`GenerationFinishReason` per-variant JSDoc; README API Overview table
+gains `engine.removeCharacter(id)` and `engine.shutdown()` rows; table
+header renamed `Class` → `API` to fit method-level entries; trailing
+periods on new rows dropped to match the existing 19-row convention.
+Commits `e919027` + `25c5465` (mirror alignment + README polish).
+
+### Test surface delta
+
+485 → 493 pass (+8 across 3 new test files):
+- `tests/generation-config-public.test.ts` — `@ts-expect-error`
+  steering-field exclusion assertions
+- `tests/sampling-profiles.test.ts` — constant equality + frozen-
+  runtime + sampling union
+- `tests/character-set-tools.test.ts` — replace / clear / add-from-none
+  / defensive-copy
+
+`make checkall` green at every commit boundary.
+
+### Decision-log highlights (from brainstorming, kept for context)
+
+- Naming: renamed current type to `InternalGenerationOptions` rather
+  than introducing a new `PublicGenerationConfig` — gives the clean
+  name to the consumer-facing 7-field type, which 99% of consumers
+  use.
+- `signal` migration: moved into `config.signal` (matches
+  `CompletionConfig` shape; one fewer positional argument).
+- `device` removal: chose the structurally cleaner option (drop from
+  `WebLLMConfig` entirely) over making it optional with engine-side
+  injection.
+- `sampling: "auto"` default preserved BC. Added `"raw"` as the
+  consumer escape hatch from the magic.
+- No deprecation aliases (`getMemoryPool` etc. just deleted) per
+  project policy "no BC-compat shims".
+- `setTools` only — `attachToolSystem(custom)` deferred (no consumer
+  ask for parser swap).
+- Polish bundle adopted all four sub-items in one commit; mirror
+  drift surfaced by code-quality review and fixed in a follow-up.
+
+### Follow-ups filed (orthogonal; opportunistic pickup)
+
+Three watch-list items captured in TODO.md "Watch list / optional
+cadence work":
+
+1. **Sampling-dispatch unit test.** `engine.ts:272-289`'s
+   `forcedProfile` / `autoProfile` / `activeProfile` resolution is
+   exercised end-to-end by smoke + chat-completion tests but has no
+   direct unit test of the dispatch matrix (4 modes × `enableThinking`
+   × Qwen-vs-non-Qwen × consumer-override). File before the next
+   `CompletionConfig` surface change.
+2. **Tool-schema mirror-drift sentinel.** Three identical literal
+   unions across `chat-types.ts`, `chat-template.ts`,
+   `tool-system.ts` share only a comment-based lock-step contract.
+   Either dedupe via shared exported `JsonSchemaParameterType`
+   (preferred — type-only, zero runtime cost) or add a structural
+   drift test.
+3. **`tsconfig.json` widening.** Currently includes only `src/**/*.ts`
+   — the `@ts-expect-error` gate in
+   `tests/generation-config-public.test.ts` is documentation, not
+   enforcement. Widening to cover `tests/**` would surface latent type
+   errors in other test files first (~5-15 latent-error hits expected).
+
+### Process notes (lessons from the cycle)
+
+- **Code-quality review caught real issues at every phase**, none
+  of which the implementer or spec reviewer surfaced. Specifically:
+  test type drift (Phase 1a), `Object.freeze` runtime-mutation
+  footgun (Phase 1c), shared-reference aliasing in `setTools`
+  (Phase 2b), tool-schema mirror divergence + README header
+  granularity (Phase 3). Justifies the two-stage review pattern
+  (spec compliance THEN code quality) end-to-end on this arc.
+- **Phase boundaries kept ≤5 files** even when spec items naturally
+  spanned more — Phase 1 sub-checkpointed into 1a/1b/1c rather than
+  one Phase 1 commit.
+- **TDD applied where new behavior** (item c sampling, item e
+  setTools); refactors (a, b, d) drove correctness via `tsc`
+  + existing test suite + ship-gate `make checkall`.
+
+---

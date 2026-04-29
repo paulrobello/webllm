@@ -923,67 +923,22 @@ then pre-rebase baseline freshness check if matrix nears 2026-05-28.
    next rebase trigger consume it. See watch list below for the
    procedure.
 
-4. **TS API audit follow-ups.** Phase 1 audit + Phase 2 (a-e)
-   remediations landed 2026-04-29 across 5 commits (`a125baf`
-   README quick-start fix, `f119540` slim public surface,
-   `ca630d0` unify load* taxonomy, `308c912` `WebLLMError`
-   taxonomy + readonly types, `15049da` AbortSignal on
-   `Character.chat` + bounded `StreamRouter` queue). Net: 14
-   exports removed from public surface, broken stub `loadModel`
-   demoted to private helper, 5-class `WebLLMError` hierarchy
-   exposed for programmatic dispatch, 4 new tests (495 total).
-   **Phase 3 follow-ups (a)-(f) CLOSED 2026-04-29** — all six
-   items shipped in one cycle as a coherent "public API hygiene"
-   pass. Spec at
+4. **TS API audit follow-ups (CLOSED 2026-04-29).** Phase 1 audit
+   + Phase 2 (a-e) + Phase 3 (a-f) all shipped 2026-04-29; full
+   block (commit map, decision log, test-surface delta, follow-ups,
+   process notes) archived to `TODO_ARCHIVE.md` under the
+   "TS API audit follow-ups (closed 2026-04-29)" heading.
+   Net: 14 exports trimmed from public surface, `WebLLMError`
+   taxonomy exposed, `GenerationConfig` split, `WebLLMConfig.device`
+   removed, `CompletionConfig.sampling` flag added,
+   `Character.setTools`, engine accessors migrated to properties,
+   `ChatToolSchema` literal union. Spec
    [`docs/superpowers/specs/2026-04-29-ts-api-audit-followups-design.md`](docs/superpowers/specs/2026-04-29-ts-api-audit-followups-design.md);
-   plan at
+   plan
    [`docs/superpowers/plans/2026-04-29-ts-api-audit-followups.md`](docs/superpowers/plans/2026-04-29-ts-api-audit-followups.md).
-
-   - **(a) Split `GenerationConfig`** — rename current 22-field
-     type to `InternalGenerationOptions` (engine-internal,
-     unexported); new public 7-field `GenerationConfig` with
-     `signal` inline; drop unused `prompt` field. Compile-fail
-     `@ts-expect-error` test locks in the steering-field
-     exclusion. Commits `91a5ee6` + `34ad33c` (test type fix).
-   - **(b) Drop `WebLLMConfig.device`** — caller passes device
-     directly to `engine.loadLightweightModel(LightweightModelConfig)`.
-     Smoke harness + tests updated. Commit `f639e2e`.
-   - **(c) Sampling flag + Qwen profile export** — new
-     `src/core/sampling-profiles.ts` exports
-     `QWEN_THINKING_DEFAULTS` / `QWEN_NON_THINKING_DEFAULTS`
-     (now `Object.freeze`d for runtime safety);
-     `CompletionConfig.sampling`:
-     `"auto" | "qwen-thinking" | "qwen-default" | "raw"`
-     (default `"auto"` = current magic). Commits `104a846` +
-     `f8e56b0` (freeze fix).
-   - **(d) Engine accessor migration** — `getMemoryPool` /
-     `getScheduler` / `getModelManager` → property getters with
-     underscore-prefixed backing fields. Test mocks that seeded
-     via `Object.create(WebLLM.prototype) + direct field assign`
-     swept to assign the new `_modelManager` backing field.
-     Commit `2fcad35`.
-   - **(e) `Character.setTools`** — runtime tool reconfiguration
-     with defensive-copy semantics. Strict YAGNI: no
-     `attachToolSystem(custom)` (no consumer ask for parser swap).
-     Commits `d0dc96f` + `e4c402e` (defensive copy).
-   - **(f) Polish bundle** — `ChatToolSchema.parameters[*].type`
-     literal union (with parallel mirrors in
-     `chat-template.ts` and `tool-system.ts` aligned in lock-step);
-     `GenerationFinishReason` per-variant JSDoc; README API table
-     + "API" header rename. Commits `e919027` + `25c5465` (mirror
-     alignment + README polish).
-
-   **Test surface delta:** 485 → 493 pass (+8 across 3 new test
-   files: `generation-config-public.test.ts`,
-   `sampling-profiles.test.ts`, `character-set-tools.test.ts`).
-   `make checkall` green throughout.
-
-   **Follow-up surfaced (orthogonal, queued):** `tsconfig.json`
-   includes only `src/**/*.ts` — the `@ts-expect-error` gate in
-   `tests/generation-config-public.test.ts` is documentation, not
-   enforcement. Widening `tsconfig` to cover `tests/**` would
-   surface latent type errors in other test files first; treat as
-   a separate cycle.
+   Three orthogonal follow-ups filed in the watch list (sampling-
+   dispatch unit test; tool-schema mirror-drift sentinel; tsconfig
+   widening to enforce `@ts-expect-error` gates).
 
 ---
 
