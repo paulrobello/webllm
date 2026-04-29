@@ -77,14 +77,19 @@ function formatLlama2(
 
 /**
  * Minimal tool schema for prompt injection — mirrors `ChatToolSchema` from
- * `core/chat-types.ts` without the import cycle.
+ * `core/chat-types.ts` without the import cycle. Keep the parameter `type`
+ * union in lock-step with `ChatToolSchema` and `ToolParameter`.
  */
 export interface ChatTemplateToolSchema {
 	name: string;
 	description: string;
 	parameters: Record<
 		string,
-		{ type: string; description?: string; required?: boolean }
+		{
+			type: "string" | "number" | "integer" | "boolean" | "array" | "object";
+			description?: string;
+			required?: boolean;
+		}
 	>;
 }
 

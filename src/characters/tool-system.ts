@@ -1,7 +1,11 @@
 /** Schema for a single tool parameter. */
 export interface ToolParameter {
-	/** JSON Schema type of the parameter. */
-	type: "string" | "number" | "boolean" | "array" | "object";
+	/**
+	 * JSON Schema type of the parameter. Keep this union in lock-step with
+	 * `ChatToolSchema` (`core/chat-types.ts`) and `ChatTemplateToolSchema`
+	 * (`inference/chat-template.ts`).
+	 */
+	type: "string" | "number" | "integer" | "boolean" | "array" | "object";
 	/** Human-readable description of the parameter. */
 	description?: string;
 	/** Whether the parameter must be provided. */

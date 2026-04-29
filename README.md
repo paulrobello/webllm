@@ -139,8 +139,8 @@ graph TD
 
 ## API Overview
 
-| Class | Description |
-|-------|-------------|
+| API | Description |
+|-----|-------------|
 | `WebLLM` | Main engine — initialization, model loading, character management |
 | `Character` | Chat persona with system prompt, tools, and streaming output |
 | `CharacterManager` | Lifecycle management for character instances |
@@ -160,8 +160,8 @@ graph TD
 | `GameLoop` | Frame-budget-aware game loop for inference ticks |
 | `GgmlWasm` | WebAssembly bridge for ggml-webgpu tensor operations |
 | `LightweightModel` | Pure WGSL inference for small models |
-| `engine.removeCharacter(id)` | Remove a registered character by id. |
-| `engine.shutdown()` | Release GPU buffers, dispose inference engines, and shut down WASM modules for all loaded models. |
+| `engine.removeCharacter(id)` | Remove a registered character by id |
+| `engine.shutdown()` | Release GPU buffers, dispose inference engines, and shut down WASM modules for all loaded models |
 
 ## Development
 
