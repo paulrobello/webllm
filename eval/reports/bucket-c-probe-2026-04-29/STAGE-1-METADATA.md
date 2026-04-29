@@ -48,7 +48,53 @@ then `build_lora_mm(model.output, cur)` for `t_logits`).
 
 ## Qwen3-Embedding-0.6B metadata
 
-(Populated in Task 3; placeholder until probe-gguf runs.)
+| Property | Intended (HF config) | As-shipped (GGUF) | Divergence |
+|---|---|---|---|
+| Architecture | `Qwen3ForCausalLM` (`model_type=qwen3`) | `qwen3` | |
+| Pooling type | last-token (README: `last_token_pool`) | `qwen3.pooling_type = 3` (LAST) | |
+| Normalization | L2 (README: `F.normalize(embeddings, p=2, dim=1)`) | absent (no key; consumer-applied) | 🚩 **GGUF carries no `*.pooling_norm` flag — L2 normalization is the caller's responsibility.** |
+| Projection head present | absent (README ties output to last-token hidden state, no projection layer) | absent (only `output_norm.weight`; no `*.embedding_proj`/`*.dense` tensors) | |
+| Projection-head output dim | n/a | n/a | |
+| `hidden_size` | 1024 | `qwen3.embedding_length = 1024` | |
+| `num_hidden_layers` | 28 | `qwen3.block_count = 28` | |
+| `num_attention_heads` | 16 | `qwen3.attention.head_count = 16` | |
+| `num_key_value_heads` | 8 | `qwen3.attention.head_count_kv = 8` | |
+| RoPE mode | NEOX (Qwen3 architecture default) | absent (no explicit `qwen3.rope.scaling_type` key; defaults to NEOX per llama.cpp qwen3 arch) | |
+| RoPE freq_base | 1000000 (`rope_theta`) | `qwen3.rope.freq_base = 1000000` | |
+| RoPE freq_dim | 128 (`head_dim`) | `qwen3.attention.key_length = 128` (per-head dim used as RoPE dim) | |
+| FFN type | SwiGLU (`hidden_act = silu` + gate/up split) | SwiGLU implied (tensors `ffn_gate` + `ffn_up` + `ffn_down` per block; `feed_forward_length = 3072`) | |
+| `eos_token_id` | 151643 (`<|endoftext|>`) | `tokenizer.ggml.eos_token_id = 151643`; also `tokenizer.ggml.eot_token_id = 151645` (`<|im_end|>`) | 🚩 **GGUF exposes a second end-of-turn token (`eot = 151645`) absent from `config.json`; embedding inference should ignore both — sequence ends at user-controlled length, not at a generated EOS.** |
+| `bos_token_id` | 151643 (same as EOS — `<|endoftext|>`) | `tokenizer.ggml.bos_token_id = 151643`; `add_bos_token = false` | |
+| Vocab size | 151669 | absent (no explicit `qwen3.vocab_size` key; embedded in `tokenizer.ggml.tokens`) | 🚩 **HF reports `vocab_size = 151669`; GGUF defers to the tokens table (count not surfaced as a metadata key in our probe).** |
+| Instruction-prefix (query) | exact string from README (see fenced block below) | n/a | |
+| Instruction-prefix (document) | raw (README: "No need to add instruction for retrieval documents") | n/a | |
+
+**Query instruction-prefix (exact string from README's `get_detailed_instruct`):**
+
+```python
+def get_detailed_instruct(task_description: str, query: str) -> str:
+    return f'Instruct: {task_description}\nQuery:{query}'
+```
+
+Concrete form (with the README's example task):
+
+```
+Instruct: Given a web search query, retrieve relevant passages that answer the query
+Query:What is the capital of China?
+```
+
+Note the literal `\n` between the `Instruct:` line and the `Query:` line, and the absence of a space between `Query:` and the query text — both are verbatim from the README. Stage 2 must preserve them exactly.
+
+**Document instruction-prefix:** none — documents are passed raw without any prefix.
+
+**Divergences flagged:**
+1. **L2 normalization is consumer-side.** The GGUF carries no flag indicating embeddings are pre-normalized; the Stage-2 webllm pipeline must apply L2 in JS after readback (matches encoder-inference.ts `poolAndNormalize` convention).
+2. **Second end-of-turn token (`eot = 151645`).** The GGUF surfaces `<|im_end|>` (151645) alongside `<|endoftext|>` (151643). Embedding mode should not stop on either — sequences run to caller-controlled length. Documenting because the chat-mode regression-lessons in `CLAUDE.md` already flag this dual-EOT pattern for Qwen3 generation.
+3. **Vocab-size key not in GGUF metadata.** HF reports 151669; the GGUF probe surfaced the tokens table as `<object>` rather than a scalar count. If Stage 2 needs the vocab size programmatically, it must be derived from the tokens table length, not read from a metadata key.
+
+**GGUF mirror used:** `https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-f16.gguf`.
+
+**Raw discovery:** `00-gguf-discovery.txt` (committed in this directory).
 
 ## Stage 2 plan refinement
 
