@@ -90,6 +90,34 @@ docs, and bug fixes alike.
   baselines are pinned at
   `eval/reports/pre-rebase-baselines-<DATE>/SUMMARY.md` with a
   ~1-month freshness window.
+- **TODO archival cadence.** When a top-level TODO block closes
+  (all sub-items resolved, follow-ups landed, child probes filed),
+  move the block out of `TODO.md` to `TODO_ARCHIVE.md` and leave a
+  4-8-line closure stub in its place. The stub stays inline in
+  `TODO.md` and links to:
+  - the canonical closure / validation report under
+    `eval/reports/<area>/`, and
+  - the archived block (`TODO_ARCHIVE.md`).
+
+  **Trigger:** all listed sub-items + follow-ups carry
+  **CLOSED `<DATE>`** markers and no new probes are queued under
+  the heading. **Don't archive prematurely** — partially-closed
+  blocks stay in `TODO.md` so the queued sub-items remain visible
+  in the active surface.
+
+  **What stays in `TODO.md`:** a watch-list-style closure stub
+  (status, headline metric, links) so future sessions reading the
+  watch list see the closed lever at a glance. **What moves to
+  archive:** the full block (rationale, phasing, risk register,
+  per-phase commit table, probe artifacts list — the load-bearing
+  reasoning).
+
+  See commits `41b964c` (close MEMORY64 follow-ups) and the
+  follow-on archive commit (replaces ~270 lines of closed migration
+  detail with a 12-line closure stub) as the canonical example.
+  TODO archival is its own commit with `docs(TODO):` prefix —
+  don't bundle with the closures themselves so a `git revert`
+  of the archive is reversible without touching the closures.
 
 ## Workflows
 
