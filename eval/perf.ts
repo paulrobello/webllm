@@ -182,6 +182,11 @@ async function run(
 	// (including 0) still wins.
 	const effectivePrefillTile = opts.prefillTile;
 
+	// Phase 4 of MEMORY64 migration: when WEBLLM_WASM_VARIANT=mem64 is set
+	// (e.g. by `make smoke-bench WASM_VARIANT=mem64`), the smoke page picks
+	// the wasm64 binary via `?wasm=mem64`. Empty/unset → wasm32 default.
+	const wasmVariant = process.env.WEBLLM_WASM_VARIANT;
+
 	for (let i = 0; i < nRuns; i++) {
 		process.stdout.write(`Run ${i + 1}/${nRuns}...`);
 		const url = buildSmokeTestUrl(model.id, model.contextLength, {
@@ -196,6 +201,7 @@ async function run(
 					: {}),
 				...(fixturePrompt ? { prompt: fixturePrompt } : {}),
 				...(opts.decodeTokens ? { max: opts.decodeTokens } : {}),
+				...(wasmVariant === "mem64" ? { wasm: "mem64" } : {}),
 			},
 		});
 		agentchrome(port, tab, ["navigate", url]);

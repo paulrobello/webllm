@@ -208,8 +208,8 @@ agentchrome-stop: ## Stop all agentchrome sessions (kill launched Chrome + clear
 	@echo "agentchrome session cleared"
 
 smoke-bench: smoke-restart ## End-to-end inference benchmark (auto-launches agentchrome if needed)
-	@echo "=== smoke-bench: $(PERF_MODEL)$(if $(PERF_DRAFTER), drafter=$(PERF_DRAFTER)), $(PERF_RUNS) runs ==="
-	bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --profile $(if $(PERF_DRAFTER),--drafter $(PERF_DRAFTER))
+	@echo "=== smoke-bench: $(PERF_MODEL)$(if $(PERF_DRAFTER), drafter=$(PERF_DRAFTER))$(if $(WASM_VARIANT), wasm=$(WASM_VARIANT)), $(PERF_RUNS) runs ==="
+	WEBLLM_WASM_VARIANT=$(WASM_VARIANT) bun run eval/perf.ts --model $(PERF_MODEL) --runs $(PERF_RUNS) --profile $(if $(PERF_DRAFTER),--drafter $(PERF_DRAFTER))
 
 # ---------------------------------------------------------------------------
 # Benchmarks
