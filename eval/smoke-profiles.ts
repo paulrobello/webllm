@@ -234,6 +234,13 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Mistral-Nemo-Instruct-2407 — Phase 7 >4 GiB validation ──
+	{
+		name: "mistral-nemo-q4ks-warm",
+		model: "mistral-nemo-instruct-2407-q4ks",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Llama 3.1 8B Instruct (wave 2 model 2) ────────────────
 	{
 		name: "llama-3.1-8b-warm",
@@ -421,5 +428,10 @@ export function profileToUrlParams(
 		params.rep = profile.repetitionPenalty;
 	if (profile.seed !== undefined) params.seed = profile.seed;
 	if (profile.prompt !== undefined) params.prompt = profile.prompt;
+	// Phase 6 dual-binary routing — auto-pick wasm64 for >3.5 GiB models so the eval harness matches `pickWasmUrl` in `src/core/engine.ts`.
+	const model = resolveProfileModel(profile);
+	if (model !== undefined && model.vramMB > 3500) {
+		params.wasm = "mem64";
+	}
 	return params;
 }

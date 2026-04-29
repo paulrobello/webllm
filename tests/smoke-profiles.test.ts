@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { getModelById } from "../eval/models.js";
 import {
 	getSmokeProfile,
 	getSmokeProfileSet,
@@ -106,6 +107,55 @@ test("profileToUrlParams only emits fields that were actually set", () => {
 			thinking: "off",
 		}),
 	).toEqual({});
+});
+
+test("profileToUrlParams auto-routes >3.5 GiB models to wasm64", () => {
+	// Phase 6 dual-binary routing: profileToUrlParams must inject
+	// wasm=mem64 for any profile whose resolved model has vramMB > 3500,
+	// matching pickWasmUrl in src/core/engine.ts. Otherwise
+	// bench-browser-eval silently falls back to wasm32 and OOMs on
+	// >4 GiB models. Asserts via real registered models so the boundary
+	// is checked end-to-end through resolveProfileModel().
+	const ensure = (id: string, predicate: (m: number) => boolean) => {
+		const m = getModelById(id);
+		expect(m).toBeDefined();
+		expect(predicate(m?.vramMB ?? -1)).toBe(true);
+		return m as { vramMB: number };
+	};
+
+	// Below threshold (~1.4 GiB).
+	ensure("qwen3-0.6b-q4f16", (v) => v <= 3500);
+	expect(profileToUrlParams({ name: "x", model: "qwen3-0.6b-q4f16" })).toEqual(
+		{},
+	);
+
+	// Exactly at the 3500 boundary — the rule is `>` not `>=`, so this
+	// should NOT trigger wasm64.
+	ensure("mistral-7b-instruct-v0.3-q3km", (v) => v === 3500);
+	expect(
+		profileToUrlParams({
+			name: "x",
+			model: "mistral-7b-instruct-v0.3-q3km",
+		}),
+	).toEqual({});
+
+	// Just above the 3500 boundary (4400 MB → 3501 covered).
+	ensure("mistral-7b-instruct-v0.3-q4ks", (v) => v > 3500);
+	expect(
+		profileToUrlParams({
+			name: "x",
+			model: "mistral-7b-instruct-v0.3-q4ks",
+		}),
+	).toEqual({ wasm: "mem64" });
+
+	// Well above boundary (5400 MB).
+	ensure("mistral-7b-instruct-v0.3-q5km", (v) => v >= 5400);
+	expect(
+		profileToUrlParams({
+			name: "x",
+			model: "mistral-7b-instruct-v0.3-q5km",
+		}),
+	).toEqual({ wasm: "mem64" });
 });
 
 test("profile sets reference only known profile names", () => {
