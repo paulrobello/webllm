@@ -3,8 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { WebLLM } from "../src/core/engine.js";
 import {
-	type GenerationConfig,
 	Generator,
+	type InternalGenerationOptions,
 } from "../src/inference/generation.js";
 import { GgmlWasm } from "../src/inference/ggml-wasm.js";
 import { ModelInference } from "../src/inference/model-inference.js";
@@ -55,8 +55,7 @@ describe.skipIf(SHOULD_SKIP)("SpeculativeGenerator integration", () => {
 
 		const tokenizer = new Tokenizer(parsed.tokenizerConfig);
 		const promptIds = tokenizer.encode("Hello");
-		const config: GenerationConfig = {
-			prompt: "Hello",
+		const config: InternalGenerationOptions = {
 			maxTokens: 12,
 			temperature: 0,
 			topK: 0,
@@ -143,8 +142,7 @@ describe.skipIf(SHOULD_SKIP)("SpeculativeGenerator integration", () => {
 		const tokenizer = new Tokenizer(parsed.tokenizerConfig);
 		const promptIds = tokenizer.encode("Once");
 		const sampler = new Sampler({ temperature: 0.7, topK: 20, seed: 42 });
-		const config: GenerationConfig = {
-			prompt: "Once",
+		const config: InternalGenerationOptions = {
 			maxTokens: 8,
 			temperature: 0.7,
 			topK: 20,

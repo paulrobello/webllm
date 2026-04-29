@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	type GenerationConfig,
 	Generator,
+	type InternalGenerationOptions,
 } from "../src/inference/generation.js";
 import { Sampler } from "../src/inference/sampler.js";
 import {
@@ -79,7 +80,6 @@ describe("Generator", () => {
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 5,
 			temperature: 0,
 			topK: 40,
@@ -111,7 +111,6 @@ describe("Generator", () => {
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 100,
 			temperature: 0,
 			topK: 40,
@@ -140,7 +139,6 @@ describe("Generator", () => {
 			0,
 		);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 3,
 			temperature: 0,
 			topK: 40,
@@ -169,7 +167,6 @@ describe("Generator", () => {
 			0,
 		);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 3,
 			temperature: 0,
 			topK: 40,
@@ -214,7 +211,6 @@ describe("Generator", () => {
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 100,
 			temperature: 0,
 			topK: 40,
@@ -252,8 +248,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 100,
 			temperature: 0,
 			topK: 40,
@@ -290,8 +285,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 100,
 			temperature: 0,
 			topK: 40,
@@ -331,8 +325,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 2,
 			temperature: 0,
 			topK: 40,
@@ -380,8 +373,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 4,
 			temperature: 0,
 			topK: 40,
@@ -429,8 +421,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 4,
 			temperature: 0,
 			topK: 40,
@@ -479,8 +470,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 4,
 			temperature: 0,
 			topK: 40,
@@ -528,8 +518,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 3,
 			temperature: 0,
 			topK: 40,
@@ -577,8 +566,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 4,
 			temperature: 0,
 			topK: 40,
@@ -627,8 +615,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 4,
 			temperature: 0,
 			topK: 40,
@@ -676,8 +663,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 5,
 			temperature: 0,
 			topK: 40,
@@ -716,8 +702,7 @@ describe("Generator", () => {
 		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 100,
 			temperature: 0,
 			topK: 40,
@@ -820,7 +805,6 @@ describe("Generator", () => {
 			0,
 		);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 5,
 			temperature: 0,
 			topK: 40,
@@ -906,8 +890,7 @@ describe("Generator", () => {
 			{ ...BASE_SESSION_CONFIG, topK: samplerTopK, repetitionPenalty: 1.05 },
 			0,
 		);
-		const config: GenerationConfig = {
-			prompt: "test",
+		const config: InternalGenerationOptions = {
 			maxTokens: 3,
 			temperature: 0,
 			topK: samplerTopK,
