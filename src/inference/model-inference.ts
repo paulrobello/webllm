@@ -145,6 +145,51 @@ export function computeDefaultPrefillTileSize(hp: ModelHyperparams): number {
 }
 
 /**
+ * Verify a tensor is laid out contiguously as F32. The fused-projection
+ * helpers `buildQKV` / `buildFFNGateUp` produce strided `opView*` slices
+ * that they immediately wrap in `opCont()` to materialize a contiguous
+ * f32 copy — required because downstream rope/permute ops assume
+ * contiguity. If a future refactor inserts an op between the helper and
+ * the rope/permute chain that re-introduces strided derivatives, this
+ * assertion fires loud at graph build time instead of producing silent
+ * gibberish at decode (the failure mode of bug #2 in the Phi-3 closure,
+ * commit `7c85a2a`).
+ *
+ * Implements the same predicate as ggml's `ggml_is_contiguous`, scoped
+ * to F32 (the dtype of every fused-projection output here): tightly
+ * packed strides nb[0]=4, nb[i]=nb[i-1]*ne[i-1] for i=1..3.
+ */
+export function assertContiguousF32(
+	wasm: Pick<GgmlWasm, "tensorType" | "tensorNe" | "tensorNb">,
+	tensor: TensorPtr,
+	label: string,
+): void {
+	const type = wasm.tensorType(tensor);
+	if (type !== GgmlType.F32) {
+		throw new Error(
+			`${label}: expected F32 (type ${GgmlType.F32}), got type ${type}`,
+		);
+	}
+	const ne0 = wasm.tensorNe(tensor, 0);
+	const ne1 = wasm.tensorNe(tensor, 1);
+	const ne2 = wasm.tensorNe(tensor, 2);
+	const nb0 = wasm.tensorNb(tensor, 0);
+	const nb1 = wasm.tensorNb(tensor, 1);
+	const nb2 = wasm.tensorNb(tensor, 2);
+	const nb3 = wasm.tensorNb(tensor, 3);
+	if (
+		nb0 !== F32_BYTES ||
+		nb1 !== nb0 * ne0 ||
+		nb2 !== nb1 * ne1 ||
+		nb3 !== nb2 * ne2
+	) {
+		throw new Error(
+			`${label}: tensor not F32-contiguous (ne=[${ne0},${ne1},${ne2}], nb=[${nb0},${nb1},${nb2},${nb3}])`,
+		);
+	}
+}
+
+/**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
@@ -193,11 +238,27 @@ export class ModelInference {
 	 * See TODO §22 for the per-model recommended tile size and rationale.
 	 */
 	readonly prefillTileSize: number;
+	/**
+	 * When true (default), `buildQKV` / `buildFFNGateUp` verify that every
+	 * fused-projection output (Q/K/V/gate/up) materialized via `opCont` is
+	 * F32-contiguous. The check costs ~7 wasm-bridge round trips per output
+	 * × 5 outputs/layer × layerCount per forward — measured at <1% of
+	 * graph-build wall time on Phi-3.5-mini, paid only when
+	 * `LayerWeights.qkvFused` / `gateUpFused` are non-null (Phi-3 family
+	 * today). Set false to disable for benchmarking; the assertion is
+	 * defense-in-depth against silent regression of the contiguous-view
+	 * invariant fixed in commit `7c85a2a`.
+	 */
+	assertFusedContiguity: boolean;
 
 	constructor(
 		wasm: GgmlWasm,
 		hyperparams: ModelHyperparams,
-		opts: { flashAttn?: boolean; prefillTileSize?: number } = {},
+		opts: {
+			flashAttn?: boolean;
+			prefillTileSize?: number;
+			assertFusedContiguity?: boolean;
+		} = {},
 	) {
 		this.wasm = wasm;
 		this.hp = hyperparams;
@@ -209,6 +270,7 @@ export class ModelInference {
 				`prefillTileSize must be >= 0; got ${this.prefillTileSize}`,
 			);
 		}
+		this.assertFusedContiguity = opts.assertFusedContiguity ?? true;
 	}
 
 	loadWeights(
@@ -519,6 +581,11 @@ export class ModelInference {
 					F32_BYTES * (E + kvDim),
 				),
 			);
+			if (this.assertFusedContiguity) {
+				assertContiguousF32(wasm, q3, "buildQKV.fused.q3");
+				assertContiguousF32(wasm, k3, "buildQKV.fused.k3");
+				assertContiguousF32(wasm, v3, "buildQKV.fused.v3");
+			}
 		} else {
 			if (!lw.qProj || !lw.kProj || !lw.vProj) {
 				throw new Error(
@@ -576,6 +643,10 @@ export class ModelInference {
 			const up = wasm.opCont(
 				wasm.opView2d(fused, ffSize, nTokens, tokenBytes, F32_BYTES * ffSize),
 			);
+			if (this.assertFusedContiguity) {
+				assertContiguousF32(wasm, gate, "buildFFNGateUp.fused.gate");
+				assertContiguousF32(wasm, up, "buildFFNGateUp.fused.up");
+			}
 			return { gate, up };
 		}
 		if (!lw.gateProj || !lw.upProj) {
