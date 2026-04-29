@@ -80,13 +80,6 @@ export type {
 	ScoringMethod,
 	ToolCallRecord,
 } from "./evaluation/types.js";
-export type { ChatTemplateType } from "./inference/chat-template.js";
-export {
-	detectChatTemplate,
-	encodeChatPrompt,
-	formatChatDelta,
-	formatChatPrompt,
-} from "./inference/chat-template.js";
 export { EncoderInference } from "./inference/encoder-inference.js";
 export type {
 	GenerationConfig,
@@ -109,21 +102,9 @@ export { StreamRouter } from "./inference/stream-router.js";
 export type { TokenData, TokenizerConfig } from "./inference/tokenizer.js";
 export {
 	StreamingDecoder,
-	TokenAttribute,
 	Tokenizer,
 	TokenizerType,
 } from "./inference/tokenizer.js";
-export type { ShaderName } from "./inference/wgsl-shaders.js";
-export {
-	ALL_SHADERS,
-	SHADER_EMBEDDING_LOOKUP,
-	SHADER_GELU,
-	SHADER_LAYER_NORM,
-	SHADER_MATMUL_F32,
-	SHADER_RMS_NORM,
-	SHADER_SILU,
-	SHADER_SOFTMAX,
-} from "./inference/wgsl-shaders.js";
 export { GgufParser } from "./models/gguf-parser.js";
 export type {
 	GgufContext,
