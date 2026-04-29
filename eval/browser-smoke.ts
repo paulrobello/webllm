@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import type { BenchmarkModel } from "./models.js";
 
 export const SMOKE_TEST_URL = "http://localhost:8031/real-model.html";
@@ -109,11 +109,16 @@ export async function ensureModelDownloaded(
 ): Promise<void> {
 	const destDir = "smoke-test/models";
 	const destPath = `${destDir}/${model.id}.gguf`;
-	if (existsSync(destPath)) {
-		return;
+	const partPath = `${destPath}.part`;
+	// A leftover .part from an interrupted prior download must always be
+	// retried — never reused — since curl was writing to it byte-by-byte.
+	if (existsSync(partPath)) {
+		console.log(
+			`Found stale partial download at ${partPath}; removing before retry.`,
+		);
+		unlinkSync(partPath);
 	}
 
-	console.log(`\nModel ${model.id} not found locally. Preparing to download...`);
 	mkdirSync(destDir, { recursive: true });
 
 	const repoUrl = model.ggufUrl;
@@ -164,14 +169,43 @@ export async function ensureModelDownloaded(
 		throw new Error(`Could not find any .gguf files in ${repoUrl}`);
 	}
 
+	// Trust the local cache only after verifying the size matches the
+	// remote manifest — guards against a previous run being killed mid-
+	// download with the destination written but truncated.
+	if (existsSync(destPath)) {
+		const localSize = statSync(destPath).size;
+		if (localSize === chosenFile.size) {
+			return;
+		}
+		console.log(
+			`Local cache at ${destPath} is ${localSize} bytes but remote reports ${chosenFile.size}; refetching.`,
+		);
+		unlinkSync(destPath);
+	} else {
+		console.log(
+			`\nModel ${model.id} not found locally. Preparing to download...`,
+		);
+	}
+
 	const downloadUrl = `https://huggingface.co/${repoName}/resolve/main/${chosenFile.path}`;
 	console.log(
 		`Downloading ${chosenFile.path} (${(chosenFile.size / 1024 / 1024).toFixed(1)} MB) to ${destPath}...`,
 	);
 
-	execFileSync("curl", ["-L", "--progress-bar", "-o", destPath, downloadUrl], {
+	// Atomic-write: curl writes to .part, then rename on success. A SIGTERM
+	// during the curl leaves only the .part, which the top-of-function
+	// guard removes before re-attempting — never a half-written destPath.
+	execFileSync("curl", ["-L", "--progress-bar", "-o", partPath, downloadUrl], {
 		stdio: "inherit",
 	});
+	const partSize = statSync(partPath).size;
+	if (partSize !== chosenFile.size) {
+		unlinkSync(partPath);
+		throw new Error(
+			`Downloaded ${partSize} bytes but remote reports ${chosenFile.size}; refusing to publish a truncated cache file.`,
+		);
+	}
+	renameSync(partPath, destPath);
 	console.log("Download complete.\n");
 }
 
