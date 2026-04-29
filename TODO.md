@@ -838,6 +838,30 @@ Closed 2026-04-29 — all 6 phases (probe → register → smoke →
 - Full block (rationale, phasing, risk register, alternates)
   archived to `TODO_ARCHIVE.md`.
 
+### Phi-3 causal LM support (CLOSED 2026-04-29)
+
+Closed 2026-04-29 — all 6 phases (probe → register → implement →
+smoke → 36-prompt eval → smoke-bench → report) passed in one
+session. **First fused-projection causal LM in the fleet** (Path
+B fused-forward, `architecture === "phi3"`-gated).
+
+- **Eval:** 27/36 = **72%** (gate ≥60%; predicted band 70-80%).
+  Tied with Mistral-Nemo 12B Q4_K_S despite being ~3× smaller.
+- **Speed:** 3-run smoke-bench median **31.6 tok/s** (gate ≥25;
+  predicted band 35-50, ~10% under-band attributed to opCont
+  copies + profile-mode overhead).
+- Plan: [`docs/superpowers/plans/2026-04-29-phi3-causal-lm-support.md`](docs/superpowers/plans/2026-04-29-phi3-causal-lm-support.md).
+- Closure report:
+  [`eval/reports/phi-3-validation-2026-04-29/SUMMARY.md`](eval/reports/phi-3-validation-2026-04-29/SUMMARY.md).
+- Implementation commit `8392bca`; bug-fix commits `7915abb`
+  (chat-template typo) + `7c85a2a` (opCont on fused views —
+  the gibberish root cause); closure commit `31612a2`.
+- Path A vs Path B note in the closure report: for the next
+  fused-projection architecture (Phi-4, Granite, etc.),
+  evaluate Path A first — the dispatch-count win is
+  unmeasured and the strided-view gotcha cost a measurable
+  ~6% throughput tax.
+
 
 
 ---
@@ -1159,9 +1183,10 @@ Three open candidates, all conditional:
   `4e11d79`. **Do not merge.** Re-evaluate only if the 30B ceiling
   lifts.
 
-- **Wave-1 architectures Gemma 2, Phi 3.** 5+ gaps for Gemma; mostly
-  fused-QKV for Phi 3. Re-evaluate if a model in either family lands
-  as a real deployment ask.
+- **Wave-1 architecture Gemma 2.** 5+ gaps (pre+post norm pairs,
+  logit/attn soft-cap, sliding-window, (1+w) RMSNorm). Re-evaluate
+  if a model in the family lands as a real deployment ask. Phi-3
+  closed 2026-04-29 — see CLOSED stub above.
 
 ### Process notes
 
