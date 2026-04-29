@@ -39,21 +39,45 @@ The branch currently carries **eleven commits** on top of upstream
 (commit 8) are kept as a pair pending a proper replacement; treat them
 as a no-op until you hear otherwise.
 
-Last rebased onto upstream master 2026-04-28-eve (§32) to tip
-`f9f33654a` ("vulkan: Coalesce Q4_K/Q5_K scale loads (#21751)"). The
-2026-04-27 → 2026-04-28-eve delta was 10 commits; 1 of them touched
-`ggml-webgpu/` (#22456 buffer aliasing refactor for `ssm_scan` —
-helper `webgpu_tensor_offset` renamed to `ggml_webgpu_tensor_offset`
-and `view_offs` folded into the helper body). The rebase replayed all
-11 patches cleanly but the renamed helper produced a compile error in
-patch 3 (request-based browser readback API still referenced the old
-name). The §32 rebase initially landed the rename adoption as a
-forward fix-up (patch 12) to avoid history rewriting on the
-long-lived branch. **Patch 12 was subsequently squashed back into
-patch 3** (2026-04-28, post-§31b cleanup pass) — patch 3's diff for
-the affected line now reads `ggml_webgpu_tensor_offset(tensor) +
-offset` directly. WASM byte-identical pre/post squash (2,249,650
-bytes); ship gate 428/11/0 unchanged. Safety branches preserved:
+Last rebased onto upstream master 2026-04-29 to tip `b1d5f5b44`
+("sync : ggml"). The 2026-04-28-eve → 2026-04-29 delta was 14 commits;
+1 of them touched `ggml-webgpu/` (#22492 FlashAttention support-check
+fix — adds an early-out when `decisions.path == FLASH_ATTN_PATH_NONE`
+plus a "set path to none if kv_tile doesn't fit" safety net). The
+rebase replayed all 11 patches cleanly with zero conflicts. WASM
+sizes: wasm32 2,249,421 bytes (-229 vs §32 baseline), wasm64
+2,292,124 bytes. Ship gate 452/11/0. Safety branch
+`webllm-browser-patches-backup-20260429-*` preserves the pre-rebase
+tip (`3b8ade2a2`).
+
+Sweep classification: **§32 template — small regression, accepted;
+don't revert**. 4 of 6 models show −3% to −5% post-rebase profile-mode
+deltas; 2 of 6 (both IQ3_M) are flat within noise. The single relevant
+upstream change (`d6a509400`) lives inside the cold-path
+`ggml_backend_webgpu_device_supports_op` (per graph build, not per
+dispatch), so the deltas are most plausibly 3-run profile-mode noise
+rather than a real per-token regression. Net read: stay current; the
+option value of clean future free-win wins outweighs the noise-band
+delta. Full sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md`](../eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md).
+
+#### Earlier rebase (2026-04-28-eve, §32)
+
+Rebased onto upstream master to tip `f9f33654a` ("vulkan: Coalesce
+Q4_K/Q5_K scale loads (#21751)"). The 2026-04-27 → 2026-04-28-eve
+delta was 10 commits; 1 of them touched `ggml-webgpu/` (#22456 buffer
+aliasing refactor for `ssm_scan` — helper `webgpu_tensor_offset`
+renamed to `ggml_webgpu_tensor_offset` and `view_offs` folded into the
+helper body). The rebase replayed all 11 patches cleanly but the
+renamed helper produced a compile error in patch 3 (request-based
+browser readback API still referenced the old name). The §32 rebase
+initially landed the rename adoption as a forward fix-up (patch 12)
+to avoid history rewriting on the long-lived branch. **Patch 12 was
+subsequently squashed back into patch 3** (2026-04-28, post-§31b
+cleanup pass) — patch 3's diff for the affected line now reads
+`ggml_webgpu_tensor_offset(tensor) + offset` directly. WASM
+byte-identical pre/post squash (2,249,650 bytes); ship gate 428/11/0
+unchanged. Safety branches preserved:
 `webllm-browser-patches-pre-rebase-2026-04-28-eve` (pre-§32 tip
 `981859864`), `webllm-browser-patches-pre-squash-2026-04-28`
 (pre-squash tip `c4af89356`).

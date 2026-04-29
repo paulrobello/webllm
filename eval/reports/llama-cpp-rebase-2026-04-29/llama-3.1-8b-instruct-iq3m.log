@@ -1,0 +1,25 @@
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
+
+Per-phase decode timing — mode=topk (156 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.00        0.00     0.00    0.0%
+buildGraphMs           0.33        0.30     0.40    0.8%
+backendAllocMs         0.05        0.00     0.10    0.1%
+uploadLeavesMs         0.01        0.00     0.00    0.0%
+graphComputeMs        40.64       40.70    42.60   95.8%
+downloadResultMs       1.39        1.40     1.70    3.3%
+teardownMs             0.00        0.00     0.00    0.0%
+totalMs               42.42       42.40    44.50  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs       156     35.92     35.90     37.90   88.4%
+backendEncodeOverheadMs      156      3.87      3.60      4.80    9.5%
+backendMatmulMs             156     22.92     22.68     24.25   56.4%
+backendAttentionMs          156      0.60      0.59      0.85    1.5%
+backendDispatchCount        156     652.0     652.0     652.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.

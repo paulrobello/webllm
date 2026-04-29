@@ -1,0 +1,25 @@
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+vs baseline (2026-04-22T19:09:16.644Z): 93.5 tok/s → 85.2 tok/s (-8.3 / -8.9%)
+
+Per-phase decode timing — mode=topk (189 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.00        0.00     0.00    0.0%
+buildGraphMs           0.20        0.20     0.30    1.7%
+backendAllocMs         0.04        0.00     0.10    0.3%
+uploadLeavesMs         0.01        0.00     0.00    0.0%
+graphComputeMs        10.41       10.50    11.30   87.7%
+downloadResultMs       1.22        1.20     1.40   10.3%
+teardownMs             0.00        0.00     0.00    0.0%
+totalMs               11.87       11.90    12.80  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs       189      9.05      9.20     10.00   87.0%
+backendEncodeOverheadMs      189      2.41      2.40      2.70   23.2%
+backendMatmulMs             189      4.01      4.00      4.33   38.5%
+backendAttentionMs          189      0.37      0.39      0.52    3.6%
+backendDispatchCount        189     450.0     450.0     450.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.

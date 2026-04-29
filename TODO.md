@@ -804,8 +804,12 @@ rebuilt, MANIFESTs verified — see closure entry in Watch list).
 **Algorithmic-perf backlog fully cleared.** All algorithmic levers
 at the canonical 4-baseline are exhausted (§17-§29 closed matmul,
 FA, drafter, encoder, prefill-tiling, spec-decode families).
-Upstream cadence check 2026-04-28: no `ggml-webgpu/` movement → no
-rebase trigger near firing.
+Rebase cadence: 2026-04-29 fired (§32 template — small regressions
+accepted; 4 of 6 models −3% to −5% in profile-mode noise band, 2
+flat). One upstream `ggml-webgpu/` commit picked up
+(`d6a509400` FA support-check fix). Tip: `fa8b16a6f`.
+Sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md).
 
 **MEMORY64 full bridge migration promoted to active 2026-04-28**
 (was external-trigger; user-requested as next major work item).
