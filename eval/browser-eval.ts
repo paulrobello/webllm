@@ -56,7 +56,14 @@ const DIMS: EvalDimension[] = [
 ];
 
 const POLL_INTERVAL_MS = 5000;
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min hard ceiling — accuracy run on a 1B+ model is slow
+// 10 min hard ceiling — accuracy run on a 1B+ model is slow. Override via
+// WEBLLM_HARD_TIMEOUT_MS for >4 GiB MEMORY64 targets where cold-cache fetch
+// + 36 prompts can total 15-20 min.
+const DEFAULT_TIMEOUT_MS = (() => {
+	const raw = process.env.WEBLLM_HARD_TIMEOUT_MS;
+	const parsed = raw !== undefined ? Number.parseInt(raw, 10) : NaN;
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 10 * 60 * 1000;
+})();
 // Bail this much sooner if the page stops making progress. Covers two modes:
 //   (a) `__benchStatus` is never published (model-load hang, CDP wedged, page
 //       crashed before bench entry); pollBenchStatus keeps returning null.
