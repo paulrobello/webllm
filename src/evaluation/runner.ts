@@ -5,9 +5,8 @@
  *
  * Usage (library consumer):
  *
- *   const engine = await WebLLM.init({...});
- *   await engine.loadModel("...");
- *   const result = await runTask(engine, modelId, myTask);
+ *   const { engine, handle } = await WebLLM.loadModelFromBuffer(buf, name, {...});
+ *   const result = await runTask(engine, handle.id, myTask);
  *
  * No I/O beyond what the engine's inference pipeline does — works in any
  * runtime that can host WebLLM.

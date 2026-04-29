@@ -129,10 +129,16 @@ export class WebLLM {
 		return new WebLLM(config);
 	}
 
-	async loadModel(
+	/**
+	 * Register an empty model entry and mint a handle. Internal helper used
+	 * by `loadModelFromBuffer` and `adoptPreloadedModel` before the inference
+	 * pipeline + tokenizer are wired up. Not a consumer-facing loader — call
+	 * `loadModelFromBuffer` (instance or static) to actually load weights.
+	 */
+	private registerModelHandle(
 		name: string,
 		options: ModelLoadOptions,
-	): Promise<ModelHandle> {
+	): ModelHandle {
 		const id = `model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const entry: ModelEntry = {
 			id,
@@ -573,7 +579,7 @@ export class WebLLM {
 			(pipeline.inference as ModelInference).resetKVCache();
 		}
 
-		const handle = await this.loadModel(name, { priority: 0 });
+		const handle = this.registerModelHandle(name, { priority: 0 });
 		const entry = this.modelManager.get(handle.id);
 		if (!entry) {
 			throw new Error(
@@ -600,7 +606,12 @@ export class WebLLM {
 	}
 
 	/**
-	 * Load a model directly from an in-memory GGUF buffer.
+	 * Load a model directly from an in-memory GGUF buffer into this engine.
+	 *
+	 * Parses the GGUF, instantiates the WASM backend, uploads weights, wires
+	 * up the inference (or encoder) pipeline, and returns a handle ready for
+	 * `chatCompletion` / `embed` / `createCharacter`. Call this multiple times
+	 * to host several models on the same engine.
 	 *
 	 * **WASM binary selection.** When `wasmUrl` is omitted, the binary
 	 * is chosen by model file size via {@link pickWasmUrl}: models
@@ -611,18 +622,14 @@ export class WebLLM {
 	 * (e.g., force wasm64 for testing, or point at a custom-served
 	 * binary).
 	 */
-	static async loadModelFromBuffer(
+	async loadModelFromBuffer(
 		data: ArrayBuffer | Uint8Array,
 		name: string,
-		config: WebLLMConfig,
 		wasmUrl?: string,
 	): Promise<{
 		handle: ModelHandle;
-		engine: WebLLM;
 		inference: ModelInference | EncoderInference;
 	}> {
-		const engine = await WebLLM.init(config);
-
 		const view = data instanceof Uint8Array ? data : new Uint8Array(data);
 		const parsed = ModelLoader.parseModel(view);
 		const ggufCtx = GgufParser.parse(view) as GgufContext;
@@ -644,9 +651,8 @@ export class WebLLM {
 			inference = inf;
 		}
 
-		const handle = await engine.loadModel(name, { priority: 0 });
-
-		const entry = engine.getModelManager().get(handle.id);
+		const handle = this.registerModelHandle(name, { priority: 0 });
+		const entry = this.modelManager.get(handle.id);
 		if (entry) {
 			entry.hyperparams = parsed.hyperparams;
 			entry.tokenizer = new Tokenizer(parsed.tokenizerConfig);
@@ -654,13 +660,38 @@ export class WebLLM {
 			entry.loaded = true;
 		}
 
-		engine.wasmModules.set(handle.id, wasm);
+		this.wasmModules.set(handle.id, wasm);
 		if (inference instanceof EncoderInference) {
-			engine.encoderEngines.set(handle.id, inference);
+			this.encoderEngines.set(handle.id, inference);
 		} else {
-			engine.inferenceEngines.set(handle.id, inference);
+			this.inferenceEngines.set(handle.id, inference);
 		}
 
+		return { handle, inference };
+	}
+
+	/**
+	 * Convenience factory: initialize a fresh engine and load a single model
+	 * from an in-memory GGUF buffer in one call. For multi-model setups, use
+	 * {@link WebLLM.init} + {@link WebLLM.prototype.loadModelFromBuffer}
+	 * directly.
+	 */
+	static async loadModelFromBuffer(
+		data: ArrayBuffer | Uint8Array,
+		name: string,
+		config: WebLLMConfig,
+		wasmUrl?: string,
+	): Promise<{
+		handle: ModelHandle;
+		engine: WebLLM;
+		inference: ModelInference | EncoderInference;
+	}> {
+		const engine = await WebLLM.init(config);
+		const { handle, inference } = await engine.loadModelFromBuffer(
+			data,
+			name,
+			wasmUrl,
+		);
 		return { handle, engine, inference };
 	}
 
