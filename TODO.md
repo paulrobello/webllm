@@ -809,7 +809,77 @@ rebase trigger near firing.
 
 **MEMORY64 full bridge migration promoted to active 2026-04-28**
 (was external-trigger; user-requested as next major work item).
-See dedicated section below.
+See dedicated section below. **CLOSED 2026-04-29** — production
+wasm64 ships end-to-end on Mistral-Nemo Q4_K_S; details and
+follow-up block below.
+
+### MEMORY64 migration follow-ups (queued 2026-04-29)
+
+The migration closed on Phase 7 commit `99a470c`, but the cycle
+surfaced three small follow-ups that aren't blocking and deserve
+their own scope. None gates further work; pick them up when
+convenient.
+
+1. **Verify Mistral-7B Q5_K_M decodes under the shim fix.** The
+   prior reproducer (`mistral-7b-instruct-v0.3-q5km`, registered
+   at `ca01d4f`) failed with the bind-group bug pre-fix. The
+   `_wgpuDeviceCreateBindGroup` patch from commit `7260eff` is
+   kernel-family-independent in theory; this confirms it's so in
+   practice and rules out an accidentally-Q4_K-specific fix.
+   Smoke probe: `agentchrome navigate http://localhost:8031/real-model.html?model=mistral-7b-instruct-v0.3-q5km&wasm=mem64&ctx=4096&temp=0.6&prompt=hi&ingest=off`,
+   wait for `[7/8] Generated`. Expected: warmup completes, decode
+   in 25-30 tok/s band. Cost: ~10 min (model already on HF, ~5 GiB
+   download on first run, can also pre-cache via `make smoke-bench`
+   on that model id). If it works, update PHASE-7-VALIDATION.md
+   with the additional confirmation.
+
+2. **Add a Q5_K-family row to the Phase 5 canonical 6.** The
+   original parity sweep (PHASE-5-PARITY.md) covered Q4_0 / Q4_K_S
+   / Q3_K_M / IQ3_M / IQ4_XS — Q5_K-blind. A future Emscripten
+   upgrade or shim regression could break Q5_K-family kernels
+   silently. Recommended: register **Mistral-7B Q5_K_S (~4.6 GiB)**
+   — covers both the Q5_K kernel AND the >4 GiB shim path in one
+   model. Re-run the canonical sweep with the new row included
+   under both wasm32 and wasm64 builds. Cost: ~30 min (one bench
+   pass on each binary). Output: PHASE-5-PARITY.md updated with
+   a 7th row, kernel-family coverage matrix expanded.
+
+3. **Upgrade Emscripten past `8d78be5` to drop the shim patch.**
+   Confirmed via upstream source diff (2026-04-29): the bug is
+   already fixed in `google/dawn` `third_party/emdawnwebgpu/pkg/
+   webgpu/src/library_webgpu.js` at commit
+   [`8d78be5`](https://github.com/google/dawn/commit/8d78be5)
+   (2025-10-07, "[emscripten] Audit and fix makeGetValue calls").
+   That commit changes the five `WGPUBindGroupEntry::buffer/sampler/
+   textureView` and `WGPURenderPass{Color,DepthStencil}Attachment::view`
+   reads from `'u32'` to `'*'` — the pointer-width-aware mode that
+   correctly emits HEAPU64 under MEMORY64. **No upstream bug report
+   needed** (the fix has already landed). Our Emscripten 5.0.6
+   snapshot (ref `6ea9c28c38cdd40c1032fa04400c9d16230ee180`)
+   predates `8d78be5` — when we next bump Emscripten, verify the
+   target version includes this commit, then `scripts/fix-mem64-
+   bindgroup-shim.py` becomes a no-op (idempotent: detects already
+   patched and exits 0) and can be deleted along with the Makefile
+   wire-in. Cost: deletion only, post-bump.
+
+**Lower-priority follow-ups** (no rush, do during a housekeeping
+sweep):
+
+- **Smoke-test page picker harmonization.**
+  `smoke-test/real-model-page.js:114-117` defaults to wasm32 and
+  reads `?wasm=mem64` directly; the eval harness now auto-routes
+  via `profileToUrlParams` (`281b2a8`). Either share `pickWasmUrl`
+  logic or document the smoke-test page as the manual debug
+  surface. Not broken, just two source-of-truth points for the
+  same routing decision.
+- **Archive the closed MEMORY64 block to `TODO_ARCHIVE.md`** per
+  the §17/§18/§19 cadence. The block at line 816+ is closed and
+  detailed; once the three follow-ups land it can move out of
+  the active TODO entirely.
+- **Register a real 13B / 30B target** if a deployment ask
+  surfaces. The wasm64 path is proven at 12B Q4_K_S; additional
+  registrations are model-list edits, not infrastructure work.
+  Currently external-trigger only.
 
 ---
 
