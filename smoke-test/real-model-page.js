@@ -111,8 +111,19 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	} = await import(`./real-model-smoke.js${assetSuffix}`);
 
 	const params = new URLSearchParams(window.location.search);
-	// Phase 4 of MEMORY64 migration: ?wasm=mem64 toggles the wasm64 binary.
-	// Default loads webllm-wasm.js (wasm32, current behavior, no regression).
+	// `?wasm=mem64` toggles the wasm64 binary; default loads webllm-wasm.js
+	// (wasm32, no regression for ≤3.5 GiB models).
+	//
+	// **This page is the manual debug surface.** No size-aware auto-routing
+	// here — for >4 GiB models pass `&wasm=mem64` explicitly. Without it,
+	// the wasm32 heap can't fit the GGUF and `wasm.malloc(N)` returns null
+	// at step 2.
+	//
+	// The eval harness (`make bench-browser-eval`, `make smoke-bench`) auto-
+	// routes via `profileToUrlParams` in `eval/smoke-profiles.ts`, which
+	// mirrors `pickWasmUrl` in `src/core/engine.ts` (the canonical
+	// modelByteLength-driven decision used by the public `WebLLM.from*`
+	// constructors at runtime).
 	const wasmVariant =
 		params.get("wasm") === "mem64" ? "webllm-wasm-mem64.js" : "webllm-wasm.js";
 	const thinkingEnabled = getThinkingModeFromParams(params);

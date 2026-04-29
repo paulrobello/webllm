@@ -94,3 +94,27 @@ The selection criterion lives in the public engine API — `WebLLM.create({ wasm
 ## Phase 6 status
 
 **PROCEED — Phase 6 implementer can use these numbers directly.** Path B (dual binary) per the plan §Task 7 description.
+
+## Addendum: Q5_K kernel-coverage row (2026-04-29, post-port-bump)
+
+The original sweep was Q5_K-blind (canonical pins are
+Q4_0 / Q4_K_S / Q3_K_M / IQ3_M / IQ4_XS). The MEMORY64 migration
+follow-up #2 (queued 2026-04-29) added a Q5_K-family row to close
+the kernel-surface gap. Under the vendored Dawn `v20260423.175430`
+port (post-`8d78be5`, on rebase tip `fa8b16a6f`):
+
+| Model | Quant | wasm32 | wasm64 | Notes |
+|---|---|---:|---:|---|
+| `mistral-7b-instruct-v0.3-q5km` | Q5_K_M | n/a (>4 GiB cap) | **26.7 tok/s** | Wasm64-only kernel-coverage probe; 3-run profile-mode median; matmul 50.8% / 17.83 ms median; 650 dispatches/token; FA path engaged (attention 1.6%). |
+
+Q5_K_M sits 5.3% slower than the Q4_K_S row at the same
+Mistral-7B param count (28.2 → 26.7 tok/s post-rebase) — within
+the expected band for the higher-precision Q5_K block layout
+versus Q4_K_S. No bind-group errors (validates the upstream
+`makeGetValue '*'` fix is kernel-family-agnostic).
+
+The row sits **outside** the wasm32/wasm64 parity matrix
+(>4 GiB cap = wasm64-only) and is captured here as the
+canonical Q5_K reference point. A future Emscripten /
+emdawnwebgpu rebase that breaks Q5_K kernels would surface as a
+regression on this row.

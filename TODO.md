@@ -834,16 +834,20 @@ convenient.
    works alongside Q4_K_S. The model registration comment in
    `eval/models.ts` was updated to reflect the closed status.
 
-2. **Add a Q5_K-family row to the Phase 5 canonical 6.** The
-   original parity sweep (PHASE-5-PARITY.md) covered Q4_0 / Q4_K_S
-   / Q3_K_M / IQ3_M / IQ4_XS — Q5_K-blind. A future Emscripten
-   upgrade or shim regression could break Q5_K-family kernels
-   silently. Recommended: register **Mistral-7B Q5_K_S (~4.6 GiB)**
-   — covers both the Q5_K kernel AND the >4 GiB shim path in one
-   model. Re-run the canonical sweep with the new row included
-   under both wasm32 and wasm64 builds. Cost: ~30 min (one bench
-   pass on each binary). Output: PHASE-5-PARITY.md updated with
-   a 7th row, kernel-family coverage matrix expanded.
+2. **Add a Q5_K-family row to the Phase 5 canonical 6.**
+   **CLOSED 2026-04-29.** Used the already-registered + already-
+   validated Mistral-7B Q5_K_M (~5.1 GiB) instead of the originally-
+   recommended Q5_K_S — both are >4 GiB-cap (wasm64-only), so the
+   row sits *outside* the wasm32/wasm64 parity matrix as a
+   wasm64-exclusive kernel-coverage probe. 3-run profile-mode
+   smoke-bench under wasm64 with the new vendored Dawn port
+   yields **26.7 tok/s** (matmul 50.8% / 17.83 ms median; 650
+   dispatches/token; FA engaged at 1.6% attention share). 5.3%
+   slower than Q4_K_S at the same param count, in the expected
+   band for the higher-precision Q5_K block layout. The
+   PHASE-5-PARITY.md addendum captures the row as the canonical
+   Q5_K reference point — a future rebase that breaks Q5_K kernels
+   surfaces as a regression here.
 
 3. **Upgrade Emscripten past `8d78be5` to drop the shim patch.**
    **CLOSED 2026-04-29.** Vendored
