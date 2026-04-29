@@ -209,7 +209,7 @@ describe("WebLLM.generateStream drafter is reserved in v1", () => {
 		const tokenizer = makeEngagementTokenizer();
 		const engine = Object.create(WebLLM.prototype) as WebLLM &
 			Record<string, unknown>;
-		engine.modelManager = {
+		engine._modelManager = {
 			get: (id: string) =>
 				id === "target"
 					? {

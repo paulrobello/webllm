@@ -101,10 +101,10 @@ export function pickWasmUrl(
 
 export class WebLLM {
 	private _config: WebLLMConfig;
-	private memoryPool: MemoryPool;
-	private scheduler: Scheduler;
+	private _memoryPool: MemoryPool;
+	private _scheduler: Scheduler;
 	private _pipelineCache: PipelineCache;
-	private modelManager: ModelManager;
+	private _modelManager: ModelManager;
 	private characterManager: CharacterManager;
 	private eventHandlers = new Map<string, Set<EventHandler>>();
 	private wasmModules = new Map<string, GgmlWasm>();
@@ -114,10 +114,10 @@ export class WebLLM {
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
-		this.memoryPool = new MemoryPool(config.memoryBudget);
+		this._memoryPool = new MemoryPool(config.memoryBudget);
 		this.characterManager = new CharacterManager();
-		this.modelManager = new ModelManager(this.memoryPool);
-		this.scheduler = new Scheduler({
+		this._modelManager = new ModelManager(this._memoryPool);
+		this._scheduler = new Scheduler({
 			frameBudgetMs: config.frameBudgetMs ?? 8,
 		});
 		this._pipelineCache = new PipelineCache(config.cacheDir ?? "webllm-cache");
@@ -157,7 +157,7 @@ export class WebLLM {
 			loaded: false,
 			activeSessions: 0,
 		};
-		this.modelManager.register(entry);
+		this._modelManager.register(entry);
 		return entry;
 	}
 
@@ -178,7 +178,7 @@ export class WebLLM {
 			await wasm.shutdown();
 			this.wasmModules.delete(id);
 		}
-		await this.modelManager.unregister(id);
+		await this._modelManager.unregister(id);
 	}
 
 	async loadLightweightModel(
@@ -194,7 +194,7 @@ export class WebLLM {
 		prompt: string,
 		config?: Partial<GenerationConfig>,
 	): Promise<string> {
-		const entry = this.modelManager.get(modelId);
+		const entry = this._modelManager.get(modelId);
 		if (!entry) throw new ModelNotFoundError(modelId);
 		if (!entry.loaded || !entry.tokenizer)
 			throw new ModelNotLoadedError(modelId);
@@ -259,7 +259,7 @@ export class WebLLM {
 		input: StreamInput,
 		config?: StreamConfig,
 	): AsyncGenerator<StreamChunk, void> {
-		const entry = this.modelManager.get(modelId);
+		const entry = this._modelManager.get(modelId);
 		if (!entry) throw new ModelNotFoundError(modelId);
 		if (!entry.loaded || !entry.tokenizer)
 			throw new ModelNotLoadedError(modelId);
@@ -463,7 +463,7 @@ export class WebLLM {
 	 * models throw with a descriptive error.
 	 */
 	async embed(modelId: string, text: string): Promise<Float32Array> {
-		const entry = this.modelManager.get(modelId);
+		const entry = this._modelManager.get(modelId);
 		if (!entry) throw new ModelNotFoundError(modelId);
 		if (!entry.loaded || !entry.tokenizer) {
 			throw new ModelNotLoadedError(modelId);
@@ -579,7 +579,7 @@ export class WebLLM {
 		}
 
 		const handle = this.registerModelHandle(name, { priority: 0 });
-		const entry = this.modelManager.get(handle.id);
+		const entry = this._modelManager.get(handle.id);
 		if (!entry) {
 			throw new Error(
 				`adoptPreloadedModel: model manager entry missing for ${handle.id}`,
@@ -651,7 +651,7 @@ export class WebLLM {
 		}
 
 		const handle = this.registerModelHandle(name, { priority: 0 });
-		const entry = this.modelManager.get(handle.id);
+		const entry = this._modelManager.get(handle.id);
 		if (entry) {
 			entry.hyperparams = parsed.hyperparams;
 			entry.tokenizer = new Tokenizer(parsed.tokenizerConfig);
@@ -700,14 +700,14 @@ export class WebLLM {
 	get pipelineCache(): PipelineCache {
 		return this._pipelineCache;
 	}
-	getMemoryPool(): MemoryPool {
-		return this.memoryPool;
+	get memoryPool(): MemoryPool {
+		return this._memoryPool;
 	}
-	getScheduler(): Scheduler {
-		return this.scheduler;
+	get scheduler(): Scheduler {
+		return this._scheduler;
 	}
-	getModelManager(): ModelManager {
-		return this.modelManager;
+	get modelManager(): ModelManager {
+		return this._modelManager;
 	}
 
 	createCharacter(config: CharacterConfig): Character {
@@ -752,8 +752,8 @@ export class WebLLM {
 			await enc.dispose();
 		}
 		this.encoderEngines.clear();
-		this.modelManager.clear();
-		this.scheduler.clear();
+		this._modelManager.clear();
+		this._scheduler.clear();
 		this.eventHandlers.clear();
 	}
 }

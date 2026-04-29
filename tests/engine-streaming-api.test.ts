@@ -114,7 +114,7 @@ function createTestEngineWithTokenizer(
 	let step = 0;
 	const engine = Object.create(WebLLM.prototype) as WebLLM &
 		Record<string, unknown>;
-	engine.modelManager = {
+	engine._modelManager = {
 		get: () => ({
 			loaded: true,
 			tokenizer,
@@ -287,7 +287,7 @@ describe("WebLLM.generateStream", () => {
 		} as unknown as Tokenizer;
 		const engine = Object.create(WebLLM.prototype) as WebLLM &
 			Record<string, unknown>;
-		engine.modelManager = {
+		engine._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
@@ -344,7 +344,7 @@ describe("WebLLM.generateStream", () => {
 		} as unknown as Tokenizer;
 		const engine = Object.create(WebLLM.prototype) as WebLLM &
 			Record<string, unknown>;
-		engine.modelManager = {
+		engine._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
@@ -411,7 +411,7 @@ describe("WebLLM.generateStream", () => {
 		} as unknown as Tokenizer;
 		const engine = Object.create(WebLLM.prototype) as WebLLM &
 			Record<string, unknown>;
-		engine.modelManager = {
+		engine._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
@@ -477,7 +477,7 @@ describe("WebLLM.generateStream", () => {
 		} as unknown as Tokenizer;
 		const engine = Object.create(WebLLM.prototype) as WebLLM &
 			Record<string, unknown>;
-		engine.modelManager = {
+		engine._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
@@ -530,7 +530,7 @@ describe("WebLLM.generateStream", () => {
 		} as unknown as Tokenizer;
 		const engine = Object.create(WebLLM.prototype) as WebLLM &
 			Record<string, unknown>;
-		engine.modelManager = {
+		engine._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
