@@ -1189,17 +1189,21 @@ this commit's report directly.
 
 **Canonical 6 fleet** (per CLAUDE.md and pre-rebase baselines):
 
-| Model | Wasm32 baseline (tok/s) |
+| Model | Wasm32 profile-mode baseline (tok/s) |
 |---|---:|
-| `tinyllama-1.1b-chat-q4_0` | 110.8 |
-| `qwen3-0.6b-q4f16` | 89.8 |
-| `qwen3-1.7b-q4f16` | 62.2 |
-| `mistral-7b-instruct-v0.3-q4ks` | 35.0 |
-| `llama-3.1-8b-instruct-iq3m` | 27.2 |
-| `qwen3-8b-iq3m` | 27.2 |
+| `tinyllama-1.1b-chat-q4_0` | 87.9 |
+| `qwen3-0.6b-q4f16` | 68.2 |
+| `qwen3-1.7b-q4f16` | 44.0 |
+| `mistral-7b-instruct-v0.3-q4ks` | 29.7 |
+| `llama-3.1-8b-instruct-iq3m` | 23.5 |
+| `qwen3-8b-iq3m` | 21.8 |
 
 (Source: `eval/reports/pre-rebase-baselines-2026-04-28/SUMMARY.md`,
-3-run median, non-profile mode.)
+3-run median, **profile-mode** — `make smoke-bench` always passes
+`--profile`, so Step 1's apples-to-apples comparison is against these
+profile-mode numbers, not the non-profile §32-era pins. Non-profile
+references like TinyLlama 110.8 / Mistral 35.0 / Qwen3-1.7b 62.2
+appear elsewhere in TODO.md but do not match the harness used here.)
 
 - [ ] **Step 1: Capture wasm32 baselines (sanity — should match pinned)**
 
@@ -1792,7 +1796,7 @@ agent transcript where the defect was identified.
 | 2026-04-28 | Task 2 Step 9 commit-msg template | Inherited the wrong baseline figure. Future phases now reference 87.9. | Phase 1 commit `65cd0a8` |
 | 2026-04-28 | Task 3 Step 4 baseline | Inherited the wrong 110.8 figure from Task 2's pre-correction state. Cited profile-mode 87.9 + §32a acceptance. | Phase 1 commit `65cd0a8` (defect surfaced retroactively while patching Task 2) |
 | 2026-04-28 | Task 3 Step 6 commit-msg template | Same root cause as Step 4. | Phase 1 commit `65cd0a8` |
-| **OPEN** | Task 6 (Phase 5) canonical-6 baseline table | Non-profile vs profile-mode framing inconsistency: prose says "non-profile" but `make smoke-bench` is profile. Resolve when Phase 5 dispatches; defer until then to avoid premature framing change. | flagged 2026-04-28 during Phase 1 corrections cycle |
+| 2026-04-28 | Task 6 (Phase 5) canonical-6 baseline table | Non-profile vs profile-mode framing inconsistency: prose said "non-profile" but `make smoke-bench` is profile-mode. Replaced the table with profile-mode numbers (87.9 / 68.2 / 44.0 / 29.7 / 23.5 / 21.8) sourced from `pre-rebase-baselines-2026-04-28/SUMMARY.md`. Step 1's `make smoke-bench` invocation now compares apples-to-apples. | flagged 2026-04-28 during Phase 1 corrections cycle; resolved 2026-04-28 ahead of Phase 5 dispatch |
 
 The Phase 1 commit body (`65cd0a8`) is permanent and still cites 110.8;
 this section is the canonical correction for any future bisect.
