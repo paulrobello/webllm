@@ -23,6 +23,15 @@ export type {
 	StreamStats,
 } from "./core/chat-types.js";
 export { WebLLM } from "./core/engine.js";
+export type { WebLLMErrorCode } from "./core/errors.js";
+export {
+	EncoderRequiredError,
+	InferenceEngineMissingError,
+	ModelNotFoundError,
+	ModelNotLoadedError,
+	SpeculativeDecodingReservedError,
+	WebLLMError,
+} from "./core/errors.js";
 export type { GameLoopCallback, GameLoopConfig } from "./core/game-loop.js";
 export { GameLoop } from "./core/game-loop.js";
 export type {

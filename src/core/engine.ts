@@ -37,6 +37,13 @@ import type {
 	StreamConfig,
 	StreamInput,
 } from "./chat-types.js";
+import {
+	EncoderRequiredError,
+	InferenceEngineMissingError,
+	ModelNotFoundError,
+	ModelNotLoadedError,
+	SpeculativeDecodingReservedError,
+} from "./errors.js";
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
 import { PipelineCache } from "./pipeline-cache.js";
@@ -200,12 +207,12 @@ export class WebLLM {
 		config?: Partial<GenerationConfig>,
 	): Promise<string> {
 		const entry = this.modelManager.get(modelId);
-		if (!entry) throw new Error(`Model "${modelId}" not found`);
+		if (!entry) throw new ModelNotFoundError(modelId);
 		if (!entry.loaded || !entry.tokenizer)
-			throw new Error(`Model "${modelId}" not fully loaded`);
+			throw new ModelNotLoadedError(modelId);
 
 		const inf = this.inferenceEngines.get(modelId);
-		if (!inf) throw new Error(`No inference engine for model "${modelId}"`);
+		if (!inf) throw new InferenceEngineMissingError(modelId);
 
 		const tokenizer = entry.tokenizer;
 		const sampler = new Sampler(config ?? {});
@@ -266,12 +273,12 @@ export class WebLLM {
 		config?: StreamConfig,
 	): AsyncGenerator<StreamChunk, void> {
 		const entry = this.modelManager.get(modelId);
-		if (!entry) throw new Error(`Model "${modelId}" not found`);
+		if (!entry) throw new ModelNotFoundError(modelId);
 		if (!entry.loaded || !entry.tokenizer)
-			throw new Error(`Model "${modelId}" not fully loaded`);
+			throw new ModelNotLoadedError(modelId);
 
 		const inf = this.inferenceEngines.get(modelId);
-		if (!inf) throw new Error(`No inference engine for model "${modelId}"`);
+		if (!inf) throw new InferenceEngineMissingError(modelId);
 
 		const tokenizer = entry.tokenizer;
 		const chatTemplate = tokenizer.options.chatTemplate;
@@ -309,7 +316,7 @@ export class WebLLM {
 			topK: effectiveTopK,
 			topP: effectiveTopP,
 			repetitionPenalty: effectiveRepetitionPenalty,
-			stopTokens: config?.stopTokenIds,
+			stopTokens: config?.stopTokenIds ? [...config.stopTokenIds] : undefined,
 		};
 
 		// Speculative-decode is reserved in v1: measurement on 2026-04-26
@@ -323,9 +330,7 @@ export class WebLLM {
 		// TODO.md §19 and docs/superpowers/specs/2026-04-26-speculative-
 		// decoding-design.md.
 		if (config?.drafter !== undefined) {
-			throw new Error(
-				"Speculative decoding is reserved in v1 (measured 0.20× vs baseline at K=4 on qwen3-8b/qwen3-0.6b on 2026-04-26). See TODO.md §19 and docs/superpowers/specs/2026-04-26-speculative-decoding-design.md.",
-			);
+			throw new SpeculativeDecodingReservedError();
 		}
 
 		if (Array.isArray(input)) {
@@ -466,14 +471,15 @@ export class WebLLM {
 	 */
 	async embed(modelId: string, text: string): Promise<Float32Array> {
 		const entry = this.modelManager.get(modelId);
-		if (!entry) throw new Error(`Model "${modelId}" not found`);
+		if (!entry) throw new ModelNotFoundError(modelId);
 		if (!entry.loaded || !entry.tokenizer) {
-			throw new Error(`Model "${modelId}" not fully loaded`);
+			throw new ModelNotLoadedError(modelId);
 		}
 		const enc = this.encoderEngines.get(modelId);
 		if (!enc) {
-			throw new Error(
-				`embed() requires a bidirectional encoder model; "${modelId}" is architecture "${entry.hyperparams.architecture}"`,
+			throw new EncoderRequiredError(
+				modelId,
+				String(entry.hyperparams.architecture),
 			);
 		}
 		const ids = entry.tokenizer.encode(text);

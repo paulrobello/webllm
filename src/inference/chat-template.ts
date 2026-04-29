@@ -95,7 +95,7 @@ export interface ChatTemplateRenderOptions {
 	 * support tool calling (ChatML-family: Qwen3, Hermes, etc.). Ignored
 	 * by templates without tool support.
 	 */
-	tools?: ChatTemplateToolSchema[];
+	tools?: readonly ChatTemplateToolSchema[];
 }
 
 type ChatPromptTokenizer = Pick<Tokenizer, "bosId" | "encode" | "options">;
@@ -142,7 +142,7 @@ function formatChatml(
  */
 function injectToolsIntoSystem(
 	messages: ChatMessage[],
-	tools: ChatTemplateToolSchema[],
+	tools: readonly ChatTemplateToolSchema[],
 ): ChatMessage[] {
 	const toolBlock = buildToolsBlock(tools);
 	const out: ChatMessage[] = [];
@@ -161,7 +161,7 @@ function injectToolsIntoSystem(
 	return out;
 }
 
-function buildToolsBlock(tools: ChatTemplateToolSchema[]): string {
+function buildToolsBlock(tools: readonly ChatTemplateToolSchema[]): string {
 	const lines = tools.map((t) =>
 		JSON.stringify({
 			type: "function",

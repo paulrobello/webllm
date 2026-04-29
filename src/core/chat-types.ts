@@ -2,8 +2,8 @@ import type { GenerationFinishReason } from "../inference/generation.js";
 
 /** A single message in a conversation. */
 export interface ChatMessage {
-	role: "system" | "user" | "assistant";
-	content: string;
+	readonly role: "system" | "user" | "assistant";
+	readonly content: string;
 }
 
 /**
@@ -43,14 +43,14 @@ export interface CompletionConfig {
 	/** AbortSignal to cancel generation mid-stream. */
 	signal?: AbortSignal;
 	/** Custom stop token IDs that halt generation. */
-	stopTokenIds?: number[];
+	stopTokenIds?: readonly number[];
 	/**
 	 * Tool schemas to surface to the model via the chat template. For ChatML
 	 * templates (Qwen3, Hermes) this injects a `<tools>...</tools>` block
 	 * and tool-call instructions before the user's system message.
 	 * Templates that don't support tool blocks ignore this.
 	 */
-	tools?: ChatToolSchema[];
+	tools?: readonly ChatToolSchema[];
 	/**
 	 * Reserved in v1. Setting this throws — measurement on 2026-04-26
 	 * (qwen3-8b-iq3m via qwen3-0.6b-q4f16, K=4) produced 3.0 vs 15.3 tok/s
@@ -77,29 +77,29 @@ export type StreamConfig = CompletionConfig;
 /** Statistics from a completed streamed generation. */
 export interface StreamStats {
 	/** Number of tokens generated (excluding prompt). */
-	tokenCount: number;
+	readonly tokenCount: number;
 	/** Throughput in tokens per second. */
-	tokensPerSecond: number;
+	readonly tokensPerSecond: number;
 	/** Milliseconds from generation start to first sampled token. */
-	timeToFirstTokenMs: number;
+	readonly timeToFirstTokenMs: number;
 	/** Total wall-clock time in ms. */
-	totalMs: number;
+	readonly totalMs: number;
 	/** Full response text. */
-	text: string;
+	readonly text: string;
 	/** Why generation stopped. */
-	finishReason: GenerationFinishReason;
+	readonly finishReason: GenerationFinishReason;
 }
 
 /** Each yield from generateStream() / chatCompletion(). */
 export interface StreamChunk {
 	/** Incremental text fragment (empty string on final done=true chunk). */
-	text: string;
+	readonly text: string;
 	/** Generated token ID for incremental chunks; omitted on the final chunk. */
-	tokenId?: number;
+	readonly tokenId?: number;
 	/** True only on the final yield, which carries stats. */
-	done: boolean;
+	readonly done: boolean;
 	/** Present and populated only when done=true. */
-	stats?: StreamStats;
+	readonly stats?: StreamStats;
 }
 
 export type CompletionChunk = StreamChunk;
