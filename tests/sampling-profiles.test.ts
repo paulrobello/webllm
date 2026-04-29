@@ -24,13 +24,18 @@ describe("Sampling profile constants", () => {
 		});
 	});
 
-	test("constants are readonly at the type level", () => {
-		// Compile-time check: `as const` produces readonly narrow types.
-		// @ts-expect-error — readonly property cannot be assigned.
-		QWEN_THINKING_DEFAULTS.temperature = 0.99;
-		// @ts-expect-error — readonly property cannot be assigned.
-		QWEN_NON_THINKING_DEFAULTS.topK = 99;
-		// (Behavior already covered by `as const` literal types.)
+	test("constants are frozen at runtime (assignment throws in strict mode)", () => {
+		expect(() => {
+			// @ts-expect-error — readonly property cannot be assigned.
+			QWEN_THINKING_DEFAULTS.temperature = 0.99;
+		}).toThrow(TypeError);
+		expect(() => {
+			// @ts-expect-error — readonly property cannot be assigned.
+			QWEN_NON_THINKING_DEFAULTS.topK = 99;
+		}).toThrow(TypeError);
+
+		expect(QWEN_THINKING_DEFAULTS.temperature).toBe(0.6);
+		expect(QWEN_NON_THINKING_DEFAULTS.topK).toBe(20);
 	});
 });
 

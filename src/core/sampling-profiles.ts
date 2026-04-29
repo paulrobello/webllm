@@ -12,16 +12,16 @@
  * `"qwen-default"` regardless of architecture, or opt out with
  * `sampling: "raw"`.
  */
-export const QWEN_THINKING_DEFAULTS = {
+export const QWEN_THINKING_DEFAULTS = Object.freeze({
 	temperature: 0.6,
 	topK: 20,
 	topP: 0.95,
 	repetitionPenalty: 1.05,
-} as const;
+} as const);
 
-export const QWEN_NON_THINKING_DEFAULTS = {
+export const QWEN_NON_THINKING_DEFAULTS = Object.freeze({
 	temperature: 0.7,
 	topK: 20,
 	topP: 0.8,
 	repetitionPenalty: 1.1,
-} as const;
+} as const);
