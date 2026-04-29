@@ -27,13 +27,13 @@ cd src/wasm && mkdir -p build && cd build && \
 -- Including WebGPU backend
 -- ggml version: 0.10.0
 -- ggml commit:  3b8ade2a2
--- Configuring done (2.2s)
+-- Configuring done (1.8s)
 -- Generating done (0.0s)
 -- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build
 [  5%] Built target generate_shaders
 [ 57%] Built target ggml-base
 [ 73%] Built target ggml-webgpu
-[ 94%] Built target webllm-wasm
+[ 84%] Built target webllm-wasm
 [100%] Built target ggml
 cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
 	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
@@ -67,7 +67,7 @@ cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
 -- Including WebGPU backend
 -- ggml version: 0.10.0
 -- ggml commit:  3b8ade2a2
--- Configuring done (2.1s)
+-- Configuring done (1.9s)
 -- Generating done (0.0s)
 -- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build-mem64
 [  6%] Built target generate_shaders
@@ -77,28 +77,28 @@ cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
 bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
 Bundled 30 modules in 4ms
 
-  webllm-bundle.js  195.69 KB  (entry point)
+  webllm-bundle.js  200.47 KB  (entry point)
 
 cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
 cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
 smoke server running on http://localhost:8031
 === smoke-bench: qwen3-0.6b-q4f16, 3 runs ===
 WEBLLM_WASM_VARIANT= bun run eval/perf.ts --model qwen3-0.6b-q4f16 --runs 3 --profile 
-Run 1/3... 54.0 tok/s
-Run 2/3... 55.8 tok/s
-Run 3/3... 53.5 tok/s
+Run 1/3... 68.6 tok/s
+Run 2/3... 68.1 tok/s
+Run 3/3... 69.5 tok/s
 
 Inference perf — Qwen3 0.6B (qwen3-0.6b-q4f16)
-Timestamp: 2026-04-29T01:59:27.731Z
+Timestamp: 2026-04-29T03:05:12.875Z
 Prompt:    "Tell one short joke."
 
 Run  Tokens  Wall(ms)  Total(ms)  Prefill(ms)  Decode(ms)  tok/s
 ---  ------  --------  ---------  -----------  ----------  -----
-  1      25      2300        500           74         463   54.0
-  2      25      2267        500           76         448   55.8
-  3      25      2351        500           77         467   53.5
+  1      25      2249        400           75         365   68.6
+  2      25      2252        400           72         367   68.1
+  3      25      2252        400           75         360   69.5
 ---  ------  --------  ---------  -----------  ----------  -----
-p50*     25      2300        500           74         463   54.0
+p50*     25      2249        400           75         365   68.6
 * row selected by median tok/s; other columns are from that run, not column-wise medians.
 
 Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
@@ -107,20 +107,20 @@ Per-phase decode timing — mode=topk (72 single-token steps)
 Phase              mean(ms)  median(ms)  p90(ms)  %total
 -----------------  --------  ----------  -------  ------
 ctxCreateMs            0.00        0.00     0.00    0.0%
-buildGraphMs           0.28        0.30     0.40    1.7%
-backendAllocMs         0.06        0.10     0.10    0.3%
-uploadLeavesMs         0.00        0.00     0.00    0.0%
-graphComputeMs        14.81       16.00    16.90   90.3%
-downloadResultMs       1.25        1.30     1.50    7.6%
+buildGraphMs           0.26        0.30     0.30    2.0%
+backendAllocMs         0.05        0.10     0.10    0.4%
+uploadLeavesMs         0.01        0.00     0.00    0.0%
+graphComputeMs        11.22       11.20    11.70   88.3%
+downloadResultMs       1.16        1.20     1.40    9.1%
 teardownMs             0.00        0.00     0.00    0.0%
-totalMs               16.40       17.70    18.50  100.0%
+totalMs               12.69       12.70    13.20  100.0%
 
 Backend decode attribution (when available)
 Field                   samples  mean      median    p90       %graph
 ----------------------  -------  --------  --------  --------  ------
-backendProfileTotalMs        72     11.32     11.30     11.80   76.4%
-backendEncodeOverheadMs       72      3.37      3.30      3.60   22.8%
-backendMatmulMs              72      3.84      3.87      4.26   25.9%
-backendAttentionMs           72      0.46      0.46      0.72    3.1%
+backendProfileTotalMs        72      9.93      9.90     10.40   88.6%
+backendEncodeOverheadMs       72      3.39      3.40      3.70   30.3%
+backendMatmulMs              72      3.77      3.74      4.13   33.6%
+backendAttentionMs           72      0.43      0.46      0.66    3.9%
 backendDispatchCount         72     629.0     629.0     629.0       -
 Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
