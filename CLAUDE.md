@@ -110,11 +110,23 @@ before a change is "done". `make help` lists every target.
 
 - **Browser smoke runs** (`smoke-test/real-model.html`) auto-post `run_complete`
   to `http://localhost:8033` by default — no flag required. Override with
-  `?ingest=<url>`. **Disable per-run** with `?ingest=off` (use this for
-  throwaway sanity checks you don't want polluting the dashboard, e.g. when
-  iterating on a patched WASM build before committing).
+  `?ingest=<url>`. **For throwaway/diagnostic runs, use `?ingest=off` rather
+  than killing the dashboard.** Examples: iterating on a patched WASM build
+  before committing, sanity-checking a fix that may not land, or running a
+  diagnostic sweep where the gate hasn't yet been adjudicated. Killing
+  `dashboard-serve` for throwaway runs is heavier-handed than necessary and
+  takes the dashboard offline for any concurrent committed-bench traffic;
+  prefer the per-URL `?ingest=off` toggle.
 - **Bun harnesses** (`eval/chat-smoke.ts`, `eval/bench.ts`, etc.) require
   `WEBLLM_LIVE_BENCH_URL=http://localhost:8033` to publish events.
+
+  Note: `make smoke-bench` (via `eval/perf.ts`) does **not** currently
+  thread `?ingest=off` through to the smoke URL — diagnostic sweeps run via
+  `make smoke-bench` will hit the dashboard if it's up. If the runs are
+  throwaway and you want to keep the live DB clean without taking the
+  dashboard down, plumb `ingest=off` through `eval/perf.ts`'s
+  `extraParams` block (one-line addition gated on a `--no-ingest` flag or
+  `WEBLLM_NO_INGEST` env var) rather than killing port 8033.
 
 **Backfill missed runs:** `make import-reports` walks `eval/reports/` and
 imports any speed-run / eval-report JSONs the dashboard hasn't already
