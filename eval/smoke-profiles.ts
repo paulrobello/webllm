@@ -248,6 +248,13 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Phi-3.5 Mini Instruct — fused-forward causal LM (2026-04-29) ──
+	{
+		name: "phi-3.5-mini-warm",
+		model: "phi-3.5-mini-q4km",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Llama 3.1 8B Instruct (wave 2 model 2) ────────────────
 	{
 		name: "llama-3.1-8b-warm",

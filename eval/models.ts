@@ -264,22 +264,34 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "Q4_0",
 	},
 
+	// Phi-3.5-mini-instruct — 3.82B, fused QKV + fused gate-up FFN.
+	// Re-registered 2026-04-29 (Path B: fused-forward, phi3-gated). 32
+	// layers, hidden 3072, 32 heads (no GQA), intermediate 8192, vocab
+	// 32064. MIT license. Sliding window present in HF config but at
+	// sliding_window=262144 (effectively no SWA at our ctx=4096). The
+	// GGUF reports general.architecture="phi3" (per llama.cpp arch
+	// table); the older "phi" entry is reserved for Phi-1 / Phi-2.
+	// 197 tensors total: 6 per layer (attn_norm, attn_qkv, attn_output,
+	// ffn_norm, ffn_up [fused gate-up], ffn_down) × 32 + 5 globals.
+	// No norm biases, no lm_head bias for this specific model — the
+	// loader's optional-bias paths stay null and inert.
 	{
-		id: "phi-3.5-mini-q4f16",
-		name: "Phi-3.5 Mini Instruct",
+		id: "phi-3.5-mini-q4km",
+		name: "Phi-3.5 Mini Instruct (Q4_K_M, fused-forward)",
 		family: "Phi",
-		architecture: "phi",
+		architecture: "phi3",
 		paramsB: 3.82,
 		vramMB: 2520,
 		defaultQuant: "q4f16_1",
-		availableQuants: ["q4f16_1", "q4f32_1"],
+		availableQuants: ["q4f16_1"],
 		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
 		license: "MIT",
 		contextLength: 4096,
 		tier: "balanced",
 		requiresShaderF16: false,
-		downloadUrl: "https://huggingface.co/mlc-ai/Phi-3.5-mini-instruct-q4f16_1-MLC",
+		downloadUrl: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct",
 		ggufUrl: "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF",
+		ggufFilePattern: "Q4_K_M",
 	},
 
 	// --- Quality tier (3-4GB VRAM, 20-30 tok/s) ---
