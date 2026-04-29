@@ -1089,19 +1089,29 @@ appetite remains; none are forced.
   canonical models, ~18 min wall. Only do this on the "stale-matrix
   + still-no-rebase-ETA" branch; otherwise let the next rebase
   trigger consume the matrix and start a fresh capture.
-- **Upstream cadence check.** Today: 2 commits, 0 in `ggml-webgpu/`.
-  Procedure: `cd ~/Repos/llama.cpp && git fetch origin && git log
-  webllm-browser-patches..origin/master --oneline -- ggml/src/
-  ggml-webgpu/ ggml/include/`. **If the result is non-empty**, a
-  rebase trigger has fired — apply the §32 procedure (rebase, sweep,
-  classify per §27/§28/§32 templates). **If empty**, log and skip.
-  Reasonable cadence: every 1-2 weeks of active development; ad-hoc
-  otherwise.
-- **Test skip count.** Currently 11 (all environmental — indexedDB
-  unavailable in Bun native, WebGPU unavailable in Bun native,
-  WordPiece HF fixtures not downloaded, side-branch spec-decode
-  tests). Watch for changes; new skips might indicate accidental
-  test regressions.
+- **Upstream cadence check — DAILY.** Procedure: `cd ~/Repos/llama.cpp
+  && git fetch origin && git log webllm-browser-patches..origin/master
+  --oneline -- ggml/src/ggml-webgpu/ ggml/include/`. **If the result
+  is non-empty**, a rebase trigger has fired — apply the §32 procedure
+  (rebase, sweep, classify per §27/§28/§32 templates). **If empty**,
+  log and skip. Cadence policy set 2026-04-29: run daily even when
+  the surface has been quiet, since the cost is ~30s and a missed
+  rebase costs much more than catching one promptly. Last clean
+  run: 2026-04-29 (3 upstream tags advanced, 0 in `ggml-webgpu/`).
+- **Test skip count.** Currently 11, all environmental:
+  - `pipeline-cache.test.ts` × 5 (`!indexedDBAvailable` — IndexedDB
+    is a browser API, missing in Bun native)
+  - `forward-verify-equivalence.test.ts` × 1 describe (`!HAS_WEBGPU
+    || !existsSync(TINYLLAMA)`)
+  - `prefill-tiling-equivalence.test.ts` × 1 describe (`!HAS_WEBGPU`)
+  - `speculative-integration.test.ts` × 1 describe (`!HAS_WEBGPU
+    || !existsSync(TINYLLAMA)`)
+  - `wordpiece-golden.test.ts` × 1 describe (`!fixturesPresent` —
+    opt-in HF golden fixtures)
+
+  These are correct safety guards, not bugs or side-branch leftovers.
+  Watch for *new* skips appearing — that might indicate an accidental
+  regression — but the current 11-count is a stable baseline.
 - **Encoder parity reference vectors freshness.** `eval/reports/
   encoder-parity-2026-04-28/{jina,nomic}-ref.json` are pinned to
   whatever sentence-transformers / HF model versions resolved on
