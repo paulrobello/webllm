@@ -1,17 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { GgmlWasm } from "../src/inference/ggml-wasm.js";
 
+// Under MEMORY64+WASM_BIGINT every void*/size_t boundary becomes BigInt;
+// under wasm32 they're Number. The wrappers route through the `is64` flag
+// on GgmlWasm. Mock accepts either shape so tests can opt into wasm64.
+type Wptr = number | bigint;
+
 type MockModule = {
 	HEAPU8: Uint8Array;
 	Asyncify?: {
 		currData: object | null;
 		whenDone(): Promise<number>;
 	};
-	_malloc(size: number): number;
-	_free(ptr: number): void;
-	_bridge_malloc(size: number): number;
-	_bridge_free(ptr: number): void;
-	_graph_compute?(graph: number): number;
+	_malloc(size: Wptr): Wptr;
+	_free(ptr: Wptr): void;
+	_bridge_malloc(size: Wptr): Wptr;
+	_bridge_free(ptr: Wptr): void;
+	_ctx_create?(memSize: Wptr): number;
+	_tensor_new_1d?(type: number, ne0: number): Wptr;
+	_graph_compute?(graph: Wptr): number;
 	_webgpu_set_graph_profiling_enabled?(enabled: number): void;
 	_webgpu_last_graph_profile_valid?(): number;
 	_webgpu_last_graph_profile_breakdown_available?(): number;
@@ -21,44 +28,47 @@ type MockModule = {
 	_webgpu_last_graph_profile_encode_overhead_ms?(): number;
 	_webgpu_last_graph_profile_dispatch_count?(): number;
 	_backend_tensor_get(
-		tensor: number,
-		dstHeapPtr: number,
-		offset: number,
-		size: number,
+		tensor: Wptr,
+		dstHeapPtr: Wptr,
+		offset: Wptr,
+		size: Wptr,
 	): void;
 	_backend_tensor_get_async_begin?(
-		tensor: number,
-		offset: number,
-		size: number,
+		tensor: Wptr,
+		offset: Wptr,
+		size: Wptr,
 	): number;
 	_backend_tensor_get_async_poll?(requestId: number): number;
 	_backend_tensor_get_async_finish?(
 		requestId: number,
-		dstHeapPtr: number,
-		size: number,
+		dstHeapPtr: Wptr,
+		size: Wptr,
 	): void;
 	_backend_tensor_get_async_cancel?(requestId: number): void;
 	_backend_tensor_get_async_callback_support?(): number;
 	__webllmNotifyAsyncTensorGet?(requestId: number, state: number): void;
 };
 
-function createWasm(overrides: Partial<MockModule> = {}) {
+function createWasm(
+	overrides: Partial<MockModule> = {},
+	options: { is64?: boolean } = {},
+) {
 	const calls: string[] = [];
 	const heapU8 = new Uint8Array(new ArrayBuffer(64));
 	const module: MockModule = {
 		HEAPU8: heapU8,
-		_malloc: (size: number) => {
+		_malloc: (size: Wptr) => {
 			calls.push(`malloc:${size}`);
 			return 8;
 		},
-		_free: (ptr: number) => {
+		_free: (ptr: Wptr) => {
 			calls.push(`free:${ptr}`);
 		},
-		_bridge_malloc: (size: number) => {
+		_bridge_malloc: (size: Wptr) => {
 			calls.push(`malloc:${size}`);
 			return 8;
 		},
-		_bridge_free: (ptr: number) => {
+		_bridge_free: (ptr: Wptr) => {
 			calls.push(`free:${ptr}`);
 		},
 		_backend_tensor_get: () => {
@@ -70,6 +80,9 @@ function createWasm(overrides: Partial<MockModule> = {}) {
 
 	const wasm = new GgmlWasm();
 	(wasm as unknown as { m: MockModule }).m = module;
+	if (options.is64) {
+		(wasm as unknown as { is64: boolean }).is64 = true;
+	}
 	return { wasm, heapU8, calls };
 }
 
@@ -103,6 +116,33 @@ describe("GgmlWasm.malloc/free routes through bridge_malloc/bridge_free", () => 
 
 		expect(bridgeCalled).toBe(1);
 		expect(stdlibCalled).toBe(0);
+	});
+
+	test("ctxCreate and tensorNew1d route through BigInt under wasm64", () => {
+		const seen: { ctxArg?: unknown; tensorPtrIn: unknown } = {
+			tensorPtrIn: undefined,
+		};
+		const { wasm } = createWasm(
+			{
+				_ctx_create: (memSize) => {
+					seen.ctxArg = memSize;
+					return 0;
+				},
+				_tensor_new_1d: (_type, _ne0) => {
+					// Pointer return is BigInt under wasm64 — wrapper must narrow.
+					return BigInt(0xbeef00);
+				},
+			},
+			{ is64: true },
+		);
+
+		expect(wasm.ctxCreate(1245184)).toBe(0);
+		expect(typeof seen.ctxArg).toBe("bigint");
+		expect(seen.ctxArg).toBe(BigInt(1245184));
+
+		const ptr = wasm.tensorNew1d(0, 16);
+		expect(typeof ptr).toBe("number");
+		expect(ptr).toBe(0xbeef00);
 	});
 
 	test("malloc normalizes BigInt return value to number under wasm64", () => {

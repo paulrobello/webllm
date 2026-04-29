@@ -111,6 +111,28 @@ export class GgmlWasm {
 	 */
 	private is64 = false;
 
+	/**
+	 * Convert a JS Number to a value safe to pass across an i32/i64 wasm
+	 * boundary parameter. Under MEMORY64 + WASM_BIGINT every `void*` and
+	 * `size_t` argument is i64 and must be a BigInt; under wasm32 they are
+	 * i32 and must be a Number. Use this for every pointer or size_t arg
+	 * crossing the bridge.
+	 */
+	private big(n: number): number | bigint {
+		return this.is64 ? BigInt(n) : n;
+	}
+
+	/**
+	 * Narrow a wasm boundary return value (i64 BigInt under wasm64, i32
+	 * Number under wasm32) to a JS Number. Safe in this codebase because
+	 * no single allocation exceeds 2^53 bytes (largest tensor at 30B IQ3_M
+	 * ≈ 850 MB; full 13B Q4_K_S model ≈ 7.4 GiB ≪ 2^53). Use this for
+	 * every `void*` or `size_t` return.
+	 */
+	private num(v: number | bigint): number {
+		return typeof v === "bigint" ? Number(v) : v;
+	}
+
 	private async enqueueGraphCompute<T>(op: () => Promise<T>): Promise<T> {
 		const run = this.graphComputeQueue.then(op, op);
 		this.graphComputeQueue = run.then(
@@ -327,7 +349,8 @@ export class GgmlWasm {
 	// ── Context ──────────────────────────────────────────────────────────
 
 	ctxCreate(memSize: number): number {
-		const rc = this.m._ctx_create(memSize);
+		// _ctx_create takes a size_t (i64 under MEMORY64) and returns int32_t.
+		const rc = this.m._ctx_create(this.big(memSize));
 		if (rc < 0) throw new Error(`ctx_create failed (${rc})`);
 		return rc;
 	}
@@ -339,15 +362,15 @@ export class GgmlWasm {
 	// ── Tensor creation ──────────────────────────────────────────────────
 
 	tensorNew1d(type: number, ne0: number): TensorPtr {
-		return this.m._tensor_new_1d(type, ne0);
+		return this.num(this.m._tensor_new_1d(type, ne0));
 	}
 
 	tensorNew2d(type: number, ne0: number, ne1: number): TensorPtr {
-		return this.m._tensor_new_2d(type, ne0, ne1);
+		return this.num(this.m._tensor_new_2d(type, ne0, ne1));
 	}
 
 	tensorNew3d(type: number, ne0: number, ne1: number, ne2: number): TensorPtr {
-		return this.m._tensor_new_3d(type, ne0, ne1, ne2);
+		return this.num(this.m._tensor_new_3d(type, ne0, ne1, ne2));
 	}
 
 	tensorNew4d(
@@ -357,7 +380,7 @@ export class GgmlWasm {
 		ne2: number,
 		ne3: number,
 	): TensorPtr {
-		return this.m._tensor_new_4d(type, ne0, ne1, ne2, ne3);
+		return this.num(this.m._tensor_new_4d(type, ne0, ne1, ne2, ne3));
 	}
 
 	tensorSetName(_tensor: TensorPtr, _name: string): void {
@@ -369,37 +392,45 @@ export class GgmlWasm {
 	// ── Tensor properties ────────────────────────────────────────────────
 
 	tensorNelements(tensor: TensorPtr): number {
-		return this.m._tensor_nelements(tensor);
+		return this.m._tensor_nelements(this.big(tensor));
 	}
 
 	tensorNbytes(tensor: TensorPtr): number {
-		return this.m._tensor_nbytes(tensor);
+		return this.m._tensor_nbytes(this.big(tensor));
 	}
 
 	tensorType(tensor: TensorPtr): number {
-		return this.m._tensor_type(tensor);
+		return this.m._tensor_type(this.big(tensor));
 	}
 
 	tensorNe(tensor: TensorPtr, dim: number): number {
-		return this.m._tensor_ne(tensor, dim);
+		return this.m._tensor_ne(this.big(tensor), dim);
 	}
 
 	tensorNb(tensor: TensorPtr, dim: number): number {
-		return this.m._tensor_nb(tensor, dim);
+		return this.m._tensor_nb(this.big(tensor), dim);
 	}
 
 	tensorData(tensor: TensorPtr): number {
-		return this.m._tensor_data(tensor);
+		return this.num(this.m._tensor_data(this.big(tensor)));
 	}
 
 	// ── Tensor data I/O ──────────────────────────────────────────────────
 
 	tensorSetData(tensor: TensorPtr, srcHeapPtr: number, size: number): void {
-		this.m._tensor_set_data(tensor, srcHeapPtr, size);
+		this.m._tensor_set_data(
+			this.big(tensor),
+			this.big(srcHeapPtr),
+			this.big(size),
+		);
 	}
 
 	tensorGetData(tensor: TensorPtr, dstHeapPtr: number, size: number): void {
-		this.m._tensor_get_data(tensor, dstHeapPtr, size);
+		this.m._tensor_get_data(
+			this.big(tensor),
+			this.big(dstHeapPtr),
+			this.big(size),
+		);
 	}
 
 	/** Upload bytes from JS ArrayBuffer to a GPU tensor via heap buffer. */
@@ -407,7 +438,12 @@ export class GgmlWasm {
 		const ptr = this.malloc(data.byteLength);
 		try {
 			this.heapU8.set(data, ptr);
-			this.m._backend_tensor_set(tensor, ptr, offset, data.byteLength);
+			this.m._backend_tensor_set(
+				this.big(tensor),
+				this.big(ptr),
+				this.big(offset),
+				this.big(data.byteLength),
+			);
 		} finally {
 			this.free(ptr);
 		}
@@ -426,7 +462,12 @@ export class GgmlWasm {
 				const end = Math.min(off + chunkSize, total);
 				const slice = data.subarray(off, end);
 				this.heapU8.set(slice, ptr);
-				this.m._backend_tensor_set(tensor, ptr, off, slice.byteLength);
+				this.m._backend_tensor_set(
+					this.big(tensor),
+					this.big(ptr),
+					this.big(off),
+					this.big(slice.byteLength),
+				);
 			}
 		} finally {
 			this.free(ptr);
@@ -452,7 +493,12 @@ export class GgmlWasm {
 				const end = Math.min(off + chunkSize, byteLength);
 				const slice = dataAt(off, end - off);
 				this.heapU8.set(slice, ptr);
-				this.m._backend_tensor_set(tensor, ptr, off, slice.byteLength);
+				this.m._backend_tensor_set(
+					this.big(tensor),
+					this.big(ptr),
+					this.big(off),
+					this.big(slice.byteLength),
+				);
 			}
 		} finally {
 			this.free(ptr);
@@ -586,27 +632,27 @@ export class GgmlWasm {
 	// ── Graph operations ─────────────────────────────────────────────────
 
 	opMulMat(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.m._op_mul_mat(a, b);
+		return this.num(this.m._op_mul_mat(this.big(a), this.big(b)));
 	}
 
 	opAdd(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.m._op_add(a, b);
+		return this.num(this.m._op_add(this.big(a), this.big(b)));
 	}
 
 	opMul(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.m._op_mul(a, b);
+		return this.num(this.m._op_mul(this.big(a), this.big(b)));
 	}
 
 	opRmsNorm(x: TensorPtr, eps: number): TensorPtr {
-		return this.m._op_rms_norm(x, eps);
+		return this.num(this.m._op_rms_norm(this.big(x), eps));
 	}
 
 	opSilu(x: TensorPtr): TensorPtr {
-		return this.m._op_silu(x);
+		return this.num(this.m._op_silu(this.big(x)));
 	}
 
 	opGelu(x: TensorPtr): TensorPtr {
-		return this.m._op_gelu(x);
+		return this.num(this.m._op_gelu(this.big(x)));
 	}
 
 	opRope(
@@ -622,27 +668,29 @@ export class GgmlWasm {
 		betaFast: number,
 		betaSlow: number,
 	): TensorPtr {
-		return this.m._op_rope(
-			x,
-			pos,
-			nDims,
-			mode,
-			nCtxOrig,
-			freqBase,
-			freqScale,
-			extFactor,
-			attnFactor,
-			betaFast,
-			betaSlow,
+		return this.num(
+			this.m._op_rope(
+				this.big(x),
+				this.big(pos),
+				nDims,
+				mode,
+				nCtxOrig,
+				freqBase,
+				freqScale,
+				extFactor,
+				attnFactor,
+				betaFast,
+				betaSlow,
+			),
 		);
 	}
 
 	opReshape2d(x: TensorPtr, ne0: number, ne1: number): TensorPtr {
-		return this.m._op_reshape_2d(x, ne0, ne1);
+		return this.num(this.m._op_reshape_2d(this.big(x), ne0, ne1));
 	}
 
 	opReshape3d(x: TensorPtr, ne0: number, ne1: number, ne2: number): TensorPtr {
-		return this.m._op_reshape_3d(x, ne0, ne1, ne2);
+		return this.num(this.m._op_reshape_3d(this.big(x), ne0, ne1, ne2));
 	}
 
 	opPermute(
@@ -652,11 +700,11 @@ export class GgmlWasm {
 		d2: number,
 		d3: number,
 	): TensorPtr {
-		return this.m._op_permute(x, d0, d1, d2, d3);
+		return this.num(this.m._op_permute(this.big(x), d0, d1, d2, d3));
 	}
 
 	opCont(x: TensorPtr): TensorPtr {
-		return this.m._op_cont(x);
+		return this.num(this.m._op_cont(this.big(x)));
 	}
 
 	opView2d(
@@ -666,7 +714,10 @@ export class GgmlWasm {
 		nb1: number,
 		offset: number,
 	): TensorPtr {
-		return this.m._op_view_2d(x, ne0, ne1, nb1, offset);
+		// offset is size_t (i64 under wasm64); ne0/ne1/nb1 stay int32_t.
+		return this.num(
+			this.m._op_view_2d(this.big(x), ne0, ne1, nb1, this.big(offset)),
+		);
 	}
 
 	opView3d(
@@ -678,20 +729,30 @@ export class GgmlWasm {
 		nb2: number,
 		offset: number,
 	): TensorPtr {
-		return this.m._op_view_3d(x, ne0, ne1, ne2, nb1, nb2, offset);
+		return this.num(
+			this.m._op_view_3d(
+				this.big(x),
+				ne0,
+				ne1,
+				ne2,
+				nb1,
+				nb2,
+				this.big(offset),
+			),
+		);
 	}
 
 	opCpy(src: TensorPtr, dst: TensorPtr): TensorPtr {
-		return this.m._op_cpy(src, dst);
+		return this.num(this.m._op_cpy(this.big(src), this.big(dst)));
 	}
 
 	opSoftMax(x: TensorPtr): TensorPtr {
-		return this.m._op_soft_max(x);
+		return this.num(this.m._op_soft_max(this.big(x)));
 	}
 
 	/** Fused SwiGLU for LLaMA FFN: silu(a) * b in one op. */
 	opSwigluSplit(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.m._op_swiglu_split(a, b);
+		return this.num(this.m._op_swiglu_split(this.big(a), this.big(b)));
 	}
 
 	/**
@@ -707,7 +768,9 @@ export class GgmlWasm {
 		scale: number,
 		maxBias: number,
 	): TensorPtr {
-		return this.m._op_soft_max_ext(x, mask, scale, maxBias);
+		return this.num(
+			this.m._op_soft_max_ext(this.big(x), this.big(mask), scale, maxBias),
+		);
 	}
 
 	/**
@@ -739,68 +802,72 @@ export class GgmlWasm {
 		maxBias: number,
 		logitSoftcap: number,
 	): TensorPtr {
-		return this.m._op_flash_attn_ext(
-			q,
-			k,
-			v,
-			mask,
-			scale,
-			maxBias,
-			logitSoftcap,
+		return this.num(
+			this.m._op_flash_attn_ext(
+				this.big(q),
+				this.big(k),
+				this.big(v),
+				this.big(mask),
+				scale,
+				maxBias,
+				logitSoftcap,
+			),
 		);
 	}
 
 	/** Pin the FA accumulator precision (e.g. GgmlPrec.F32 for higher precision). */
 	opFlashAttnSetPrec(a: TensorPtr, prec: GgmlPrec): void {
-		this.m._op_flash_attn_ext_set_prec(a, prec);
+		this.m._op_flash_attn_ext_set_prec(this.big(a), prec);
 	}
 
 	/** Attach attention sinks (used by some Phi-3 / Qwen variants). Pass 0 for none. */
 	opFlashAttnAddSinks(a: TensorPtr, sinks: TensorPtr): void {
-		this.m._op_flash_attn_ext_add_sinks(a, sinks);
+		this.m._op_flash_attn_ext_add_sinks(this.big(a), this.big(sinks));
 	}
 
 	opScale(x: TensorPtr, s: number): TensorPtr {
-		return this.m._op_scale(x, s);
+		return this.num(this.m._op_scale(this.big(x), s));
 	}
 
 	opRepeat(x: TensorPtr, y: TensorPtr): TensorPtr {
-		return this.m._op_repeat(x, y);
+		return this.num(this.m._op_repeat(this.big(x), this.big(y)));
 	}
 
 	opGetRows(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.m._op_get_rows(a, b);
+		return this.num(this.m._op_get_rows(this.big(a), this.big(b)));
 	}
 
 	opArgmax(src: TensorPtr): TensorPtr {
-		return this.m._op_argmax(src);
+		return this.num(this.m._op_argmax(this.big(src)));
 	}
 
 	opTopK(src: TensorPtr, k: number): TensorPtr {
-		return this.m._op_top_k(src, k);
+		return this.num(this.m._op_top_k(this.big(src), k));
 	}
 
 	opDiagMaskInf(x: TensorPtr, nPast: number): TensorPtr {
-		return this.m._op_diag_mask_inf(x, nPast);
+		return this.num(this.m._op_diag_mask_inf(this.big(x), nPast));
 	}
 
 	opNorm(x: TensorPtr, eps: number): TensorPtr {
-		return this.m._op_norm(x, eps);
+		return this.num(this.m._op_norm(this.big(x), eps));
 	}
 
 	// ── Graph compute ────────────────────────────────────────────────────
 
 	graphNew(size: number): GraphPtr {
-		return this.m._graph_new(size);
+		// _graph_new takes size_t (i64 under wasm64) and returns void* graph ptr.
+		return this.num(this.m._graph_new(this.big(size)));
 	}
 
 	graphBuildForwardExpand(graph: GraphPtr, tensor: TensorPtr): void {
-		this.m._graph_build_forward_expand(graph, tensor);
+		this.m._graph_build_forward_expand(this.big(graph), this.big(tensor));
 	}
 
 	async graphCompute(graph: GraphPtr): Promise<number> {
+		const graphArg = this.big(graph);
 		return await this.enqueueGraphCompute(() =>
-			this.callWithAsyncify<number>(() => this.m._graph_compute(graph)),
+			this.callWithAsyncify<number>(() => this.m._graph_compute(graphArg)),
 		);
 	}
 
@@ -809,11 +876,12 @@ export class GgmlWasm {
 	}
 
 	async graphComputeWithDetailedProfile(graph: GraphPtr): Promise<number> {
+		const graphArg = this.big(graph);
 		return await this.enqueueGraphCompute(async () => {
 			this.setDetailedGraphComputeProfilingEnabled(true);
 			try {
 				return await this.callWithAsyncify<number>(() =>
-					this.m._graph_compute(graph),
+					this.m._graph_compute(graphArg),
 				);
 			} finally {
 				this.setDetailedGraphComputeProfilingEnabled(false);
@@ -844,11 +912,11 @@ export class GgmlWasm {
 	// ── Backend buffer ───────────────────────────────────────────────────
 
 	backendAllocCtxTensors(): BufferPtr {
-		return this.m._backend_alloc_ctx_tensors();
+		return this.num(this.m._backend_alloc_ctx_tensors());
 	}
 
 	backendBufferFree(buffer: BufferPtr): void {
-		this.m._backend_buffer_free(buffer);
+		this.m._backend_buffer_free(this.big(buffer));
 	}
 
 	backendTensorSet(
@@ -857,7 +925,12 @@ export class GgmlWasm {
 		offset: number,
 		size: number,
 	): void {
-		this.m._backend_tensor_set(tensor, srcHeapPtr, offset, size);
+		this.m._backend_tensor_set(
+			this.big(tensor),
+			this.big(srcHeapPtr),
+			this.big(offset),
+			this.big(size),
+		);
 	}
 
 	/**
@@ -877,7 +950,17 @@ export class GgmlWasm {
 		d3: number,
 		sz3: number,
 	): void {
-		this.m._backend_tensor_set3(t1, d1, sz1, t2, d2, sz2, t3, d3, sz3);
+		this.m._backend_tensor_set3(
+			this.big(t1),
+			this.big(d1),
+			this.big(sz1),
+			this.big(t2),
+			this.big(d2),
+			this.big(sz2),
+			this.big(t3),
+			this.big(d3),
+			this.big(sz3),
+		);
 	}
 
 	async backendTensorGet(
@@ -886,8 +969,12 @@ export class GgmlWasm {
 		offset: number,
 		size: number,
 	): Promise<void> {
+		const tensorArg = this.big(tensor);
+		const dstArg = this.big(dstHeapPtr);
+		const offsetArg = this.big(offset);
+		const sizeArg = this.big(size);
 		await this.callWithAsyncify<void>(() =>
-			this.m._backend_tensor_get(tensor, dstHeapPtr, offset, size),
+			this.m._backend_tensor_get(tensorArg, dstArg, offsetArg, sizeArg),
 		);
 	}
 
@@ -896,7 +983,12 @@ export class GgmlWasm {
 		offset: number,
 		size: number,
 	): number {
-		return this.m._backend_tensor_get_async_begin(tensor, offset, size);
+		// requestId return is int32_t; tensor/offset/size are ptr/size_t.
+		return this.m._backend_tensor_get_async_begin(
+			this.big(tensor),
+			this.big(offset),
+			this.big(size),
+		);
 	}
 
 	backendTensorGetAsyncPoll(requestId: number): number {
@@ -908,7 +1000,12 @@ export class GgmlWasm {
 		dstHeapPtr: number,
 		size: number,
 	): void {
-		this.m._backend_tensor_get_async_finish(requestId, dstHeapPtr, size);
+		// requestId stays int32_t; dstHeapPtr is void*, size is size_t.
+		this.m._backend_tensor_get_async_finish(
+			requestId,
+			this.big(dstHeapPtr),
+			this.big(size),
+		);
 	}
 
 	backendTensorGetAsyncCancel(requestId: number): void {
