@@ -59,4 +59,19 @@ describe("Character.setTools", () => {
 		const after = (ch as unknown as { toolSystem: unknown }).toolSystem;
 		expect(after).not.toBeNull();
 	});
+
+	test("copies the input array defensively (caller mutation cannot leak)", () => {
+		const ch = new Character({
+			modelId: "test-model",
+			systemPrompt: "system",
+		});
+		const callerArray: ToolDefinition[] = [toolA];
+		ch.setTools(callerArray);
+
+		// Caller mutates their array post-call.
+		callerArray.push(toolB);
+
+		expect(ch.config.tools).toEqual([toolA]);
+		expect(ch.config.tools).not.toBe(callerArray);
+	});
 });

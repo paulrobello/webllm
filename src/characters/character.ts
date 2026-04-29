@@ -293,11 +293,14 @@ export class Character {
 	 *
 	 * Empty array clears tools (mirrors constructor behavior). Existing
 	 * message history is preserved. No effect on in-flight `chat()` —
-	 * the change applies to the next call.
+	 * the change applies to the next call. The input array is copied
+	 * defensively, so post-call mutation of the caller's array does not
+	 * affect the character's tool state.
 	 */
 	setTools(tools: ToolDefinition[]): void {
-		this.config.tools = tools;
-		this.toolSystem = tools.length > 0 ? new ToolSystem(tools) : null;
+		const copy = [...tools];
+		this.config.tools = copy;
+		this.toolSystem = copy.length > 0 ? new ToolSystem(copy) : null;
 	}
 
 	get isActive(): boolean {
