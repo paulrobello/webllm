@@ -25,7 +25,7 @@
   Real LF (U+000A) between the two lines; no space after `Query:`. Documents pass raw.
 
 - **Output dim:** 1024 (= `hidden_size`; no projection head)
-- **Normalization:** L2 via sentence-transformers `normalize_embeddings=True`. Max magnitude deviation across all 10 vectors: **5.46e-08** — eight orders of magnitude inside the 1e-3 spec gate.
+- **Normalization:** L2 via sentence-transformers `normalize_embeddings=True`. Max magnitude deviation across all 10 vectors: **5.46e-08** — about four orders of magnitude inside the 1e-3 spec gate.
 
 ## Document mode (5 vectors)
 
@@ -85,9 +85,9 @@ would land it ≥ 0.99).
 
 Off-diagonal ranges: doc-vs-doc 0.262–0.628; query-vs-query 0.115–0.461. Healthy
 distinguishability — no model collapse, no degenerate vectors. Row 4's strong
-separation (0.5409) reflects the unicode-heavy input being the most prefix-
-sensitive case; row 3's tightness (0.9674) reflects a short, semantically
-dense fixture.
+separation (0.5409) is the minimal-content fixture (`.`) where the prefix
+dominates the representation; row 3's tightness (0.9674) is the unicode-heavy
+fixture where the dense content carries most of the signal in both modes.
 
 ## Probe conclusion
 
@@ -106,7 +106,7 @@ All six spec-listed risks are resolved or explicitly accepted:
    (`model-inference.ts:912-916`, before `lm_head`), aligned with
    `~/Repos/llama.cpp/src/models/qwen3.cpp:98` `res->t_embd = cur`.
 5. ✅ **Reference vectors L2-normalized** — magnitude assertion passed at
-   1e-3 tolerance with margin 8 orders tighter (5.46e-08).
+   1e-3 tolerance with margin ~4 orders tighter (5.46e-08).
 6. ✅ **Projection-head presence + dim characterized** — absent; output dim
    = `hidden_size` = 1024.
 
