@@ -229,7 +229,7 @@ function formatPhi3(
 		prompt += `<|${msg.role}|>\n${msg.content}<|end|>\n`;
 	}
 	if (addGenerationPrompt) {
-		prompt += "<|assistant|?\n";
+		prompt += "<|assistant|>\n";
 	}
 	return prompt;
 }
