@@ -48,6 +48,10 @@ import {
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
 import { PipelineCache } from "./pipeline-cache.js";
+import {
+	QWEN_NON_THINKING_DEFAULTS,
+	QWEN_THINKING_DEFAULTS,
+} from "./sampling-profiles.js";
 import { Scheduler } from "./scheduler.js";
 import {
 	type EventHandler,
@@ -94,20 +98,6 @@ export function pickWasmUrl(
 		? "webllm-wasm-mem64.js"
 		: "webllm-wasm.js";
 }
-
-const QWEN_THINKING_DEFAULTS = {
-	temperature: 0.6,
-	topK: 20,
-	topP: 0.95,
-	repetitionPenalty: 1.05,
-} as const;
-
-const QWEN_NON_THINKING_DEFAULTS = {
-	temperature: 0.7,
-	topK: 20,
-	topP: 0.8,
-	repetitionPenalty: 1.1,
-} as const;
 
 export class WebLLM {
 	private _config: WebLLMConfig;
@@ -279,26 +269,33 @@ export class WebLLM {
 
 		const tokenizer = entry.tokenizer;
 		const chatTemplate = tokenizer.options.chatTemplate;
+		const samplingMode = config?.sampling ?? "auto";
 		const isQwenChatml =
 			Array.isArray(input) &&
 			String(entry.hyperparams.architecture).startsWith("qwen") &&
 			detectChatTemplate(chatTemplate ?? "") === "chatml";
-		const qwenDefaults =
-			isQwenChatml && config?.enableThinking === false
+		const applyAutoQwen = samplingMode === "auto" && isQwenChatml;
+		const forcedProfile =
+			samplingMode === "qwen-thinking"
+				? QWEN_THINKING_DEFAULTS
+				: samplingMode === "qwen-default"
+					? QWEN_NON_THINKING_DEFAULTS
+					: null;
+		const autoProfile = applyAutoQwen
+			? config?.enableThinking === false
 				? QWEN_NON_THINKING_DEFAULTS
-				: QWEN_THINKING_DEFAULTS;
-		const effectiveTemperature = isQwenChatml
-			? (config?.temperature ?? qwenDefaults.temperature)
-			: (config?.temperature ?? 1.0);
-		const effectiveTopK = isQwenChatml
-			? (config?.topK ?? qwenDefaults.topK)
-			: (config?.topK ?? 0);
-		const effectiveTopP = isQwenChatml
-			? (config?.topP ?? qwenDefaults.topP)
-			: (config?.topP ?? 1.0);
-		const effectiveRepetitionPenalty = isQwenChatml
-			? (config?.repetitionPenalty ?? qwenDefaults.repetitionPenalty)
-			: (config?.repetitionPenalty ?? 1.0);
+				: QWEN_THINKING_DEFAULTS
+			: null;
+		const activeProfile = forcedProfile ?? autoProfile;
+		// Consumer-provided values override profile defaults; profile defaults
+		// override engine fallbacks. samplingMode === "raw" produces a null
+		// activeProfile, falling through to the engine fallbacks directly.
+		const effectiveTemperature =
+			config?.temperature ?? activeProfile?.temperature ?? 1.0;
+		const effectiveTopK = config?.topK ?? activeProfile?.topK ?? 0;
+		const effectiveTopP = config?.topP ?? activeProfile?.topP ?? 1.0;
+		const effectiveRepetitionPenalty =
+			config?.repetitionPenalty ?? activeProfile?.repetitionPenalty ?? 1.0;
 		const sampler = new Sampler({
 			temperature: effectiveTemperature,
 			topK: effectiveTopK,

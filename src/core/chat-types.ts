@@ -35,6 +35,23 @@ export interface CompletionConfig {
 	/** Repetition penalty. 1.0 = disabled. Default: 1.0 */
 	repetitionPenalty?: number;
 	/**
+	 * How to apply sampling-parameter defaults.
+	 * - `"auto"` (default): apply Qwen profiles when architecture starts
+	 *   with `"qwen"` and chat template is ChatML; otherwise use
+	 *   consumer-provided values.
+	 * - `"qwen-thinking"`: force `QWEN_THINKING_DEFAULTS` regardless of
+	 *   architecture.
+	 * - `"qwen-default"`: force `QWEN_NON_THINKING_DEFAULTS` regardless
+	 *   of architecture.
+	 * - `"raw"`: skip auto-application; use only consumer-provided values
+	 *   (with engine fallbacks for unspecified fields).
+	 *
+	 * Consumer-provided field values always override profile defaults.
+	 * Example: `sampling: "qwen-thinking", temperature: 0.9` applies the
+	 * qwen profile then overrides temperature with 0.9.
+	 */
+	sampling?: "auto" | "qwen-thinking" | "qwen-default" | "raw";
+	/**
 	 * Optional PRNG seed for deterministic sampling. When omitted the
 	 * sampler falls back to `Math.random`. Useful for reproducible
 	 * smoke/bench runs.

@@ -42,6 +42,10 @@ export type {
 export { MemoryPool } from "./core/memory-pool.js";
 export { ModelManager } from "./core/model-manager.js";
 export { PipelineCache } from "./core/pipeline-cache.js";
+export {
+	QWEN_NON_THINKING_DEFAULTS,
+	QWEN_THINKING_DEFAULTS,
+} from "./core/sampling-profiles.js";
 export { Scheduler } from "./core/scheduler.js";
 export type {
 	EventHandler,
