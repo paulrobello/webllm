@@ -820,6 +820,25 @@ See dedicated section below.
 can host 13B Q4_K_S (~7.4 GiB) and 30B IQ3_M (~12.8 GiB) targets
 within the 30B project ceiling.
 
+**Status (2026-04-28):** Phases 0-4 complete. Phase 5 (bench parity
+gates on canonical 6) is the next user-gated step.
+
+| Phase | Commit(s) | Result |
+|---|---|---|
+| 0 — audit + punch list | `c2cf1ef` (audit), `fe9c406` (filter fix) | 16 first-party stack/heap callsites mapped at `eval/reports/memory64-migration-2026-04-28/PUNCH-LIST.md` |
+| 1 — JS bridge_malloc migration | `65cd0a8` | `is64` probe + `_bridge_malloc` / `_bridge_free` wrappers; +2 fixture tests |
+| 1.5 — BigInt FFI coverage gap | `061a93c` | Extended `is64`-aware routing (`big()` / `num()` helpers) to all 38 `void*` / `size_t` boundaries; surfaced when Phase 4 wasm64 smoke aborted at `_ctx_create(1245184)` (Phase 1 only wrapped malloc/free). +1 test. |
+| 2 — bridge ABI hardening | `9556cf0` | 11 `int32_t` → `size_t` promotions across `webgpu-bridge.cpp`; wasm32 byte-identical pre/post |
+| 3 — GGUF loader BigInt boundary | `80b63d6` | Static analysis 14/14 safe; `eval/reports/memory64-migration-2026-04-28/PHASE-3-VERIFY.md` |
+| 4 — dual-binary `make wasm-build` | `2ef3e9a` | `wasm-build-{wasm32,mem64}` sub-targets; `?wasm=mem64` smoke toggle; **15/15 PASS on both wasm32 and wasm64** |
+
+**Phase 5 readiness:** working bench surface ready
+(`smoke-test/index.html` `?wasm=mem64`, `make smoke-bench`,
+`make bench-inference`); pre-rebase wasm32 references pinned at
+`eval/reports/pre-rebase-baselines-2026-04-28/SUMMARY.md`. **Held
+pending explicit user "go"** — gate is zero ≥3% regression on
+canonical 6.
+
 **Probe state — what's already established:**
 
 - ✅ ASYNCIFY × MEMORY64 round-trip works (§31 closure;
