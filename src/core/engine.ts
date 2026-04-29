@@ -10,6 +10,7 @@ import {
 	type GenerationConfig,
 	Generator,
 	generateTextStream,
+	type InternalGenerationOptions,
 } from "../inference/generation.js";
 import { GgmlWasm } from "../inference/ggml-wasm.js";
 import {
@@ -236,8 +237,7 @@ export class WebLLM {
 			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
 		};
 
-		const genConfig: GenerationConfig = {
-			prompt,
+		const genConfig: InternalGenerationOptions = {
 			maxTokens: config?.maxTokens ?? 512,
 			temperature: config?.temperature ?? 1.0,
 			topK: config?.topK ?? 0,
@@ -309,14 +309,14 @@ export class WebLLM {
 			repetitionPenalty: effectiveRepetitionPenalty,
 			seed: config?.seed,
 		});
-		const genConfig: GenerationConfig = {
-			prompt: typeof input === "string" ? input : "",
+		const genConfig: InternalGenerationOptions = {
 			maxTokens: config?.maxTokens ?? 512,
 			temperature: effectiveTemperature,
 			topK: effectiveTopK,
 			topP: effectiveTopP,
 			repetitionPenalty: effectiveRepetitionPenalty,
 			stopTokens: config?.stopTokenIds ? [...config.stopTokenIds] : undefined,
+			signal: config?.signal,
 		};
 
 		// Speculative-decode is reserved in v1: measurement on 2026-04-26
@@ -443,7 +443,6 @@ export class WebLLM {
 			tokenizer,
 			forwardPass,
 			config: genConfig,
-			signal: config?.signal,
 			forwardDecode,
 		});
 	}

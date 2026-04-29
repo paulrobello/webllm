@@ -7,10 +7,8 @@ import {
 	type Tokenizer,
 } from "./tokenizer.js";
 
-/** Configuration for a single generation request. */
+/** Configuration for a single generation request. Public API surface. */
 export interface GenerationConfig {
-	/** The input prompt text (pre-tokenization). */
-	prompt: string;
 	/** Maximum number of tokens to generate. */
 	maxTokens: number;
 	/** Sampling temperature. 0 = greedy. */
@@ -23,6 +21,17 @@ export interface GenerationConfig {
 	repetitionPenalty: number;
 	/** Optional custom stop token IDs that halt generation. */
 	stopTokens?: number[];
+	/** Optional AbortSignal to cancel generation mid-stream. */
+	signal?: AbortSignal;
+}
+
+/**
+ * Internal options for `Generator.generate` / `generateTextStream`. Extends
+ * the public `GenerationConfig` with chat-control steering fields (Qwen3
+ * thinking-block masks, leading-whitespace enforcement, etc.). Engine builds
+ * this internally and never exposes it on the public API.
+ */
+export interface InternalGenerationOptions extends GenerationConfig {
 	/**
 	 * Optional token IDs that should terminate generation if produced after the
 	 * first generated token. Used to contain malformed chat-control reentry.
@@ -137,8 +146,7 @@ export interface GenerationStreamOptions {
 		tokenIds: number[],
 		positions: number[],
 	) => Float32Array | Promise<Float32Array>;
-	config: GenerationConfig;
-	signal?: AbortSignal;
+	config: InternalGenerationOptions;
 	forwardDecode?: (
 		tokenIds: number[],
 		positions: number[],
@@ -164,8 +172,7 @@ export class Generator {
 	 * @param session - Inference session tracking position and token history.
 	 * @param eosTokenId - End-of-sequence token ID.
 	 * @param forwardPass - Function that runs the model forward pass and returns logits.
-	 * @param config - Generation configuration.
-	 * @param signal - Optional AbortSignal to cancel generation mid-stream.
+	 * @param config - Generation configuration (signal travels via `config.signal`).
 	 * @param forwardDecode - Optional GPU-side decode function for reduced readback.
 	 * @yields Sampled token IDs (one at a time, excluding prompt tokens).
 	 * @returns Generation statistics after the loop completes.
@@ -179,8 +186,7 @@ export class Generator {
 			tokenIds: number[],
 			positions: number[],
 		) => Float32Array | Promise<Float32Array>,
-		config: GenerationConfig,
-		signal?: AbortSignal,
+		config: InternalGenerationOptions,
 		forwardDecode?: (
 			tokenIds: number[],
 			positions: number[],
@@ -222,7 +228,7 @@ export class Generator {
 		session.advance(promptTokenIds.length);
 		for (const id of promptTokenIds) session.pushToken(id);
 
-		if (signal?.aborted) {
+		if (config.signal?.aborted) {
 			const elapsed = performance.now() - startTime;
 			return {
 				tokens: [...session.tokens],
@@ -299,7 +305,7 @@ export class Generator {
 
 		// 3. Autoregressive decode loop
 		while (!session.shouldStop(sampledId, eosTokenId)) {
-			if (signal?.aborted) {
+			if (config.signal?.aborted) {
 				finishReason = "aborted";
 				break;
 			}
@@ -332,7 +338,7 @@ export class Generator {
 					throw new Error("forwardDecode(greedy) returned no tokenId");
 				}
 				session.advance(1);
-				if (signal?.aborted) break;
+				if (config.signal?.aborted) break;
 				sampledId = result.tokenId;
 			} else if (decodeStep && gpuMode === "topk") {
 				// GPU TOP_K + CPU sampling on reduced set. When steering is
@@ -351,7 +357,7 @@ export class Generator {
 					throw new Error("forwardDecode(topk) returned incomplete top-k data");
 				}
 				session.advance(1);
-				if (signal?.aborted) break;
+				if (config.signal?.aborted) break;
 
 				let indices = result.topKIndices;
 				let values = result.topKValues;
@@ -399,7 +405,7 @@ export class Generator {
 					throw new Error("forwardDecode(full) returned no logits");
 				}
 				session.advance(1);
-				if (signal?.aborted) break;
+				if (config.signal?.aborted) break;
 				sampler.applyRepetitionPenalty(result.logits, recentTokens.slice(-64));
 				if (thinkDepth > 0) {
 					maskTokenLogits(result.logits, maskedTokensWhileThinking);
@@ -439,7 +445,7 @@ export class Generator {
 					[session.currentPosition],
 				);
 				session.advance(1);
-				if (signal?.aborted) break;
+				if (config.signal?.aborted) break;
 				sampler.applyRepetitionPenalty(stepLogits, recentTokens.slice(-64));
 				if (thinkDepth > 0) {
 					maskTokenLogits(stepLogits, maskedTokensWhileThinking);
@@ -523,7 +529,7 @@ export class Generator {
 
 		// 4. Return stats
 		if (!finishReason) {
-			finishReason = signal?.aborted
+			finishReason = config.signal?.aborted
 				? "aborted"
 				: sampledId === eosTokenId
 					? "eos"
@@ -656,7 +662,6 @@ export async function* generateTextStream({
 	tokenizer,
 	forwardPass,
 	config,
-	signal,
 	forwardDecode,
 }: GenerationStreamOptions): AsyncGenerator<
 	GenerationStreamChunk,
@@ -671,7 +676,6 @@ export async function* generateTextStream({
 		eosTokenId,
 		forwardPass,
 		config,
-		signal,
 		forwardDecode,
 	);
 

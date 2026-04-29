@@ -1,7 +1,7 @@
 import type {
-	GenerationConfig,
 	GenerationFinishReason,
 	GenerationResult,
+	InternalGenerationOptions,
 } from "./generation.js";
 import type { ModelInference } from "./model-inference.js";
 import type { Sampler } from "./sampler.js";
@@ -227,7 +227,7 @@ export interface SpeculativeGenerateOptions {
 	/** Generation config (maxTokens, temperature, topK, topP, repetitionPenalty,
 	 *  stopTokens). Steering fields must be empty — engagement gate at the
 	 *  engine level guarantees this. */
-	config: GenerationConfig;
+	config: InternalGenerationOptions;
 	/** EOS token id for the shared tokenizer. */
 	eosTokenId: number;
 	/** Draft-burst length K (≥ 2). */

@@ -748,12 +748,12 @@ describe("Generator", () => {
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 10,
 			temperature: 0,
 			topK: 40,
 			topP: 1,
 			repetitionPenalty: 1,
+			signal: controller.signal,
 		};
 
 		const tokens: number[] = [];
@@ -764,7 +764,6 @@ describe("Generator", () => {
 			2,
 			mockForwardPass,
 			config,
-			controller.signal,
 		)) {
 			tokens.push(token);
 		}
@@ -787,12 +786,12 @@ describe("Generator", () => {
 			0,
 		);
 		const config: GenerationConfig = {
-			prompt: "test",
 			maxTokens: 50,
 			temperature: 0,
 			topK: 40,
 			topP: 1,
 			repetitionPenalty: 1,
+			signal: controller.signal,
 		};
 
 		const tokens: number[] = [];
@@ -803,7 +802,6 @@ describe("Generator", () => {
 			2,
 			delayedForward,
 			config,
-			controller.signal,
 		)) {
 			tokens.push(token);
 		}
@@ -928,7 +926,6 @@ describe("Generator", () => {
 			99,
 			prefillThink,
 			config,
-			undefined,
 			decodeStep,
 		)) {
 			tokens.push(token);
