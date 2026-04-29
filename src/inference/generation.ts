@@ -99,9 +99,13 @@ export interface InternalGenerationOptions extends GenerationConfig {
 }
 
 export type GenerationFinishReason =
+	/** Generation cancelled via AbortSignal. */
 	| "aborted"
+	/** End-of-sequence token sampled. */
 	| "eos"
+	/** maxTokens budget exhausted. */
 	| "max-tokens"
+	/** A custom `stopTokens` entry was sampled. */
 	| "stop-token";
 
 /** Statistics and output from a completed generation run. */

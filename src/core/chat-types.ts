@@ -16,7 +16,11 @@ export interface ChatToolSchema {
 	description: string;
 	parameters: Record<
 		string,
-		{ type: string; description?: string; required?: boolean }
+		{
+			type: "string" | "number" | "integer" | "boolean" | "array" | "object";
+			description?: string;
+			required?: boolean;
+		}
 	>;
 }
 

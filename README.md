@@ -160,6 +160,8 @@ graph TD
 | `GameLoop` | Frame-budget-aware game loop for inference ticks |
 | `GgmlWasm` | WebAssembly bridge for ggml-webgpu tensor operations |
 | `LightweightModel` | Pure WGSL inference for small models |
+| `engine.removeCharacter(id)` | Remove a registered character by id. |
+| `engine.shutdown()` | Release GPU buffers, dispose inference engines, and shut down WASM modules for all loaded models. |
 
 ## Development
 
