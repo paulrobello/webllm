@@ -51,6 +51,7 @@ export type ModelArchitecture =
 	| "llama"
 	| "mistral"
 	| "phi"
+	| "phi3"
 	| "gemma"
 	| "qwen"
 	| "qwen2"
