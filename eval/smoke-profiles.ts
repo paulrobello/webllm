@@ -223,6 +223,12 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		prompt: DEFAULT_PROMPT,
 	},
 	{
+		name: "mistral-7b-v0.3-q5km-warm",
+		model: "mistral-7b-instruct-v0.3-q5km",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
+	{
 		name: "mistral-7b-v0.3-q3km-warm",
 		model: "mistral-7b-instruct-v0.3-q3km",
 		temperature: 0.6,

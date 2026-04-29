@@ -516,6 +516,37 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "Q4_K_S",
 	},
 
+	// >4 GiB MEMORY64 reproducer (Phase 7 of the MEMORY64 full
+	// migration, 2026-04-28). Q5_K_M (~5.1 GB) is the smallest
+	// Mistral-7B quant that exceeds the wasm32 4 GiB streaming cap.
+	// `pickWasmUrl` (src/core/engine.ts) auto-routes this entry to
+	// webllm-wasm-mem64.{js,wasm} since file size > 3.5 GiB.
+	//
+	// CURRENTLY FAILING under wasm64: warmup graph dies in the JS
+	// `_wgpuDeviceCreateBindGroup` shim with "Required member is
+	// undefined" on `GPUBufferBinding.buffer`. Phase 5's parity gate
+	// did not exercise Q5_K (canonical pins are Q4_0/Q4_K_S/Q3_K_M/
+	// IQ3_M/IQ4_XS). Kept as the standing reproducer; see
+	// `eval/reports/memory64-migration-2026-04-28/PHASE-7-BLOCKED.md`.
+	{
+		id: "mistral-7b-instruct-v0.3-q5km",
+		name: "Mistral 7B Instruct v0.3 (Q5_K_M)",
+		family: "Mistral",
+		architecture: "mistral",
+		paramsB: 7.25,
+		vramMB: 5400,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3",
+		ggufUrl: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+		ggufFilePattern: "Q5_K_M",
+	},
+
 	// Q3_K_M wave-2 fleet entry — the UB-safe u32 loader fix
 	// (llama.cpp `webllm-browser-patches` patch 11) restored Q3_K
 	// correctness on Tint/Dawn. Original optimized Q3_K mul_mat_vec
