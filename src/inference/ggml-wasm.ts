@@ -128,9 +128,20 @@ export class GgmlWasm {
 	 * no single allocation exceeds 2^53 bytes (largest tensor at 30B IQ3_M
 	 * ≈ 850 MB; full 13B Q4_K_S model ≈ 7.4 GiB ≪ 2^53). Use this for
 	 * every `void*` or `size_t` return.
+	 *
+	 * Under wasm32 the `>>> 0` coerces signed i32 to unsigned uint32 — the
+	 * Emscripten linker only emits this conversion for known-pointer-typed
+	 * exports (`_malloc` / `_free`); custom exports like `_bridge_malloc`,
+	 * `_tensor_new_*`, and `_op_*` (returning `void*`) are not in that
+	 * list, so JS sees the raw signed i32 and any address ≥ 2^31 surfaces
+	 * as a negative Number. That breaks `Uint8Array.set(_, offset)` for
+	 * any 7B+ model where the heap fills past 2 GiB before the upload
+	 * scratch malloc lands in the upper half. Phase 1 of the MEMORY64
+	 * migration switched these calls from `_malloc` to `_bridge_malloc`
+	 * and inherited the bug; this `>>> 0` is the surgical fix.
 	 */
 	private num(v: number | bigint): number {
-		return typeof v === "bigint" ? Number(v) : v;
+		return typeof v === "bigint" ? Number(v) : v >>> 0;
 	}
 
 	private async enqueueGraphCompute<T>(op: () => Promise<T>): Promise<T> {
@@ -306,7 +317,11 @@ export class GgmlWasm {
 			const ptr = this.m._bridge_malloc(BigInt(size));
 			return Number(ptr);
 		}
-		return this.m._bridge_malloc(size);
+		// `>>> 0`: see `num()` — Emscripten's linker doesn't emit unsigned
+		// coercion for custom-export pointer returns, so any malloc landing
+		// above 2 GiB (common for 7B+ models) would otherwise return as a
+		// negative JS Number and break Uint8Array.set offsets.
+		return this.m._bridge_malloc(size) >>> 0;
 	}
 
 	free(ptr: number): void {
