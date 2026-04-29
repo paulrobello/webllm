@@ -164,6 +164,81 @@ Path forward options:
   time when the caller selects it for a >4 GiB GGUF until A1
   lands.
 
+## Static analysis of the JS shim — 2026-04-28
+
+The Emscripten-generated `_wgpuDeviceCreateBindGroup` shim in
+`smoke-test/webllm-wasm-mem64.js` reads the entry's
+`bufferPtr`/`samplerPtr`/`textureViewPtr` as `HEAPU32` (4 bytes,
+low 32 only) at offsets +16/+40/+48:
+
+```js
+function makeEntry(entryPtr) {
+    var bufferPtr      = HEAPU32[(entryPtr + 16) / 4];
+    var samplerPtr     = HEAPU32[(entryPtr + 40) / 4];
+    var textureViewPtr = HEAPU32[(entryPtr + 48) / 4];
+    var binding        = HEAPU32[(entryPtr + 8) / 4];
+    if (bufferPtr) {
+        var size = readI53FromI64(entryPtr + 32);
+        if (size == -1) size = undefined;
+        return { binding, resource: {
+            buffer: WebGPU.getJsObject(bufferPtr),
+            offset: HEAPU32[(entryPtr + 4 + 24) / 4] * 4294967296
+                  + HEAPU32[(entryPtr + 24) / 4],
+            size,
+        } };
+    } else if (samplerPtr) { ... }
+    else { ... }
+}
+```
+
+The descriptor reads are consistent with wasm64 (HEAPU64 for
+layout pointer, full 8-byte reads). The struct layout is also
+consistent across wasm32/wasm64 (56 bytes, fields at the same
+offsets due to 8-byte alignment of the offset/size i64 fields).
+
+**The shim is *correct* under the assumption that the buffer
+handle stored at offset +16 fits in the low 32 bits and the
+high 32 bits are zero.** WebGPU handle IDs in Emscripten are
+small integer counters that always fit in 32 bits, and a
+properly-zero-initialized struct keeps the high 4 bytes zero.
+
+So the bug is unlikely to be in the shim. Two remaining sites
+are where the bug actually lives:
+
+1. **C-side struct construction in patched ggml-webgpu** — if
+   the patched `~/Repos/llama.cpp/`'s `webllm-browser-patches`
+   branch contains code that:
+   - Initializes WGPUBindGroupEntry without `= {0}` and assigns
+     buffer via `(WGPUBuffer)(uintptr_t)handle_int`
+   - Or has integer-promotion bugs on the buffer field path
+     (e.g., `(uint32_t)addr` truncating somewhere upstream)
+   then under wasm64 the high 4 bytes at offset +16 would carry
+   stale stack/heap values, and HEAPU32 read at +16 would still
+   read the LOW 4 bytes correctly. So this hypothesis predicts
+   the shim still gets the right handle. **Inconsistent with
+   the observed undefined-buffer error** — if the handle low 32
+   were correct, `getJsObject` would return the right buffer.
+2. **Handle-counter exhaustion / collision under wasm64** —
+   maybe wasm64 takes a code path that allocates more handles
+   per-tensor (e.g., extra scratch buffers for the larger
+   memory model), and the handle-counter overflows or collides
+   with another live handle. Possible but unlikely; counters
+   would have to exhaust 2³¹+ handles.
+3. **A buffer was destroyed before this createBindGroup** —
+   the Q5_K shader-cache warmup path, or some bookkeeping in
+   the patched ggml-webgpu, may release a buffer too early
+   under wasm64-specific code paths. The shim reads the
+   correct (now-stale) handle, `getJsObject` returns undefined
+   because the handle was unregistered. This is consistent
+   with the observed error.
+
+(3) is the most plausible from this static read. Confirming it
+needs a live probe — install a wrapper around `WebGPU.Internals.
+jsObjectInsert` and `getJsObject` that logs every buffer
+register/lookup, run Mistral-Nemo, and find the buffer handle
+that's queried but not in the table. The wrapping is JS-only,
+no rebuild needed. Reserved for the A1 implementer.
+
 ## Two secondary gaps surfaced
 
 1. **The smoke-test page does NOT auto-pick wasm64.** `pickWasmUrl`
