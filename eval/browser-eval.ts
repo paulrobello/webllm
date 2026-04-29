@@ -65,7 +65,14 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min hard ceiling — accuracy r
 // The clock starts at loop entry and resets on (first non-null status) or
 // (advance in `completedTasks`). 180s is generous enough for a cold 1–3B
 // model download + weight load, yet still far below the hard ceiling.
-const STALL_TIMEOUT_MS = 180_000;
+// Override via WEBLLM_STALL_TIMEOUT_MS for >4 GiB MEMORY64 targets where
+// a cold GGUF fetch can exceed 3 min before the bench loop publishes
+// its first __benchStatus.
+const STALL_TIMEOUT_MS = (() => {
+	const raw = process.env.WEBLLM_STALL_TIMEOUT_MS;
+	const parsed = raw !== undefined ? Number.parseInt(raw, 10) : NaN;
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 180_000;
+})();
 
 function main(): void {
 	const { values } = parseArgs({
