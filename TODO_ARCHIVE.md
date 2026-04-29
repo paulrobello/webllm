@@ -4274,3 +4274,92 @@ cadence work":
   + existing test suite + ship-gate `make checkall`.
 
 ---
+
+## Phi-3 causal LM support (closed 2026-04-29; archived from TODO.md)
+
+Full closure narrative for Phi-3 causal LM support, originally queued
+under "Active next steps" in TODO.md and shipped 2026-04-29.
+
+Closed 2026-04-29 — all 6 phases (probe → register → implement →
+smoke → 36-prompt eval → smoke-bench → report) passed in one
+session. **First fused-projection causal LM in the fleet** (Path
+B fused-forward, `architecture === "phi3"`-gated).
+
+- **Eval:** 27/36 = **72%** (gate ≥60%; predicted band 70-80%).
+  Tied with Mistral-Nemo 12B Q4_K_S despite being ~3× smaller.
+- **Speed:** 3-run smoke-bench median **31.6 tok/s** (gate ≥25;
+  predicted band 35-50, ~10% under-band attributed to opCont
+  copies + profile-mode overhead).
+- Plan: [`docs/superpowers/plans/2026-04-29-phi3-causal-lm-support.md`](docs/superpowers/plans/2026-04-29-phi3-causal-lm-support.md).
+- Closure report:
+  [`eval/reports/phi-3-validation-2026-04-29/SUMMARY.md`](eval/reports/phi-3-validation-2026-04-29/SUMMARY.md).
+- Implementation commit `8392bca`; bug-fix commits `7915abb`
+  (chat-template typo) + `7c85a2a` (opCont on fused views —
+  the gibberish root cause); closure commit `31612a2`.
+- Path A vs Path B note in the closure report: for the next
+  fused-projection architecture (Phi-4, Granite, etc.),
+  evaluate Path A first — the dispatch-count win is
+  unmeasured and the strided-view gotcha cost a measurable
+  ~6% throughput tax.
+
+---
+
+## Bucket B follow-ups (post-closure, 2026-04-28; archived from TODO.md)
+
+Full closure narrative for Bucket B follow-ups (encoder non-BERT-arch
+expansion housekeeping). Both queued follow-up items closed 2026-04-28.
+
+### 11. Spec accuracy patch — DONE 2026-04-28
+
+Patched `docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`:
+added a top-level "Post-implementation corrections" note enumerating
+all four spec/reality mismatches with their llama.cpp truth-source
+line refs; updated §0 (jina FFN GeGLU; nomic RoPE NEOX), §1 Phase 0
+findings tables, §2 components table (`getRopeModeForArchitecture`
+row), §3 Point D (softmax mask leaf required + `-|i-j|` populate
+semantics), §3 Point F (per-arch gate activation: silu for nomic,
+gelu for jina), §4 Tokenizer (cls/mask → bos/eos fallback for
+nomic-style GGUFs), and §5 failure-diagnosis notes. The "(Open
+questions / decisions: None)" §7 block is unchanged — all four
+corrections are derived from already-shipped code, not from open
+decisions.
+
+### 12. Vault-save bucket B doctrines — DONE 2026-04-28
+
+All four notes landed at `~/ClaudeVault/`:
+
+- `Patterns/encoder-parity-gate-via-sentence-transformers.md` —
+  uv-pinned reference capture + agentchrome browser-side cosine
+  ≥0.999 gate harness, reusable for any future encoder addition
+  or cross-runtime numerical-parity probe.
+- `Patterns/llama-cpp-as-arch-truth-source.md` — authoritative
+  file map (`src/models/<arch>.cpp`, `llama-graph.cpp`,
+  `llama-model.cpp`) + 3 worked examples (jina GeGLU, nomic
+  NEOX RoPE, ALiBi `-|i-j|` mask) from bucket B.
+- `Knowledge/encoder-cosine-degradation-signatures.md` —
+  diagnostic ladder mapping cosine-curve shape to root cause:
+  Signature A (monotonic length-degradation = positional bug),
+  B (compressed-but-flat near-1.0 = activation/scaling bug),
+  C (all-rows-uniform-low = tokenizer/input bug),
+  D (single-row-spike = pooling/edge-case bug). Plus cheap
+  localization tricks (layer-0 cosine, per-block bisect, op-
+  count fingerprint, tokenizer diff).
+- `Debugging/jina-bert-v2-gguf-mirror-omits-alibi-key.md` —
+  `gaianet/jina-embeddings-v2-base-en-GGUF` omits
+  `attention.alibi_bias_max`; default is 8.0; loader fallback
+  handles both mirror cases. Generalizes to any GGUF metadata
+  key with a documented default (rope.freq_base, layer_norm_
+  epsilon, pooling_type, cls/mask token IDs).
+
+Index rebuilt: 3089 notes / 986 tags / 9 MANIFESTs. All 4 notes
+verified in `Patterns/MANIFEST.md`, `Knowledge/MANIFEST.md`,
+`Debugging/MANIFEST.md`. Cross-links: the four notes
+cross-reference each other plus the existing
+`encoder-architecture-probe-saved-spec-rewrite` (Phase 0 probe)
+and the four bucket B session-specific debugging notes that
+captured the original incident timeline (`alibi-mask-fix-
+insufficient-for-{encoder,jina-v2}-parity`,
+`jina-bert-v2-encoder-parity-debugging`,
+`jina-vs-nomic-ffn-activation-mismatch`).
+
+---
