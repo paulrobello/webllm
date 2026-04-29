@@ -820,8 +820,8 @@ See dedicated section below.
 can host 13B Q4_K_S (~7.4 GiB) and 30B IQ3_M (~12.8 GiB) targets
 within the 30B project ceiling.
 
-**Status (2026-04-28):** Phases 0-4 complete. Phase 5 (bench parity
-gates on canonical 6) is the next user-gated step.
+**Status (2026-04-28):** Phases 0-4 complete; Phase 5 ran and **HALTED at gate failure**;
+Phase 1.5 inline optimization landed; **perf re-bench queued for a quiet host**.
 
 | Phase | Commit(s) | Result |
 |---|---|---|
@@ -831,13 +831,15 @@ gates on canonical 6) is the next user-gated step.
 | 2 — bridge ABI hardening | `9556cf0` | 11 `int32_t` → `size_t` promotions across `webgpu-bridge.cpp`; wasm32 byte-identical pre/post |
 | 3 — GGUF loader BigInt boundary | `80b63d6` | Static analysis 14/14 safe; `eval/reports/memory64-migration-2026-04-28/PHASE-3-VERIFY.md` |
 | 4 — dual-binary `make wasm-build` | `2ef3e9a` | `wasm-build-{wasm32,mem64}` sub-targets; `?wasm=mem64` smoke toggle; **15/15 PASS on both wasm32 and wasm64** |
+| 4.5 — unsigned-pointer fix | `56272cb` | `>>> 0` in wasm32 paths of `malloc()` and `num()` — fixed `RangeError: offset is out of bounds` for any 7B+ wasm32 model (Emscripten linker omits unsigned coercion for custom-export `void*` returns; Phase 1's `_malloc → _bridge_malloc` switch inherited the bug) |
+| 5 — bench parity gates | `49be54c` | **HALT.** Step 1 sanity gate (wasm32-vs-pinned) fails on 5/6 models (4-21% regression); Step 4 main gate (wasm64-vs-current-wasm32) passes 5/6, fails TinyLlama −5.5%. Net wasm64-vs-wasm32 median delta 0%. Wasm size +1.9%. Diagnosis: per-FFI helper-dispatch overhead dominates dispatch-heavy small-model decode. |
+| 5.5 — Phase 1.5 inline optimization | `c919efa` | Helpers `big()`/`num()` removed; `is64` branch inlined at every FFI call site (38 methods); upload-loop branches hoisted. checkall + both binaries' smoke tests clean. **Perf claim deferred** — measurement under load avg 7.5+ produced 15% spread (70.6 → 80.9 across consecutive same-binary runs); gate cannot be adjudicated without a clean host. |
 
-**Phase 5 readiness:** working bench surface ready
-(`smoke-test/index.html` `?wasm=mem64`, `make smoke-bench`,
-`make bench-inference`); pre-rebase wasm32 references pinned at
-`eval/reports/pre-rebase-baselines-2026-04-28/SUMMARY.md`. **Held
-pending explicit user "go"** — gate is zero ≥3% regression on
-canonical 6.
+**Phase 5 re-bench queued.** Conditions required: load avg < 2.0,
+< ~10 Chrome processes, dashboard ingest off. Re-run the canonical 6
+sweep against `c919efa` and update PHASE-5-PARITY.md. Then proceed
+to Phase 6 (deploy decision) or further investigation depending on
+the gate outcome.
 
 **Probe state — what's already established:**
 
