@@ -932,92 +932,58 @@ then pre-rebase baseline freshness check if matrix nears 2026-05-28.
    exports removed from public surface, broken stub `loadModel`
    demoted to private helper, 5-class `WebLLMError` hierarchy
    exposed for programmatic dispatch, 4 new tests (495 total).
-   The following items were intentionally deferred — each one
-   needs a separate design pass rather than a small phase, and
-   none have a measurable user impact today. Listed in rough
-   priority order; pick up if a public-API consumer ask fires.
+   **Phase 3 follow-ups (a)-(f) CLOSED 2026-04-29** — all six
+   items shipped in one cycle as a coherent "public API hygiene"
+   pass. Spec at
+   [`docs/superpowers/specs/2026-04-29-ts-api-audit-followups-design.md`](docs/superpowers/specs/2026-04-29-ts-api-audit-followups-design.md);
+   plan at
+   [`docs/superpowers/plans/2026-04-29-ts-api-audit-followups.md`](docs/superpowers/plans/2026-04-29-ts-api-audit-followups.md).
 
-   - **(a) Split `GenerationConfig` into public/internal halves.**
-     The public `GenerationConfig` currently leaks 11 internal
-     steering fields (`thinkingOpenTokenId`, `maskedTokensWhile-
-     Thinking`, `maskedTokensAfterAnswerStarts`,
-     `requireVisibleAnswerAfterThinking`,
-     `suppressWhitespaceOnlyAfterThinking`, etc.). Engine
-     auto-populates these for Qwen3-ChatML inside
-     `generateStream`, but a consumer driving `Generator.generate`
-     directly has to reproduce the entire steering protocol. Fix:
-     introduce `PublicGenerationConfig` (consumer-facing — temp,
-     topK, topP, repPen, maxTokens, stopTokens, signal, seed) and
-     keep the existing 11 fields on an internal
-     `InternalGenerationOptions extends PublicGenerationConfig`.
-     Engine builds the internal type; public exports only the
-     public type. **Risk:** medium — touches `generation.ts`,
-     `engine.ts`, and any place that currently passes a
-     `Partial<GenerationConfig>` through. Worth scoping only if
-     a consumer reports the steering-field exposure as
-     load-bearing for them.
+   - **(a) Split `GenerationConfig`** — rename current 22-field
+     type to `InternalGenerationOptions` (engine-internal,
+     unexported); new public 7-field `GenerationConfig` with
+     `signal` inline; drop unused `prompt` field. Compile-fail
+     `@ts-expect-error` test locks in the steering-field
+     exclusion. Commits `91a5ee6` + `34ad33c` (test type fix).
+   - **(b) Drop `WebLLMConfig.device`** — caller passes device
+     directly to `engine.loadLightweightModel(LightweightModelConfig)`.
+     Smoke harness + tests updated. Commit `f639e2e`.
+   - **(c) Sampling flag + Qwen profile export** — new
+     `src/core/sampling-profiles.ts` exports
+     `QWEN_THINKING_DEFAULTS` / `QWEN_NON_THINKING_DEFAULTS`
+     (now `Object.freeze`d for runtime safety);
+     `CompletionConfig.sampling`:
+     `"auto" | "qwen-thinking" | "qwen-default" | "raw"`
+     (default `"auto"` = current magic). Commits `104a846` +
+     `f8e56b0` (freeze fix).
+   - **(d) Engine accessor migration** — `getMemoryPool` /
+     `getScheduler` / `getModelManager` → property getters with
+     underscore-prefixed backing fields. Test mocks that seeded
+     via `Object.create(WebLLM.prototype) + direct field assign`
+     swept to assign the new `_modelManager` backing field.
+     Commit `2fcad35`.
+   - **(e) `Character.setTools`** — runtime tool reconfiguration
+     with defensive-copy semantics. Strict YAGNI: no
+     `attachToolSystem(custom)` (no consumer ask for parser swap).
+     Commits `d0dc96f` + `e4c402e` (defensive copy).
+   - **(f) Polish bundle** — `ChatToolSchema.parameters[*].type`
+     literal union (with parallel mirrors in
+     `chat-template.ts` and `tool-system.ts` aligned in lock-step);
+     `GenerationFinishReason` per-variant JSDoc; README API table
+     + "API" header rename. Commits `e919027` + `25c5465` (mirror
+     alignment + README polish).
 
-   - **(b) Path-specific `WebLLMConfig.device` plumbing.**
-     `device: GPUDevice` is required at `WebLLM.init({...})` but
-     is consumed only by `loadLightweightModel` (the WGSL path).
-     The WASM path acquires its own device via
-     `navigator.gpu.requestAdapter()` inside the WASM bundle.
-     Fix options: (i) make `device` optional and require it only
-     for `loadLightweightModel`; (ii) move it into
-     `LightweightModelConfig` and drop from `WebLLMConfig` entirely.
-     Option (ii) is cleaner but requires consumers who do mixed
-     wasm/lightweight workloads to know which path needs the
-     device. **Risk:** low (TS-only change once the decision is
-     made); needs a clear design call.
+   **Test surface delta:** 485 → 493 pass (+8 across 3 new test
+   files: `generation-config-public.test.ts`,
+   `sampling-profiles.test.ts`, `character-set-tools.test.ts`).
+   `make checkall` green throughout.
 
-   - **(c) Expose Qwen3 default-sampling profile as a named
-     export.** Engine hardcodes `QWEN_THINKING_DEFAULTS` (temp
-     0.6 / topK 20 / topP 0.95 / repPen 1.05) and
-     `QWEN_NON_THINKING_DEFAULTS` (0.7 / 20 / 0.8 / 1.1) as
-     private constants and applies them magically inside
-     `generateStream` when `architecture` starts with `"qwen"`
-     and the chat template is ChatML. Consumers can override
-     each field individually but cannot opt out of the
-     auto-application or discover the values without reading
-     engine.ts. Fix: export `QWEN_THINKING_DEFAULTS` /
-     `QWEN_NON_THINKING_DEFAULTS` as readonly objects + accept
-     a `sampling?: "qwen-thinking" | "qwen-default" | "raw"`
-     flag on `CompletionConfig`. **Risk:** low (additive); no
-     behavior change for existing consumers if `"qwen-thinking"`
-     stays the default for matching architectures.
-
-   - **(d) Engine accessor convention.** `engine.config` /
-     `engine.pipelineCache` (properties) vs
-     `engine.getMemoryPool()` / `getScheduler()` /
-     `getModelManager()` (methods) — pick one and migrate. Cleanest
-     is properties for everything; method accessors for these are
-     leftovers from when they returned different lifetimes. **Risk:**
-     low (pure rename + call-site sweep). Touches engine.ts +
-     wherever the helpers are called. Cosmetic — defer until the
-     next time the accessor surface is touched anyway.
-
-   - **(e) `ToolSystem` swappability.** `Character` instantiates
-     `ToolSystem` internally with the constructor-time `tools` list
-     and exposes no way to add/remove tools post-creation or replace
-     the parser. Fix: add `character.setTools(tools)` /
-     `character.attachToolSystem(custom)`. **Risk:** low; behaviour-
-     preserving for existing consumers. Defer unless a real ask
-     for runtime tool reconfiguration appears.
-
-   - **(f) Lower-priority polish from the audit.**
-     `ChatToolSchema.parameters[*].type: string` lacks a literal
-     union (consumer can't discover `"string" | "number" | ...`);
-     `GenerationFinishReason` union variants lack JSDoc;
-     `engine.removeCharacter` / `engine.shutdown` aren't in the
-     README API Overview table; README "Memory management" /
-     "Scheduling" feature claims oversell what's consumer-callable
-     (only getters are exposed). Each is a 1-2 line fix; bundle
-     into the next docs/api commit cadence rather than its own
-     phase.
-
-   **Decision rule:** pick up (a)-(c) if a consumer ask fires.
-   (d)-(f) are pure polish; address opportunistically when the
-   surrounding code is touched for another reason.
+   **Follow-up surfaced (orthogonal, queued):** `tsconfig.json`
+   includes only `src/**/*.ts` — the `@ts-expect-error` gate in
+   `tests/generation-config-public.test.ts` is documentation, not
+   enforcement. Widening `tsconfig` to cover `tests/**` would
+   surface latent type errors in other test files first; treat as
+   a separate cycle.
 
 ---
 
