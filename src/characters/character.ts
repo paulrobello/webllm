@@ -288,6 +288,18 @@ export class Character {
 		this.config.maxTokens = n;
 	}
 
+	/**
+	 * Replace the tools list and recreate the internal ToolSystem.
+	 *
+	 * Empty array clears tools (mirrors constructor behavior). Existing
+	 * message history is preserved. No effect on in-flight `chat()` —
+	 * the change applies to the next call.
+	 */
+	setTools(tools: ToolDefinition[]): void {
+		this.config.tools = tools;
+		this.toolSystem = tools.length > 0 ? new ToolSystem(tools) : null;
+	}
+
 	get isActive(): boolean {
 		return this.active;
 	}
