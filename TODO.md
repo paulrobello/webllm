@@ -1266,6 +1266,36 @@ appetite remains; none are forced.
   parity gate ever fires a regression after a Phase 2 forward-graph
   change** to confirm the regression is local (not a reference
   drift). Otherwise leave pinned; the gate is a known-good fixture.
+- **TS API audit follow-ups — surfaced from final review (2026-04-29).**
+  Two low-effort quality items queued from the closure of items
+  (a)-(f); not ship blockers. Address opportunistically when the
+  surrounding code is touched for another reason.
+  - **Sampling-dispatch unit test.** `engine.ts:272-289`'s
+    `forcedProfile` / `autoProfile` / `activeProfile` resolution
+    is exercised end-to-end by smoke + chat-completion tests but
+    has no direct unit test of the dispatch matrix (4 modes ×
+    `enableThinking` flag × Qwen-vs-non-Qwen × consumer-override).
+    A unit test that stubs `entry.hyperparams.architecture` and
+    asserts effective sampler params would catch silent regressions
+    if the dispatch ladder is refactored. File before the next
+    `CompletionConfig` surface change.
+  - **Tool-schema mirror-drift sentinel.** Three identical literal
+    unions live in `core/chat-types.ts` (`ChatToolSchema`),
+    `inference/chat-template.ts` (`ChatTemplateToolSchema`), and
+    `characters/tool-system.ts` (`ToolParameter`) with comment-only
+    "lock-step" contracts. Either dedupe via a shared exported
+    `JsonSchemaParameterType` (preferred — type-only, zero runtime
+    cost) or add a structural drift test. The comment-based contract
+    is the weakest link in the polish bundle and a future PR adding
+    one type to a single mirror is the most likely failure mode.
+- **`tsconfig.json` widening to enforce test typechecks.** Currently
+  includes only `src/**/*.ts` — the `@ts-expect-error` gate in
+  `tests/generation-config-public.test.ts` is documentation, not
+  enforcement (`bun test` strips types; the gate fires only under
+  `tsc --noEmit` against test files). Widening would surface latent
+  type errors in other test files first, so this is a separate cycle.
+  Surface area to fix before bumping: probably ~5-15 latent-error
+  hits across the test tree.
 
 ### External-trigger candidates
 
