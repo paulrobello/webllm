@@ -823,7 +823,17 @@ Phase 5 parity sweep with Q5_K addendum at
 [`eval/reports/memory64-migration-2026-04-28/PHASE-5-PARITY.md`](eval/reports/memory64-migration-2026-04-28/PHASE-5-PARITY.md);
 full migration history archived to `TODO_ARCHIVE.md`.
 
-### 13B target registration (queued 2026-04-29)
+### 13B target registration (queued 2026-04-29) — CLOSED 2026-04-29
+
+**Status:** all 6 phases passed.
+- Phase 4 eval **34/36 = 94%** (gate ≥60%) — **new fleet
+  accuracy leader** (was qwen3-4B at 88-90%).
+- Phase 5 smoke-bench median **18.9 tok/s** (gate ≥12, predicted
+  band 15-19 — top of band).
+- Closure report:
+  [`eval/reports/13b-validation-2026-04-29/SUMMARY.md`](eval/reports/13b-validation-2026-04-29/SUMMARY.md).
+- Registration commit `a4c8189`
+  (`feat(eval): register Qwen3-14B Q4_K_S target (13B-class)`).
 
 **Trigger:** the MEMORY64 closure stub above promoted this from
 external-trigger to an active next step. The wasm64 path is now
@@ -849,34 +859,45 @@ HuggingFace GGUF that bartowski has packaged.
    on HuggingFace under bartowski (or a comparable
    GGUF-publishing repo) at the right quant. Confirm filesize
    on the HEAD response. Cost: ~30s. Output: a model spec
-   block ready for `eval/models.ts`.
+   block ready for `eval/models.ts`. **CLOSED 2026-04-29**
+   (filesize 8,573,475,872 bytes / 7.99 GiB confirmed on
+   bartowski/Qwen_Qwen3-14B-GGUF Q4_K_S).
 2. **Register.** Add the entry to `eval/models.ts` mirroring
    the Mistral-Nemo Q4_K_S registration pattern (`vramMB`,
    `paramsB`, `architecture`, `ggufUrl`, `ggufFilePattern`,
    `capabilities`, `tier`). Add a smoke-profiles `…-warm`
    entry in `eval/smoke-profiles.ts` if needed. Re-run
-   `make checkall` (must pass).
+   `make checkall` (must pass). **CLOSED 2026-04-29** (commit
+   `a4c8189`; checkall green; +40 LoC across 2 files).
 3. **End-to-end smoke probe.** `agentchrome navigate
    real-model.html?model=<id>&wasm=mem64&ctx=4096&prompt=hi&ingest=off`.
    **Gate:** all 8 stages complete; decode > 0 tok/s; embed
    sanity passes (cosine ≥ 0.75). The
    `pickWasmUrl(byteLength)` path auto-routes to wasm64 since
-   filesize > 3.5 GiB.
+   filesize > 3.5 GiB. **CLOSED 2026-04-29** (all 8 stages
+   green; decode 21.0 tok/s greedy / finish=eos / embed cosine
+   0.76 ≥ 0.75; 0 console errors).
 4. **36-prompt sanity eval.** `make bench-browser-eval
    PROFILE=<profile>-warm`. **Gate ≥ 60% overall** (the same
    gate Phase 7 validation used). Reference: Mistral-Nemo 12B
    Q4_K_S landed at 72% (26/36); Qwen3-8B IQ3_M is the closest
    smaller-Qwen3 reference at the existing dashboard.
+   **CLOSED 2026-04-29** (34/36 = 94%; new fleet accuracy
+   leader).
 5. **Smoke-bench tok/s.** `make smoke-bench PERF_MODEL=<id>
    PERF_RUNS=3 WASM_VARIANT=mem64`. **Expected band:**
    extrapolating from Mistral-Nemo 12B Q4_K_S (19.3 tok/s)
    and Mistral-7B Q4_K_S (28.2 tok/s post-rebase), 14B Q4_K_S
    should land in the **15-19 tok/s** range under
    profile-mode. Hard floor: ≥ 12 tok/s (anything lower
-   indicates a kernel surface regression).
+   indicates a kernel surface regression). **CLOSED 2026-04-29**
+   (3-run median 18.9 tok/s; runs 18.8/18.9/19.1; matmul 60.7%
+   of graph; 893 dispatches/token = 8B's 805 + 4 layers × 22).
 6. **Closure report.**
    `eval/reports/13b-validation-<DATE>/SUMMARY.md` with the
    discovery arc + matrices, mirroring PHASE-7-VALIDATION.md.
+   **CLOSED 2026-04-29**
+   ([`eval/reports/13b-validation-2026-04-29/SUMMARY.md`](eval/reports/13b-validation-2026-04-29/SUMMARY.md)).
 
 **Out of scope for this work item:**
 - Integrating the 13B model into the canonical 6 parity
