@@ -596,6 +596,40 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "IQ4_XS",
 	},
 
+	// Mistral-Nemo-Instruct-2407 — 12B params, the >4 GiB MEMORY64
+	// validation target (Phase 7, 2026-04-28..29). Real Mistral release
+	// (2024-07), commonly mirrored. Q4_K_S (~6.63 GiB) is firmly above
+	// the wasm32 4 GiB streaming cap. `pickWasmUrl` auto-routes via
+	// vramMB > 3500.
+	//
+	// First Phase 7 attempt registered mistral-7b-q5km (5.1 GiB) and
+	// blocked on what looked like a Q5_K-kernel wasm64 bug. Pivoting
+	// to this 12B Q4_K_S target proved the bug was kernel-family-
+	// independent — same _wgpuDeviceCreateBindGroup failure under a
+	// Phase-5-validated kernel. Probe (PHASE-7-BLOCKED.md + FINDINGS)
+	// pinned the bug to the Emscripten wasm64 shim reading 8-byte
+	// handle pointers as HEAPU32 (low 32 only). Fix lives in
+	// scripts/fix-mem64-bindgroup-shim.py and is applied after every
+	// `make wasm-build-mem64`.
+	{
+		id: "mistral-nemo-instruct-2407-q4ks",
+		name: "Mistral Nemo Instruct 2407 (Q4_K_S, >4 GiB validation)",
+		family: "Mistral",
+		architecture: "mistral",
+		paramsB: 12.25,
+		vramMB: 7000,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/mistralai/Mistral-Nemo-Instruct-2407",
+		ggufUrl: "https://huggingface.co/bartowski/Mistral-Nemo-Instruct-2407-GGUF",
+		ggufFilePattern: "Q4_K_S",
+	},
+
 	// First 8B candidate (wave 2 model 2). Q4_K_S 8B = 4475 MB
 	// exceeds the 4 GiB WASM cap; Q3_K_S would fit but routes
 	// through the broken Q3_K shader (#28). IQ3_M (3609 MB) uses
