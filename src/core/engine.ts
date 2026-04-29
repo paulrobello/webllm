@@ -192,12 +192,9 @@ export class WebLLM {
 	}
 
 	async loadLightweightModel(
-		config: Omit<LightweightModelConfig, "device">,
+		config: LightweightModelConfig,
 	): Promise<LightweightModel> {
-		const model = new LightweightModel({
-			device: this._config.device,
-			...config,
-		});
+		const model = new LightweightModel(config);
 		await model.init();
 		return model;
 	}

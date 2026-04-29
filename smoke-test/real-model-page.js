@@ -504,13 +504,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			if (!navigator.gpu) {
 				throw new Error("navigator.gpu unavailable; smoke test needs WebGPU");
 			}
-			const engineAdapter = await navigator.gpu.requestAdapter();
-			if (!engineAdapter) {
-				throw new Error("requestAdapter() returned null for engine");
-			}
-			const engineDevice = await engineAdapter.requestDevice();
 			smokeEngine = await WebLLM.init({
-				device: engineDevice,
 				memoryBudget: 2_000_000_000,
 			});
 			const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(

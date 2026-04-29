@@ -1,6 +1,5 @@
 /** Configuration for initializing a WebLLM engine instance. */
 export interface WebLLMConfig {
-	device: GPUDevice;
 	cacheDir?: string;
 	memoryBudget: number;
 	frameBudgetMs?: number;
