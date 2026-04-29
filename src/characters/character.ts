@@ -139,12 +139,29 @@ export class Character {
 	/**
 	 * Send a user message and stream the character's response.
 	 *
+	 * Yields one decoded text fragment per generated chunk (no `done`
+	 * envelope — iteration completes when generation ends). For chunk-level
+	 * metadata or generation stats, drive `engine.chatCompletion` directly.
+	 *
+	 * Cancellation: pass `{ signal }` to abort mid-stream from the outside.
+	 * `character.stop()` remains the in-process equivalent and now also
+	 * marks subsequent `chat()` calls as no-ops until `clearHistory()` is
+	 * called.
+	 *
 	 * @param input - User message text.
-	 * @yields Response characters one at a time. If a tool call is detected, yields the formatted tool result instead.
+	 * @param options - Optional `{ signal }` for external cancellation.
+	 * @yields Decoded text fragments. If a tool call is detected, yields
+	 *   the formatted tool result on subsequent chats.
 	 */
-	async *chat(input: string): AsyncGenerator<string> {
+	async *chat(
+		input: string,
+		options?: { signal?: AbortSignal },
+	): AsyncGenerator<string> {
 		this.messages.push({ role: "user", content: input });
 		if (this.stopped) {
+			return;
+		}
+		if (options?.signal?.aborted) {
 			return;
 		}
 		if (!this.engine) {
@@ -171,6 +188,7 @@ export class Character {
 			repetitionPenalty: this.config.repetitionPenalty,
 			maxTokens: this.config.maxTokens,
 			enableThinking: this.config.enableThinking,
+			signal: options?.signal,
 			// Surface tools to the chat template so the model is actually told
 			// they exist. Handlers/results stay on the Character side; only
 			// the schema crosses into the prompt.
@@ -191,7 +209,7 @@ export class Character {
 				chatMessages,
 				completionConfig,
 			)) {
-				if (!this.active) {
+				if (!this.active || options?.signal?.aborted) {
 					this.stopped = false;
 					return;
 				}

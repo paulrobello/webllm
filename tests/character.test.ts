@@ -170,4 +170,48 @@ describe("Character", () => {
 		});
 		expect(char.id).toBe("my-char");
 	});
+
+	test("AbortSignal aborted before chat() returns immediately", async () => {
+		const engine = createStubEngine("nope");
+		const char = new Character({
+			modelId: "test-model",
+			systemPrompt: "Test",
+			engine,
+		});
+		const ctrl = new AbortController();
+		ctrl.abort();
+		const tokens: string[] = [];
+		for await (const t of char.chat("Hi", { signal: ctrl.signal })) {
+			tokens.push(t);
+		}
+		expect(tokens).toEqual([]);
+		// Engine should not have been invoked.
+		expect(engine.calls).toEqual([]);
+	});
+
+	test("AbortSignal mid-stream short-circuits iteration", async () => {
+		// Stub that emits a controllable number of chunks before the consumer
+		// aborts. Aborting after the first chunk should yield exactly that one
+		// chunk and skip the rest.
+		const ctrl = new AbortController();
+		const engine: ChatEngine = {
+			async *chatCompletion(): AsyncGenerator<CompletionChunk, void> {
+				yield { text: "a", done: false };
+				ctrl.abort();
+				yield { text: "b", done: false };
+				yield { text: "c", done: false };
+				yield { text: "", done: true };
+			},
+		};
+		const char = new Character({
+			modelId: "test-model",
+			systemPrompt: "Test",
+			engine,
+		});
+		const tokens: string[] = [];
+		for await (const t of char.chat("Hi", { signal: ctrl.signal })) {
+			tokens.push(t);
+		}
+		expect(tokens).toEqual(["a"]);
+	});
 });

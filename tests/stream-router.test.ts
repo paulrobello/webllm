@@ -46,4 +46,27 @@ describe("StreamRouter", () => {
 		router.removeConsumer("test");
 		expect(router.hasConsumer("test")).toBe(false);
 	});
+
+	test("getQueueDepth reports pending items", () => {
+		const router = new StreamRouter<string>();
+		router.createConsumer("test");
+		expect(router.getQueueDepth("test")).toBe(0);
+		router.emit("test", "a");
+		router.emit("test", "b");
+		router.emit("test", "c");
+		expect(router.getQueueDepth("test")).toBe(3);
+		expect(router.getQueueDepth("missing")).toBe(0);
+	});
+
+	test("maxQueueDepth interrupts a stalled consumer", async () => {
+		const router = new StreamRouter<number>({ maxQueueDepth: 2 });
+		const consumer = router.createConsumer("slow");
+		router.emit("slow", 1);
+		router.emit("slow", 2);
+		router.emit("slow", 3); // Exceeds cap → consumer interrupted.
+		router.emit("slow", 4); // Dropped (consumer interrupted).
+		const drained: number[] = [];
+		for await (const v of consumer) drained.push(v);
+		expect(drained).toEqual([1, 2]);
+	});
 });
