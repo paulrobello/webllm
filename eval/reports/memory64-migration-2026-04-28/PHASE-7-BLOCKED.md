@@ -90,6 +90,80 @@ wasm64. It does NOT block ≤4 GiB Q5_K_M targets running under
 wasm32 (any of those would still pass through the wasm32 binary
 via `pickWasmUrl`'s ≤3.5 GiB → wasm32 branch).
 
+## Hypothesis update — 2026-04-28 (after retry on Mistral-Nemo)
+
+The "Q5_K-family-specific" framing above is **wrong**. A retry
+attempt with Mistral-Nemo-Instruct-2407 Q4_K_S (~6.63 GiB,
+registered at commit `ca01d4f → 388142b`) — chosen because Q4_K_S
+is a **Phase-5-validated kernel family** — produced the **identical**
+`_wgpuDeviceCreateBindGroup` `Required member is undefined` error
+at the warmup graph. This rules out the kernel-family hypothesis.
+
+The pattern that actually fits all three datapoints is **model
+working-set size**, not kernel type:
+
+| Model | Quant | File size | wasm64 outcome |
+|---|---|---:|---|
+| Mistral-7B Q4_K_S | Q4_K | 3.95 GiB | ✅ runs (Phase 5: 28.5-29.4 tok/s) |
+| Mistral-7B Q5_K_M | Q5_K | 5.10 GiB | ❌ bind-group fail at warmup |
+| Mistral-Nemo Q4_K_S | Q4_K | 6.63 GiB | ❌ bind-group fail at warmup |
+
+Working hypothesis (replaces the prior Q5_K kernel hypothesis):
+the bug surfaces when the buffer slot in a `WGPUBindGroupEntry`
+references memory whose **address exceeds 2³² in wasm64 address
+space**. Phase 5's Mistral-7B Q4_K_S keeps the entire model below
+the 4 GiB mark; Q5_K_M and Mistral-Nemo's data spans both halves.
+Likely site:
+
+1. **Emscripten's auto-generated `_wgpuDeviceCreateBindGroup` JS
+   shim** reads each `WGPUBindGroupEntry` from wasm memory; the
+   `WGPUBuffer` handle field is `void*` (i64 in wasm64). If the
+   shim has a hardcoded 32-bit offset somewhere in the struct
+   layout, the buffer field reads as `undefined` whenever the
+   handle is non-zero in its upper 32 bits. (Emscripten 5.0.6 ref
+   `6ea9c28c38cdd40c1032fa04400c9d16230ee180` — pinned, may
+   already be patched upstream).
+2. **Patched `ggml-webgpu`** Q5_K and Q4_K matmul kernels both
+   touch model weights through bindings; if the C-side struct
+   construction passes a buffer pointer/handle that's been
+   computed via 32-bit arithmetic anywhere in the path, it'd
+   trim the high bits and emit zero/garbage to the JS shim.
+3. **Buffer slicing on the WebGPU side** — Apple's M4 Max has
+   `maxStorageBufferBindingSize = 2 GiB`. A single 6.6 GiB GGUF
+   blob mapped as a sub-binding might exceed that limit and the
+   browser silently fails the binding; but the error message
+   would more likely call that out specifically rather than
+   "Required member is undefined".
+
+This is now task #543's actual scope: **wasm64 bind-group failure
+above the 2³² model-data threshold, kernel-family-independent.**
+
+## Implications for Phase 6 / migration closure
+
+Phase 6's `pickWasmUrl` change shipped a "production wasm64
+binary that auto-routes >3.5 GiB models." That binary builds and
+loads >4 GiB GGUFs into memory correctly (verified through
+`Weights loaded in 2.4s` in this retry), but **cannot run
+inference on them** — the very class of models it was added to
+support. Migration closure by candidate-pivot is no longer
+viable: every >4 GiB target hits the same bind-group bug.
+
+Path forward options:
+- **A1:** Triage the bind-group bug as the actual blocker.
+  Diagnostic plan: instrument the patched ggml-webgpu Q4_K
+  matmul to log the buffer pointer/offset/size before
+  `wgpuCreateBindGroup`, run Mistral-Nemo Q4_K_S, see whether
+  the offending field is bridge_malloc'd above 2³² or below.
+- **A2:** Document the bug as a known limitation and ship the
+  dual binary with the wasm64 path **only proven for ≤4 GiB
+  models that the wasm32 path also handles** — i.e. dual binary
+  has no current value-add. Migration stays nominally closed
+  for the ≤4 GiB ceiling but loses the 13B/30B aspiration.
+- **A3:** Revert Phase 6's auto-routing default. Keep wasm64
+  as an opt-in that throws a known-issue warning at load
+  time when the caller selects it for a >4 GiB GGUF until A1
+  lands.
+
 ## Two secondary gaps surfaced
 
 1. **The smoke-test page does NOT auto-pick wasm64.** `pickWasmUrl`
