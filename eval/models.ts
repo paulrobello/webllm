@@ -681,6 +681,39 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufUrl: "https://huggingface.co/bartowski/Qwen_Qwen3-8B-GGUF",
 		ggufFilePattern: "IQ3_M",
 	},
+
+	// Qwen3-14B Q4_K_S — 13B-class registration target (queued
+	// 2026-04-29 from the MEMORY64 closure stub). 40 layers,
+	// hidden 5120, GQA 5:1 (40 Q heads / 8 KV heads), SwiGLU,
+	// vocab 151936. Disk filesize 7.99 GiB (HEAD-verified
+	// 8,573,475,872 bytes on bartowski/Qwen_Qwen3-14B-GGUF);
+	// well above the 4 GiB wasm32 streaming cap and well under
+	// the 16 GiB Emscripten 5.0.6 wasm-ld --max-memory ceiling.
+	// `pickWasmUrl(byteLength)` auto-routes to wasm64 since
+	// vramMB > 3500. Same Qwen3 kernel surface already validated
+	// at 0.6B / 1.7B / 4B / 8B; this row exercises the next
+	// param-count band inside the 30B project ceiling. Expected
+	// smoke-bench band: 15-19 tok/s (extrapolated from
+	// Mistral-Nemo 12B Q4_K_S 19.3 tok/s and Mistral-7B Q4_K_S
+	// 28.2 tok/s); hard floor 12 tok/s.
+	{
+		id: "qwen3-14b-q4ks",
+		name: "Qwen3 14B (Q4_K_S, 13B-class registration)",
+		family: "Qwen3",
+		architecture: "qwen",
+		paramsB: 14.77,
+		vramMB: 8800,
+		defaultQuant: "q4f16_1",
+		availableQuants: ["q4f16_1"],
+		capabilities: { toolCalling: true, structuredOutput: true, vision: false, embedding: false },
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "quality",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/Qwen/Qwen3-14B",
+		ggufUrl: "https://huggingface.co/bartowski/Qwen_Qwen3-14B-GGUF",
+		ggufFilePattern: "Q4_K_S",
+	},
 ];
 
 /** Tier display order and labels. */

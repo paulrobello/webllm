@@ -241,6 +241,13 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Qwen3-14B Q4_K_S — 13B-class registration (2026-04-29) ──
+	{
+		name: "qwen3-14b-q4ks-warm",
+		model: "qwen3-14b-q4ks",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Llama 3.1 8B Instruct (wave 2 model 2) ────────────────
 	{
 		name: "llama-3.1-8b-warm",
