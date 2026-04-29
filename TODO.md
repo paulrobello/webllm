@@ -862,12 +862,13 @@ B fused-forward, `architecture === "phi3"`-gated).
   unmeasured and the strided-view gotcha cost a measurable
   ~6% throughput tax.
 
-### Next session pickup (queued 2026-04-29)
+### Next session pickup (queued 2026-04-29; updated 2026-04-29)
 
 **Status:** algorithmic-perf backlog cleared (§17-§29 + Phi-3
-support shipped). No load-bearing work queued. Next session
-should start with the daily upstream cadence check, then pick
-from the optional candidates below by appetite.
+support shipped). Phi-3 closure follow-ups (a) + (b) closed
+2026-04-29 — both defensive-only, no perf or eval impact. (c)
+remains skip-on-no-consumer. Next session: daily cadence check,
+then pre-rebase baseline freshness check if matrix nears 2026-05-28.
 
 1. **Daily upstream cadence check (REQUIRED, ~30s).** Procedure:
    `cd ~/Repos/llama.cpp && git fetch origin && git log
@@ -875,41 +876,45 @@ from the optional candidates below by appetite.
    ggml/src/ggml-webgpu/ ggml/include/`. **If non-empty:** apply
    §32 procedure (rebase, sweep, classify per §27/§28/§32
    templates). **If empty:** log and skip. Last clean run:
-   2026-04-29 (3 upstream tags advanced, 0 in `ggml-webgpu/`).
+   2026-04-29 (3 cadence checks done across 2 sessions; cumulative
+   6 upstream tags advanced, 0 in `ggml-webgpu/`).
 
-2. **Phi-3 closure follow-ups (OPTIONAL, pick zero or more).** All
-   three flagged in `eval/reports/phi-3-validation-2026-04-29/SUMMARY.md`
-   "Closing notes":
+2. **Phi-3 closure follow-ups.**
+   - ~~(a) Runtime contiguous-tensor assertion in fused helpers.~~
+     **CLOSED 2026-04-29** — commit `dc441ce`. Added
+     `assertContiguousF32(wasm, tensor, label)` exported from
+     `model-inference.ts`; wired into `buildQKV` / `buildFFNGateUp`
+     fused branches gated on `ModelInference.assertFusedContiguity`
+     (default true). 8-case helper unit test in
+     `tests/fused-contiguity-assert.test.ts`. Cost: ~7 wasm-bridge
+     round trips per output × 5 outputs/layer × layerCount (only
+     when `qkvFused`/`gateUpFused` non-null — Phi-3 today);
+     measured <1% of graph-build wall time on Phi-3.5-mini.
 
-   a. **Runtime contiguous-tensor assertion in fused helpers.**
-      `buildQKV` / `buildFFNGateUp` now wrap views in `opCont()`,
-      but a future op added between the helper and the rope/permute
-      chain could re-introduce strided derivatives without warning.
-      Add a runtime assertion (or a debug-mode check) that the
-      returned tensors are `ggml_is_contiguous`. ~5 LoC + one test
-      lock. Defense in depth; not blocking.
+   - ~~(b) Chat-template special-token literal audit.~~ **CLOSED
+     2026-04-29** — commit `2d65082`.
+     `tests/chat-template-special-tokens.test.ts` audits 13 special-
+     token literals across formatPhi3 / formatLlama3 / formatChatml /
+     formatLlama2-via-Mistral-v3 (4 + 4 + 2 + 3 = 13 single-token
+     assertions + 4 round-trip assertions = 17 tests). Each test
+     skips gracefully if its GGUF is missing. Probe verified: the
+     documented `<|assistant|?` typo encodes as 6 tokens vs 1 for
+     the correct `<|assistant|>` — audit fires on the protected bug
+     class. **Deferred:** mistral-v7 (`[SYSTEM_PROMPT]`/`[/]` only
+     special in v7-template GGUFs; Mistral-Nemo 6.6 GiB too heavy
+     for unit test) and gemma (no Gemma GGUF in fleet). Re-introduce
+     coverage if a smaller v7-template or any Gemma GGUF lands.
 
-   b. **Chat-template special-token literal audit.** Bug #3 was a
-      one-character typo (`<|assistant|?` instead of `<|assistant|>`)
-      in `formatPhi3` that was invisible until accidentally read
-      during gibberish debugging. Audit every `formatXxx` function
-      in `src/inference/chat-template.ts` for special-token
-      literals and verify each round-trips through the model's
-      tokenizer to a single token id. ~30 min wall, one fixture
-      file. Catches latent equivalents in formatLlama3 / formatQwen3
-      / formatMistralV7 / etc. before they ship to a public-API
-      caller.
-
-   c. **Path A vs Path B A/B measurement on Phi-3.** Loader-only
-      views (Path A) — split the fused tensors at upload time
-      into materialized Q/K/V/gate/up tensors — vs the shipped
-      Path B fused-forward. Predicted Path B win: ~96 dispatches
-      saved per token; observed cost: -6% throughput from opCont
-      copies. Without the A/B we don't know if the prediction
-      holds in practice. **Informational only**; closure report
-      already recommends evaluating Path A first for the next
-      fused-projection architecture (Phi-4, Granite). Skip if no
-      next fused architecture is queued.
+   - (c) **Path A vs Path B A/B measurement on Phi-3.** Loader-only
+     views (Path A) — split the fused tensors at upload time
+     into materialized Q/K/V/gate/up tensors — vs the shipped
+     Path B fused-forward. Predicted Path B win: ~96 dispatches
+     saved per token; observed cost: -6% throughput from opCont
+     copies. Without the A/B we don't know if the prediction
+     holds in practice. **Informational only**; closure report
+     already recommends evaluating Path A first for the next
+     fused-projection architecture (Phi-4, Granite). **Skip until
+     a next fused architecture is queued.**
 
 3. **Pre-rebase baseline freshness.** Matrix at
    `eval/reports/pre-rebase-baselines-2026-04-28/` is fresh until
