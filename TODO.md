@@ -876,8 +876,8 @@ then pre-rebase baseline freshness check if matrix nears 2026-05-28.
    ggml/src/ggml-webgpu/ ggml/include/`. **If non-empty:** apply
    §32 procedure (rebase, sweep, classify per §27/§28/§32
    templates). **If empty:** log and skip. Last clean run:
-   2026-04-29 (3 cadence checks done across 2 sessions; cumulative
-   6 upstream tags advanced, 0 in `ggml-webgpu/`).
+   2026-04-29 (4 cadence checks done across 3 sessions; cumulative
+   7 upstream tags advanced, 0 in `ggml-webgpu/`).
 
 2. **Phi-3 closure follow-ups.**
    - ~~(a) Runtime contiguous-tensor assertion in fused helpers.~~
@@ -1276,7 +1276,8 @@ appetite remains; none are forced.
   log and skip. Cadence policy set 2026-04-29: run daily even when
   the surface has been quiet, since the cost is ~30s and a missed
   rebase costs much more than catching one promptly. Last clean
-  run: 2026-04-29 (3 upstream tags advanced, 0 in `ggml-webgpu/`).
+  run: 2026-04-29 (4 cadence checks across 3 sessions; cumulative
+  7 upstream tags advanced, 0 in `ggml-webgpu/`).
 - **Test skip count.** Currently 11, all environmental:
   - `pipeline-cache.test.ts` × 5 (`!indexedDBAvailable` — IndexedDB
     is a browser API, missing in Bun native)
