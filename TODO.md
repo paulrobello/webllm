@@ -813,15 +813,42 @@ See dedicated section below.
 
 ---
 
-### MEMORY64 full bridge migration (active, queued 2026-04-28)
+### MEMORY64 full bridge migration (CLOSED 2026-04-29)
+
+**Migration closed 2026-04-29.** All 8 phases shipped (audit + 7
+implementation phases). Canonical 6 maintain ±3% wasm64-vs-wasm32
+parity (Phase 5 re-bench against `c919efa`). Production wasm64
+binary ships via `make wasm-build` (Phase 6 dual-binary path with
+`pickWasmUrl` size-aware default). >4 GiB validation on Mistral-
+Nemo-Instruct-2407 Q4_K_S (~6.63 GiB) coherent at **26/36 = 72%
+overall** (beats Mistral-7B Q4_K_S 68% baseline) and **3-run
+smoke-bench median 19.3 tok/s** (gate ≥15, in arch band 16-22).
+Closure report at
+[`eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md`](eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md).
+
+The Phase 7 cycle also discovered and fixed an Emscripten 5.0.6
+codegen bug: `_wgpuDeviceCreateBindGroup` reads 8-byte
+`WGPUBindGroupEntry::buffer/sampler/textureView` pointer fields
+with `HEAPU32` (low-32 only). Under MEMORY64, when a handle is
+allocated above 2³², the lookup misses by `1_00000000`. Fix lives
+in `scripts/fix-mem64-bindgroup-shim.py` and is wired into
+`make wasm-build-mem64` so every fresh build has the patch
+applied. Full diagnosis at
+[`eval/reports/memory64-migration-2026-04-28/PHASE-7-BLOCKED.md`](eval/reports/memory64-migration-2026-04-28/PHASE-7-BLOCKED.md).
+The lever is closed for the ≤30B ceiling. Next ask: register a
+real 13B / 30B target if a deployment need surfaces (no
+infrastructure work required — the wasm64 path is now proven
+end-to-end).
 
 **One-line goal.** Migrate the production WebLLM build from the
 4 GiB-cap WASM32 path to the 16 GiB-cap WASM64 path so the engine
 can host 13B Q4_K_S (~7.4 GiB) and 30B IQ3_M (~12.8 GiB) targets
 within the 30B project ceiling.
 
-**Status (2026-04-28):** Phases 0-4 complete; Phase 5 ran and **HALTED at gate failure**;
-Phase 1.5 inline optimization landed; **perf re-bench queued for a quiet host**.
+**Final status (2026-04-29):** Phases 0-7 complete; production
+wasm64 binary ships with the bind-group shim patch applied at
+build time. Phase 5 re-bench at `c919efa` PASSed parity; Phase 7
+validation at `5a53b1b` + `7260eff` PASSed eval + speed gates.
 
 | Phase | Commit(s) | Result |
 |---|---|---|
@@ -1267,9 +1294,12 @@ appetite remains; none are forced.
 
 Three open candidates, all conditional:
 
-- ~~**MEMORY64 full bridge migration**~~ → **promoted to Active next
-  step 2026-04-28** (see "MEMORY64 full bridge migration" block
-  above the External-trigger section).
+- ~~**MEMORY64 full bridge migration**~~ → **CLOSED 2026-04-29.**
+  All 8 phases shipped. Production wasm64 ships with bind-group
+  shim patch (`scripts/fix-mem64-bindgroup-shim.py`); >4 GiB
+  validation on Mistral-Nemo Q4_K_S = 72% eval / 19.3 tok/s
+  median. Closure report:
+  [`eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md`](eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md).
 
 - **§D concat-graph batched encoder compute.** Trigger: a real
   batch-encoder-throughput use-case (was non-goal in §21). The
