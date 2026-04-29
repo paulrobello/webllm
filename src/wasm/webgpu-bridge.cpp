@@ -56,9 +56,9 @@ void webgpu_shutdown() {
 
 // ── Context management (stack-based) ────────────────────────────────────
 
-int32_t ctx_create(int32_t mem_size) {
+int32_t ctx_create(size_t mem_size) {
     struct ggml_init_params params = {
-        .mem_size   = (size_t)mem_size,
+        .mem_size   = mem_size,
         .mem_buffer = nullptr,
         .no_alloc   = true,
     };
@@ -126,11 +126,11 @@ void* tensor_data(void* tensor) {
 
 // ── Tensor data I/O (direct memory access via WASM heap) ────────────────
 
-void tensor_set_data(void* tensor, const void* data, int32_t size) {
+void tensor_set_data(void* tensor, const void* data, size_t size) {
     memcpy(((struct ggml_tensor*)tensor)->data, data, size);
 }
 
-void tensor_get_data(void* tensor, void* out, int32_t size) {
+void tensor_get_data(void* tensor, void* out, size_t size) {
     memcpy(out, ((struct ggml_tensor*)tensor)->data, size);
 }
 
@@ -184,12 +184,12 @@ void* op_cont(void* x) {
     return ggml_cont(current_ctx(), (struct ggml_tensor*)x);
 }
 
-void* op_view_2d(void* x, int32_t ne0, int32_t ne1, int32_t nb1, int32_t offset) {
+void* op_view_2d(void* x, int32_t ne0, int32_t ne1, int32_t nb1, size_t offset) {
     return ggml_view_2d(current_ctx(), (struct ggml_tensor*)x, ne0, ne1, nb1, offset);
 }
 
 void* op_view_3d(void* x, int32_t ne0, int32_t ne1, int32_t ne2,
-                 int32_t nb1, int32_t nb2, int32_t offset) {
+                 int32_t nb1, int32_t nb2, size_t offset) {
     return ggml_view_3d(current_ctx(), (struct ggml_tensor*)x, ne0, ne1, ne2, nb1, nb2, offset);
 }
 
@@ -269,8 +269,8 @@ void* op_norm(void* x, float eps) {
 
 // ── Graph compute ───────────────────────────────────────────────────────
 
-void* graph_new(int32_t size) {
-    return ggml_new_graph_custom(current_ctx(), (size_t)size, false);
+void* graph_new(size_t size) {
+    return ggml_new_graph_custom(current_ctx(), size, false);
 }
 
 void graph_build_forward_expand(void* graph, void* tensor) {
@@ -293,7 +293,7 @@ void backend_buffer_free(void* buffer) {
     if (buffer) ggml_backend_buffer_free((ggml_backend_buffer_t)buffer);
 }
 
-void backend_tensor_set(void* tensor, const void* data, int32_t offset, int32_t size) {
+void backend_tensor_set(void* tensor, const void* data, size_t offset, size_t size) {
     ggml_backend_tensor_set((struct ggml_tensor*)tensor, data, offset, size);
 }
 
@@ -301,32 +301,32 @@ void backend_tensor_set(void* tensor, const void* data, int32_t offset, int32_t 
 // Saves 1-2 JS->WASM FFI hops per forward. A null tensor pointer skips
 // that slot (for the common "no mask on single-token decode" case).
 void backend_tensor_set3(
-    void* t1, const void* d1, int32_t sz1,
-    void* t2, const void* d2, int32_t sz2,
-    void* t3, const void* d3, int32_t sz3
+    void* t1, const void* d1, size_t sz1,
+    void* t2, const void* d2, size_t sz2,
+    void* t3, const void* d3, size_t sz3
 ) {
     if (t1) ggml_backend_tensor_set((struct ggml_tensor*)t1, d1, 0, sz1);
     if (t2) ggml_backend_tensor_set((struct ggml_tensor*)t2, d2, 0, sz2);
     if (t3) ggml_backend_tensor_set((struct ggml_tensor*)t3, d3, 0, sz3);
 }
 
-void backend_tensor_get(void* tensor, void* out, int32_t offset, int32_t size) {
+void backend_tensor_get(void* tensor, void* out, size_t offset, size_t size) {
     ggml_backend_tensor_get((struct ggml_tensor*)tensor, out, offset, size);
 }
 
-int32_t backend_tensor_get_async_begin(void* tensor, int32_t offset, int32_t size) {
+int32_t backend_tensor_get_async_begin(void* tensor, size_t offset, size_t size) {
     return ggml_backend_webgpu_tensor_get_async_begin(
         (const struct ggml_tensor*)tensor,
-        (size_t)offset,
-        (size_t)size);
+        offset,
+        size);
 }
 
 int32_t backend_tensor_get_async_poll(int32_t request_id) {
     return ggml_backend_webgpu_tensor_get_async_poll(request_id);
 }
 
-void backend_tensor_get_async_finish(int32_t request_id, void* out, int32_t size) {
-    ggml_backend_webgpu_tensor_get_async_finish(request_id, out, (size_t)size);
+void backend_tensor_get_async_finish(int32_t request_id, void* out, size_t size) {
+    ggml_backend_webgpu_tensor_get_async_finish(request_id, out, size);
 }
 
 void backend_tensor_get_async_cancel(int32_t request_id) {
