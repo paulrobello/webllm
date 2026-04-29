@@ -112,37 +112,32 @@ export class GgmlWasm {
 	private is64 = false;
 
 	/**
-	 * Convert a JS Number to a value safe to pass across an i32/i64 wasm
-	 * boundary parameter. Under MEMORY64 + WASM_BIGINT every `void*` and
-	 * `size_t` argument is i64 and must be a BigInt; under wasm32 they are
-	 * i32 and must be a Number. Use this for every pointer or size_t arg
-	 * crossing the bridge.
-	 */
-	private big(n: number): number | bigint {
-		return this.is64 ? BigInt(n) : n;
-	}
-
-	/**
-	 * Narrow a wasm boundary return value (i64 BigInt under wasm64, i32
-	 * Number under wasm32) to a JS Number. Safe in this codebase because
-	 * no single allocation exceeds 2^53 bytes (largest tensor at 30B IQ3_M
-	 * ≈ 850 MB; full 13B Q4_K_S model ≈ 7.4 GiB ≪ 2^53). Use this for
-	 * every `void*` or `size_t` return.
+	 * Pointer/size_t boundary discipline.
 	 *
-	 * Under wasm32 the `>>> 0` coerces signed i32 to unsigned uint32 — the
-	 * Emscripten linker only emits this conversion for known-pointer-typed
-	 * exports (`_malloc` / `_free`); custom exports like `_bridge_malloc`,
-	 * `_tensor_new_*`, and `_op_*` (returning `void*`) are not in that
-	 * list, so JS sees the raw signed i32 and any address ≥ 2^31 surfaces
-	 * as a negative Number. That breaks `Uint8Array.set(_, offset)` for
-	 * any 7B+ model where the heap fills past 2 GiB before the upload
-	 * scratch malloc lands in the upper half. Phase 1 of the MEMORY64
-	 * migration switched these calls from `_malloc` to `_bridge_malloc`
-	 * and inherited the bug; this `>>> 0` is the surgical fix.
+	 * Under MEMORY64 + WASM_BIGINT, every `void*` and `size_t` arg is i64
+	 * and must be a BigInt; the corresponding return values come back as
+	 * BigInt and we narrow with `Number(...)`. No single allocation in
+	 * this codebase exceeds 2^53 bytes (largest tensor at 30B IQ3_M
+	 * ≈ 850 MB; full 13B Q4_K_S model ≈ 7.4 GiB ≪ 2^53), so the narrow
+	 * is safe.
+	 *
+	 * Under wasm32 every `void*` and `size_t` is i32. The `>>> 0` coerces
+	 * a signed i32 return to unsigned uint32 — the Emscripten linker only
+	 * emits this for known-pointer-typed exports (`_malloc` / `_free`);
+	 * custom exports like `_bridge_malloc`, `_tensor_new_*`, and `_op_*`
+	 * (returning `void*`) are not in that list, so JS sees the raw signed
+	 * i32 and any address ≥ 2^31 surfaces as a negative Number. That
+	 * breaks `Uint8Array.set(_, offset)` for any 7B+ model where the
+	 * heap fills past 2 GiB before the upload scratch malloc lands in
+	 * the upper half. Phase 1 of the MEMORY64 migration switched these
+	 * calls from `_malloc` to `_bridge_malloc` and inherited the bug;
+	 * the inline `>>> 0` at every pointer-return call site is the fix.
+	 *
+	 * The is64 branch is inlined at every call site (rather than
+	 * factored into helper methods) because the wrapped bridge ops are
+	 * microsecond-scale and per-call helper dispatch dominated dispatch-
+	 * heavy hot paths in profiling (see PHASE-5-PARITY.md).
 	 */
-	private num(v: number | bigint): number {
-		return typeof v === "bigint" ? Number(v) : v >>> 0;
-	}
 
 	private async enqueueGraphCompute<T>(op: () => Promise<T>): Promise<T> {
 		const run = this.graphComputeQueue.then(op, op);
@@ -365,7 +360,9 @@ export class GgmlWasm {
 
 	ctxCreate(memSize: number): number {
 		// _ctx_create takes a size_t (i64 under MEMORY64) and returns int32_t.
-		const rc = this.m._ctx_create(this.big(memSize));
+		const rc = this.is64
+			? this.m._ctx_create(BigInt(memSize))
+			: this.m._ctx_create(memSize);
 		if (rc < 0) throw new Error(`ctx_create failed (${rc})`);
 		return rc;
 	}
@@ -377,15 +374,24 @@ export class GgmlWasm {
 	// ── Tensor creation ──────────────────────────────────────────────────
 
 	tensorNew1d(type: number, ne0: number): TensorPtr {
-		return this.num(this.m._tensor_new_1d(type, ne0));
+		if (this.is64) {
+			return Number(this.m._tensor_new_1d(type, ne0));
+		}
+		return this.m._tensor_new_1d(type, ne0) >>> 0;
 	}
 
 	tensorNew2d(type: number, ne0: number, ne1: number): TensorPtr {
-		return this.num(this.m._tensor_new_2d(type, ne0, ne1));
+		if (this.is64) {
+			return Number(this.m._tensor_new_2d(type, ne0, ne1));
+		}
+		return this.m._tensor_new_2d(type, ne0, ne1) >>> 0;
 	}
 
 	tensorNew3d(type: number, ne0: number, ne1: number, ne2: number): TensorPtr {
-		return this.num(this.m._tensor_new_3d(type, ne0, ne1, ne2));
+		if (this.is64) {
+			return Number(this.m._tensor_new_3d(type, ne0, ne1, ne2));
+		}
+		return this.m._tensor_new_3d(type, ne0, ne1, ne2) >>> 0;
 	}
 
 	tensorNew4d(
@@ -395,7 +401,10 @@ export class GgmlWasm {
 		ne2: number,
 		ne3: number,
 	): TensorPtr {
-		return this.num(this.m._tensor_new_4d(type, ne0, ne1, ne2, ne3));
+		if (this.is64) {
+			return Number(this.m._tensor_new_4d(type, ne0, ne1, ne2, ne3));
+		}
+		return this.m._tensor_new_4d(type, ne0, ne1, ne2, ne3) >>> 0;
 	}
 
 	tensorSetName(_tensor: TensorPtr, _name: string): void {
@@ -407,45 +416,63 @@ export class GgmlWasm {
 	// ── Tensor properties ────────────────────────────────────────────────
 
 	tensorNelements(tensor: TensorPtr): number {
-		return this.m._tensor_nelements(this.big(tensor));
+		if (this.is64) {
+			return this.m._tensor_nelements(BigInt(tensor));
+		}
+		return this.m._tensor_nelements(tensor);
 	}
 
 	tensorNbytes(tensor: TensorPtr): number {
-		return this.m._tensor_nbytes(this.big(tensor));
+		if (this.is64) {
+			return this.m._tensor_nbytes(BigInt(tensor));
+		}
+		return this.m._tensor_nbytes(tensor);
 	}
 
 	tensorType(tensor: TensorPtr): number {
-		return this.m._tensor_type(this.big(tensor));
+		if (this.is64) {
+			return this.m._tensor_type(BigInt(tensor));
+		}
+		return this.m._tensor_type(tensor);
 	}
 
 	tensorNe(tensor: TensorPtr, dim: number): number {
-		return this.m._tensor_ne(this.big(tensor), dim);
+		if (this.is64) {
+			return this.m._tensor_ne(BigInt(tensor), dim);
+		}
+		return this.m._tensor_ne(tensor, dim);
 	}
 
 	tensorNb(tensor: TensorPtr, dim: number): number {
-		return this.m._tensor_nb(this.big(tensor), dim);
+		if (this.is64) {
+			return this.m._tensor_nb(BigInt(tensor), dim);
+		}
+		return this.m._tensor_nb(tensor, dim);
 	}
 
 	tensorData(tensor: TensorPtr): number {
-		return this.num(this.m._tensor_data(this.big(tensor)));
+		if (this.is64) {
+			return Number(this.m._tensor_data(BigInt(tensor)));
+		}
+		return this.m._tensor_data(tensor) >>> 0;
 	}
 
 	// ── Tensor data I/O ──────────────────────────────────────────────────
 
 	tensorSetData(tensor: TensorPtr, srcHeapPtr: number, size: number): void {
-		this.m._tensor_set_data(
-			this.big(tensor),
-			this.big(srcHeapPtr),
-			this.big(size),
-		);
+		if (this.is64) {
+			this.m._tensor_set_data(BigInt(tensor), BigInt(srcHeapPtr), BigInt(size));
+			return;
+		}
+		this.m._tensor_set_data(tensor, srcHeapPtr, size);
 	}
 
 	tensorGetData(tensor: TensorPtr, dstHeapPtr: number, size: number): void {
-		this.m._tensor_get_data(
-			this.big(tensor),
-			this.big(dstHeapPtr),
-			this.big(size),
-		);
+		if (this.is64) {
+			this.m._tensor_get_data(BigInt(tensor), BigInt(dstHeapPtr), BigInt(size));
+			return;
+		}
+		this.m._tensor_get_data(tensor, dstHeapPtr, size);
 	}
 
 	/** Upload bytes from JS ArrayBuffer to a GPU tensor via heap buffer. */
@@ -453,12 +480,16 @@ export class GgmlWasm {
 		const ptr = this.malloc(data.byteLength);
 		try {
 			this.heapU8.set(data, ptr);
-			this.m._backend_tensor_set(
-				this.big(tensor),
-				this.big(ptr),
-				this.big(offset),
-				this.big(data.byteLength),
-			);
+			if (this.is64) {
+				this.m._backend_tensor_set(
+					BigInt(tensor),
+					BigInt(ptr),
+					BigInt(offset),
+					BigInt(data.byteLength),
+				);
+			} else {
+				this.m._backend_tensor_set(tensor, ptr, offset, data.byteLength);
+			}
 		} finally {
 			this.free(ptr);
 		}
@@ -473,16 +504,27 @@ export class GgmlWasm {
 		const total = data.byteLength;
 		const ptr = this.malloc(Math.min(chunkSize, total));
 		try {
-			for (let off = 0; off < total; off += chunkSize) {
-				const end = Math.min(off + chunkSize, total);
-				const slice = data.subarray(off, end);
-				this.heapU8.set(slice, ptr);
-				this.m._backend_tensor_set(
-					this.big(tensor),
-					this.big(ptr),
-					this.big(off),
-					this.big(slice.byteLength),
-				);
+			if (this.is64) {
+				const tensorArg = BigInt(tensor);
+				const ptrArg = BigInt(ptr);
+				for (let off = 0; off < total; off += chunkSize) {
+					const end = Math.min(off + chunkSize, total);
+					const slice = data.subarray(off, end);
+					this.heapU8.set(slice, ptr);
+					this.m._backend_tensor_set(
+						tensorArg,
+						ptrArg,
+						BigInt(off),
+						BigInt(slice.byteLength),
+					);
+				}
+			} else {
+				for (let off = 0; off < total; off += chunkSize) {
+					const end = Math.min(off + chunkSize, total);
+					const slice = data.subarray(off, end);
+					this.heapU8.set(slice, ptr);
+					this.m._backend_tensor_set(tensor, ptr, off, slice.byteLength);
+				}
 			}
 		} finally {
 			this.free(ptr);
@@ -504,16 +546,27 @@ export class GgmlWasm {
 	): void {
 		const ptr = this.malloc(Math.min(chunkSize, byteLength));
 		try {
-			for (let off = 0; off < byteLength; off += chunkSize) {
-				const end = Math.min(off + chunkSize, byteLength);
-				const slice = dataAt(off, end - off);
-				this.heapU8.set(slice, ptr);
-				this.m._backend_tensor_set(
-					this.big(tensor),
-					this.big(ptr),
-					this.big(off),
-					this.big(slice.byteLength),
-				);
+			if (this.is64) {
+				const tensorArg = BigInt(tensor);
+				const ptrArg = BigInt(ptr);
+				for (let off = 0; off < byteLength; off += chunkSize) {
+					const end = Math.min(off + chunkSize, byteLength);
+					const slice = dataAt(off, end - off);
+					this.heapU8.set(slice, ptr);
+					this.m._backend_tensor_set(
+						tensorArg,
+						ptrArg,
+						BigInt(off),
+						BigInt(slice.byteLength),
+					);
+				}
+			} else {
+				for (let off = 0; off < byteLength; off += chunkSize) {
+					const end = Math.min(off + chunkSize, byteLength);
+					const slice = dataAt(off, end - off);
+					this.heapU8.set(slice, ptr);
+					this.m._backend_tensor_set(tensor, ptr, off, slice.byteLength);
+				}
 			}
 		} finally {
 			this.free(ptr);
@@ -647,27 +700,45 @@ export class GgmlWasm {
 	// ── Graph operations ─────────────────────────────────────────────────
 
 	opMulMat(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.num(this.m._op_mul_mat(this.big(a), this.big(b)));
+		if (this.is64) {
+			return Number(this.m._op_mul_mat(BigInt(a), BigInt(b)));
+		}
+		return this.m._op_mul_mat(a, b) >>> 0;
 	}
 
 	opAdd(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.num(this.m._op_add(this.big(a), this.big(b)));
+		if (this.is64) {
+			return Number(this.m._op_add(BigInt(a), BigInt(b)));
+		}
+		return this.m._op_add(a, b) >>> 0;
 	}
 
 	opMul(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.num(this.m._op_mul(this.big(a), this.big(b)));
+		if (this.is64) {
+			return Number(this.m._op_mul(BigInt(a), BigInt(b)));
+		}
+		return this.m._op_mul(a, b) >>> 0;
 	}
 
 	opRmsNorm(x: TensorPtr, eps: number): TensorPtr {
-		return this.num(this.m._op_rms_norm(this.big(x), eps));
+		if (this.is64) {
+			return Number(this.m._op_rms_norm(BigInt(x), eps));
+		}
+		return this.m._op_rms_norm(x, eps) >>> 0;
 	}
 
 	opSilu(x: TensorPtr): TensorPtr {
-		return this.num(this.m._op_silu(this.big(x)));
+		if (this.is64) {
+			return Number(this.m._op_silu(BigInt(x)));
+		}
+		return this.m._op_silu(x) >>> 0;
 	}
 
 	opGelu(x: TensorPtr): TensorPtr {
-		return this.num(this.m._op_gelu(this.big(x)));
+		if (this.is64) {
+			return Number(this.m._op_gelu(BigInt(x)));
+		}
+		return this.m._op_gelu(x) >>> 0;
 	}
 
 	opRope(
@@ -683,10 +754,27 @@ export class GgmlWasm {
 		betaFast: number,
 		betaSlow: number,
 	): TensorPtr {
-		return this.num(
+		if (this.is64) {
+			return Number(
+				this.m._op_rope(
+					BigInt(x),
+					BigInt(pos),
+					nDims,
+					mode,
+					nCtxOrig,
+					freqBase,
+					freqScale,
+					extFactor,
+					attnFactor,
+					betaFast,
+					betaSlow,
+				),
+			);
+		}
+		return (
 			this.m._op_rope(
-				this.big(x),
-				this.big(pos),
+				x,
+				pos,
 				nDims,
 				mode,
 				nCtxOrig,
@@ -696,16 +784,22 @@ export class GgmlWasm {
 				attnFactor,
 				betaFast,
 				betaSlow,
-			),
+			) >>> 0
 		);
 	}
 
 	opReshape2d(x: TensorPtr, ne0: number, ne1: number): TensorPtr {
-		return this.num(this.m._op_reshape_2d(this.big(x), ne0, ne1));
+		if (this.is64) {
+			return Number(this.m._op_reshape_2d(BigInt(x), ne0, ne1));
+		}
+		return this.m._op_reshape_2d(x, ne0, ne1) >>> 0;
 	}
 
 	opReshape3d(x: TensorPtr, ne0: number, ne1: number, ne2: number): TensorPtr {
-		return this.num(this.m._op_reshape_3d(this.big(x), ne0, ne1, ne2));
+		if (this.is64) {
+			return Number(this.m._op_reshape_3d(BigInt(x), ne0, ne1, ne2));
+		}
+		return this.m._op_reshape_3d(x, ne0, ne1, ne2) >>> 0;
 	}
 
 	opPermute(
@@ -715,11 +809,17 @@ export class GgmlWasm {
 		d2: number,
 		d3: number,
 	): TensorPtr {
-		return this.num(this.m._op_permute(this.big(x), d0, d1, d2, d3));
+		if (this.is64) {
+			return Number(this.m._op_permute(BigInt(x), d0, d1, d2, d3));
+		}
+		return this.m._op_permute(x, d0, d1, d2, d3) >>> 0;
 	}
 
 	opCont(x: TensorPtr): TensorPtr {
-		return this.num(this.m._op_cont(this.big(x)));
+		if (this.is64) {
+			return Number(this.m._op_cont(BigInt(x)));
+		}
+		return this.m._op_cont(x) >>> 0;
 	}
 
 	opView2d(
@@ -730,9 +830,12 @@ export class GgmlWasm {
 		offset: number,
 	): TensorPtr {
 		// offset is size_t (i64 under wasm64); ne0/ne1/nb1 stay int32_t.
-		return this.num(
-			this.m._op_view_2d(this.big(x), ne0, ne1, nb1, this.big(offset)),
-		);
+		if (this.is64) {
+			return Number(
+				this.m._op_view_2d(BigInt(x), ne0, ne1, nb1, BigInt(offset)),
+			);
+		}
+		return this.m._op_view_2d(x, ne0, ne1, nb1, offset) >>> 0;
 	}
 
 	opView3d(
@@ -744,30 +847,34 @@ export class GgmlWasm {
 		nb2: number,
 		offset: number,
 	): TensorPtr {
-		return this.num(
-			this.m._op_view_3d(
-				this.big(x),
-				ne0,
-				ne1,
-				ne2,
-				nb1,
-				nb2,
-				this.big(offset),
-			),
-		);
+		if (this.is64) {
+			return Number(
+				this.m._op_view_3d(BigInt(x), ne0, ne1, ne2, nb1, nb2, BigInt(offset)),
+			);
+		}
+		return this.m._op_view_3d(x, ne0, ne1, ne2, nb1, nb2, offset) >>> 0;
 	}
 
 	opCpy(src: TensorPtr, dst: TensorPtr): TensorPtr {
-		return this.num(this.m._op_cpy(this.big(src), this.big(dst)));
+		if (this.is64) {
+			return Number(this.m._op_cpy(BigInt(src), BigInt(dst)));
+		}
+		return this.m._op_cpy(src, dst) >>> 0;
 	}
 
 	opSoftMax(x: TensorPtr): TensorPtr {
-		return this.num(this.m._op_soft_max(this.big(x)));
+		if (this.is64) {
+			return Number(this.m._op_soft_max(BigInt(x)));
+		}
+		return this.m._op_soft_max(x) >>> 0;
 	}
 
 	/** Fused SwiGLU for LLaMA FFN: silu(a) * b in one op. */
 	opSwigluSplit(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.num(this.m._op_swiglu_split(this.big(a), this.big(b)));
+		if (this.is64) {
+			return Number(this.m._op_swiglu_split(BigInt(a), BigInt(b)));
+		}
+		return this.m._op_swiglu_split(a, b) >>> 0;
 	}
 
 	/**
@@ -783,9 +890,12 @@ export class GgmlWasm {
 		scale: number,
 		maxBias: number,
 	): TensorPtr {
-		return this.num(
-			this.m._op_soft_max_ext(this.big(x), this.big(mask), scale, maxBias),
-		);
+		if (this.is64) {
+			return Number(
+				this.m._op_soft_max_ext(BigInt(x), BigInt(mask), scale, maxBias),
+			);
+		}
+		return this.m._op_soft_max_ext(x, mask, scale, maxBias) >>> 0;
 	}
 
 	/**
@@ -817,70 +927,112 @@ export class GgmlWasm {
 		maxBias: number,
 		logitSoftcap: number,
 	): TensorPtr {
-		return this.num(
-			this.m._op_flash_attn_ext(
-				this.big(q),
-				this.big(k),
-				this.big(v),
-				this.big(mask),
-				scale,
-				maxBias,
-				logitSoftcap,
-			),
+		if (this.is64) {
+			return Number(
+				this.m._op_flash_attn_ext(
+					BigInt(q),
+					BigInt(k),
+					BigInt(v),
+					BigInt(mask),
+					scale,
+					maxBias,
+					logitSoftcap,
+				),
+			);
+		}
+		return (
+			this.m._op_flash_attn_ext(q, k, v, mask, scale, maxBias, logitSoftcap) >>>
+			0
 		);
 	}
 
 	/** Pin the FA accumulator precision (e.g. GgmlPrec.F32 for higher precision). */
 	opFlashAttnSetPrec(a: TensorPtr, prec: GgmlPrec): void {
-		this.m._op_flash_attn_ext_set_prec(this.big(a), prec);
+		if (this.is64) {
+			this.m._op_flash_attn_ext_set_prec(BigInt(a), prec);
+			return;
+		}
+		this.m._op_flash_attn_ext_set_prec(a, prec);
 	}
 
 	/** Attach attention sinks (used by some Phi-3 / Qwen variants). Pass 0 for none. */
 	opFlashAttnAddSinks(a: TensorPtr, sinks: TensorPtr): void {
-		this.m._op_flash_attn_ext_add_sinks(this.big(a), this.big(sinks));
+		if (this.is64) {
+			this.m._op_flash_attn_ext_add_sinks(BigInt(a), BigInt(sinks));
+			return;
+		}
+		this.m._op_flash_attn_ext_add_sinks(a, sinks);
 	}
 
 	opScale(x: TensorPtr, s: number): TensorPtr {
-		return this.num(this.m._op_scale(this.big(x), s));
+		if (this.is64) {
+			return Number(this.m._op_scale(BigInt(x), s));
+		}
+		return this.m._op_scale(x, s) >>> 0;
 	}
 
 	opRepeat(x: TensorPtr, y: TensorPtr): TensorPtr {
-		return this.num(this.m._op_repeat(this.big(x), this.big(y)));
+		if (this.is64) {
+			return Number(this.m._op_repeat(BigInt(x), BigInt(y)));
+		}
+		return this.m._op_repeat(x, y) >>> 0;
 	}
 
 	opGetRows(a: TensorPtr, b: TensorPtr): TensorPtr {
-		return this.num(this.m._op_get_rows(this.big(a), this.big(b)));
+		if (this.is64) {
+			return Number(this.m._op_get_rows(BigInt(a), BigInt(b)));
+		}
+		return this.m._op_get_rows(a, b) >>> 0;
 	}
 
 	opArgmax(src: TensorPtr): TensorPtr {
-		return this.num(this.m._op_argmax(this.big(src)));
+		if (this.is64) {
+			return Number(this.m._op_argmax(BigInt(src)));
+		}
+		return this.m._op_argmax(src) >>> 0;
 	}
 
 	opTopK(src: TensorPtr, k: number): TensorPtr {
-		return this.num(this.m._op_top_k(this.big(src), k));
+		if (this.is64) {
+			return Number(this.m._op_top_k(BigInt(src), k));
+		}
+		return this.m._op_top_k(src, k) >>> 0;
 	}
 
 	opDiagMaskInf(x: TensorPtr, nPast: number): TensorPtr {
-		return this.num(this.m._op_diag_mask_inf(this.big(x), nPast));
+		if (this.is64) {
+			return Number(this.m._op_diag_mask_inf(BigInt(x), nPast));
+		}
+		return this.m._op_diag_mask_inf(x, nPast) >>> 0;
 	}
 
 	opNorm(x: TensorPtr, eps: number): TensorPtr {
-		return this.num(this.m._op_norm(this.big(x), eps));
+		if (this.is64) {
+			return Number(this.m._op_norm(BigInt(x), eps));
+		}
+		return this.m._op_norm(x, eps) >>> 0;
 	}
 
 	// ── Graph compute ────────────────────────────────────────────────────
 
 	graphNew(size: number): GraphPtr {
 		// _graph_new takes size_t (i64 under wasm64) and returns void* graph ptr.
-		return this.num(this.m._graph_new(this.big(size)));
+		if (this.is64) {
+			return Number(this.m._graph_new(BigInt(size)));
+		}
+		return this.m._graph_new(size) >>> 0;
 	}
 
 	graphBuildForwardExpand(graph: GraphPtr, tensor: TensorPtr): void {
-		this.m._graph_build_forward_expand(this.big(graph), this.big(tensor));
+		if (this.is64) {
+			this.m._graph_build_forward_expand(BigInt(graph), BigInt(tensor));
+			return;
+		}
+		this.m._graph_build_forward_expand(graph, tensor);
 	}
 
 	async graphCompute(graph: GraphPtr): Promise<number> {
-		const graphArg = this.big(graph);
+		const graphArg: number | bigint = this.is64 ? BigInt(graph) : graph;
 		return await this.enqueueGraphCompute(() =>
 			this.callWithAsyncify<number>(() => this.m._graph_compute(graphArg)),
 		);
@@ -891,7 +1043,7 @@ export class GgmlWasm {
 	}
 
 	async graphComputeWithDetailedProfile(graph: GraphPtr): Promise<number> {
-		const graphArg = this.big(graph);
+		const graphArg: number | bigint = this.is64 ? BigInt(graph) : graph;
 		return await this.enqueueGraphCompute(async () => {
 			this.setDetailedGraphComputeProfilingEnabled(true);
 			try {
@@ -927,11 +1079,18 @@ export class GgmlWasm {
 	// ── Backend buffer ───────────────────────────────────────────────────
 
 	backendAllocCtxTensors(): BufferPtr {
-		return this.num(this.m._backend_alloc_ctx_tensors());
+		if (this.is64) {
+			return Number(this.m._backend_alloc_ctx_tensors());
+		}
+		return this.m._backend_alloc_ctx_tensors() >>> 0;
 	}
 
 	backendBufferFree(buffer: BufferPtr): void {
-		this.m._backend_buffer_free(this.big(buffer));
+		if (this.is64) {
+			this.m._backend_buffer_free(BigInt(buffer));
+			return;
+		}
+		this.m._backend_buffer_free(buffer);
 	}
 
 	backendTensorSet(
@@ -940,12 +1099,16 @@ export class GgmlWasm {
 		offset: number,
 		size: number,
 	): void {
-		this.m._backend_tensor_set(
-			this.big(tensor),
-			this.big(srcHeapPtr),
-			this.big(offset),
-			this.big(size),
-		);
+		if (this.is64) {
+			this.m._backend_tensor_set(
+				BigInt(tensor),
+				BigInt(srcHeapPtr),
+				BigInt(offset),
+				BigInt(size),
+			);
+			return;
+		}
+		this.m._backend_tensor_set(tensor, srcHeapPtr, offset, size);
 	}
 
 	/**
@@ -965,17 +1128,21 @@ export class GgmlWasm {
 		d3: number,
 		sz3: number,
 	): void {
-		this.m._backend_tensor_set3(
-			this.big(t1),
-			this.big(d1),
-			this.big(sz1),
-			this.big(t2),
-			this.big(d2),
-			this.big(sz2),
-			this.big(t3),
-			this.big(d3),
-			this.big(sz3),
-		);
+		if (this.is64) {
+			this.m._backend_tensor_set3(
+				BigInt(t1),
+				BigInt(d1),
+				BigInt(sz1),
+				BigInt(t2),
+				BigInt(d2),
+				BigInt(sz2),
+				BigInt(t3),
+				BigInt(d3),
+				BigInt(sz3),
+			);
+			return;
+		}
+		this.m._backend_tensor_set3(t1, d1, sz1, t2, d2, sz2, t3, d3, sz3);
 	}
 
 	async backendTensorGet(
@@ -984,12 +1151,18 @@ export class GgmlWasm {
 		offset: number,
 		size: number,
 	): Promise<void> {
-		const tensorArg = this.big(tensor);
-		const dstArg = this.big(dstHeapPtr);
-		const offsetArg = this.big(offset);
-		const sizeArg = this.big(size);
+		if (this.is64) {
+			const tensorArg = BigInt(tensor);
+			const dstArg = BigInt(dstHeapPtr);
+			const offsetArg = BigInt(offset);
+			const sizeArg = BigInt(size);
+			await this.callWithAsyncify<void>(() =>
+				this.m._backend_tensor_get(tensorArg, dstArg, offsetArg, sizeArg),
+			);
+			return;
+		}
 		await this.callWithAsyncify<void>(() =>
-			this.m._backend_tensor_get(tensorArg, dstArg, offsetArg, sizeArg),
+			this.m._backend_tensor_get(tensor, dstHeapPtr, offset, size),
 		);
 	}
 
@@ -999,11 +1172,14 @@ export class GgmlWasm {
 		size: number,
 	): number {
 		// requestId return is int32_t; tensor/offset/size are ptr/size_t.
-		return this.m._backend_tensor_get_async_begin(
-			this.big(tensor),
-			this.big(offset),
-			this.big(size),
-		);
+		if (this.is64) {
+			return this.m._backend_tensor_get_async_begin(
+				BigInt(tensor),
+				BigInt(offset),
+				BigInt(size),
+			);
+		}
+		return this.m._backend_tensor_get_async_begin(tensor, offset, size);
 	}
 
 	backendTensorGetAsyncPoll(requestId: number): number {
@@ -1016,11 +1192,15 @@ export class GgmlWasm {
 		size: number,
 	): void {
 		// requestId stays int32_t; dstHeapPtr is void*, size is size_t.
-		this.m._backend_tensor_get_async_finish(
-			requestId,
-			this.big(dstHeapPtr),
-			this.big(size),
-		);
+		if (this.is64) {
+			this.m._backend_tensor_get_async_finish(
+				requestId,
+				BigInt(dstHeapPtr),
+				BigInt(size),
+			);
+			return;
+		}
+		this.m._backend_tensor_get_async_finish(requestId, dstHeapPtr, size);
 	}
 
 	backendTensorGetAsyncCancel(requestId: number): void {
