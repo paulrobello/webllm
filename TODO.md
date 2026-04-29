@@ -855,10 +855,11 @@ causal LM support (closed 2026-04-29)".
 ### Next session pickup (queued 2026-04-29; updated 2026-04-29)
 
 **Status:** algorithmic-perf backlog cleared (§17-§29 + Phi-3
-support shipped). Phi-3 closure follow-ups (a) + (b) closed
-2026-04-29 — both defensive-only, no perf or eval impact. (c)
-remains skip-on-no-consumer. Next session: daily cadence check,
-then pre-rebase baseline freshness check if matrix nears 2026-05-28.
+support shipped). TS API audit (a)-(f) closed 2026-04-29; full
+narrative archived to `TODO_ARCHIVE.md`. **Next session focus
+queued 2026-04-29: embedding bucket C (Qwen3-Embedding
+causal-LM-derived embedders)** — see item 5 below. Daily cadence
+check (item 1) still required at session start.
 
 1. **Daily upstream cadence check (REQUIRED, ~30s).** Procedure:
    `cd ~/Repos/llama.cpp && git fetch origin && git log
@@ -929,6 +930,62 @@ then pre-rebase baseline freshness check if matrix nears 2026-05-28.
    Three orthogonal follow-ups filed in the watch list (sampling-
    dispatch unit test; tool-schema mirror-drift sentinel; tsconfig
    widening to enforce `@ts-expect-error` gates).
+
+5. **Embedding bucket C — causal-LM-derived embedders (queued
+   2026-04-29 as next-session focus).** Last bucket of the embedding
+   expansion campaign (A and B closed 2026-04-28). Highest MTEB
+   upside in the queue: Qwen3-Embedding tops MTEB at 0.6B-8B as of
+   2026; landing the lever also unlocks `gte-Qwen2-*`,
+   `e5-mistral-*`, and any future causal-LM embedder using last-
+   token pooling.
+
+   **Probe-first per project doctrine.** Open with a Phase 0 probe
+   characterizing:
+   - The current `ModelInference` embed surface — what does the
+     causal forward path expose at the layer-final hidden state?
+     Is there a clean point to bypass the sampling stack?
+   - Qwen3-Embedding GGUF metadata — pooling type
+     (last-token / attention-pooled), normalization (L2),
+     projection head presence + dim.
+   - Reference vectors via `~/ClaudeVault/Patterns/encoder-parity-
+     gate-via-sentence-transformers.md` harness (already used for
+     bucket B; reusable as-is).
+
+   **Phase plan (from probe outcome; keep flexible):**
+   - **Phase 1:** types + embed-mode toggle on `ModelInference`
+     (skip sampling, return hidden state).
+   - **Phase 2:** pooling head (last-token / attention-pooled) +
+     L2 normalize + projection-head support.
+   - **Phase 3:** Qwen3-Embedding-0.6B registration + 5/5 reference-
+     vector parity at cosine ≥0.999.
+   - **Phase 4:** dashboard / bench-full integration; smoke gate.
+   - **Phase 5:** scale-up (Qwen3-Embedding-4B / 8B if Phase 3
+     passes; otherwise diagnose with the cosine-degradation
+     signature ladder at
+     `~/ClaudeVault/Knowledge/encoder-cosine-degradation-signatures.md`).
+
+   **Workflow:** brainstorming → writing-plans → subagent-driven-
+   development per the established cadence (used successfully for
+   the TS API audit Phase 3). Cross-link the probe report to the
+   three vault notes already covering this terrain:
+   `Patterns/encoder-parity-gate-via-sentence-transformers.md`,
+   `Patterns/llama-cpp-as-arch-truth-source.md`,
+   `Knowledge/encoder-cosine-degradation-signatures.md`.
+
+   **Scope estimate:** medium (additive). Comparable to bucket B
+   (10 commits, 5 phases) but lighter — reuses the existing causal
+   forward path rather than adding new architecture branches. Risk
+   centered on the embed-mode toggle (does it cleanly bypass the
+   sampling stack? does the existing forward expose hidden state at
+   the right point?). Phase 0 probe answers both before any
+   implementation lands.
+
+   **Out of scope (current cycle):**
+   - Other causal-LM embedders (`gte-Qwen2-*`, `e5-mistral-*`) —
+     register only after Qwen3-Embedding-0.6B is end-to-end green.
+   - Qwen3-Embedding-4B/8B — gated on Phase 3 success at 0.6B.
+   - Any encoder-batched-throughput work (still external-trigger
+     candidate §D).
 
 ---
 
@@ -1071,7 +1128,11 @@ top of this foundation if they share an arch tag already on file
 re-open Phase 0/1.
 
 **C. Causal-LM-derived embedders (`Qwen3-Embedding-0.6B`)**
-(deferred). Reuses the existing causal forward but requires:
+**→ promoted 2026-04-29 to active next-session focus; see
+"Next session pickup" item 5 above for the probe-first phase
+plan and scope.** Original scope summary preserved here for
+the embedding-bucket campaign narrative: reuses the existing
+causal forward but requires:
 - Embed-mode toggle on `ModelInference` (skip sampling, return
   hidden state)
 - Last-token (or attention-pooled) pooling head
