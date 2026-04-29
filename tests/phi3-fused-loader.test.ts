@@ -53,7 +53,12 @@ describe("phi3 fused QKV view-offset math", () => {
 });
 
 describe("phi3 fused gate-up view-offset math", () => {
-	test("gate-up halves are contiguous and equal-size at phi-3.5-mini ffSize=8192", () => {
+	test("gate is FIRST half, up is SECOND half (HF Phi3MLP order)", () => {
+		// HF Phi3MLP forward is `up * silu(gate)` with `chunk(2, dim=-1)`,
+		// so HF stores [gate | up] along the output dim. llama.cpp's
+		// convert_hf_to_gguf.py Phi3MiniModel preserves the order, and
+		// its swiglu kernel (ggml-cpu/ops.cpp:3170-3179) computes
+		// `silu(first_half) * second_half` when swapped=0, matching.
 		const ffSize = 8192;
 		const tokenBytes = F32_BYTES * 2 * ffSize;
 		const gateOffset = 0;

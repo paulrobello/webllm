@@ -111,6 +111,14 @@ export function getRopeModeForArchitecture(
 	// LLAMA_ROPE_TYPE_NEOX). The HF config also surfaces this as
 	// `rotary_emb_interleaved: false`.
 	if (architecture === "nomic-bert") return RopeMode.NEOX;
+	// Phi-3 / Phi-3.5 / PhiMoE all use NEOX-style RoPE (split-halves)
+	// per llama.cpp's llama-model.cpp:9282 — phi3 sits in the same
+	// case-list as PLAMO, GEMMA, STARCODER2, GPTNEOX, etc., all
+	// returning LLAMA_ROPE_TYPE_NEOX. Without this, Phi-3 forward
+	// produces fluent-but-meaningless output (interleaved RoPE
+	// rotates the wrong feature pairs and the model decodes to
+	// nonsense like "IMDbSidenoteSidenotepisode...").
+	if (architecture === "phi3") return RopeMode.NEOX;
 	return String(architecture).startsWith("qwen")
 		? RopeMode.NEOX
 		: RopeMode.NORMAL;
@@ -486,32 +494,30 @@ export class ModelInference {
 			const qkv = wasm.opMulMat(lw.qkvFused, normed); // [fusedRowDim, nTokens]
 			const headBytes = F32_BYTES * headDim;
 			const tokenBytes = F32_BYTES * fusedRowDim;
-			q3 = wasm.opView3d(
-				qkv,
-				headDim,
-				nHeads,
-				nTokens,
-				headBytes,
-				tokenBytes,
-				0,
+			q3 = wasm.opCont(
+				wasm.opView3d(qkv, headDim, nHeads, nTokens, headBytes, tokenBytes, 0),
 			);
-			k3 = wasm.opView3d(
-				qkv,
-				headDim,
-				hp.headCountKv,
-				nTokens,
-				headBytes,
-				tokenBytes,
-				F32_BYTES * E,
+			k3 = wasm.opCont(
+				wasm.opView3d(
+					qkv,
+					headDim,
+					hp.headCountKv,
+					nTokens,
+					headBytes,
+					tokenBytes,
+					F32_BYTES * E,
+				),
 			);
-			v3 = wasm.opView3d(
-				qkv,
-				headDim,
-				hp.headCountKv,
-				nTokens,
-				headBytes,
-				tokenBytes,
-				F32_BYTES * (E + kvDim),
+			v3 = wasm.opCont(
+				wasm.opView3d(
+					qkv,
+					headDim,
+					hp.headCountKv,
+					nTokens,
+					headBytes,
+					tokenBytes,
+					F32_BYTES * (E + kvDim),
+				),
 			);
 		} else {
 			if (!lw.qProj || !lw.kProj || !lw.vProj) {
@@ -555,16 +561,20 @@ export class ModelInference {
 	): { gate: TensorPtr; up: TensorPtr } {
 		const { wasm, hp } = this;
 		if (lw.gateUpFused) {
+			// llama.cpp's swiglu kernel (ggml-cpu/ops.cpp:3170-3179)
+			// computes y = silu(first_half) * second_half when swapped=0.
+			// HF Phi3MLP forward is `up * silu(gate)` with `chunk(2, dim=-1)`,
+			// so HF puts gate first / up second along the output dim, and
+			// llama.cpp's convert_hf_to_gguf.py Phi3MiniModel preserves
+			// that order — gate is the FIRST half, up is the SECOND.
 			const ffSize = hp.feedForwardLength;
 			const fused = wasm.opMulMat(lw.gateUpFused, ffnNormed); // [2*ffSize, nTokens]
 			const tokenBytes = F32_BYTES * 2 * ffSize;
-			const gate = wasm.opView2d(fused, ffSize, nTokens, tokenBytes, 0);
-			const up = wasm.opView2d(
-				fused,
-				ffSize,
-				nTokens,
-				tokenBytes,
-				F32_BYTES * ffSize,
+			const gate = wasm.opCont(
+				wasm.opView2d(fused, ffSize, nTokens, tokenBytes, 0),
+			);
+			const up = wasm.opCont(
+				wasm.opView2d(fused, ffSize, nTokens, tokenBytes, F32_BYTES * ffSize),
 			);
 			return { gate, up };
 		}
