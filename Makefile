@@ -1,5 +1,5 @@
 .PHONY: build test lint lint-fix fmt typecheck checkall clean install deps \
-        wasm-build wasm-clean \
+        wasm-build wasm-build-wasm32 wasm-build-mem64 wasm-clean \
         bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full bench-all \
         smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench mem64-probe \
@@ -72,7 +72,9 @@ checkall: fmt lint typecheck test ## Format, lint, typecheck, and test
 # console (useful while chasing WASM aborts). Default is off (production speed).
 WEBLLM_ASSERTIONS ?= 0
 
-wasm-build: ## Build ggml-webgpu WASM via Emscripten (pass WEBLLM_ASSERTIONS=1 for diagnostic build)
+wasm-build: wasm-build-wasm32 wasm-build-mem64 ## Build both wasm32 (4 GiB cap) and wasm64 (16 GiB cap) binaries
+
+wasm-build-wasm32: ## Build only the wasm32 production binary (current default)
 	cd src/wasm && mkdir -p build && cd build && \
 	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
 	emcmake cmake .. \
@@ -94,29 +96,8 @@ wasm-build: ## Build ggml-webgpu WASM via Emscripten (pass WEBLLM_ASSERTIONS=1 f
 		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --config Release -j
 
-wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
-wasm-build-debug: wasm-clean wasm-build
-
-wasm-clean: ## Remove WASM build artifacts
-	rm -rf src/wasm/build
-
-# ---------------------------------------------------------------------------
-# Vendored browser libraries
-# ---------------------------------------------------------------------------
-vendor-refresh: ## Refresh smoke-test/vendor/ from node_modules after bumping chart.js
-	@mkdir -p smoke-test/vendor
-	@cp node_modules/chart.js/dist/chart.umd.min.js smoke-test/vendor/
-	@echo "smoke-test/vendor/chart.umd.min.js ← node_modules/chart.js"
-
-# ---------------------------------------------------------------------------
-# Smoke Test (browser end-to-end)
-# ---------------------------------------------------------------------------
-smoke-test: wasm-build ## Bundle + copy WASM artifacts into smoke-test/
-	bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
-	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
-
-mem64-probe: ## Build wasm64 mem64 binary in build-mem64/, copy to smoke-test/, restart smoke server, print probe URL
-	@cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
+wasm-build-mem64: ## Build only the wasm64 (MEMORY64) production binary
+	cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
 	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
 	emcmake cmake .. \
 		-DGGML_WEBGPU=ON \
@@ -139,6 +120,30 @@ mem64-probe: ## Build wasm64 mem64 binary in build-mem64/, copy to smoke-test/, 
 		-DCMAKE_CXX_FLAGS="-sMEMORY64=1" \
 		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --target webllm-wasm-mem64 --config Release -j
+
+wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
+wasm-build-debug: wasm-clean wasm-build
+
+wasm-clean: ## Remove WASM build artifacts (both wasm32 and wasm64 trees)
+	rm -rf src/wasm/build src/wasm/build-mem64
+
+# ---------------------------------------------------------------------------
+# Vendored browser libraries
+# ---------------------------------------------------------------------------
+vendor-refresh: ## Refresh smoke-test/vendor/ from node_modules after bumping chart.js
+	@mkdir -p smoke-test/vendor
+	@cp node_modules/chart.js/dist/chart.umd.min.js smoke-test/vendor/
+	@echo "smoke-test/vendor/chart.umd.min.js ← node_modules/chart.js"
+
+# ---------------------------------------------------------------------------
+# Smoke Test (browser end-to-end)
+# ---------------------------------------------------------------------------
+smoke-test: wasm-build ## Bundle + copy WASM artifacts (both wasm32 and wasm64) into smoke-test/
+	bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
+	cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
+
+mem64-probe: wasm-build-mem64 ## Build wasm64 mem64 binary, copy to smoke-test/, restart smoke server, print probe URL
 	cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
 	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
 	@bun run eval/smoke-serve.ts --port $(SMOKE_PORT) >/dev/null 2>&1 &

@@ -111,6 +111,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	} = await import(`./real-model-smoke.js${assetSuffix}`);
 
 	const params = new URLSearchParams(window.location.search);
+	// Phase 4 of MEMORY64 migration: ?wasm=mem64 toggles the wasm64 binary.
+	// Default loads webllm-wasm.js (wasm32, current behavior, no regression).
+	const wasmVariant =
+		params.get("wasm") === "mem64" ? "webllm-wasm-mem64.js" : "webllm-wasm.js";
 	const thinkingEnabled = getThinkingModeFromParams(params);
 	const maxTokensParam = Number(params.get("max"));
 	const maxTokensOverride =
@@ -259,7 +263,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		try {
 			wasm = new GgmlWasm();
 			wasmInstance = wasm;
-			await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
+			await wasm.init({ wasmUrl: `./${wasmVariant}${assetSuffix}` });
 			log("pass", "[1/8] WebGPU backend initialized");
 		} catch (e) {
 			log("fail", `[1/8] WebGPU init failed: ${e.message}\n${e.stack || ""}`);
@@ -529,7 +533,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			let drafterWasm = null;
 			try {
 				drafterWasm = new GgmlWasm();
-				await drafterWasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
+				await drafterWasm.init({ wasmUrl: `./${wasmVariant}${assetSuffix}` });
 				const drafterResp = await fetch(drafterUrl);
 				if (!drafterResp.ok) {
 					throw new Error(`HTTP ${drafterResp.status} fetching ${drafterUrl}`);
@@ -993,7 +997,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					embedBuf,
 					"arctic-s",
 					{ device: embedDevice, memoryBudget: 500_000_000 },
-					`./webllm-wasm.js${assetSuffix}`,
+					`./${wasmVariant}${assetSuffix}`,
 				);
 			const va = await engine2.embed(embedHandle.id, "happy");
 			const vb = await engine2.embed(embedHandle.id, "joyful");

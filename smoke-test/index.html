@@ -34,6 +34,12 @@ h1 { font-size: 20px; margin-bottom: 8px; color: var(--blue); }
 
 <script type="module">
 const assetSuffix = window.location.search || "";
+// Phase 4 of MEMORY64 migration: ?wasm=mem64 toggles the wasm64 binary.
+// Default loads webllm-wasm.js (wasm32, current behavior, no regression).
+const wasmVariant =
+    new URLSearchParams(window.location.search).get("wasm") === "mem64"
+        ? "webllm-wasm-mem64.js"
+        : "webllm-wasm.js";
 const {
     GgufParser, ModelLoader, GgmlWasm, ModelInference, Tokenizer
 } = await import(`./webllm-bundle.js${assetSuffix}`);
@@ -324,7 +330,7 @@ async function runSmokeTest() {
     // Step 5: Initialize WebGPU backend
     const s5 = addStep('Initialize WebGPU backend via WASM');
     try {
-        await wasm.init({ wasmUrl: `./webllm-wasm.js${assetSuffix}` });
+        await wasm.init({ wasmUrl: `./${wasmVariant}${assetSuffix}` });
         setStep(s5, 'pass', 'Backend initialized');
     } catch (e) { setStep(s5, 'fail', e.message); return finish(false); }
 
