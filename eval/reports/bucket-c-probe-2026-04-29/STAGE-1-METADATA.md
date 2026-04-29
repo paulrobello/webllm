@@ -98,4 +98,28 @@ Note the literal `\n` between the `Instruct:` line and the `Query:` line, and th
 
 ## Stage 2 plan refinement
 
-(Populated in Task 4; placeholder until metadata is read.)
+**Fixture-mode count:** 2 (document + query). Default from spec retained — README documents exactly these two modes (query gets an instruction prefix; documents pass raw).
+
+**Exact instruction-prefix string (query mode), verbatim:**
+
+When the README's `f'Instruct: {task_description}\nQuery:{query}'` is rendered as a Python f-string, the `\n` becomes a real newline. The runtime byte sequence the model sees for query mode is:
+
+```
+Instruct: Given a web search query, retrieve relevant passages that answer the query
+Query:<fixture text>
+```
+
+Where:
+- Real newline (LF, U+000A) between the `Instruct:` line and `Query:` line.
+- No space after `Query:` (the fixture text appends directly).
+- Task description: the canonical README example (`Given a web search query, retrieve relevant passages that answer the query`) — use verbatim so reference vectors are reproducible.
+
+**Document mode:** raw fixture text passed unmodified to `model.encode`.
+
+**Expected output dim:** 1024 (= `hidden_size`; no projection head per metadata table).
+
+**Pooling:** last-token (`qwen3.pooling_type = 3`).
+
+**Reference vector normalization:** L2 (consumer-side; sentence-transformers default `normalize_embeddings=True`).
+
+**Stage 2 ready-to-execute:** yes. All Stage-2 inputs (prefix, pooling, expected dim, mode count) are fully pinned.
