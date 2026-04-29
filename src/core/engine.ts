@@ -56,6 +56,37 @@ interface ConversationSession {
 	messageCount: number;
 }
 
+/**
+ * Heap-margin threshold for routing between the wasm32 and wasm64 binaries.
+ *
+ * 3.5 GiB = 10% under the wasm32 4 GiB heap cap. Models at or below this
+ * size fit comfortably in the wasm32 heap (with headroom for KV cache and
+ * scratch buffers); larger models require the wasm64 binary's 16 GiB heap.
+ */
+const WASM32_HEAP_MARGIN = 3.5 * 1024 * 1024 * 1024;
+
+/**
+ * Pick the WASM binary based on model file size.
+ *
+ * Models ≤ 3.5 GiB (10% under the wasm32 4 GiB heap cap) route through
+ * `webllm-wasm.js` (wasm32 — smaller bundle, no BigInt-allocation
+ * overhead in hot paths). Larger models route through
+ * `webllm-wasm-mem64.js` (wasm64 — 16 GiB heap cap, the only path
+ * available for 7B+ Q4_K_S, 13B Q4_K_S, and 30B IQ3_M targets).
+ *
+ * Pass an explicit `override` to bypass the default (e.g., to force
+ * wasm64 for testing or to point at a custom-served binary).
+ */
+export function pickWasmUrl(
+	modelByteLength: number,
+	override?: string,
+): string {
+	if (override) return override;
+	return modelByteLength > WASM32_HEAP_MARGIN
+		? "webllm-wasm-mem64.js"
+		: "webllm-wasm.js";
+}
+
 const QWEN_THINKING_DEFAULTS = {
 	temperature: 0.6,
 	topK: 20,
@@ -568,11 +599,23 @@ export class WebLLM {
 		return handle;
 	}
 
+	/**
+	 * Load a model directly from an in-memory GGUF buffer.
+	 *
+	 * **WASM binary selection.** When `wasmUrl` is omitted, the binary
+	 * is chosen by model file size via {@link pickWasmUrl}: models
+	 * ≤ 3.5 GiB use `webllm-wasm.js` (wasm32, smaller bundle, no BigInt
+	 * dispatch overhead); larger models use `webllm-wasm-mem64.js`
+	 * (wasm64, 16 GiB heap — required for 7B+ Q4_K_S, 13B Q4_K_S, and
+	 * 30B IQ3_M). Pass an explicit `wasmUrl` to override the default
+	 * (e.g., force wasm64 for testing, or point at a custom-served
+	 * binary).
+	 */
 	static async loadModelFromBuffer(
 		data: ArrayBuffer | Uint8Array,
 		name: string,
 		config: WebLLMConfig,
-		wasmUrl = "webllm-wasm.js",
+		wasmUrl?: string,
 	): Promise<{
 		handle: ModelHandle;
 		engine: WebLLM;
@@ -584,8 +627,9 @@ export class WebLLM {
 		const parsed = ModelLoader.parseModel(view);
 		const ggufCtx = GgufParser.parse(view) as GgufContext;
 
+		const resolvedWasmUrl = pickWasmUrl(view.byteLength, wasmUrl);
 		const wasm = new GgmlWasm();
-		await wasm.init({ wasmUrl });
+		await wasm.init({ wasmUrl: resolvedWasmUrl });
 
 		const isEncoder = isEncoderArchitecture(parsed.hyperparams.architecture);
 		let inference: ModelInference | EncoderInference;
