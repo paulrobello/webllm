@@ -931,61 +931,27 @@ check (item 1) still required at session start.
    dispatch unit test; tool-schema mirror-drift sentinel; tsconfig
    widening to enforce `@ts-expect-error` gates).
 
-5. **Embedding bucket C — causal-LM-derived embedders (queued
-   2026-04-29 as next-session focus).** Last bucket of the embedding
-   expansion campaign (A and B closed 2026-04-28). Highest MTEB
-   upside in the queue: Qwen3-Embedding tops MTEB at 0.6B-8B as of
-   2026; landing the lever also unlocks `gte-Qwen2-*`,
-   `e5-mistral-*`, and any future causal-LM embedder using last-
-   token pooling.
+5. **Embedding bucket C — causal-LM-derived embedders.** Phase 0
+   probe **CLOSED 2026-04-29** — see
+   [`eval/reports/bucket-c-probe-2026-04-29/STAGE-2-REFERENCE-VECTORS.md`](eval/reports/bucket-c-probe-2026-04-29/STAGE-2-REFERENCE-VECTORS.md).
+   Probe artifacts: Stage 1 metadata + embed-surface analysis
+   (tap-point #2 post-output-norm recommended; `qwen3.cpp:98`
+   `res->t_embd = cur` truth-source); Stage 2 reference vectors
+   (5 fixtures × 2 modes = 10 refs, all unit-magnitude with
+   max deviation 5.46e-08; doc-vs-query same-row cosines
+   0.5409–0.9674 confirming prefix is materially applied).
+   **Probe conclusion: proceed to Phase 1.** All 6 spec-listed
+   risks resolved or explicitly accepted; deferred risks (graph-build
+   cost, causal-mask semantics, 4B/8B variants) flagged for Phase 2-5.
 
-   **Probe-first per project doctrine.** Open with a Phase 0 probe
-   characterizing:
-   - The current `ModelInference` embed surface — what does the
-     causal forward path expose at the layer-final hidden state?
-     Is there a clean point to bypass the sampling stack?
-   - Qwen3-Embedding GGUF metadata — pooling type
-     (last-token / attention-pooled), normalization (L2),
-     projection head presence + dim.
-   - Reference vectors via `~/ClaudeVault/Patterns/encoder-parity-
-     gate-via-sentence-transformers.md` harness (already used for
-     bucket B; reusable as-is).
-
-   **Phase plan (from probe outcome; keep flexible):**
-   - **Phase 1:** types + embed-mode toggle on `ModelInference`
-     (skip sampling, return hidden state).
-   - **Phase 2:** pooling head (last-token / attention-pooled) +
-     L2 normalize + projection-head support.
-   - **Phase 3:** Qwen3-Embedding-0.6B registration + 5/5 reference-
-     vector parity at cosine ≥0.999.
-   - **Phase 4:** dashboard / bench-full integration; smoke gate.
-   - **Phase 5:** scale-up (Qwen3-Embedding-4B / 8B if Phase 3
-     passes; otherwise diagnose with the cosine-degradation
-     signature ladder at
-     `~/ClaudeVault/Knowledge/encoder-cosine-degradation-signatures.md`).
-
-   **Workflow:** brainstorming → writing-plans → subagent-driven-
-   development per the established cadence (used successfully for
-   the TS API audit Phase 3). Cross-link the probe report to the
-   three vault notes already covering this terrain:
-   `Patterns/encoder-parity-gate-via-sentence-transformers.md`,
-   `Patterns/llama-cpp-as-arch-truth-source.md`,
-   `Knowledge/encoder-cosine-degradation-signatures.md`.
-
-   **Scope estimate:** medium (additive). Comparable to bucket B
-   (10 commits, 5 phases) but lighter — reuses the existing causal
-   forward path rather than adding new architecture branches. Risk
-   centered on the embed-mode toggle (does it cleanly bypass the
-   sampling stack? does the existing forward expose hidden state at
-   the right point?). Phase 0 probe answers both before any
-   implementation lands.
-
-   **Out of scope (current cycle):**
-   - Other causal-LM embedders (`gte-Qwen2-*`, `e5-mistral-*`) —
-     register only after Qwen3-Embedding-0.6B is end-to-end green.
-   - Qwen3-Embedding-4B/8B — gated on Phase 3 success at 0.6B.
-   - Any encoder-batched-throughput work (still external-trigger
-     candidate §D).
+   **Phase 1+ plan:** queued. See spec
+   [`docs/superpowers/specs/2026-04-29-embedding-bucket-c-phase-0-probe-design.md`](docs/superpowers/specs/2026-04-29-embedding-bucket-c-phase-0-probe-design.md)
+   for original phase plan template; Phase 1+ specs to be written
+   when the next cycle queues implementation. Three open questions
+   for Phase 1: chunked/batched embed dispatch shape;
+   `engine.embed(modelId, text)` API consistency with bucket A/B;
+   tokenizer routing (Qwen3-Embedding BPE vs existing Qwen3 chat
+   tokenizer pipeline).
 
 ---
 
