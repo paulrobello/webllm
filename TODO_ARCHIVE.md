@@ -4017,3 +4017,119 @@ in this session once the plan is reviewed.
   burden / surface area / reversibility, not duration.
 
 ---
+
+## 13B target registration (closed 2026-04-29; archived from TODO.md)
+
+Closed 2026-04-29 — Qwen3-14B Q4_K_S validated end-to-end on the
+wasm64 path. Eval 34/36 = 94% (new fleet accuracy leader); 3-run
+smoke-bench median 18.9 tok/s (top of predicted 15-19 band).
+Closure report at
+[`eval/reports/13b-validation-2026-04-29/SUMMARY.md`](eval/reports/13b-validation-2026-04-29/SUMMARY.md).
+The block was archived from `TODO.md` on 2026-04-29 per the
+TODO archival cadence (closed-and-detailed → moves out of active
+TODO).
+
+### 13B target registration (queued 2026-04-29) — full block
+
+**Trigger:** the MEMORY64 closure stub above promoted this from
+external-trigger to an active next step. The wasm64 path is now
+proven at 12B Q4_K_S (Mistral-Nemo) + 7B Q5_K_M (Mistral-Q5_K_M);
+adding a 13B-class row exercises the next param-count band
+inside the 30B project ceiling. Pure model-list work (no
+infrastructure changes — `pickWasmUrl` + `vendor/emdawnwebgpu`
+already route correctly).
+
+**Candidate model:** **Qwen3-14B Q4_K_S** (~7.8 GiB, GQA, RoPE +
+SwiGLU, same architecture family as our existing Qwen3-0.6B /
+1.7B / 8B canonical-6 entries). Predictable kernel surface
+(every kernel already validated at smaller sizes), and the
+14B / 8B / 1.7B / 0.6B Qwen3 size ladder gives the dashboard a
+clean architecture-internal scaling curve. **Alternatives** if
+Qwen3-14B doesn't materialize: Llama-2-13B-Chat Q4_K_S
+(~7.4 GiB, older but architecturally simple) or any 13-15B
+HuggingFace GGUF that bartowski has packaged.
+
+**Phasing (all CLOSED 2026-04-29):**
+
+1. **Probe — registration audit.** Verify the chosen GGUF is
+   on HuggingFace under bartowski (or a comparable
+   GGUF-publishing repo) at the right quant. Confirm filesize
+   on the HEAD response. Cost: ~30s. Output: a model spec
+   block ready for `eval/models.ts`. **CLOSED 2026-04-29**
+   (filesize 8,573,475,872 bytes / 7.99 GiB confirmed on
+   bartowski/Qwen_Qwen3-14B-GGUF Q4_K_S).
+2. **Register.** Add the entry to `eval/models.ts` mirroring
+   the Mistral-Nemo Q4_K_S registration pattern (`vramMB`,
+   `paramsB`, `architecture`, `ggufUrl`, `ggufFilePattern`,
+   `capabilities`, `tier`). Add a smoke-profiles `…-warm`
+   entry in `eval/smoke-profiles.ts` if needed. Re-run
+   `make checkall` (must pass). **CLOSED 2026-04-29** (commit
+   `a4c8189`; checkall green; +40 LoC across 2 files).
+3. **End-to-end smoke probe.** `agentchrome navigate
+   real-model.html?model=<id>&wasm=mem64&ctx=4096&prompt=hi&ingest=off`.
+   **Gate:** all 8 stages complete; decode > 0 tok/s; embed
+   sanity passes (cosine ≥ 0.75). The
+   `pickWasmUrl(byteLength)` path auto-routes to wasm64 since
+   filesize > 3.5 GiB. **CLOSED 2026-04-29** (all 8 stages
+   green; decode 21.0 tok/s greedy / finish=eos / embed cosine
+   0.76 ≥ 0.75; 0 console errors).
+4. **36-prompt sanity eval.** `make bench-browser-eval
+   PROFILE=<profile>-warm`. **Gate ≥ 60% overall** (the same
+   gate Phase 7 validation used). Reference: Mistral-Nemo 12B
+   Q4_K_S landed at 72% (26/36); Qwen3-8B IQ3_M is the closest
+   smaller-Qwen3 reference at the existing dashboard.
+   **CLOSED 2026-04-29** (34/36 = 94%; new fleet accuracy
+   leader).
+5. **Smoke-bench tok/s.** `make smoke-bench PERF_MODEL=<id>
+   PERF_RUNS=3 WASM_VARIANT=mem64`. **Expected band:**
+   extrapolating from Mistral-Nemo 12B Q4_K_S (19.3 tok/s)
+   and Mistral-7B Q4_K_S (28.2 tok/s post-rebase), 14B Q4_K_S
+   should land in the **15-19 tok/s** range under
+   profile-mode. Hard floor: ≥ 12 tok/s (anything lower
+   indicates a kernel surface regression). **CLOSED 2026-04-29**
+   (3-run median 18.9 tok/s; runs 18.8/18.9/19.1; matmul 60.7%
+   of graph; 893 dispatches/token = 8B's 805 + 4 layers × 22).
+6. **Closure report.**
+   `eval/reports/13b-validation-<DATE>/SUMMARY.md` with the
+   discovery arc + matrices, mirroring PHASE-7-VALIDATION.md.
+   **CLOSED 2026-04-29**
+   ([`eval/reports/13b-validation-2026-04-29/SUMMARY.md`](eval/reports/13b-validation-2026-04-29/SUMMARY.md)).
+
+**Out of scope for this work item:**
+- Integrating the 13B model into the canonical 6 parity
+  sweep (separate decision; may stay wasm64-only like the
+  Q5_K addendum row, or may replace one of the existing 8B
+  rows if the dashboard wants to maintain a 6-row matrix).
+- Registering a 30B IQ3_M target (separate work item; spec
+  carried at §31b and PHASE-7-VALIDATION.md as the
+  next-rung target).
+- Any algorithmic perf work — purely a registration +
+  validation cycle.
+
+**Risk register:**
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Filesize >16 GiB working set | Low | Q4_K_S at 14B = ~7.8 GiB on disk + ~3 GiB KV @ ctx=4096 + ~2 GiB scratch ≈ 13 GiB, well under the 16 GiB toolchain ceiling |
+| Tokenizer / chat-template mismatch | Low-Medium | Qwen3-14B uses the same tokenizer as Qwen3-0.6B/1.7B/8B; the canonical entries already exercise this code path |
+| Eval gate fails (<60%) | Low | Mistral-Nemo 12B passed at 72%; Qwen3 family scales predictably with param count |
+| Smoke-bench tok/s below floor (<12) | Low | Architectural extrapolation places 14B Q4_K_S at 15-19 tok/s; matmul scaling is well-understood at this size |
+
+**Outcome notes (post-closure):**
+
+- Phase 3a download discovery: smoke harness expects local
+  GGUFs at `smoke-test/models/<id>.gguf` (not HF-fetched); the
+  HF URL in `ggufUrl` is consumed by `eval/browser-smoke.ts`
+  for separate HF-mirror probes. New registrants need both:
+  the registration commit lands metadata, a separate `curl`
+  populates the local file. Documented in the SUMMARY.
+- vramMB=8800 was conservative for routing (>3500 → wasm64,
+  hits cleanly) but mildly underestimates absolute decode-time
+  footprint (~10.3 GiB observed). Worth bumping to ~10500 if
+  any future code reads vramMB for capacity planning rather
+  than routing.
+- Dispatch-count scaling held exactly: qwen3-14b's 893 = qwen3-8b's
+  805 + (4 extra layers × 22 dispatches/layer). This is the
+  cleanest size-ladder data point in the project.
+
+---
