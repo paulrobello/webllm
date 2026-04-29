@@ -2,6 +2,7 @@ import type { ModelHyperparams } from "../core/types.js";
 import type { GgufContext, GgufTensorInfo } from "../models/gguf-types.js";
 import {
 	type BufferPtr,
+	F32_BYTES,
 	GgmlType,
 	type GgmlWasm,
 	type GraphComputeProfile,
@@ -11,13 +12,25 @@ import {
 
 interface LayerWeights {
 	attnNorm: TensorPtr;
-	qProj: TensorPtr;
-	kProj: TensorPtr;
-	vProj: TensorPtr;
-	// Qwen2 / Qwen2.5 use biased Q/K/V projections. Llama, Qwen3, and
-	// most other architectures don't — these stay null and the forward
-	// graph skips the add. Without this, qwen2 GGUFs produce garbage
-	// (random-token) output because Q/K/V are off by the bias shift.
+	// Optional Phi-3 attn-norm bias. RMSNorm + bias add. Null on llama /
+	// qwen / mistral GGUFs (which lack norm biases) and on Phi-3.5-mini
+	// (which also has no norm biases) — the field stays in the interface
+	// so future Phi-3 variants that ship norm biases can light up the
+	// path without an interface change.
+	attnNormBias: TensorPtr | null;
+	// Phi-3 fused QKV: single [3*n_embd, n_embd] matrix (or [E + 2*kvDim,
+	// n_embd] under GQA). When non-null, qProj/kProj/vProj are null and
+	// the forward graph takes the fused matmul + view-slice path
+	// (mirrors encoder-inference.ts:263-296).
+	qkvFused: TensorPtr | null;
+	qProj: TensorPtr | null;
+	kProj: TensorPtr | null;
+	vProj: TensorPtr | null;
+	// Qwen2 / Qwen2.5 use biased Q/K/V projections. Llama, Qwen3, Mistral,
+	// and Phi-3 (whose biases — if any — are baked into qkvFused) don't —
+	// these stay null and the forward graph skips the add. Without this,
+	// qwen2 GGUFs produce garbage (random-token) output because Q/K/V are
+	// off by the bias shift.
 	qBias: TensorPtr | null;
 	kBias: TensorPtr | null;
 	vBias: TensorPtr | null;
@@ -25,15 +38,25 @@ interface LayerWeights {
 	kNorm: TensorPtr | null;
 	oProj: TensorPtr;
 	ffnNorm: TensorPtr;
-	gateProj: TensorPtr;
-	upProj: TensorPtr;
+	ffnNormBias: TensorPtr | null;
+	// Phi-3 fused gate-up: single [2*n_ff, n_embd] matrix. When non-null,
+	// gateProj/upProj are null and the forward graph splits the matmul
+	// output into gate/up halves before SwiGLU.
+	gateUpFused: TensorPtr | null;
+	gateProj: TensorPtr | null;
+	upProj: TensorPtr | null;
 	downProj: TensorPtr;
 }
 
 interface WeightTensors {
 	tokEmb: TensorPtr;
 	norm: TensorPtr;
+	// Optional Phi-3 final-norm bias.
+	normBias: TensorPtr | null;
 	output: TensorPtr | null;
+	// Phi-3 lm_head bias. Null for all other architectures and for
+	// Phi-3.5-mini (its lm_head is biasless).
+	outputBias: TensorPtr | null;
 	layers: LayerWeights[];
 }
 
@@ -215,39 +238,73 @@ export class ModelInference {
 		const output = tensorMap.has("output.weight")
 			? this.makeTensor(tensorMap, "output.weight")
 			: null;
+		const outputBias = tensorMap.has("output.bias")
+			? this.makeTensor(tensorMap, "output.bias")
+			: null;
+		const normBias = tensorMap.has("output_norm.bias")
+			? this.makeTensor(tensorMap, "output_norm.bias")
+			: null;
 
+		const isPhi3 = hp.architecture === "phi3";
 		const layers: LayerWeights[] = [];
 		for (let i = 0; i < hp.layerCount; i++) {
 			const p = (s: string) => `blk.${i}.${s}`;
-			layers.push({
-				attnNorm: this.makeTensor(tensorMap, p("attn_norm.weight")),
-				qProj: this.makeTensor(tensorMap, p("attn_q.weight")),
-				kProj: this.makeTensor(tensorMap, p("attn_k.weight")),
-				vProj: this.makeTensor(tensorMap, p("attn_v.weight")),
-				qBias: tensorMap.has(p("attn_q.bias"))
-					? this.makeTensor(tensorMap, p("attn_q.bias"))
-					: null,
-				kBias: tensorMap.has(p("attn_k.bias"))
-					? this.makeTensor(tensorMap, p("attn_k.bias"))
-					: null,
-				vBias: tensorMap.has(p("attn_v.bias"))
-					? this.makeTensor(tensorMap, p("attn_v.bias"))
-					: null,
-				qNorm: tensorMap.has(p("attn_q_norm.weight"))
-					? this.makeTensor(tensorMap, p("attn_q_norm.weight"))
-					: null,
-				kNorm: tensorMap.has(p("attn_k_norm.weight"))
-					? this.makeTensor(tensorMap, p("attn_k_norm.weight"))
-					: null,
-				oProj: this.makeTensor(tensorMap, p("attn_output.weight")),
-				ffnNorm: this.makeTensor(tensorMap, p("ffn_norm.weight")),
-				gateProj: this.makeTensor(tensorMap, p("ffn_gate.weight")),
-				upProj: this.makeTensor(tensorMap, p("ffn_up.weight")),
-				downProj: this.makeTensor(tensorMap, p("ffn_down.weight")),
-			});
+			const opt = (s: string) =>
+				tensorMap.has(p(s)) ? this.makeTensor(tensorMap, p(s)) : null;
+			if (isPhi3) {
+				// Phi-3: fused QKV + fused gate-up. The forward graph slices
+				// the fused outputs via opView3d / opView2d. Per-layer norms
+				// may carry an optional bias (RMSNorm + bias) on some Phi-3
+				// variants; Phi-3.5-mini does not have norm biases so the
+				// opt() calls return null for this specific model.
+				layers.push({
+					attnNorm: this.makeTensor(tensorMap, p("attn_norm.weight")),
+					attnNormBias: opt("attn_norm.bias"),
+					qkvFused: this.makeTensor(tensorMap, p("attn_qkv.weight")),
+					qProj: null,
+					kProj: null,
+					vProj: null,
+					qBias: null,
+					kBias: null,
+					vBias: null,
+					qNorm: null,
+					kNorm: null,
+					oProj: this.makeTensor(tensorMap, p("attn_output.weight")),
+					ffnNorm: this.makeTensor(tensorMap, p("ffn_norm.weight")),
+					ffnNormBias: opt("ffn_norm.bias"),
+					gateUpFused: this.makeTensor(tensorMap, p("ffn_up.weight")),
+					gateProj: null,
+					upProj: null,
+					downProj: this.makeTensor(tensorMap, p("ffn_down.weight")),
+				});
+			} else {
+				// Default split-QKV / split-gate-up path used by llama / qwen* /
+				// mistral / etc. Existing behaviour preserved exactly; only
+				// nulls were added for phi3-only fields.
+				layers.push({
+					attnNorm: this.makeTensor(tensorMap, p("attn_norm.weight")),
+					attnNormBias: null,
+					qkvFused: null,
+					qProj: this.makeTensor(tensorMap, p("attn_q.weight")),
+					kProj: this.makeTensor(tensorMap, p("attn_k.weight")),
+					vProj: this.makeTensor(tensorMap, p("attn_v.weight")),
+					qBias: opt("attn_q.bias"),
+					kBias: opt("attn_k.bias"),
+					vBias: opt("attn_v.bias"),
+					qNorm: opt("attn_q_norm.weight"),
+					kNorm: opt("attn_k_norm.weight"),
+					oProj: this.makeTensor(tensorMap, p("attn_output.weight")),
+					ffnNorm: this.makeTensor(tensorMap, p("ffn_norm.weight")),
+					ffnNormBias: null,
+					gateUpFused: null,
+					gateProj: this.makeTensor(tensorMap, p("ffn_gate.weight")),
+					upProj: this.makeTensor(tensorMap, p("ffn_up.weight")),
+					downProj: this.makeTensor(tensorMap, p("ffn_down.weight")),
+				});
+			}
 		}
 
-		this.weights = { tokEmb, norm, output, layers };
+		this.weights = { tokEmb, norm, normBias, output, outputBias, layers };
 		this.weightBuf = wasm.backendAllocCtxTensors();
 
 		for (const t of ggufCtx.tensors) {
@@ -387,6 +444,142 @@ export class ModelInference {
 	}
 
 	/**
+	 * Build the per-layer QKV projection stage and return reshaped
+	 * Q/K/V tensors ready for RoPE.
+	 *
+	 * Two paths share this helper:
+	 * - **Split-QKV** (llama / qwen* / mistral / phi): three matmuls,
+	 *   optional bias add, reshape to [headDim, nHeads_q_or_kv, nTokens].
+	 * - **Fused-QKV** (phi3): one matmul on `lw.qkvFused`, then 3
+	 *   `opView3d` slices over the [E + 2*kvDim, nTokens] output.
+	 *   Mirrors the encoder fused path at
+	 *   `src/inference/encoder-inference.ts:263-296` and llama.cpp's
+	 *   `build_qkv` in `src/llama-graph.cpp`.
+	 *
+	 * After the split/fused branch the qNorm / kNorm gain is applied
+	 * uniformly (Qwen3 family uses these; phi3 doesn't but the field
+	 * is null and the branch skips).
+	 *
+	 * Used by `forwardSingle`, `forwardAllPositions`, `forwardDecode`.
+	 * The `debugLayerOutput` path interleaves checkpoints between Q,
+	 * K, and V so it cannot share this helper — it has its own inline
+	 * split-QKV code that throws if the model is fused.
+	 */
+	private buildQKV(
+		lw: LayerWeights,
+		normed: TensorPtr,
+		nTokens: number,
+		headDim: number,
+		nHeads: number,
+	): { qReady: TensorPtr; kReady: TensorPtr; v3: TensorPtr } {
+		const { wasm, hp } = this;
+		let q3: TensorPtr;
+		let k3: TensorPtr;
+		let v3: TensorPtr;
+		if (lw.qkvFused) {
+			// Phi-3 fused QKV: one matmul → 3 opView3d slices. No GQA on
+			// Phi-3.5-mini (kvDim == E); the math handles GQA-shrunk K/V
+			// correctly for any future Phi-3 variants that ship GQA.
+			const E = hp.embeddingLength;
+			const kvDim = headDim * hp.headCountKv;
+			const fusedRowDim = E + 2 * kvDim;
+			const qkv = wasm.opMulMat(lw.qkvFused, normed); // [fusedRowDim, nTokens]
+			const headBytes = F32_BYTES * headDim;
+			const tokenBytes = F32_BYTES * fusedRowDim;
+			q3 = wasm.opView3d(
+				qkv,
+				headDim,
+				nHeads,
+				nTokens,
+				headBytes,
+				tokenBytes,
+				0,
+			);
+			k3 = wasm.opView3d(
+				qkv,
+				headDim,
+				hp.headCountKv,
+				nTokens,
+				headBytes,
+				tokenBytes,
+				F32_BYTES * E,
+			);
+			v3 = wasm.opView3d(
+				qkv,
+				headDim,
+				hp.headCountKv,
+				nTokens,
+				headBytes,
+				tokenBytes,
+				F32_BYTES * (E + kvDim),
+			);
+		} else {
+			if (!lw.qProj || !lw.kProj || !lw.vProj) {
+				throw new Error(
+					`split-QKV path requires qProj/kProj/vProj for ${hp.architecture}`,
+				);
+			}
+			const qRaw = wasm.opMulMat(lw.qProj, normed);
+			const kRaw = wasm.opMulMat(lw.kProj, normed);
+			const vRaw = wasm.opMulMat(lw.vProj, normed);
+			const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
+			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
+			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
+			q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
+			k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
+			v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
+		}
+		const qReady = lw.qNorm
+			? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
+			: q3;
+		const kReady = lw.kNorm
+			? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
+			: k3;
+		return { qReady, kReady, v3 };
+	}
+
+	/**
+	 * Build the per-layer FFN gate / up projections.
+	 *
+	 * - **Split** (llama / qwen* / mistral / phi): two matmuls.
+	 * - **Fused gate-up** (phi3): one matmul on `lw.gateUpFused`,
+	 *   then 2 `opView2d` slices over the [2*ffSize, nTokens] output.
+	 *   Mirrors llama.cpp's `LLM_FFN_SWIGLU` mode where the up
+	 *   tensor is [2*ffSize, n_embd] and gets split into halves
+	 *   before the SwiGLU multiply.
+	 */
+	private buildFFNGateUp(
+		lw: LayerWeights,
+		ffnNormed: TensorPtr,
+		nTokens: number,
+	): { gate: TensorPtr; up: TensorPtr } {
+		const { wasm, hp } = this;
+		if (lw.gateUpFused) {
+			const ffSize = hp.feedForwardLength;
+			const fused = wasm.opMulMat(lw.gateUpFused, ffnNormed); // [2*ffSize, nTokens]
+			const tokenBytes = F32_BYTES * 2 * ffSize;
+			const gate = wasm.opView2d(fused, ffSize, nTokens, tokenBytes, 0);
+			const up = wasm.opView2d(
+				fused,
+				ffSize,
+				nTokens,
+				tokenBytes,
+				F32_BYTES * ffSize,
+			);
+			return { gate, up };
+		}
+		if (!lw.gateProj || !lw.upProj) {
+			throw new Error(
+				`split-gate-up path requires gateProj/upProj for ${hp.architecture}`,
+			);
+		}
+		return {
+			gate: wasm.opMulMat(lw.gateProj, ffnNormed),
+			up: wasm.opMulMat(lw.upProj, ffnNormed),
+		};
+	}
+
+	/**
 	 * Single-call forward pass: one ctxCreate → graph build → graph compute →
 	 * ctxFree cycle for the given tokens. **Do not call directly** — public
 	 * callers go through `forward()`, which dispatches to either this or the
@@ -463,27 +656,16 @@ export class ModelInference {
 			// LLaMA RMSNorm: (x / rms(x)) * gamma. ggml_rms_norm only does the
 			// normalize step — the per-dim gain `attn_norm.weight` must be applied
 			// separately. Same for `ffn_norm.weight` and the final `output_norm.weight`.
-			const normed = wasm.opMul(
-				wasm.opRmsNorm(cur, hp.normEpsilon),
-				lw.attnNorm,
+			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
+			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
+
+			const { qReady, kReady, v3 } = this.buildQKV(
+				lw,
+				normed,
+				nTokens,
+				headDim,
+				nHeads,
 			);
-
-			const qRaw = wasm.opMulMat(lw.qProj, normed);
-			const kRaw = wasm.opMulMat(lw.kProj, normed);
-			const vRaw = wasm.opMulMat(lw.vProj, normed);
-			const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
-			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
-			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
-
-			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
-			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
-			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
-			const qReady = lw.qNorm
-				? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
-				: q3;
-			const kReady = lw.kNorm
-				? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
-				: k3;
 
 			const qRope = wasm.opRope(
 				qReady,
@@ -633,12 +815,12 @@ export class ModelInference {
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
 
-			const ffnNormed = wasm.opMul(
+			let ffnNormed = wasm.opMul(
 				wasm.opRmsNorm(attnResidual, hp.normEpsilon),
 				lw.ffnNorm,
 			);
-			const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
-			const up = wasm.opMulMat(lw.upProj, ffnNormed);
+			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
+			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens);
 			// Fused silu(gate) * up — single GPU op instead of silu+mul.
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
@@ -646,13 +828,15 @@ export class ModelInference {
 			cur = wasm.opAdd(ffnOut, attnResidual);
 		}
 
-		const finalNorm = wasm.opMul(
+		let finalNorm = wasm.opMul(
 			wasm.opRmsNorm(cur, hp.normEpsilon),
 			weights.norm,
 		);
-		const logits = weights.output
+		if (weights.normBias) finalNorm = wasm.opAdd(finalNorm, weights.normBias);
+		let logits = weights.output
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
+		if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
 
 		wasm.graphBuildForwardExpand(graph, logits);
 
@@ -861,27 +1045,16 @@ export class ModelInference {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
 
-			const normed = wasm.opMul(
-				wasm.opRmsNorm(cur, hp.normEpsilon),
-				lw.attnNorm,
+			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
+			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
+
+			const { qReady, kReady, v3 } = this.buildQKV(
+				lw,
+				normed,
+				nTokens,
+				headDim,
+				nHeads,
 			);
-
-			const qRaw = wasm.opMulMat(lw.qProj, normed);
-			const kRaw = wasm.opMulMat(lw.kProj, normed);
-			const vRaw = wasm.opMulMat(lw.vProj, normed);
-			const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
-			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
-			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
-
-			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
-			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
-			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
-			const qReady = lw.qNorm
-				? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
-				: q3;
-			const kReady = lw.kNorm
-				? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
-				: k3;
 
 			const qRope = wasm.opRope(
 				qReady,
@@ -1002,25 +1175,27 @@ export class ModelInference {
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
 
-			const ffnNormed = wasm.opMul(
+			let ffnNormed = wasm.opMul(
 				wasm.opRmsNorm(attnResidual, hp.normEpsilon),
 				lw.ffnNorm,
 			);
-			const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
-			const up = wasm.opMulMat(lw.upProj, ffnNormed);
+			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
+			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens);
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
 			cur = wasm.opAdd(ffnOut, attnResidual);
 		}
 
-		const finalNorm = wasm.opMul(
+		let finalNorm = wasm.opMul(
 			wasm.opRmsNorm(cur, hp.normEpsilon),
 			weights.norm,
 		);
-		const logits = weights.output
+		if (weights.normBias) finalNorm = wasm.opAdd(finalNorm, weights.normBias);
+		let logits = weights.output
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
+		if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
 
 		wasm.graphBuildForwardExpand(graph, logits);
 
@@ -1189,27 +1364,16 @@ export class ModelInference {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
 
-			const normed = wasm.opMul(
-				wasm.opRmsNorm(cur, hp.normEpsilon),
-				lw.attnNorm,
+			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
+			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
+
+			const { qReady, kReady, v3 } = this.buildQKV(
+				lw,
+				normed,
+				nTokens,
+				headDim,
+				nHeads,
 			);
-
-			const qRaw = wasm.opMulMat(lw.qProj, normed);
-			const kRaw = wasm.opMulMat(lw.kProj, normed);
-			const vRaw = wasm.opMulMat(lw.vProj, normed);
-			const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
-			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
-			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
-
-			const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
-			const k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
-			const v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
-			const qReady = lw.qNorm
-				? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
-				: q3;
-			const kReady = lw.kNorm
-				? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
-				: k3;
 
 			const qRope = wasm.opRope(
 				qReady,
@@ -1327,24 +1491,26 @@ export class ModelInference {
 			const oProj = wasm.opMulMat(lw.oProj, merged);
 			const attnResidual = wasm.opAdd(oProj, cur);
 
-			const ffnNormed = wasm.opMul(
+			let ffnNormed = wasm.opMul(
 				wasm.opRmsNorm(attnResidual, hp.normEpsilon),
 				lw.ffnNorm,
 			);
-			const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
-			const up = wasm.opMulMat(lw.upProj, ffnNormed);
+			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
+			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens);
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 			cur = wasm.opAdd(ffnOut, attnResidual);
 		}
 
-		const finalNorm = wasm.opMul(
+		let finalNorm = wasm.opMul(
 			wasm.opRmsNorm(cur, hp.normEpsilon),
 			weights.norm,
 		);
-		const logits = weights.output
+		if (weights.normBias) finalNorm = wasm.opAdd(finalNorm, weights.normBias);
+		let logits = weights.output
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
+		if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
 
 		const t2 = trace ? performance.now() : 0;
 
@@ -1755,6 +1921,20 @@ export class ModelInference {
 		if (!this.weights) throw new Error("Weights not loaded");
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const { wasm, hp, weights } = this;
+		// debugLayerOutput interleaves checkpoint breaks between
+		// individual Q / K / V matmuls and between gate / up matmuls.
+		// Phi-3-class architectures fuse QKV and gate-up into single
+		// matmuls so those checkpoints aren't addressable. The split
+		// path below assumes per-layer split projections exist.
+		if (
+			weights.layers.length > 0 &&
+			(weights.layers[0].qkvFused !== null ||
+				weights.layers[0].gateUpFused !== null)
+		) {
+			throw new Error(
+				`debugLayerOutput is split-QKV / split-gate-up only; ${hp.architecture} uses fused projections so per-Q/K/V or per-gate/up checkpoints are not addressable. Use forwardSingle for end-to-end output instead.`,
+			);
+		}
 		const isFfnIntermediate =
 			checkpoint === "ffn_gate" ||
 			checkpoint === "ffn_up" ||
@@ -1794,19 +1974,19 @@ export class ModelInference {
 					returnTensor = normed;
 					break;
 				}
-				const qRaw = wasm.opMulMat(lw.qProj, normed);
+				const qRaw = wasm.opMulMat(lw.qProj as number, normed);
 				const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
 				if (il === layerIdx && checkpoint === "attn_q") {
 					returnTensor = q;
 					break;
 				}
-				const kRaw = wasm.opMulMat(lw.kProj, normed);
+				const kRaw = wasm.opMulMat(lw.kProj as number, normed);
 				const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
 				if (il === layerIdx && checkpoint === "attn_k") {
 					returnTensor = k;
 					break;
 				}
-				const vRaw = wasm.opMulMat(lw.vProj, normed);
+				const vRaw = wasm.opMulMat(lw.vProj as number, normed);
 				const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
 				if (il === layerIdx && checkpoint === "attn_v") {
 					returnTensor = v;
@@ -1980,12 +2160,12 @@ export class ModelInference {
 					returnTensor = ffnNormed;
 					break;
 				}
-				const gate = wasm.opMulMat(lw.gateProj, ffnNormed);
+				const gate = wasm.opMulMat(lw.gateProj as number, ffnNormed);
 				if (il === layerIdx && checkpoint === "ffn_gate") {
 					returnTensor = gate;
 					break;
 				}
-				const up = wasm.opMulMat(lw.upProj, ffnNormed);
+				const up = wasm.opMulMat(lw.upProj as number, ffnNormed);
 				if (il === layerIdx && checkpoint === "ffn_up") {
 					returnTensor = up;
 					break;
