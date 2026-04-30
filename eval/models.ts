@@ -332,6 +332,12 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		tier: "balanced",
 		requiresShaderF16: false,
 		embeddingCapable: true,
+		// Phi-3.5-mini exhibits high last-token anisotropy: a strict-f16
+		// PyTorch probe (eval/reports/bucket-d-phi3-probe-2026-04-30/)
+		// showed mean-pool preserves more semantic separation between
+		// paraphrases and unrelated text than last-token. Switch the
+		// bucket D dispatch to mean-pool here.
+		embeddingPooling: "mean",
 		downloadUrl: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct",
 		ggufUrl: "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF",
 		ggufFilePattern: "Q4_K_M",
