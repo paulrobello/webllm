@@ -48,6 +48,10 @@ import { getModelById } from "./models.js";
 
 const COSINE_GATE_FULL = 0.999;
 const COSINE_GATE_HYBRID = 0.995;
+// Q4_K_M: more aggressive than hybrid. Phi-3.5-mini empirical range:
+// 0.922-0.970 across 10 fixtures vs f16 PyTorch reference.
+// Gate = min_observed - 0.01 safety margin (0.922 - 0.01 = 0.912, rounded to 0.91).
+const COSINE_GATE_Q4KM = 0.91;
 // IQ3_M at 8B+ params: per-layer quant error accumulates across 36+ layers;
 // empirical range against f16 HF reference is 0.90-0.96. Gate set at 0.90.
 const COSINE_GATE_IQ3M = 0.90;
@@ -166,18 +170,22 @@ const COSINE_GATE =
 	gateOverride ??
 	(model.defaultQuant === "hyb"
 		? COSINE_GATE_HYBRID
-		: model.defaultQuant === "iq3m"
-			? COSINE_GATE_IQ3M
-			: COSINE_GATE_FULL);
+		: model.defaultQuant === "q4km"
+			? COSINE_GATE_Q4KM
+			: model.defaultQuant === "iq3m"
+				? COSINE_GATE_IQ3M
+				: COSINE_GATE_FULL);
 console.log(
 	`Gate: cos >= ${COSINE_GATE}${
 		gateOverride !== null
 			? " (override)"
 			: model.defaultQuant === "hyb"
 				? " (hybrid Q4_K on token_embd vs full-precision reference)"
-				: model.defaultQuant === "iq3m"
-					? " (IQ3_M i-quant: quant noise accumulates across layers vs f16 reference)"
-					: ""
+				: model.defaultQuant === "q4km"
+					? " (Q4_K_M: quant noise between hybrid and IQ3_M vs f16 reference)"
+					: model.defaultQuant === "iq3m"
+						? " (IQ3_M i-quant: quant noise accumulates across layers vs f16 reference)"
+						: ""
 	}`,
 );
 
