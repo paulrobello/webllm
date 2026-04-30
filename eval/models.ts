@@ -63,6 +63,18 @@ export interface BenchmarkModel {
 	 * if the local cache is missing.
 	 */
 	localGGUFOnly?: boolean;
+	/**
+	 * When true, `engine.embed(id, text)` is allowed to dispatch through
+	 * `inferenceEngines` (the chat-model self-embedding path / "bucket D").
+	 * The chat model produces an embedding by tapping the post-`output_norm`
+	 * hidden state, last-token-pooling, and L2-normalizing. Quality drops
+	 * 5-15% on MTEB benchmarks vs dedicated retrieval-tuned embedders;
+	 * acceptable for in-domain retrieval (agent memory, dialogue history).
+	 *
+	 * Only set this on chat models that have passed the bucket D parity
+	 * gate at `cos >= 0.999` against a PyTorch HF-base reference.
+	 */
+	embeddingCapable?: boolean;
 }
 
 /**
