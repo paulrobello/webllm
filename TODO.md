@@ -940,30 +940,29 @@ check (item 1) still required at session start.
    dispatch unit test; tool-schema mirror-drift sentinel; tsconfig
    widening to enforce `@ts-expect-error` gates).
 
-5. **Embedding bucket C — causal-LM-derived embedders.** Phase 0
-   probe **CLOSED 2026-04-29**; Phases 1-3 + parity harness
-   **LANDED 2026-04-29** (commits `33e8a62` Phase 1 → `80a63c4`
-   Phase 2 → `91103b1` Phase 3 → `d583daf` Phase 4 harness).
-   Phase 4 parity gate run surfaced a **load-side feasibility
-   bug** the probe didn't anticipate: `token_embd.weight` at f16
-   is **310 MB**, exceeding WebGPU's per-binding cap (128 MiB,
-   `ggml-webgpu.cpp:4302-4307`). Diagnosed 2026-04-29 mid-Task-12.
-
-   **Pivot:** ship `qwen3-embedding-0.6b-q4kfth` (canonical id TBD
-   — hybrid quant: `token_embd` Q4_K, all other weights f16) as
-   the canonical Bucket C registration. Production via local
-   `llama-quantize --token-embedding-type Q4_K` from the existing
-   1.1 GB f16 GGUF. Net file ~920 MB; `token_embd` 87 MB (fits
-   cap); per-row dequant error doesn't compound through the forward
-   pass, preserving the ≥0.999 parity gate against f16 sentence-
-   transformers refs. The hybrid-quant pattern is documented in
-   CLAUDE.md as the canonical fix for any model whose `token_embd`
-   would exceed the per-binding cap.
-
-   **Remaining Phase 4-6 work:** re-register hybrid GGUF, re-run
-   parity gate (10/10 ≥0.999), Phase 5 (`embed-perf` bench
-   coverage), Phase 6 (closure SUMMARY.md + this stub closure).
-   Plan `docs/superpowers/plans/2026-04-29-embedding-bucket-c-implementation.md`.
+5. **Embedding bucket C — causal-LM-derived embedders. CLOSED
+   2026-04-29.** Qwen3-Embedding-0.6B-hyb shipped (commits
+   `deab38a` BPE tokenizer fix → `e2fa58b` bucket C bundle →
+   `2724b02` embed-perf bench coverage). Hybrid GGUF (`token_embd`
+   Q4_K = 83 MiB + f16 elsewhere) clears the WebGPU 128 MiB
+   per-binding cap that blocked the f16 path. Parity 10/10 at
+   `cos >= 0.995` (hybrid-tier gate) — cosines 0.996-0.9996,
+   magnitudes 1.000 ± 1e-6. Bench: 77 ms / 114 ms p50 single
+   short/long, 10.4 texts/sec batch (n=30, 64-text mixed batch).
+   Two cross-cutting bugs surfaced and were fixed: BPE merge
+   stale-rank validation (chars-only fallback for words like
+   "Instruct"/"Query" outside chat framing) and parity-harness
+   ↔ in-page embedPerf race (concurrent forward graphs corrupting
+   the WASM ctx-stack). Closure report
+   [`eval/reports/bucket-c-parity-2026-04-29/SUMMARY.md`](eval/reports/bucket-c-parity-2026-04-29/SUMMARY.md);
+   bench [`eval/reports/embed-perf-qwen3-2026-04-29/`](eval/reports/embed-perf-qwen3-2026-04-29/).
+   Full bucket C block (Phase 0 → Phase 6 detail, gate-selection
+   rationale, hybrid-quant build recipe, follow-on hooks for
+   bucket D) archived to `TODO_ARCHIVE.md` under "Embedding bucket
+   C (closed 2026-04-29)". Spec
+   [`docs/superpowers/specs/2026-04-29-embedding-bucket-c-implementation-design.md`](docs/superpowers/specs/2026-04-29-embedding-bucket-c-implementation-design.md);
+   plan
+   [`docs/superpowers/plans/2026-04-29-embedding-bucket-c-implementation.md`](docs/superpowers/plans/2026-04-29-embedding-bucket-c-implementation.md).
 
 6. **Embedding bucket D — chat-model self-embedding** (filed
    2026-04-29). Add `ModelInference.embed(tokenIds): Promise<Float32Array>`
