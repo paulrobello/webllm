@@ -291,33 +291,116 @@ if (pass < refs.fixtures.length) {
 }
 
 // ---------------------------------------------------------------------------
-// 4-pair cosine-distinguishability sanity check.
+// 16+16 cosine-distinguishability sanity check.
 // Runs after the primary parity gate passes. Catches the "tap-point picked
 // the wrong layer" failure mode — a symmetrically wrong tap-point would give
 // vectors that pass parity (if the bug is the same in PyTorch and WASM) but
 // would produce semantically random embeddings that can't distinguish
 // paraphrases from unrelated text.
 //
+// 16 paraphrase pairs span 16 domains (technology, sports, food, weather,
+// finance, history, biology, music, travel, education, medicine, law, art,
+// geography, politics, household). The 16 unrelated pairs are constructed by
+// taking the first sentence of paraphrase pair i and pairing it with the
+// first sentence of paraphrase pair (i + 8) mod 16 — same sentence pool, so
+// the harness only embeds 32 unique sentences; offset of 8 maximizes
+// cross-domain semantic distance.
+//
 // Pass criterion: every paraphrase cosine > every unrelated cosine.
 // ---------------------------------------------------------------------------
 const PARAPHRASE_PAIRS: ReadonlyArray<readonly [string, string]> = [
-	["The cat sat on the mat.", "A feline rested comfortably on the woven rug."],
+	// 0 — technology
 	[
 		"Compile-time type checking catches a wide class of programmer errors.",
 		"Static type analysis prevents many bugs at build time.",
 	],
+	// 1 — sports
+	[
+		"The marathon runner crossed the finish line in just over two hours.",
+		"After running for more than two hours, the athlete completed the long-distance race.",
+	],
+	// 2 — food
+	[
+		"She slowly stirred the simmering tomato sauce on the stove.",
+		"On the burner, she gently mixed the bubbling tomato sauce.",
+	],
+	// 3 — weather
+	[
+		"A heavy thunderstorm rolled across the valley last night.",
+		"Last night the valley was hit by a powerful electrical storm.",
+	],
+	// 4 — finance
+	[
+		"Stock prices fell sharply after the merger announcement.",
+		"Share values dropped steeply once the merger was made public.",
+	],
+	// 5 — history
+	[
+		"The Roman Empire collapsed under pressure from invading tribes.",
+		"Under sustained barbarian incursions, ancient Rome eventually fell.",
+	],
+	// 6 — biology
+	[
+		"Photosynthesis converts sunlight into chemical energy stored in glucose.",
+		"Plants turn light from the sun into glucose-bound chemical energy.",
+	],
+	// 7 — music
+	[
+		"The orchestra performed Beethoven's ninth symphony to a packed hall.",
+		"To a full audience, the ensemble played Beethoven's 9th symphony.",
+	],
+	// 8 — travel
+	[
+		"The flight from Tokyo to San Francisco takes roughly ten hours.",
+		"It takes about ten hours to fly between Tokyo and San Francisco.",
+	],
+	// 9 — education
+	[
+		"The professor assigned a long reading list for the seminar.",
+		"For the seminar, the instructor handed out an extensive reading list.",
+	],
+	// 10 — medicine
+	[
+		"The vaccine triggers an immune response without causing the disease.",
+		"By prompting immunity without infection, the vaccine protects patients.",
+	],
+	// 11 — law
+	[
+		"The court ruled the contract unenforceable due to fraud.",
+		"Because of fraudulent conduct, the judge struck down the agreement.",
+	],
+	// 12 — art
+	[
+		"The painter applied thick layers of oil paint to the canvas.",
+		"Across the canvas, the artist built up dense strokes of oil paint.",
+	],
+	// 13 — geography
+	[
+		"The Amazon basin holds the largest rainforest on Earth.",
+		"Earth's biggest tropical forest sits inside the Amazon river basin.",
+	],
+	// 14 — politics
+	[
+		"The senator introduced a bill to expand renewable energy subsidies.",
+		"A new bill proposing larger subsidies for renewables was filed by the senator.",
+	],
+	// 15 — household
+	[
+		"He swept the kitchen floor before mopping the tiles.",
+		"After sweeping, he mopped the tiles in the kitchen.",
+	],
 ];
 
-const UNRELATED_PAIRS: ReadonlyArray<readonly [string, string]> = [
-	[
-		"The cat sat on the mat.",
-		"Stock prices fell sharply after the merger announcement.",
-	],
-	[
-		"Compile-time type checking catches a wide class of programmer errors.",
-		"The marathon runner crossed the finish line in just over two hours.",
-	],
-];
+// Build 16 unrelated pairs by offsetting first-sentence indices by 8 so each
+// row pairs cross-domain content (technology↔travel, sports↔education, etc.).
+const UNRELATED_PAIRS: ReadonlyArray<readonly [string, string]> =
+	PARAPHRASE_PAIRS.map(
+		(_pair, i) =>
+			[
+				PARAPHRASE_PAIRS[i][0],
+				PARAPHRASE_PAIRS[(i + 8) % PARAPHRASE_PAIRS.length][0],
+			] as readonly [string, string],
+	);
 
 // Collect unique sentences and embed them.
 const allSentences = [
