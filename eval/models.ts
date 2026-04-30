@@ -311,7 +311,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		vramMB: 2520,
 		defaultQuant: "q4km",
 		availableQuants: ["q4km"],
-		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: true },
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
 		license: "MIT",
 		contextLength: 4096,
 		tier: "balanced",
