@@ -331,13 +331,17 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		contextLength: 4096,
 		tier: "balanced",
 		requiresShaderF16: false,
-		embeddingCapable: true,
-		// Phi-3.5-mini exhibits high last-token anisotropy: a strict-f16
-		// PyTorch probe (eval/reports/bucket-d-phi3-probe-2026-04-30/)
-		// showed mean-pool preserves more semantic separation between
-		// paraphrases and unrelated text than last-token. Switch the
-		// bucket D dispatch to mean-pool here.
-		embeddingPooling: "mean",
+		// Bucket D self-embedding NOT enabled. Parity gates 10/10 at cos >= 0.91
+		// (last-token, vs PyTorch f16 ref) but the 16+16 mean-margin
+		// distinguishability harness measures margin = -0.006 (last-token)
+		// and -0.027 (mean-pool) — paraphrase cosines are not separated from
+		// unrelated cosines, so self-embedding produces semantically random
+		// vectors. Probed and demoted 2026-04-30; closure report at
+		// eval/reports/bucket-d-phi3-parity-2026-04-30/SUMMARY.md.
+		// Do not flip `embeddingCapable: true` without re-running the harness
+		// against a different quant tier (Q5_K_M / Q6_K / f16) — Q4_K_M
+		// quant noise compounded with the model's high last-token anisotropy
+		// is the load-bearing failure.
 		downloadUrl: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct",
 		ggufUrl: "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF",
 		ggufFilePattern: "Q4_K_M",
