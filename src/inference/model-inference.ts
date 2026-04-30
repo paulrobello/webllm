@@ -1162,10 +1162,12 @@ export class ModelInference {
 			}
 
 			// Final output_norm — TAP POINT. No lm_head; no sampling.
-			const finalHidden = wasm.opMul(
+			let finalHidden = wasm.opMul(
 				wasm.opRmsNorm(cur, hp.normEpsilon),
 				weights.norm,
 			);
+			if (weights.normBias)
+				finalHidden = wasm.opAdd(finalHidden, weights.normBias);
 
 			wasm.graphBuildForwardExpand(graph, finalHidden);
 			const graphBuf = wasm.backendAllocCtxTensors();
@@ -1183,6 +1185,9 @@ export class ModelInference {
 
 					const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
 					const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
+					// Positions always start at 0 — embed() processes an isolated
+					// sequence with no KV history; applying an offset would shift
+					// RoPE relative to the training distribution.
 					for (let i = 0; i < N; i++) {
 						idsView[i] = tokenIds[i];
 						posView[i] = i;

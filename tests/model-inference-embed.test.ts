@@ -49,6 +49,9 @@ describe.skipIf(SHOULD_SKIP)("ModelInference.embed", () => {
 		await inf.forward(chatA, posA);
 		expect(inf.cachedTokenCount).toBe(3);
 
+		// Arbitrary in-vocab ids — any valid range works; the test only
+		// requires that ModelInference.embed accepts and returns a vector
+		// without OOB token ids.
 		const embedIds = new Int32Array([100, 200, 300]);
 		const embedVec = await inf.embed(embedIds);
 		expect(embedVec.length).toBe(parsed.hyperparams.embeddingLength);
