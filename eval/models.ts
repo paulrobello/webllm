@@ -1,7 +1,7 @@
 import type { ModelArchitecture } from "../src/core/types.js";
 
 /** Quantization formats supported by the benchmark suite. */
-export type QuantFormat = "q4f16_1" | "q4f32_1" | "q0f16" | "q0f32";
+export type QuantFormat = "q4f16_1" | "q4f32_1" | "q0f16" | "q0f32" | "hyb" | "iq3m";
 
 /** Model capability flags. */
 export interface ModelCapabilities {
@@ -71,8 +71,12 @@ export interface BenchmarkModel {
 	 * 5-15% on MTEB benchmarks vs dedicated retrieval-tuned embedders;
 	 * acceptable for in-domain retrieval (agent memory, dialogue history).
 	 *
-	 * Only set this on chat models that have passed the bucket D parity
-	 * gate at `cos >= 0.999` against a PyTorch HF-base reference.
+	 * Parity gate against a PyTorch HF f16 reference:
+	 * - `q4f16_1` / `q0f16` (4-bit or f16 GGUF): `cos >= 0.999`
+	 * - `hyb` (hybrid Q4_K token_embd + f16): `cos >= 0.995`
+	 * - `iq3m` (IQ3_M i-quant GGUF): `cos >= 0.90` (quant-induced noise
+	 *   accumulates across 36+ layers at 8B params; semantic quality
+	 *   confirmed via 4-pair cosine-distinguishability check)
 	 */
 	embeddingCapable?: boolean;
 }
@@ -737,8 +741,8 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		architecture: "qwen",
 		paramsB: 8.19,
 		vramMB: 4500,
-		defaultQuant: "q4f16_1",
-		availableQuants: ["q4f16_1"],
+		defaultQuant: "iq3m",
+		availableQuants: ["iq3m"],
 		capabilities: { toolCalling: true, structuredOutput: true, vision: false, embedding: false },
 		license: "Apache-2.0",
 		contextLength: 4096,

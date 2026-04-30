@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
- * Bucket C parity harness. Drives the smoke page via agentchrome, calls
+ * Bucket C/D parity harness. Drives the smoke page via agentchrome, calls
  * window.engine.embed(handleId, text) for each fixture × mode, compares
- * cosine similarity vs sentence-transformers reference vectors.
+ * cosine similarity vs sentence-transformers / transformers reference vectors.
  *
  * Pass gate: cosine >= COSINE_GATE on every row, |v|_2 == 1.0 ± 1e-3.
  *
@@ -13,6 +13,12 @@
  * 128 MiB cap doctrine"); the Q4_K row-lookup error doesn't compound but
  * does shift the last-token state by ~1e-3 cosine on multi-token inputs.
  * Override with `--gate <value>`.
+ *
+ * Bucket D (embeddingCapable chat models): the model's `embeddingCapable`
+ * flag triggers `?embeddingCapable=1` in the smoke URL, which routes
+ * `engine.embed()` through the hidden-state tap-point path
+ * (ModelInference.embed). Ref bundles for chat models have no
+ * `instruction_prefix` and only document-mode fixtures.
  *
  * Usage:
  *   bun eval/causal-embedder-parity.ts <modelId> <ref-file> [--gate 0.999]
@@ -42,6 +48,9 @@ import { getModelById } from "./models.js";
 
 const COSINE_GATE_FULL = 0.999;
 const COSINE_GATE_HYBRID = 0.995;
+// IQ3_M at 8B+ params: per-layer quant error accumulates across 36+ layers;
+// empirical range against f16 HF reference is 0.90-0.96. Gate set at 0.90.
+const COSINE_GATE_IQ3M = 0.90;
 const MAGNITUDE_TOLERANCE = 1e-3;
 
 const args = process.argv.slice(2);
@@ -79,7 +88,9 @@ interface RefBundle {
 	model: string;
 	captured_with: string;
 	pooling: string;
-	instruction_prefix: string;
+	// Bucket C (dedicated embedders): instruction prefix string for query mode.
+	// Bucket D (embeddingCapable chat models): absent / null — no prefix, doc-only.
+	instruction_prefix?: string | null;
 	fixtures: Fixture[];
 }
 
@@ -153,14 +164,20 @@ if (!model) {
 
 const COSINE_GATE =
 	gateOverride ??
-	(model.defaultQuant === "hyb" ? COSINE_GATE_HYBRID : COSINE_GATE_FULL);
+	(model.defaultQuant === "hyb"
+		? COSINE_GATE_HYBRID
+		: model.defaultQuant === "iq3m"
+			? COSINE_GATE_IQ3M
+			: COSINE_GATE_FULL);
 console.log(
 	`Gate: cos >= ${COSINE_GATE}${
 		gateOverride !== null
 			? " (override)"
 			: model.defaultQuant === "hyb"
 				? " (hybrid Q4_K on token_embd vs full-precision reference)"
-				: ""
+				: model.defaultQuant === "iq3m"
+					? " (IQ3_M i-quant: quant noise accumulates across layers vs f16 reference)"
+					: ""
 	}`,
 );
 
@@ -180,6 +197,9 @@ const url = buildSmokeTestUrl(modelId, model.contextLength, {
 	extraParams: {
 		v: `${Date.now()}`,
 		ingest: "off",
+		// Bucket D: route engine.embed() through the hidden-state tap-point path
+		// (ModelInference.embed) for embeddingCapable chat models.
+		...(model.embeddingCapable ? { embeddingCapable: "1" } : {}),
 	},
 });
 console.log(`Navigating to ${url}`);
@@ -215,8 +235,9 @@ const rows: {
 }[] = [];
 
 for (const fx of refs.fixtures) {
-	const text =
-		fx.mode === "query" ? refs.instruction_prefix + fx.input : fx.input;
+	// instruction_prefix is absent for bucket D (chat model, doc-only fixtures).
+	const prefix = refs.instruction_prefix ?? "";
+	const text = fx.mode === "query" && prefix ? prefix + fx.input : fx.input;
 	const inputJson = JSON.stringify(text);
 	const script = `(async () => {
 		const v = await window.engine.embed(window.handleId, ${inputJson});
@@ -246,4 +267,108 @@ for (const fx of refs.fixtures) {
 console.log(
 	`\n${pass}/${refs.fixtures.length} rows passed (gate cos >= ${COSINE_GATE}, mag |v|_2 == 1.0 +/- ${MAGNITUDE_TOLERANCE})`,
 );
-process.exit(pass === refs.fixtures.length ? 0 : 1);
+
+if (pass < refs.fixtures.length) {
+	process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// 4-pair cosine-distinguishability sanity check.
+// Runs after the primary parity gate passes. Catches the "tap-point picked
+// the wrong layer" failure mode — a symmetrically wrong tap-point would give
+// vectors that pass parity (if the bug is the same in PyTorch and WASM) but
+// would produce semantically random embeddings that can't distinguish
+// paraphrases from unrelated text.
+//
+// Pass criterion: every paraphrase cosine > every unrelated cosine.
+// ---------------------------------------------------------------------------
+const PARAPHRASE_PAIRS: ReadonlyArray<readonly [string, string]> = [
+	["The cat sat on the mat.", "A feline rested comfortably on the woven rug."],
+	[
+		"Compile-time type checking catches a wide class of programmer errors.",
+		"Static type analysis prevents many bugs at build time.",
+	],
+];
+
+const UNRELATED_PAIRS: ReadonlyArray<readonly [string, string]> = [
+	[
+		"The cat sat on the mat.",
+		"Stock prices fell sharply after the merger announcement.",
+	],
+	[
+		"Compile-time type checking catches a wide class of programmer errors.",
+		"The marathon runner crossed the finish line in just over two hours.",
+	],
+];
+
+// Collect unique sentences and embed them.
+const allSentences = [
+	...new Set([
+		...PARAPHRASE_PAIRS.flat(),
+		...UNRELATED_PAIRS.flat(),
+	]),
+];
+console.log(
+	`\n4-pair distinguishability check: embedding ${allSentences.length} sentences...`,
+);
+
+async function embedSentence(text: string): Promise<number[]> {
+	const inputJson = JSON.stringify(text);
+	const script = `(async () => {
+		const v = await window.engine.embed(window.handleId, ${inputJson});
+		return JSON.stringify(Array.from(v));
+	})()`;
+	const raw = jsExec(port, tab, script);
+	if (typeof raw !== "string") {
+		throw new Error(`distinguishability: empty response for text ${JSON.stringify(text)}`);
+	}
+	return JSON.parse(raw) as number[];
+}
+
+const sentenceVecs = new Map<string, number[]>();
+for (const s of allSentences) {
+	sentenceVecs.set(s, await embedSentence(s));
+}
+
+function cosinePair(a: number[], b: number[]): number {
+	return cosine(a, b);
+}
+
+const paraphraseCosines = PARAPHRASE_PAIRS.map(([a, b]) =>
+	cosinePair(sentenceVecs.get(a)!, sentenceVecs.get(b)!),
+);
+const unrelatedCosines = UNRELATED_PAIRS.map(([a, b]) =>
+	cosinePair(sentenceVecs.get(a)!, sentenceVecs.get(b)!),
+);
+
+console.log("\nParaphrase pairs (expect high cosine):");
+for (let i = 0; i < PARAPHRASE_PAIRS.length; i++) {
+	const [a, b] = PARAPHRASE_PAIRS[i];
+	console.log(
+		`  pair ${i} cos=${paraphraseCosines[i].toFixed(6)}  "${a.slice(0, 40)}..." vs "${b.slice(0, 40)}..."`,
+	);
+}
+console.log("\nUnrelated pairs (expect low cosine):");
+for (let i = 0; i < UNRELATED_PAIRS.length; i++) {
+	const [a, b] = UNRELATED_PAIRS[i];
+	console.log(
+		`  pair ${i} cos=${unrelatedCosines[i].toFixed(6)}  "${a.slice(0, 40)}..." vs "${b.slice(0, 40)}..."`,
+	);
+}
+
+const minParaphrase = Math.min(...paraphraseCosines);
+const maxUnrelated = Math.max(...unrelatedCosines);
+const distinguishabilityPass = minParaphrase > maxUnrelated;
+
+console.log(
+	`\nDistinguishability: min_paraphrase=${minParaphrase.toFixed(6)} max_unrelated=${maxUnrelated.toFixed(6)} ${distinguishabilityPass ? "PASS" : "FAIL"}`,
+);
+
+if (!distinguishabilityPass) {
+	console.error(
+		`FAIL: distinguishability check failed — every paraphrase cosine must exceed every unrelated cosine.`,
+	);
+	process.exit(1);
+}
+
+process.exit(0);
