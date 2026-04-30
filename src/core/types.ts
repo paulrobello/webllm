@@ -165,4 +165,5 @@ export interface ModelEntry {
 	memoryAllocations: number[];
 	loaded: boolean;
 	activeSessions: number;
+	embeddingCapable?: boolean;
 }

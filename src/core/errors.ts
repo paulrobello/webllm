@@ -72,11 +72,11 @@ export class InferenceEngineMissingError extends WebLLMError {
 export class EncoderRequiredError extends WebLLMError {
 	readonly modelId: string;
 	readonly architecture: string;
-	constructor(modelId: string, architecture: string) {
-		super(
-			`embed() requires a bidirectional encoder model; "${modelId}" is architecture "${architecture}"`,
-			"ENCODER_REQUIRED",
-		);
+	constructor(modelId: string, architecture: string, hint?: string) {
+		const message = hint
+			? `embed() requires a bidirectional encoder model; "${modelId}" is architecture "${architecture}". ${hint}`
+			: `embed() requires a bidirectional encoder model; "${modelId}" is architecture "${architecture}"`;
+		super(message, "ENCODER_REQUIRED");
 		this.name = "EncoderRequiredError";
 		this.modelId = modelId;
 		this.architecture = architecture;

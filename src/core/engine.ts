@@ -493,9 +493,26 @@ export class WebLLM {
 				ids.length > 0 && ids[ids.length - 1] === eos ? ids : [...ids, eos];
 			return cembed.embed(new Int32Array(withEos));
 		}
+
+		// Bucket D — chat-model self-embedding. Gated on the registration
+		// flag so we only fall through for chat models that have passed
+		// the parity gate (encoderEngines / causalEmbedderEngines remain
+		// the high-quality path; bucket D is the simplicity / single-
+		// model-load path).
+		if (entry.embeddingCapable) {
+			const inf = this.inferenceEngines.get(modelId);
+			if (inf) {
+				const eos = entry.tokenizer.eosId;
+				const withEos =
+					ids.length > 0 && ids[ids.length - 1] === eos ? ids : [...ids, eos];
+				return inf.embed(new Int32Array(withEos));
+			}
+		}
+
 		throw new EncoderRequiredError(
 			modelId,
 			String(entry.hyperparams.architecture),
+			"register the model with `embeddingCapable: true` to use the chat-model self-embedding path",
 		);
 	}
 
