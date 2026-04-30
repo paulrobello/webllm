@@ -744,6 +744,7 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		contextLength: 4096,
 		tier: "quality",
 		requiresShaderF16: false,
+		embeddingCapable: true,
 		downloadUrl: "https://huggingface.co/Qwen/Qwen3-8B",
 		ggufUrl: "https://huggingface.co/bartowski/Qwen_Qwen3-8B-GGUF",
 		ggufFilePattern: "IQ3_M",
