@@ -218,6 +218,43 @@ Both are reserved in `~/.claude/used_ports.md`.
 3. **Do not launch a new Chrome window** unless there is no reachable session or the user explicitly requests one.
 4. **Preserve debugging continuity** — reusing the same session/tab keeps console history, page state, and reproducibility intact.
 
+## HuggingFace downloads — always use `hfdownloader`
+
+Always use the `hfdownloader` CLI (`/Users/probello/.local/bin/hfdownloader`)
+for HuggingFace model / dataset fetches. **Do not rely on**
+`huggingface_hub.snapshot_download`, `huggingface-cli download`, or
+transformers' implicit `from_pretrained()` fetch when the goal is
+acquiring weights for a downstream consumer.
+
+**Why:** `hfdownloader` is fast and resumable (parallel range
+requests, 8 connections per file by default, 3 concurrent files).
+The Python paths are slower, single-stream, and easier to wedge —
+observed 2026-04-30 during bucket D ref capture: an in-flight
+`transformers.from_pretrained()` died after ~10 minutes mid-fetch
+with no error, leaving 4 GB of partial shards on disk. Restart
+resumed but lost wall time.
+
+**How to apply:**
+
+- Pre-fetch with `hfdownloader download <owner>/<name>` *before*
+  running any Python script that loads weights (transformers /
+  sentence-transformers will then load from the warm HF cache
+  instantly).
+- For datasets, add `--dataset`.
+- Filter LFS artifacts (e.g., GGUF quants):
+  `hfdownloader download <repo> --filters q4_0,q5_k_m`.
+- Pin a revision: `-b <branch_or_sha>`.
+- Use `--dry-run` first to see the file list / total size.
+- Tokens: `HF_TOKEN` env or `--token`.
+- Files land in `~/.cache/huggingface/` by default — same layout
+  the Python tooling expects, so cache-warmth is shared.
+
+This applies to ref-capture scripts under `eval/reports/<probe>/`
+(see `bucket-d-probe-2026-04-29/capture-refs.py` for the canonical
+pattern: `hfdownloader download Qwen/Qwen3-8B` first, then
+`uv run --no-project --with-requirements ...` to run the script
+that calls `from_pretrained()`).
+
 ## Regression lessons — do not repeat these bugs
 
 These issues caused real regressions here. The fixes are load-bearing:
