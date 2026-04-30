@@ -163,6 +163,38 @@ graph TD
 | `engine.removeCharacter(id)` | Remove a registered character by id |
 | `engine.shutdown()` | Release GPU buffers, dispose inference engines, and shut down WASM modules for all loaded models |
 
+## Embeddings
+
+`engine.embed(modelId, text)` returns an L2-normalized `Float32Array` for use
+in semantic search, clustering, or RAG pipelines. The method dispatches across
+three tiers in priority order:
+
+| Tier | Model type | Example | Quality |
+|------|-----------|---------|---------|
+| 1 — Encoder | Bidirectional BERT/RoBERTa | `bge-large-en-v1.5` | Highest (purpose-built) |
+| 2 — Causal-embedder | Causal-LM fine-tuned for retrieval | `qwen3-embedding-0.6b-hyb` | High (MTEB-competitive) |
+| 3 — Chat-model (bucket D) | Chat model with `embeddingCapable: true` | `qwen3-8b-iq3m` | Good (5-15% MTEB delta vs tier 2) |
+
+**Which tier should I use?**
+
+- **General-purpose retrieval** — use a dedicated encoder (tier 1) or
+  causal-embedder (tier 2). They are purpose-trained for semantic similarity
+  and deliver the best MTEB scores.
+- **In-domain agent retrieval with a single loaded model** — bucket D (tier 3)
+  lets the chat model already in memory serve embedding queries without loading
+  a second model. The 5-15% MTEB delta is acceptable for most agent dialogue
+  and episodic memory use cases; the VRAM savings are significant on the
+  16 GB floor.
+- **Uncertainty** — benchmark both on your workload. The dispatch is
+  transparent: load only the models you need and the right tier is used
+  automatically.
+
+**Registering a bucket D model** — set `embeddingCapable: true` in the model's
+registration entry in `eval/models.ts`. Only models that have passed the parity
+gate (≥ 0.90 cosine similarity against a dedicated embedder on the canonical
+benchmark suite) are eligible. See
+`eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md` for the current list.
+
 ## Development
 
 The Makefile is the single source of truth for tooling. `make help` lists

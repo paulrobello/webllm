@@ -466,10 +466,24 @@ export class WebLLM {
 	}
 
 	/**
-	 * Compute an L2-normalized sentence embedding for the given text using
-	 * a registered bidirectional-encoder model (e.g. Arctic-Embed). The
-	 * model must be loaded with a bert-architecture GGUF; non-encoder
-	 * models throw with a descriptive error.
+	 * Compute an L2-normalized sentence embedding for the given text.
+	 *
+	 * Dispatch order (first match wins):
+	 *   1. **Encoder** — bidirectional BERT/RoBERTa model registered via
+	 *      `encoderEngines` (e.g. `bge-large-en-v1.5`). Highest quality.
+	 *   2. **Causal-embedder** — causal-LM fine-tuned for retrieval,
+	 *      registered via `causalEmbedderEngines` (e.g.
+	 *      `qwen3-embedding-0.6b-hyb`). MTEB-competitive quality.
+	 *   3. **Chat-model / bucket D** — general chat model whose registration
+	 *      entry carries `embeddingCapable: true`. Taps the post-`output_norm`
+	 *      hidden state at the final EOS token. Carries a ~5-15% MTEB delta
+	 *      vs a dedicated embedder; suitable for in-domain agent retrieval
+	 *      when a second model is not loaded. Only models that have passed the
+	 *      parity gate are registered with `embeddingCapable`.
+	 *
+	 * Throws {@link EncoderRequiredError} when the model is loaded but falls
+	 * into none of the three tiers (i.e. it is a plain chat model without
+	 * `embeddingCapable: true`).
 	 */
 	async embed(modelId: string, text: string): Promise<Float32Array> {
 		const entry = this._modelManager.get(modelId);

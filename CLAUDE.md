@@ -52,7 +52,11 @@ docs, and bug fixes alike.
   current `engine.ts` keeps one KV cache per loaded model, which is
   fine for single-active-conversation agents but doesn't support
   concurrent independent agent conversations on the same chat model
-  weights.
+  weights. **Bucket D shipped 2026-04-30** — `engine.embed()` now
+  dispatches encoder → causal-embedder → chat-model (gated per-model
+  via `embeddingCapable: true` in the registration entry). Closure
+  report and parity data:
+  `eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md`.
 - **Per-binding 128 MiB cap doctrine** (lesson from bucket C
   Phase 4). WebGPU `maxStorageBufferBindingSize` is 128 MiB on
   Chrome/Apple regardless of total VRAM. The patched `ggml-webgpu`
