@@ -1,5 +1,6 @@
 import type { Character, CharacterConfig } from "../characters/character.js";
 import { CharacterManager } from "../characters/character-manager.js";
+import { CausalLMEmbedder } from "../inference/causal-embedder-inference.js";
 import {
 	detectChatTemplate,
 	encodeChatPrompt,
@@ -55,6 +56,7 @@ import {
 import { Scheduler } from "./scheduler.js";
 import {
 	type EventHandler,
+	isCausalEmbedderArchitecture,
 	isEncoderArchitecture,
 	type ModelEntry,
 	type ModelHandle,
@@ -110,6 +112,7 @@ export class WebLLM {
 	private wasmModules = new Map<string, GgmlWasm>();
 	private inferenceEngines = new Map<string, ModelInference>();
 	private encoderEngines = new Map<string, EncoderInference>();
+	private causalEmbedderEngines = new Map<string, CausalLMEmbedder>();
 	private sessions = new Map<string, ConversationSession>();
 
 	private constructor(config: WebLLMConfig) {
@@ -172,6 +175,11 @@ export class WebLLM {
 		if (enc) {
 			await enc.dispose();
 			this.encoderEngines.delete(id);
+		}
+		const cembed = this.causalEmbedderEngines.get(id);
+		if (cembed) {
+			await cembed.dispose();
+			this.causalEmbedderEngines.delete(id);
 		}
 		const wasm = this.wasmModules.get(id);
 		if (wasm) {
@@ -468,15 +476,15 @@ export class WebLLM {
 		if (!entry.loaded || !entry.tokenizer) {
 			throw new ModelNotLoadedError(modelId);
 		}
-		const enc = this.encoderEngines.get(modelId);
-		if (!enc) {
-			throw new EncoderRequiredError(
-				modelId,
-				String(entry.hyperparams.architecture),
-			);
-		}
 		const ids = entry.tokenizer.encode(text);
-		return enc.embed(new Int32Array(ids));
+		const enc = this.encoderEngines.get(modelId);
+		if (enc) return enc.embed(new Int32Array(ids));
+		const cembed = this.causalEmbedderEngines.get(modelId);
+		if (cembed) return cembed.embed(new Int32Array(ids));
+		throw new EncoderRequiredError(
+			modelId,
+			String(entry.hyperparams.architecture),
+		);
 	}
 
 	/** Clear conversation history and KV cache for a model. */
@@ -565,16 +573,18 @@ export class WebLLM {
 		name: string,
 		pipeline: {
 			wasm: GgmlWasm;
-			inference: ModelInference | EncoderInference;
+			inference: ModelInference | EncoderInference | CausalLMEmbedder;
 			parsed: ParsedModel;
 		},
 	): Promise<ModelHandle> {
 		const isEncoder = pipeline.inference instanceof EncoderInference;
+		const isCausalEmbedder = pipeline.inference instanceof CausalLMEmbedder;
 		// Causal-LM pipelines may have been used before (e.g. the smoke
 		// page's [7/8] one-shot writes to the KV cache). Reset the cache
 		// here so the engine's session tracker doesn't collide with
-		// existing state. Encoder pipelines have no KV cache to reset.
-		if (!isEncoder) {
+		// existing state. Encoder and causal-embedder pipelines have no
+		// KV cache to reset.
+		if (!isEncoder && !isCausalEmbedder) {
 			(pipeline.inference as ModelInference).resetKVCache();
 		}
 
@@ -594,6 +604,11 @@ export class WebLLM {
 			this.encoderEngines.set(
 				handle.id,
 				pipeline.inference as EncoderInference,
+			);
+		} else if (isCausalEmbedder) {
+			this.causalEmbedderEngines.set(
+				handle.id,
+				pipeline.inference as CausalLMEmbedder,
 			);
 		} else {
 			this.inferenceEngines.set(
@@ -627,7 +642,7 @@ export class WebLLM {
 		wasmUrl?: string,
 	): Promise<{
 		handle: ModelHandle;
-		inference: ModelInference | EncoderInference;
+		inference: ModelInference | EncoderInference | CausalLMEmbedder;
 	}> {
 		const view = data instanceof Uint8Array ? data : new Uint8Array(data);
 		const parsed = ModelLoader.parseModel(view);
@@ -637,12 +652,18 @@ export class WebLLM {
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl: resolvedWasmUrl });
 
-		const isEncoder = isEncoderArchitecture(parsed.hyperparams.architecture);
-		let inference: ModelInference | EncoderInference;
+		const arch = parsed.hyperparams.architecture;
+		const isEncoder = isEncoderArchitecture(arch);
+		const isCausalEmbedder = isCausalEmbedderArchitecture(arch);
+		let inference: ModelInference | EncoderInference | CausalLMEmbedder;
 		if (isEncoder) {
 			const enc = new EncoderInference(wasm, parsed.hyperparams);
 			enc.loadWeights(ggufCtx, view);
 			inference = enc;
+		} else if (isCausalEmbedder) {
+			const cembed = new CausalLMEmbedder(wasm, parsed.hyperparams);
+			cembed.loadWeights(ggufCtx, view);
+			inference = cembed;
 		} else {
 			const inf = new ModelInference(wasm, parsed.hyperparams);
 			inf.loadWeights(ggufCtx, view);
@@ -662,6 +683,8 @@ export class WebLLM {
 		this.wasmModules.set(handle.id, wasm);
 		if (inference instanceof EncoderInference) {
 			this.encoderEngines.set(handle.id, inference);
+		} else if (inference instanceof CausalLMEmbedder) {
+			this.causalEmbedderEngines.set(handle.id, inference);
 		} else {
 			this.inferenceEngines.set(handle.id, inference);
 		}
@@ -683,7 +706,7 @@ export class WebLLM {
 	): Promise<{
 		handle: ModelHandle;
 		engine: WebLLM;
-		inference: ModelInference | EncoderInference;
+		inference: ModelInference | EncoderInference | CausalLMEmbedder;
 	}> {
 		const engine = await WebLLM.init(config);
 		const { handle, inference } = await engine.loadModelFromBuffer(
@@ -752,6 +775,10 @@ export class WebLLM {
 			await enc.dispose();
 		}
 		this.encoderEngines.clear();
+		for (const [, cembed] of this.causalEmbedderEngines) {
+			await cembed.dispose();
+		}
+		this.causalEmbedderEngines.clear();
 		this._modelManager.clear();
 		this._scheduler.clear();
 		this.eventHandlers.clear();

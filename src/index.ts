@@ -93,6 +93,7 @@ export type {
 	ScoringMethod,
 	ToolCallRecord,
 } from "./evaluation/types.js";
+export { CausalLMEmbedder } from "./inference/causal-embedder-inference.js";
 export { EncoderInference } from "./inference/encoder-inference.js";
 export type {
 	GenerationConfig,

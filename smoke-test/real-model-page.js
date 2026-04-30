@@ -79,6 +79,7 @@ async function runEmbedPerfHook(engine, handleId, mode, reps, fixture, log) {
 export async function runRealModelPage({ debugMode = false } = {}) {
 	const assetSuffix = window.location.search || "";
 	const {
+		CausalLMEmbedder,
 		EncoderInference,
 		GgufParser,
 		GgmlWasm,
@@ -413,6 +414,19 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			parsed.hyperparams.architecture === "bert" ||
 			parsed.hyperparams.architecture === "nomic-bert" ||
 			parsed.hyperparams.architecture === "jina-bert-v2";
+		// Causal-LM-derived embedders (e.g. Qwen3-Embedding) share the qwen3
+		// weight layout but are pooled at the last token and never decode.
+		// They route through CausalLMEmbedder, skip the KV cache, and use
+		// engine.embed() for warmup/generation gates — same as encoders
+		// from the smoke page's perspective. Mirrors
+		// `isCausalEmbedderArchitecture` from src/core/types.ts.
+		const isCausalEmbedderModel =
+			parsed.hyperparams.architecture === "qwen3-embedding";
+		// Unified gate for everything the smoke page treats identically
+		// across encoder + causal-embedder paths: skip KV init, warm up via
+		// embed(), skip [7/8] generation, skip the [8/8] second-engine
+		// reference encoder load.
+		const isEmbedderModel = isEncoderModel || isCausalEmbedderModel;
 
 		log("running", "[4/8] Loading weights into GPU...");
 		let loadFailed = false;
@@ -420,6 +434,8 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			setProgress(35);
 			if (isEncoderModel) {
 				inference = new EncoderInference(wasm, parsed.hyperparams);
+			} else if (isCausalEmbedderModel) {
+				inference = new CausalLMEmbedder(wasm, parsed.hyperparams);
 			} else {
 				inference = new ModelInference(wasm, parsed.hyperparams, {
 					flashAttn: flashAttnEnabled,
@@ -455,10 +471,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		}
 		if (loadFailed) return;
 
-		if (isEncoderModel) {
+		if (isEmbedderModel) {
 			log(
 				"pass",
-				`[5/8] KV cache: skipped (encoder model — no autoregressive cache)`,
+				`[5/8] KV cache: skipped (embedder model — no autoregressive cache)`,
 			);
 			setProgress(85);
 		} else {
@@ -641,7 +657,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// step covers compile, second confirms steady state.
 		try {
 			const warmupStart = performance.now();
-			if (isEncoderModel) {
+			if (isEmbedderModel) {
 				await smokeEngine.embed(smokeEngineHandleId, "warmup");
 			} else {
 				const stream = smokeEngine.chatCompletion(
@@ -811,10 +827,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			}
 		}
 
-		if (isEncoderModel) {
+		if (isEmbedderModel) {
 			log(
 				"pass",
-				"[7/8] Generation: skipped (encoder model — bench mode runs embedding tasks instead)",
+				"[7/8] Generation: skipped (embedder model — bench mode runs embedding tasks instead)",
 			);
 			setProgress(90);
 		} else {
@@ -960,14 +976,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		}
 
 		// The [8/8] embed smoke check loads a *second* engine on a known-good
-		// arctic-embed-s F16 GGUF. For BERT bench runs we already have an
-		// encoder pipeline loaded (steps 1-6 above) — re-downloading the
+		// arctic-embed-s F16 GGUF. For embedder bench runs we already have a
+		// pooling pipeline loaded (steps 1-6 above) — re-downloading the
 		// reference GGUF would only add noise. Skip when the page itself is
-		// already encoder-driven.
-		if (isEncoderModel) {
+		// already embedder-driven (encoder or causal-embedder).
+		if (isEmbedderModel) {
 			log(
 				"pass",
-				"[8/8] Reference encoder check: skipped (page is already running an encoder model)",
+				"[8/8] Reference encoder check: skipped (page is already running an embedder model)",
 			);
 			await runEmbedPerfHook(
 				smokeEngine,
