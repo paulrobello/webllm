@@ -94,6 +94,16 @@ export type {
 	ToolCallRecord,
 } from "./evaluation/types.js";
 export { CausalLMEmbedder } from "./inference/causal-embedder-inference.js";
+// Re-exported for the smoke-test harness in `smoke-test/real-model-page.js`,
+// which builds prompts and inspects template family without going through
+// `engine.chatCompletion`. These are internal helpers — public consumers
+// should use `engine.chatCompletion` / `engine.generateStream` instead.
+// Removed from the public API in commit f1195407; restored 2026-04-30
+// after the smoke bundle rebundle surfaced the latent break.
+export {
+	detectChatTemplate,
+	encodeChatPrompt,
+} from "./inference/chat-template.js";
 export { EncoderInference } from "./inference/encoder-inference.js";
 export type {
 	GenerationConfig,
