@@ -177,6 +177,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	const embeddingCapable =
 		params.get("embeddingCapable") === "1" ||
 		params.get("embeddingCapable") === "true";
+	// Bucket D pooling mode: ?embeddingPooling=mean overrides the default
+	// last-token pool. Used for chat models with high last-token anisotropy
+	// (e.g., Phi-3.5-mini). Ignored unless ?embeddingCapable=1.
+	const embeddingPoolingParam = params.get("embeddingPooling");
+	const embeddingPooling =
+		embeddingPoolingParam === "mean" ? "mean" : "last-token";
 	// §22 prefill-tiling diagnostic: ?diagnoseAlloc=1 dumps WebGPU device
 	// limits to #log at startup. No engine work — caller follows up with a
 	// long-prefill request and watches console for the abort to capture
@@ -538,7 +544,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
 				modelId,
 				{ wasm: wasmInstance, inference, parsed },
-				{ embeddingCapable },
+				{ embeddingCapable, embeddingPooling },
 			);
 			smokeEngineHandleId = smokeEngineHandle.id;
 			// Expose for external harnesses (e.g. eval/encoder-parity.ts):

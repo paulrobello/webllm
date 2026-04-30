@@ -188,6 +188,10 @@ console.log(
 						: ""
 	}`,
 );
+const activePooling = model.embeddingPooling ?? "last-token";
+console.log(
+	`Pooling: ${activePooling}${model.embeddingPooling ? " (registration override)" : " (default)"}`,
+);
 
 await ensureSmokeServerReachable();
 const { port, tab } = await resolveAgentchromeSession();
@@ -208,6 +212,12 @@ const url = buildSmokeTestUrl(modelId, model.contextLength, {
 		// Bucket D: route engine.embed() through the hidden-state tap-point path
 		// (ModelInference.embed) for embeddingCapable chat models.
 		...(model.embeddingCapable ? { embeddingCapable: "1" } : {}),
+		// Bucket D pooling mode: forward the registration's pooling choice
+		// to the smoke page so engine.embed dispatches with the right pool
+		// (last-token by default; mean for high-anisotropy chat models).
+		...(model.embeddingPooling === "mean"
+			? { embeddingPooling: "mean" }
+			: {}),
 	},
 });
 console.log(`Navigating to ${url}`);
