@@ -49,10 +49,7 @@ import {
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
 import { PipelineCache } from "./pipeline-cache.js";
-import {
-	QWEN_NON_THINKING_DEFAULTS,
-	QWEN_THINKING_DEFAULTS,
-} from "./sampling-profiles.js";
+import { resolveSamplingParams } from "./sampling-profiles.js";
 import { Scheduler } from "./scheduler.js";
 import {
 	type EventHandler,
@@ -279,33 +276,26 @@ export class WebLLM {
 
 		const tokenizer = entry.tokenizer;
 		const chatTemplate = tokenizer.options.chatTemplate;
-		const samplingMode = config?.sampling ?? "auto";
 		const isQwenChatml =
 			Array.isArray(input) &&
 			String(entry.hyperparams.architecture).startsWith("qwen") &&
 			detectChatTemplate(chatTemplate ?? "") === "chatml";
-		const applyAutoQwen = samplingMode === "auto" && isQwenChatml;
-		const forcedProfile =
-			samplingMode === "qwen-thinking"
-				? QWEN_THINKING_DEFAULTS
-				: samplingMode === "qwen-default"
-					? QWEN_NON_THINKING_DEFAULTS
-					: null;
-		const autoProfile = applyAutoQwen
-			? config?.enableThinking === false
-				? QWEN_NON_THINKING_DEFAULTS
-				: QWEN_THINKING_DEFAULTS
-			: null;
-		const activeProfile = forcedProfile ?? autoProfile;
-		// Consumer-provided values override profile defaults; profile defaults
-		// override engine fallbacks. samplingMode === "raw" produces a null
-		// activeProfile, falling through to the engine fallbacks directly.
-		const effectiveTemperature =
-			config?.temperature ?? activeProfile?.temperature ?? 1.0;
-		const effectiveTopK = config?.topK ?? activeProfile?.topK ?? 0;
-		const effectiveTopP = config?.topP ?? activeProfile?.topP ?? 1.0;
-		const effectiveRepetitionPenalty =
-			config?.repetitionPenalty ?? activeProfile?.repetitionPenalty ?? 1.0;
+		const {
+			temperature: effectiveTemperature,
+			topK: effectiveTopK,
+			topP: effectiveTopP,
+			repetitionPenalty: effectiveRepetitionPenalty,
+		} = resolveSamplingParams({
+			samplingMode: config?.sampling ?? "auto",
+			isQwenChatml,
+			enableThinking: config?.enableThinking,
+			consumer: {
+				temperature: config?.temperature,
+				topK: config?.topK,
+				topP: config?.topP,
+				repetitionPenalty: config?.repetitionPenalty,
+			},
+		});
 		const sampler = new Sampler({
 			temperature: effectiveTemperature,
 			topK: effectiveTopK,
