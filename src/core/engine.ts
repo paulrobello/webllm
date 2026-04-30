@@ -596,6 +596,10 @@ export class WebLLM {
 	 * to drive them through the library primitives (`Character.chat`,
 	 * `runTask`, `runTasks`) without re-loading the model.
 	 *
+	 * @param name - Unique model identifier within this engine.
+	 * @param pipeline - The manually-assembled WASM, inference, and parsed model.
+	 * @param options - Optional metadata (e.g. embeddingCapable to enable bucket D dispatch).
+	 *
 	 * After this returns, the returned handle is ready for `engine.chatCompletion`
 	 * and everything built on top of it.
 	 */
@@ -606,6 +610,7 @@ export class WebLLM {
 			inference: ModelInference | EncoderInference | CausalLMEmbedder;
 			parsed: ParsedModel;
 		},
+		options?: { embeddingCapable?: boolean },
 	): Promise<ModelHandle> {
 		const isEncoder = pipeline.inference instanceof EncoderInference;
 		const isCausalEmbedder = pipeline.inference instanceof CausalLMEmbedder;
@@ -629,6 +634,9 @@ export class WebLLM {
 		entry.tokenizer = new Tokenizer(pipeline.parsed.tokenizerConfig);
 		entry.kvCache = new KVCache(pipeline.parsed.kvCacheConfig);
 		entry.loaded = true;
+		if (options?.embeddingCapable !== undefined) {
+			entry.embeddingCapable = options.embeddingCapable;
+		}
 		this.wasmModules.set(handle.id, pipeline.wasm);
 		if (isEncoder) {
 			this.encoderEngines.set(

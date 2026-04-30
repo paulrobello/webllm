@@ -171,6 +171,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// §4 Flash Attention gate: ?fa=on toggles ggml_flash_attn_ext + the
 	// FA-ready V-cache layout. Default off — preserves §18-revert behavior.
 	const flashAttnEnabled = params.get("fa") === "on";
+	// Bucket D embedding gate: ?embeddingCapable=1 dispatches to the hidden-state
+	// embedding path when adopted into the engine. Gates parity testing for
+	// causal-LM-derived embedders (Qwen3-Embedding, etc).
+	const embeddingCapable =
+		params.get("embeddingCapable") === "1" ||
+		params.get("embeddingCapable") === "true";
 	// §22 prefill-tiling diagnostic: ?diagnoseAlloc=1 dumps WebGPU device
 	// limits to #log at startup. No engine work — caller follows up with a
 	// long-prefill request and watches console for the abort to capture
@@ -526,6 +532,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
 				modelId,
 				{ wasm: wasmInstance, inference, parsed },
+				{ embeddingCapable },
 			);
 			smokeEngineHandleId = smokeEngineHandle.id;
 			// Expose for external harnesses (e.g. eval/encoder-parity.ts):
