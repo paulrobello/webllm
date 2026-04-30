@@ -433,6 +433,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// embed(), skip [7/8] generation, skip the [8/8] second-engine
 		// reference encoder load.
 		const isEmbedderModel = isEncoderModel || isCausalEmbedderModel;
+		// Bucket D: embeddingCapable chat model running in embed-perf bench
+		// mode. Shares the normal ModelInference load path (KV cache init +
+		// chatCompletion warmup) but skips step-7 chat generation and routes
+		// step-8 to the embed-perf hook on the already-loaded engine rather
+		// than loading the arctic-embed-s reference encoder.
+		const isBucketDEmbedPerf = embeddingCapable && embedPerfMode !== null;
 
 		log("running", "[4/8] Loading weights into GPU...");
 		let loadFailed = false;
@@ -834,7 +840,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			}
 		}
 
-		if (isEmbedderModel) {
+		if (isEmbedderModel || isBucketDEmbedPerf) {
 			log(
 				"pass",
 				"[7/8] Generation: skipped (embedder model — bench mode runs embedding tasks instead)",
@@ -986,8 +992,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// arctic-embed-s F16 GGUF. For embedder bench runs we already have a
 		// pooling pipeline loaded (steps 1-6 above) — re-downloading the
 		// reference GGUF would only add noise. Skip when the page itself is
-		// already embedder-driven (encoder or causal-embedder).
-		if (isEmbedderModel) {
+		// already embedder-driven (encoder or causal-embedder), or a bucket D
+		// embeddingCapable chat model in embed-perf bench mode.
+		if (isEmbedderModel || isBucketDEmbedPerf) {
 			log(
 				"pass",
 				"[8/8] Reference encoder check: skipped (page is already running an embedder model)",

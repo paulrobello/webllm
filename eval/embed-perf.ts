@@ -41,6 +41,10 @@ const EMBEDDER_MODELS = [
 	// `localGGUFOnly: true` in the registration bypasses the HF tree-fetch
 	// in `ensureModelDownloaded` when the file already exists locally.
 	"qwen3-embedding-0.6b-hyb",
+	// Bucket D: `embeddingCapable` chat model — 8B IQ3_M. Uses the same
+	// `engine.embed()` surface as bucket C; dispatch is inside the engine.
+	// Informational row; not compared against bucket C throughput.
+	"qwen3-8b-iq3m",
 ] as const;
 
 type Mode = "single" | "batch";
@@ -86,6 +90,7 @@ async function runCell(
 			embedReps: reps,
 			embedFixture: fixture,
 			v: `${Date.now()}`,
+			...(model.embeddingCapable ? { embeddingCapable: 1 } : {}),
 			...(profile ? { profile: 1 } : {}),
 		},
 	});

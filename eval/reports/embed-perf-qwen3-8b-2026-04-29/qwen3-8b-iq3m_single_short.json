@@ -1,0 +1,28 @@
+{
+  "modelId": "qwen3-8b-iq3m",
+  "mode": "single",
+  "fixture": "short",
+  "traces": [
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 0,
+      "wallMs": 1000.2000000476837
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 1,
+      "wallMs": 1000.0999999046326
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 2,
+      "wallMs": 1000
+    }
+  ],
+  "p50WallMs": 1000.0999999046326,
+  "p90WallMs": 1000.2000000476837,
+  "meanWallMs": 1000.0999999841055
+}
