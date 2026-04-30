@@ -1,7 +1,7 @@
 import type { ModelArchitecture } from "../src/core/types.js";
 
 /** Quantization formats supported by the benchmark suite. */
-export type QuantFormat = "q4f16_1" | "q4f32_1" | "q0f16" | "q0f32" | "hyb" | "iq3m";
+export type QuantFormat = "q4f16_1" | "q4f32_1" | "q0f16" | "q0f32" | "hyb" | "iq3m" | "q4km";
 
 /** Model capability flags. */
 export interface ModelCapabilities {
@@ -309,8 +309,8 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		architecture: "phi3",
 		paramsB: 3.82,
 		vramMB: 2520,
-		defaultQuant: "q4f16_1",
-		availableQuants: ["q4f16_1"],
+		defaultQuant: "q4km",
+		availableQuants: ["q4km"],
 		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: false },
 		license: "MIT",
 		contextLength: 4096,
