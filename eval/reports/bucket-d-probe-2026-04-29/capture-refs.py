@@ -1,3 +1,8 @@
+# pyright: reportMissingImports=false
+# torch / transformers load from the inline uv env via
+# --with-requirements; they are not in any project venv that Pyright
+# watches. Suppress at file level since this script is a self-
+# contained side-run, not part of the TS project's typing surface.
 """
 Bucket D Phase 0 — reference-embedding capture for Qwen3-8B (chat
 model self-embedding). Tokenize identically to webllm (add_special_
