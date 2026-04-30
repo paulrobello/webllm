@@ -201,7 +201,6 @@ export function assertContiguousF32(
  */
 export class ModelInference {
 	private wasm: GgmlWasm;
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: accessed via destructuring in methods
 	private hp: ModelHyperparams;
 	private weights: WeightTensors | null = null;
 	private weightBuf: BufferPtr = 0;
@@ -1037,6 +1036,239 @@ export class ModelInference {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Build a single-pass causal forward over `tokenIds` and return the
+	 * post-`output_norm` hidden state as a flat `[E * N]` Float32Array
+	 * (row-major-reversed `[E, N]`). **Does not touch the KV cache.**
+	 *
+	 * Mirrors `CausalLMEmbedder.forwardEmbed` but uses this class's
+	 * `buildQKV` / `buildFFNGateUp` helpers so it handles every chat
+	 * architecture in the fleet (split + fused QKV; split + fused
+	 * gate-up). The chat session's `nCached`, `kvLayers`, and
+	 * conversation transcript are unchanged after this call.
+	 *
+	 * Architecture truth source: `~/Repos/llama.cpp/src/models/qwen3.cpp`
+	 * (`res->t_embd = cur` after the final RMSNorm, before `lm_head`).
+	 *
+	 * Concurrency: the caller must serialize this against any
+	 * `forward()` / `forwardSingle()` on the same engine; both paths
+	 * share the global WASM ctx-stack.
+	 */
+	private async forwardForEmbedding(
+		tokenIds: Int32Array,
+	): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		const { hp, wasm, weights } = this;
+		const N = tokenIds.length;
+		const E = hp.embeddingLength;
+		const headDim = hp.embeddingHeadLength;
+		const nHeads = hp.headCount;
+		const ropeMode = getRopeModeForArchitecture(hp.architecture);
+
+		const graphMem = hp.layerCount * 32768 + N * E * 24;
+		wasm.ctxCreate(graphMem);
+
+		try {
+			const posTensor = wasm.tensorNew1d(GgmlType.I32, N);
+			const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, N);
+
+			const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
+			const maskPaddedRows = padTo(N, 32);
+			const maskTensor = wasm.tensorNew2d(GgmlType.F16, N, maskPaddedRows);
+
+			const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+			const graph = wasm.graphNew(hp.layerCount * 32 + 128);
+
+			let cur = x;
+			for (let il = 0; il < hp.layerCount; il++) {
+				const lw = weights.layers[il];
+
+				let normed = wasm.opMul(
+					wasm.opRmsNorm(cur, hp.normEpsilon),
+					lw.attnNorm,
+				);
+				if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
+
+				const { qReady, kReady, v3 } = this.buildQKV(
+					lw,
+					normed,
+					N,
+					headDim,
+					nHeads,
+				);
+
+				const qRope = wasm.opRope(
+					qReady,
+					posTensor,
+					headDim,
+					ropeMode,
+					hp.contextLength,
+					hp.ropeFreqBase,
+					hp.ropeScale,
+					0.0,
+					1.0,
+					0.0,
+					0.0,
+				);
+				const kRope = wasm.opRope(
+					kReady,
+					posTensor,
+					headDim,
+					ropeMode,
+					hp.contextLength,
+					hp.ropeFreqBase,
+					hp.ropeScale,
+					0.0,
+					1.0,
+					0.0,
+					0.0,
+				);
+
+				// Manual attention chain — mirrors CausalLMEmbedder.
+				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+				const kp = wasm.opPermute(kRope, 0, 2, 1, 3);
+				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
+
+				const qk = wasm.opMulMat(kp, qp);
+				const attnW = wasm.opSoftMaxExt(
+					qk,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0,
+				);
+				const attnOut = wasm.opMulMat(vp, attnW);
+				const merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					nHeads * headDim,
+					N,
+				);
+
+				const oProj = wasm.opMulMat(lw.oProj, merged);
+				const attnResidual = wasm.opAdd(oProj, cur);
+
+				let ffnNormed = wasm.opMul(
+					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+					lw.ffnNorm,
+				);
+				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
+
+				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N);
+				const ffnHidden = wasm.opSwigluSplit(gate, up);
+				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+
+				cur = wasm.opAdd(ffnOut, attnResidual);
+			}
+
+			// Final output_norm — TAP POINT. No lm_head; no sampling.
+			const finalHidden = wasm.opMul(
+				wasm.opRmsNorm(cur, hp.normEpsilon),
+				weights.norm,
+			);
+
+			wasm.graphBuildForwardExpand(graph, finalHidden);
+			const graphBuf = wasm.backendAllocCtxTensors();
+
+			try {
+				const idsBytes = N * 4;
+				const posBytes = N * 4;
+				const maskBytes = N * maskPaddedRows * 2;
+				const totalBytes = idsBytes + posBytes + maskBytes;
+				const heap = wasm.malloc(totalBytes);
+				try {
+					const idsPtr = heap;
+					const posPtr = heap + idsBytes;
+					const maskPtr = heap + idsBytes + posBytes;
+
+					const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
+					const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
+					for (let i = 0; i < N; i++) {
+						idsView[i] = tokenIds[i];
+						posView[i] = i;
+					}
+
+					const F16_NEG_INF = 0xfc00;
+					const mask = new Uint16Array(
+						wasm.heapU8.buffer,
+						maskPtr,
+						N * maskPaddedRows,
+					);
+					for (let q = 0; q < N; q++) {
+						const rowBase = q * N;
+						for (let k = 0; k < N; k++) {
+							mask[rowBase + k] = k <= q ? 0 : F16_NEG_INF;
+						}
+					}
+					for (let q = N; q < maskPaddedRows; q++) {
+						const rowBase = q * N;
+						for (let k = 0; k < N; k++) mask[rowBase + k] = 0;
+					}
+
+					wasm.backendTensorSet3(
+						tokenIdsTensor,
+						idsPtr,
+						idsBytes,
+						posTensor,
+						posPtr,
+						posBytes,
+						maskTensor,
+						maskPtr,
+						maskBytes,
+					);
+				} finally {
+					wasm.free(heap);
+				}
+
+				await wasm.graphCompute(graph);
+
+				const totalFloats = E * N;
+				const bytes = await wasm.downloadFromTensor(
+					finalHidden,
+					totalFloats * 4,
+				);
+				const hidden = new Float32Array(
+					bytes.buffer,
+					bytes.byteOffset,
+					totalFloats,
+				);
+				return new Float32Array(hidden);
+			} finally {
+				wasm.backendBufferFree(graphBuf);
+			}
+		} finally {
+			wasm.ctxFree();
+		}
+	}
+
+	/**
+	 * Compute an L2-normalized sentence embedding by running a single-
+	 * pass causal forward over `tokenIds`, tapping the post-
+	 * `output_norm` hidden state, last-token-pooling, and L2-
+	 * normalizing. **Does not write to the KV cache** — the chat
+	 * session's state is unchanged.
+	 *
+	 * Concurrency: the caller (typically `engine.embed`) must serialize
+	 * this against any concurrent `forward()` / `generate()` on the
+	 * same engine. The two paths share the global WASM ctx-stack.
+	 */
+	async embed(tokenIds: Int32Array): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		if (tokenIds.length === 0) {
+			throw new Error("embed() received empty input after tokenization");
+		}
+		const hidden = await this.forwardForEmbedding(tokenIds);
+		const E = this.hp.embeddingLength;
+		const N = tokenIds.length;
+		const lastCol = (N - 1) * E;
+		const pooled = new Float32Array(E);
+		for (let i = 0; i < E; i++) pooled[i] = hidden[lastCol + i];
+		let sq = 0;
+		for (let i = 0; i < E; i++) sq += pooled[i] * pooled[i];
+		if (sq === 0) return pooled;
+		const invNorm = 1 / Math.sqrt(sq);
+		for (let i = 0; i < E; i++) pooled[i] *= invNorm;
+		return pooled;
 	}
 
 	/**
