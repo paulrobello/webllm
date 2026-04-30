@@ -287,15 +287,24 @@
 
 ## Project Constraints
 
-The five workflow policies that gate every change on this project —
-**30B model-size ceiling**, **quick-wins override on YAGNI**,
+The workflow policies that gate every change on this project —
+**8B model-size ceiling** (revised 2026-04-29 from prior 30B),
+**16 GB / 32 GB / 128 GB hardware baseline**, **single-model-active
+deployment**, **per-binding 128 MiB cap doctrine** (hybrid quant for
+vocab-too-big-for-cap models), **quick-wins override on YAGNI**,
 **probe-first default**, **complexity ≠ implementation time**, and
-**always commit before work** — moved to
-[`CLAUDE.md`](CLAUDE.md#workflow-policies-set-2026-04-28) on 2026-04-28
-so they apply to all sessions, not just ones that load TODO.md. Read
-that section before starting any new work; entries below cite the
-policies (e.g. "deferred under the 30B ceiling") without re-stating
-them.
+**always commit before work** — live in
+[`CLAUDE.md`](CLAUDE.md#workflow-policies-set-2026-04-28) so they
+apply to all sessions, not just ones that load TODO.md. Read that
+section before starting any new work; entries below cite the policies
+(e.g. "deferred under the 8B ceiling") without re-stating them.
+
+**Use case anchor (set 2026-04-29):** the project's load-bearing
+deployment is **agent + Three.js coexistence in a single browser
+tab** — a small chat model drives 3D agents alongside a renderer.
+This anchors the 8B ceiling, the hardware baseline, the single-
+model-active doctrine, and the bucket D "chat-model self-embedding"
+direction.
 
 ---
 
@@ -932,26 +941,57 @@ check (item 1) still required at session start.
    widening to enforce `@ts-expect-error` gates).
 
 5. **Embedding bucket C — causal-LM-derived embedders.** Phase 0
-   probe **CLOSED 2026-04-29** — see
-   [`eval/reports/bucket-c-probe-2026-04-29/STAGE-2-REFERENCE-VECTORS.md`](eval/reports/bucket-c-probe-2026-04-29/STAGE-2-REFERENCE-VECTORS.md).
-   Probe artifacts: Stage 1 metadata + embed-surface analysis
-   (tap-point #2 post-output-norm recommended; `qwen3.cpp:98`
-   `res->t_embd = cur` truth-source); Stage 2 reference vectors
-   (5 fixtures × 2 modes = 10 refs, all unit-magnitude with
-   max deviation 5.46e-08; doc-vs-query same-row cosines
-   0.5409–0.9674 confirming prefix is materially applied).
-   **Probe conclusion: proceed to Phase 1.** All 6 spec-listed
-   risks resolved or explicitly accepted; deferred risks (graph-build
-   cost, causal-mask semantics, 4B/8B variants) flagged for Phase 2-5.
+   probe **CLOSED 2026-04-29**; Phases 1-3 + parity harness
+   **LANDED 2026-04-29** (commits `33e8a62` Phase 1 → `80a63c4`
+   Phase 2 → `91103b1` Phase 3 → `d583daf` Phase 4 harness).
+   Phase 4 parity gate run surfaced a **load-side feasibility
+   bug** the probe didn't anticipate: `token_embd.weight` at f16
+   is **310 MB**, exceeding WebGPU's per-binding cap (128 MiB,
+   `ggml-webgpu.cpp:4302-4307`). Diagnosed 2026-04-29 mid-Task-12.
 
-   **Phase 1+ plan:** queued. See spec
-   [`docs/superpowers/specs/2026-04-29-embedding-bucket-c-phase-0-probe-design.md`](docs/superpowers/specs/2026-04-29-embedding-bucket-c-phase-0-probe-design.md)
-   for original phase plan template; Phase 1+ specs to be written
-   when the next cycle queues implementation. Three open questions
-   for Phase 1: chunked/batched embed dispatch shape;
-   `engine.embed(modelId, text)` API consistency with bucket A/B;
-   tokenizer routing (Qwen3-Embedding BPE vs existing Qwen3 chat
-   tokenizer pipeline).
+   **Pivot:** ship `qwen3-embedding-0.6b-q4kfth` (canonical id TBD
+   — hybrid quant: `token_embd` Q4_K, all other weights f16) as
+   the canonical Bucket C registration. Production via local
+   `llama-quantize --token-embedding-type Q4_K` from the existing
+   1.1 GB f16 GGUF. Net file ~920 MB; `token_embd` 87 MB (fits
+   cap); per-row dequant error doesn't compound through the forward
+   pass, preserving the ≥0.999 parity gate against f16 sentence-
+   transformers refs. The hybrid-quant pattern is documented in
+   CLAUDE.md as the canonical fix for any model whose `token_embd`
+   would exceed the per-binding cap.
+
+   **Remaining Phase 4-6 work:** re-register hybrid GGUF, re-run
+   parity gate (10/10 ≥0.999), Phase 5 (`embed-perf` bench
+   coverage), Phase 6 (closure SUMMARY.md + this stub closure).
+   Plan `docs/superpowers/plans/2026-04-29-embedding-bucket-c-implementation.md`.
+
+6. **Embedding bucket D — chat-model self-embedding** (filed
+   2026-04-29). Add `ModelInference.embed(tokenIds): Promise<Float32Array>`
+   that taps the post-`output_norm` hidden state on the chat
+   model's forward pass (same architecture truth source as bucket C:
+   `qwen3.cpp:98 res->t_embd = cur`), pools last-token, L2-
+   normalizes. Reuses ~70% of `CausalLMEmbedder.forwardEmbed`
+   logic. Motivated by the **single-model-active deployment**
+   doctrine — for agent + Three.js use cases where retrieval is
+   over in-domain content (agent memory, dialogue history,
+   semantic search over game state), running the chat model in
+   embedding mode avoids a second model load and halves cold-start.
+   Quality drops 5-15% vs dedicated retrieval-tuned embedders on
+   MTEB benchmarks but is "good enough" for in-domain retrieval.
+
+   **Scope:** ~80-120 LOC. Add `ModelInference.embed(tokenIds)`,
+   widen `engine.embed(modelId, text)` dispatch to include
+   `inferenceEngines` lookup as a tertiary fallback after
+   `encoderEngines` and `causalEmbedderEngines`. Brainstorm /
+   spec / plan via `superpowers:writing-plans` once bucket C
+   closes. Hard prereq: bucket C ships first (so the hybrid
+   quant + per-binding cap doctrine + tap-point pattern are
+   battle-tested before generalization to chat models).
+
+   **Decision rule for users:** the dedicated bucket C path
+   (Qwen3-Embedding-0.6B hybrid) ships as the **high-quality**
+   embedder; bucket D is the **simplicity / single-model-load**
+   embedder. CLAUDE.md documents the quality tradeoff.
 
 ---
 
@@ -984,11 +1024,13 @@ grows.** Encoder is 24-30% at tiny models (TinyLlama, Qwen3-0.6B)
 where matmul is 33-38%; drops to 9-11% at 7-8B where matmul is
 49-58%. **Reducing the per-dispatch encode cost would yield
 ~26% relative speedup at TinyLlama scale (11.40 → 9.00 ms/step
-→ 87.9 → 111.1 tok/s).** Lever isn't load-bearing for the
-project's size-30B target ceiling — at large models the
-absolute headroom is <1 tok/s — but is the only real
-opportunity at sub-1B targets if a "tiny-model" deployment
-appears. Captured as a finding rather than a next step.
+→ 87.9 → 111.1 tok/s).** Lever wasn't load-bearing under the
+prior 30B ceiling and is **promoted to "watch list"** under the
+new 8B ceiling (2026-04-29) — agent latency goals make the
+~26% headroom at sub-1B and ~10% at 1.7B-8B more interesting
+than they were at 30B targets, where absolute headroom is <1
+tok/s. Re-evaluate once bucket D (chat-model self-embedding)
+ships and the agent-loop end-to-end latency profile is in hand.
 
 ---
 
@@ -1256,11 +1298,12 @@ Three open candidates, all conditional:
 
 - **§C-v2-A resurrection.** Side branch `feat/spec-decode-v2-greedy`
   retains the entire driver, AdaptiveGate, K+1 verify, contract gate,
-  and ~30 tests. The only remaining theoretical resurrection path is
-  a 70B+ target via MEMORY64 (target/drafter ratio 13× → ~100×), but
-  the 30B project ceiling (set 2026-04-28) defers that. Tip
-  `4e11d79`. **Do not merge.** Re-evaluate only if the 30B ceiling
-  lifts.
+  and ~30 tests. The only remaining theoretical resurrection path was
+  a 70B+ target via MEMORY64 (target/drafter ratio 13× → ~100×); both
+  the prior 30B ceiling (2026-04-28) and the current **8B ceiling
+  (2026-04-29)** defer this. Tip `4e11d79`. **Do not merge.**
+  Re-evaluate only if the model-size ceiling lifts dramatically (no
+  current trigger; agent + Three.js use case will not approach 70B).
 
 - **Wave-1 architecture Gemma 2.** 5+ gaps (pre+post norm pairs,
   logit/attn soft-cap, sliding-window, (1+w) RMSNorm). Re-evaluate
