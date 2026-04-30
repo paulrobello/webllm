@@ -1249,25 +1249,44 @@ export class ModelInference {
 	/**
 	 * Compute an L2-normalized sentence embedding by running a single-
 	 * pass causal forward over `tokenIds`, tapping the post-
-	 * `output_norm` hidden state, last-token-pooling, and L2-
-	 * normalizing. **Does not write to the KV cache** — the chat
-	 * session's state is unchanged.
+	 * `output_norm` hidden state, pooling, and L2-normalizing.
+	 * **Does not write to the KV cache** — the chat session's state is
+	 * unchanged.
+	 *
+	 * Pooling (`opts.pooling`, default `"last-token"`):
+	 *   - `"last-token"`: take the hidden state at column `N - 1`.
+	 *     Canonical bucket D pool; matches qwen3-8b-iq3m ref capture.
+	 *   - `"mean"`: average all `N` columns, then L2-normalize. Use on
+	 *     models with high last-token anisotropy (e.g., Phi-3.5-mini).
 	 *
 	 * Concurrency: the caller (typically `engine.embed`) must serialize
 	 * this against any concurrent `forward()` / `generate()` on the
 	 * same engine. The two paths share the global WASM ctx-stack.
 	 */
-	async embed(tokenIds: Int32Array): Promise<Float32Array> {
+	async embed(
+		tokenIds: Int32Array,
+		opts?: { pooling?: "last-token" | "mean" },
+	): Promise<Float32Array> {
 		if (!this.weights) throw new Error("Weights not loaded");
 		if (tokenIds.length === 0) {
 			throw new Error("embed() received empty input after tokenization");
 		}
+		const pooling = opts?.pooling ?? "last-token";
 		const hidden = await this.forwardForEmbedding(tokenIds);
 		const E = this.hp.embeddingLength;
 		const N = tokenIds.length;
-		const lastCol = (N - 1) * E;
 		const pooled = new Float32Array(E);
-		for (let i = 0; i < E; i++) pooled[i] = hidden[lastCol + i];
+		if (pooling === "mean") {
+			for (let col = 0; col < N; col++) {
+				const base = col * E;
+				for (let i = 0; i < E; i++) pooled[i] += hidden[base + i];
+			}
+			const invN = 1 / N;
+			for (let i = 0; i < E; i++) pooled[i] *= invN;
+		} else {
+			const lastCol = (N - 1) * E;
+			for (let i = 0; i < E; i++) pooled[i] = hidden[lastCol + i];
+		}
 		let sq = 0;
 		for (let i = 0; i < E; i++) sq += pooled[i] * pooled[i];
 		if (sq === 0) return pooled;

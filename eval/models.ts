@@ -79,6 +79,21 @@ export interface BenchmarkModel {
 	 *   confirmed via 4-pair cosine-distinguishability check)
 	 */
 	embeddingCapable?: boolean;
+	/**
+	 * Pooling strategy for `engine.embed()` when `embeddingCapable: true`.
+	 * Meaningful only on chat models routed through bucket D
+	 * (`ModelInference.embed`); ignored for encoder / causal-embedder
+	 * registrations whose pooling is fixed by their architecture.
+	 *
+	 * - `"last-token"` (default): take the post-`output_norm` hidden state
+	 *   at the final token position. Matches the canonical bucket D ref
+	 *   (qwen3-8b-iq3m).
+	 * - `"mean"`: average the post-`output_norm` hidden state across all
+	 *   token positions. Use on models with high last-token anisotropy
+	 *   that compresses semantic separation between paraphrases and
+	 *   unrelated text (e.g., Phi-3.5-mini).
+	 */
+	embeddingPooling?: "last-token" | "mean";
 }
 
 /**

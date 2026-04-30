@@ -19,6 +19,13 @@ export interface ModelLoadOptions {
 	 * gate (cos >= 0.999 vs PyTorch reference).
 	 */
 	embeddingCapable?: boolean;
+	/**
+	 * Pooling strategy for `engine.embed()` when `embeddingCapable: true`.
+	 * Default `"last-token"`. Use `"mean"` for chat models with high
+	 * last-token anisotropy (e.g., Phi-3.5-mini); the mean of all token
+	 * hidden states preserves more semantic spread.
+	 */
+	embeddingPooling?: "last-token" | "mean";
 }
 
 /** Read-only handle returned after successfully loading a model. */
@@ -174,4 +181,5 @@ export interface ModelEntry {
 	loaded: boolean;
 	activeSessions: number;
 	embeddingCapable?: boolean;
+	embeddingPooling?: "last-token" | "mean";
 }
