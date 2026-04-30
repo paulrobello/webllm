@@ -1263,35 +1263,43 @@ appetite remains; none are forced.
   change** to confirm the regression is local (not a reference
   drift). Otherwise leave pinned; the gate is a known-good fixture.
 - **TS API audit follow-ups — surfaced from final review (2026-04-29).**
-  Two low-effort quality items queued from the closure of items
-  (a)-(f); not ship blockers. Address opportunistically when the
-  surrounding code is touched for another reason.
-  - **Sampling-dispatch unit test.** `engine.ts:272-289`'s
-    `forcedProfile` / `autoProfile` / `activeProfile` resolution
-    is exercised end-to-end by smoke + chat-completion tests but
-    has no direct unit test of the dispatch matrix (4 modes ×
-    `enableThinking` flag × Qwen-vs-non-Qwen × consumer-override).
-    A unit test that stubs `entry.hyperparams.architecture` and
-    asserts effective sampler params would catch silent regressions
-    if the dispatch ladder is refactored. File before the next
-    `CompletionConfig` surface change.
-  - **Tool-schema mirror-drift sentinel.** Three identical literal
-    unions live in `core/chat-types.ts` (`ChatToolSchema`),
-    `inference/chat-template.ts` (`ChatTemplateToolSchema`), and
-    `characters/tool-system.ts` (`ToolParameter`) with comment-only
-    "lock-step" contracts. Either dedupe via a shared exported
-    `JsonSchemaParameterType` (preferred — type-only, zero runtime
-    cost) or add a structural drift test. The comment-based contract
-    is the weakest link in the polish bundle and a future PR adding
-    one type to a single mirror is the most likely failure mode.
+  Two of three queued items closed 2026-04-30; the third deferred
+  to its own cycle pending a larger fix.
+  - **Sampling-dispatch unit test. CLOSED 2026-04-30** (commit
+    `b76b546`). Extracted the dispatch ladder from `engine.ts` into
+    a pure `resolveSamplingParams()` helper in
+    `src/core/sampling-profiles.ts` and unit-tested the full matrix
+    (4 modes × `enableThinking` × Qwen-vs-non-Qwen × consumer override
+    × per-field precedence × consumer 0 honored as a real override).
+    13 new tests in `tests/sampling-dispatch.test.ts`. Engine call
+    site reduced to a single named call against the same shape;
+    identical behavior.
+  - **Tool-schema mirror-drift sentinel. CLOSED 2026-04-30** (commit
+    `76acf05`). Promoted the `JsonSchemaParameterType` literal union
+    to a single exported type in `core/chat-types.ts`; the two other
+    mirrors (`inference/chat-template.ts`'s `ChatTemplateToolSchema`,
+    `characters/tool-system.ts`'s `ToolParameter`) now import it.
+    Comment-based "lock-step" contract upgraded to a typecheck
+    error. Pure type-only refactor — zero runtime cost.
 - **`tsconfig.json` widening to enforce test typechecks.** Currently
   includes only `src/**/*.ts` — the `@ts-expect-error` gate in
   `tests/generation-config-public.test.ts` is documentation, not
   enforcement (`bun test` strips types; the gate fires only under
-  `tsc --noEmit` against test files). Widening would surface latent
-  type errors in other test files first, so this is a separate cycle.
-  Surface area to fix before bumping: probably ~5-15 latent-error
-  hits across the test tree.
+  `tsc --noEmit` against test files). **Probed 2026-04-30:** widening
+  the include to `tests/**/*.ts` (excluding `eval/`) surfaces **101
+  latent errors** across the test tree — much larger than the
+  watch-list estimate (~5-15). Dominant categories: TS2341 private-
+  property access (25 hits, mostly `engine-streaming-api.test.ts`
+  poking at `_modelManager` / `inferenceEngines` / `sessions`),
+  TS2345/TS2322/TS2740 mock shape mismatches (30+ hits — mocks don't
+  satisfy the full `ModelInference` / `ModelHyperparams` interfaces),
+  TS2578 unused `@ts-expect-error` directives (4 hits) which are
+  the actual *latent regression evidence* — those `@ts-expect-error`
+  lines are documentation that doesn't fire. Cycle is its own thing
+  (not a quick win); needs internal-API hooks for testing or a
+  systematic mock-factory pass before widening can land. Probe log
+  retained at `/tmp/tsc-probe.log` ephemerally; if reopened, re-run
+  the probe rather than relying on stale state.
 
 ### External-trigger candidates
 
