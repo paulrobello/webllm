@@ -535,7 +535,12 @@ export class EncoderInference {
 				totalFloats,
 			);
 
-			const pooling = hp.poolingType ?? "cls";
+			// poolingType widened to include "last-token" for causal-LM-derived
+			// embedders, which route to CausalLMEmbedder (sibling class). Encoders
+			// never see "last-token" at runtime; narrow defensively for the type
+			// system.
+			const pooling: "cls" | "mean" =
+				hp.poolingType === "mean" ? "mean" : "cls";
 			return EncoderInference.poolAndNormalize(hidden, E, N, pooling);
 		} finally {
 			wasm.backendBufferFree(graphBuf);

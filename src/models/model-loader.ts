@@ -1,4 +1,8 @@
-import { isEncoderArchitecture, type ModelHyperparams } from "../core/types.js";
+import {
+	isCausalEmbedderArchitecture,
+	isEncoderArchitecture,
+	type ModelHyperparams,
+} from "../core/types.js";
 import {
 	TokenAttribute,
 	type TokenData,
@@ -38,11 +42,24 @@ export class ModelLoader {
 
 	/** Extract model hyperparameters from GGUF metadata. */
 	private static extractHyperparams(ctx: GgufContext): ModelHyperparams {
-		const arch = getMetaString(
+		const rawArch = getMetaString(
 			ctx,
 			"general.architecture",
 			"llama",
 		) as ModelHyperparams["architecture"];
+
+		// Derive qwen3-embedding from the qwen3 base arch when LAST-TOKEN pooling
+		// is set in metadata (qwen3.pooling_type=3). The Qwen3-Embedding GGUFs
+		// share the qwen3 architecture string but carry a pooling_type that the
+		// chat Qwen3 GGUFs do not. See bucket C Phase 0 probe report.
+		const qwen3PoolingRaw =
+			rawArch === "qwen3"
+				? getMetaNumberOptional(ctx, "qwen3.pooling_type")
+				: undefined;
+		const arch: ModelHyperparams["architecture"] =
+			rawArch === "qwen3" && qwen3PoolingRaw === 3
+				? "qwen3-embedding"
+				: rawArch;
 
 		const embeddingLength = getMetaNumber(
 			ctx,
@@ -57,14 +74,15 @@ export class ModelLoader {
 			? getMetaFloat(ctx, `${arch}.attention.layer_norm_epsilon`, 1e-12)
 			: getMetaFloat(ctx, `${arch}.attention.layer_norm_rms_epsilon`, 1e-5);
 
-		// Pooling + causal flag live on encoder models; causal defaults true elsewhere.
+		// Pooling + causal flag live on encoder models; causal-LM embedders
+		// (e.g. qwen3-embedding) carry pooling_type=LAST. Causal defaults true elsewhere.
 		let poolingType: ModelHyperparams["poolingType"];
 		let causalAttention: boolean | undefined;
 		let alibiMaxBias: number | undefined;
 		if (isEncoderArchitecture(arch)) {
 			const pt = getMetaNumberOptional(ctx, `${arch}.pooling_type`) ?? 2;
 			// llama.cpp enum: NONE=0, MEAN=1, CLS=2, LAST=3, RANK=4. We only
-			// implement CLS and MEAN in MVP; anything else falls back to CLS.
+			// implement CLS and MEAN for encoders; anything else falls back to CLS.
 			poolingType = pt === 1 ? "mean" : "cls";
 			causalAttention =
 				getMetaBooleanOptional(ctx, `${arch}.attention.causal`) ?? false;
@@ -74,6 +92,10 @@ export class ModelLoader {
 				alibiMaxBias =
 					getMetaNumberOptional(ctx, `${arch}.attention.alibi_bias_max`) ?? 8.0;
 			}
+		} else if (isCausalEmbedderArchitecture(arch)) {
+			// llama.cpp enum: LAST=3. Hard-pin "last-token" for the causal-LM-derived
+			// embedder family — no other pooling mode is supported for them.
+			poolingType = "last-token";
 		}
 
 		return {

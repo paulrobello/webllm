@@ -462,6 +462,27 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufFilePattern: "f16",
 	},
 
+	{
+		id: "qwen3-embedding-0.6b-q0f16",
+		name: "Qwen3 Embedding 0.6B",
+		family: "Qwen3-Embedding",
+		architecture: "qwen3-embedding",
+		paramsB: 0.6,
+		vramMB: 1300,
+		defaultQuant: "q0f16",
+		availableQuants: ["q0f16"],
+		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: true },
+		license: "Apache-2.0",
+		contextLength: 32768,
+		tier: "ultrafast",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B",
+		ggufUrl: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF",
+		// Mirror publishes `Qwen3-Embedding-0.6B-f16.gguf`; `f16` substring
+		// matches uniquely on this mirror.
+		ggufFilePattern: "f16",
+	},
+
 	// --- Specialized models ---
 
 	{

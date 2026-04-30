@@ -312,6 +312,12 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		model: "nomic-embed-text-v1.5-q0f16",
 		embedding: true,
 	},
+	// ── Qwen3-Embedding 0.6B (causal-LM-derived, last-token pooling) ──
+	{
+		name: "qwen3-embedding-0.6b",
+		model: "qwen3-embedding-0.6b-q0f16",
+		embedding: true,
+	},
 ];
 
 /**
@@ -390,6 +396,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"bge-large",
 		"jina-embeddings-v2-base-en",
 		"nomic-embed-text-v1.5",
+		"qwen3-embedding-0.6b",
 	],
 	embeddings: [
 		"arctic-embed-s",
@@ -398,6 +405,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"bge-large",
 		"jina-embeddings-v2-base-en",
 		"nomic-embed-text-v1.5",
+		"qwen3-embedding-0.6b",
 	],
 };
 

@@ -55,6 +55,7 @@ export type ModelArchitecture =
 	| "qwen"
 	| "qwen2"
 	| "qwen3"
+	| "qwen3-embedding"
 	| "mixtral"
 	| "deepseek"
 	| "bert"
@@ -70,6 +71,13 @@ export const ENCODER_ARCHITECTURES = [
 
 export function isEncoderArchitecture(a: ModelArchitecture): boolean {
 	return (ENCODER_ARCHITECTURES as readonly string[]).includes(a);
+}
+
+/** All architectures handled by CausalLMEmbedder (causal LM with last-token pooling, no KV cache). */
+export const CAUSAL_EMBEDDER_ARCHITECTURES = ["qwen3-embedding"] as const;
+
+export function isCausalEmbedderArchitecture(a: ModelArchitecture): boolean {
+	return (CAUSAL_EMBEDDER_ARCHITECTURES as readonly string[]).includes(a);
 }
 
 /** Metadata for a single tensor within a GGUF model file. */
@@ -120,8 +128,8 @@ export interface ModelHyperparams {
 	normEpsilon: number;
 	expertCount: number;
 	expertUsedCount: number;
-	/** For bidirectional encoders: pooling strategy for `embed()`. */
-	poolingType?: "cls" | "mean";
+	/** Pooling strategy for `embed()`. CLS/MEAN for BERT-family encoders; LAST-TOKEN for causal-LM-derived embedders (e.g., Qwen3-Embedding). */
+	poolingType?: "cls" | "mean" | "last-token";
 	/**
 	 * When false, attention is bidirectional (BERT-style encoders).
 	 * Only encoder architectures populate this field; `undefined` means causal
