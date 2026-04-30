@@ -1,0 +1,31 @@
+Reference bundle: Qwen/Qwen3-8B (transformers (torch.float16 cpu); add_special_tokens=False + manual EOS append (id 151645))
+Pooling: last-token
+Instruction prefix bytes: undefined
+Fixtures: 10
+Gate: cos >= 0.9 (IQ3_M i-quant: quant noise accumulates across layers vs f16 reference)
+Navigating to http://localhost:8031/real-model.html?model=qwen3-8b-iq3m&ctx=4096&v=1777564181934&ingest=off&embeddingCapable=1
+Loaded qwen3-8b-iq3m
+  row 0 document  cos=0.930597  mag=1.000000  PASS
+  row 1 document  cos=0.959582  mag=1.000000  PASS
+  row 2 document  cos=0.947716  mag=1.000000  PASS
+  row 3 document  cos=0.940043  mag=1.000000  PASS
+  row 4 document  cos=0.931431  mag=1.000000  PASS
+  row 5 document  cos=0.946040  mag=1.000000  PASS
+  row 6 document  cos=0.930099  mag=1.000000  PASS
+  row 7 document  cos=0.961593  mag=1.000000  PASS
+  row 8 document  cos=0.950431  mag=1.000000  PASS
+  row 9 document  cos=0.906286  mag=1.000000  PASS
+
+10/10 rows passed (gate cos >= 0.9, mag |v|_2 == 1.0 +/- 0.001)
+
+4-pair distinguishability check: embedding 6 sentences...
+
+Paraphrase pairs (expect high cosine):
+  pair 0 cos=0.918117  "The cat sat on the mat...." vs "A feline rested comfortably on the woven..."
+  pair 1 cos=0.918932  "Compile-time type checking catches a wid..." vs "Static type analysis prevents many bugs ..."
+
+Unrelated pairs (expect low cosine):
+  pair 0 cos=0.777268  "The cat sat on the mat...." vs "Stock prices fell sharply after the merg..."
+  pair 1 cos=0.766737  "Compile-time type checking catches a wid..." vs "The marathon runner crossed the finish l..."
+
+Distinguishability: min_paraphrase=0.918117 max_unrelated=0.777268 PASS
