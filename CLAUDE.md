@@ -20,10 +20,53 @@ For architecture, the public API, and the full benchmark surface, see
 These apply to all work on this project — perf cycles, infra, refactors,
 docs, and bug fixes alike.
 
-- **Model-size ceiling: 30B parameters.** Anything larger (Llama-3-70B,
-  DeepSeek-V2 236B, etc.) is out of scope. Levers that justify themselves
-  via 70B+ targets must be **deferred** (with the ceiling cited), not
-  silently dropped. 8-30B remains in scope.
+- **Model-size ceiling: 8B parameters** (revised 2026-04-29 from prior
+  30B). Rationale: the project's load-bearing use case is **agent +
+  Three.js coexistence** in a single tab (browser-side LLM driving 3D
+  agents alongside a renderer). Hardware baseline is **16 GB unified
+  memory floor / 32 GB recommended / 128 GB development**. On the 16 GB
+  floor, WebGPU sees ~10-11 GB; Three.js mid-complexity scenes take
+  0.5-1 GB; KV cache + browser overhead another 1-2 GB → ~7-8 GB for
+  the model. 8B Q4_K_M (~5 GB) fits comfortably with headroom. 14B Q4
+  (~9 GB) fits on 32 GB+ but is too tight for the floor and is **not**
+  load-bearing for project planning. Levers that justify themselves
+  only via models >8B must be **deferred** (with the ceiling cited),
+  not silently dropped. The prior 30B framing in archived items
+  (`§C-v2-A`, `§22`, MEMORY64-bound resurrection paths) is retained
+  for historical context but the practical retire-threshold is now 8B.
+- **Hardware baseline doctrine.** All registrations, defaults, and
+  workflow policies are sized for the **16 GB minimum / 32 GB
+  recommended / 128 GB dev** tier. Three.js is assumed resident in
+  the same tab; budget ~0.5-1 GB for scene + frame buffers + post-
+  processing. The chat model + embedder + KV cache + scratch buffers
+  must coexist with that. Default `contextLength` for chat models
+  registered in `eval/models.ts` should reflect this — 4-8K is fine
+  for agent dialogue, 32K is fine for embedders (no KV cache).
+- **Single-model-active deployment.** Project ships **at most one
+  chat model and one embedder loaded simultaneously**, or a single
+  model used for both via tap-point self-embedding (bucket D —
+  `ModelInference.embed(tokenIds)` taps the post-`output_norm`
+  hidden state, same architecture truth source as the dedicated
+  embedder path). Multi-model hot-loading is out of scope. KV-cache-
+  per-conversation-on-shared-weights multiplexing is **deferred** —
+  current `engine.ts` keeps one KV cache per loaded model, which is
+  fine for single-active-conversation agents but doesn't support
+  concurrent independent agent conversations on the same chat model
+  weights.
+- **Per-binding 128 MiB cap doctrine** (lesson from bucket C
+  Phase 4). WebGPU `maxStorageBufferBindingSize` is 128 MiB on
+  Chrome/Apple regardless of total VRAM. The patched `ggml-webgpu`
+  rejects ops with src/dst tensors exceeding this cap
+  (`ggml-webgpu.cpp:4302-4307`). For models with vocab > ~65K
+  (Qwen3 family, most modern models with token_embd > 128 MiB at
+  f16), the canonical fix is **hybrid quant: only `token_embd.weight`
+  quantized to Q4_K, all other weights f16**. One-line
+  `llama-quantize --token-embedding-type Q4_K` invocation. Preserves
+  parity ≥0.999 against f16 reference vectors (token_embd is a pure
+  row lookup; per-row dequant error doesn't compound). Ship hybrid as
+  the default for any embedder/chat model whose token_embd would
+  exceed the cap; fall back to full Q4_K_M only if the agent use
+  case explicitly trades quality for VRAM.
 - **Quick-wins override on YAGNI.** Speculative or YAGNI-flagged work is
   allowed when **(a)** there is measured gain (or a cheap probe phase
   that produces one) and **(b)** the gain outweighs the implementation
