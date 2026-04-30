@@ -160,6 +160,7 @@ export class WebLLM {
 			loaded: false,
 			activeSessions: 0,
 			embeddingCapable: options.embeddingCapable,
+			embeddingPooling: options.embeddingPooling,
 		};
 		this._modelManager.register(entry);
 		return entry;
@@ -520,7 +521,8 @@ export class WebLLM {
 				const eos = entry.tokenizer.eosId;
 				const withEos =
 					ids.length > 0 && ids[ids.length - 1] === eos ? ids : [...ids, eos];
-				return inf.embed(new Int32Array(withEos));
+				const pooling = entry.embeddingPooling ?? "last-token";
+				return inf.embed(new Int32Array(withEos), { pooling });
 			}
 		}
 
@@ -624,7 +626,10 @@ export class WebLLM {
 			inference: ModelInference | EncoderInference | CausalLMEmbedder;
 			parsed: ParsedModel;
 		},
-		options?: { embeddingCapable?: boolean },
+		options?: {
+			embeddingCapable?: boolean;
+			embeddingPooling?: "last-token" | "mean";
+		},
 	): Promise<ModelHandle> {
 		const isEncoder = pipeline.inference instanceof EncoderInference;
 		const isCausalEmbedder = pipeline.inference instanceof CausalLMEmbedder;
@@ -650,6 +655,9 @@ export class WebLLM {
 		entry.loaded = true;
 		if (options?.embeddingCapable !== undefined) {
 			entry.embeddingCapable = options.embeddingCapable;
+		}
+		if (options?.embeddingPooling !== undefined) {
+			entry.embeddingPooling = options.embeddingPooling;
 		}
 		this.wasmModules.set(handle.id, pipeline.wasm);
 		if (isEncoder) {
