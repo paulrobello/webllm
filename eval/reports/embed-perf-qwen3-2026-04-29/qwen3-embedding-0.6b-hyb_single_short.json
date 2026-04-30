@@ -1,0 +1,190 @@
+{
+  "modelId": "qwen3-embedding-0.6b-hyb",
+  "mode": "single",
+  "fixture": "short",
+  "traces": [
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 0,
+      "wallMs": 74.5
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 1,
+      "wallMs": 78.20000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 2,
+      "wallMs": 78.80000019073486
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 3,
+      "wallMs": 75
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 4,
+      "wallMs": 78.89999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 5,
+      "wallMs": 79
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 6,
+      "wallMs": 78.70000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 7,
+      "wallMs": 76.90000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 8,
+      "wallMs": 76.89999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 9,
+      "wallMs": 79.19999980926514
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 10,
+      "wallMs": 77.20000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 11,
+      "wallMs": 79.60000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 12,
+      "wallMs": 75.89999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 13,
+      "wallMs": 77.10000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 14,
+      "wallMs": 76.79999995231628
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 15,
+      "wallMs": 74.20000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 16,
+      "wallMs": 77
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 17,
+      "wallMs": 77.5
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 18,
+      "wallMs": 79.39999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 19,
+      "wallMs": 76.5
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 20,
+      "wallMs": 76.70000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 21,
+      "wallMs": 77.40000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 22,
+      "wallMs": 77.69999980926514
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 23,
+      "wallMs": 75.20000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 24,
+      "wallMs": 76.79999995231628
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 25,
+      "wallMs": 77.20000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 26,
+      "wallMs": 74.60000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 27,
+      "wallMs": 76.19999980926514
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 28,
+      "wallMs": 79.5
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 29,
+      "wallMs": 77.40000009536743
+    }
+  ],
+  "p50WallMs": 77.20000004768372,
+  "p90WallMs": 79.39999985694885,
+  "meanWallMs": 77.2
+}

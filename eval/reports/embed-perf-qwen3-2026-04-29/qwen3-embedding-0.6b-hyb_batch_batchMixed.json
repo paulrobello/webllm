@@ -1,0 +1,221 @@
+{
+  "modelId": "qwen3-embedding-0.6b-hyb",
+  "mode": "batch",
+  "fixture": "batchMixed",
+  "traces": [
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 0,
+      "count": 64,
+      "wallMs": 6134.299999952316
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 1,
+      "count": 64,
+      "wallMs": 6115.100000143051
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 2,
+      "count": 64,
+      "wallMs": 6135.899999856949
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 3,
+      "count": 64,
+      "wallMs": 6082.400000095367
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 4,
+      "count": 64,
+      "wallMs": 6099.299999952316
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 5,
+      "count": 64,
+      "wallMs": 6092.700000047684
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 6,
+      "count": 64,
+      "wallMs": 6105.700000047684
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 7,
+      "count": 64,
+      "wallMs": 6079.099999904633
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 8,
+      "count": 64,
+      "wallMs": 6108.900000095367
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 9,
+      "count": 64,
+      "wallMs": 6161.099999904633
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 10,
+      "count": 64,
+      "wallMs": 6151.799999952316
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 11,
+      "count": 64,
+      "wallMs": 6136.400000095367
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 12,
+      "count": 64,
+      "wallMs": 6106.299999952316
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 13,
+      "count": 64,
+      "wallMs": 6147.400000095367
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 14,
+      "count": 64,
+      "wallMs": 6144.099999904633
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 15,
+      "count": 64,
+      "wallMs": 6197.799999952316
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 16,
+      "count": 64,
+      "wallMs": 6243.700000047684
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 17,
+      "count": 64,
+      "wallMs": 6186.400000095367
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 18,
+      "count": 64,
+      "wallMs": 6171.099999904633
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 19,
+      "count": 64,
+      "wallMs": 6151.200000047684
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 20,
+      "count": 64,
+      "wallMs": 6105.899999856949
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 21,
+      "count": 64,
+      "wallMs": 6108.300000190735
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 22,
+      "count": 64,
+      "wallMs": 6123.699999809265
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 23,
+      "count": 64,
+      "wallMs": 6140.600000143051
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 24,
+      "count": 64,
+      "wallMs": 6108.299999952316
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 25,
+      "count": 64,
+      "wallMs": 6159.700000047684
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 26,
+      "count": 64,
+      "wallMs": 6131.599999904633
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 27,
+      "count": 64,
+      "wallMs": 6134.700000047684
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 28,
+      "count": 64,
+      "wallMs": 6158.700000047684
+    },
+    {
+      "mode": "batch",
+      "fixture": "batchMixed",
+      "trial": 29,
+      "count": 64,
+      "wallMs": 6125.299999952316
+    }
+  ],
+  "p50WallMs": 6134.700000047684,
+  "p90WallMs": 6186.400000095367,
+  "meanWallMs": 6134.916666666667,
+  "textsPerSec": 10.432457984824447
+}

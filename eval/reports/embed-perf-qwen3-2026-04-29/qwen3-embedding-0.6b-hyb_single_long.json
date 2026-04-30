@@ -1,0 +1,190 @@
+{
+  "modelId": "qwen3-embedding-0.6b-hyb",
+  "mode": "single",
+  "fixture": "long",
+  "traces": [
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 0,
+      "wallMs": 113.60000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 1,
+      "wallMs": 118.70000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 2,
+      "wallMs": 115.40000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 3,
+      "wallMs": 117.39999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 4,
+      "wallMs": 115.60000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 5,
+      "wallMs": 113.5
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 6,
+      "wallMs": 111.5
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 7,
+      "wallMs": 114.39999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 8,
+      "wallMs": 113.29999995231628
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 9,
+      "wallMs": 113.5
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 10,
+      "wallMs": 115.40000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 11,
+      "wallMs": 113.5
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 12,
+      "wallMs": 114.59999990463257
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 13,
+      "wallMs": 112.20000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 14,
+      "wallMs": 112.5
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 15,
+      "wallMs": 114.90000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 16,
+      "wallMs": 110.20000004768372
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 17,
+      "wallMs": 113.19999980926514
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 18,
+      "wallMs": 112.90000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 19,
+      "wallMs": 114.40000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 20,
+      "wallMs": 114.59999990463257
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 21,
+      "wallMs": 113.5
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 22,
+      "wallMs": 114.60000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 23,
+      "wallMs": 112.89999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 24,
+      "wallMs": 113.10000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 25,
+      "wallMs": 115.59999990463257
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 26,
+      "wallMs": 114.60000014305115
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 27,
+      "wallMs": 110.29999995231628
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 28,
+      "wallMs": 113.39999985694885
+    },
+    {
+      "mode": "single",
+      "fixture": "long",
+      "rep": 29,
+      "wallMs": 117.90000009536743
+    }
+  ],
+  "p50WallMs": 113.60000014305115,
+  "p90WallMs": 117.39999985694885,
+  "meanWallMs": 114.04000000953674
+}

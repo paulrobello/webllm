@@ -1,11 +1,14 @@
 /**
- * Encoder perf harness for §D. Drives the smoke-test page's [8/8]
- * arctic-embed engine with embedPerf URL params, captures wall-time
- * traces, and prints a per-(model, fixture, mode) summary.
+ * Embedder perf harness for §D. Drives the smoke-test page's
+ * `runEmbedPerfHook` via embedPerf URL params, captures wall-time traces,
+ * and prints a per-(model, fixture, mode) summary. Covers both bidirectional
+ * encoders (BERT/jina/nomic — `EncoderInference`) and causal-LM-derived
+ * embedders (Qwen3-Embedding family — `CausalLMEmbedder`); the smoke page
+ * routes both through `engine.embed` so the perf surface is identical.
  *
  * Usage:
- *   bun run eval/embed-perf.ts                                 # both models, both modes, both fixtures
- *   bun run eval/embed-perf.ts --model snowflake-arctic-embed-s-q0f32-b4
+ *   bun run eval/embed-perf.ts                                 # all models, both modes, both fixtures
+ *   bun run eval/embed-perf.ts --model qwen3-embedding-0.6b-hyb
  *   bun run eval/embed-perf.ts --mode single --fixture short   # one cell
  *   bun run eval/embed-perf.ts --reps 50                       # override single-mode reps
  *   bun run eval/embed-perf.ts --profile                       # also pass profile=1 to smoke page
@@ -29,11 +32,15 @@ import {
 } from "./browser-smoke.js";
 import { getModelById, type BenchmarkModel } from "./models.js";
 
-const ENCODER_MODELS = [
+const EMBEDDER_MODELS = [
 	"snowflake-arctic-embed-s-q0f32-b4",
 	"snowflake-arctic-embed-m-q0f32-b4",
 	"bge-small-en-v1.5-q0f16",
 	"bge-large-en-v1.5-q0f16",
+	// Causal-LM-derived embedder (bucket C). Hand-built hybrid GGUF —
+	// `localGGUFOnly: true` in the registration bypasses the HF tree-fetch
+	// in `ensureModelDownloaded` when the file already exists locally.
+	"qwen3-embedding-0.6b-hyb",
 ] as const;
 
 type Mode = "single" | "batch";
@@ -112,7 +119,7 @@ async function runCell(
 
 function formatSummary(cells: CellResult[]): string {
 	const lines: string[] = [];
-	lines.push(`# §D Encoder Perf — Baseline\n`);
+	lines.push(`# §D Embedder Perf — Baseline\n`);
 	lines.push(`Date: ${new Date().toISOString()}\n`);
 	lines.push(`## Single-text latency (p50 wall ms; non-profile)\n`);
 	lines.push(`| Model | Fixture | p50 ms | p90 ms | mean ms | reps |`);
@@ -162,7 +169,7 @@ async function main(): Promise<void> {
 
 	const modelIds = values.model
 		? [values.model]
-		: (ENCODER_MODELS as readonly string[]);
+		: (EMBEDDER_MODELS as readonly string[]);
 	const modes: Mode[] = values.mode
 		? [values.mode as Mode]
 		: ["single", "batch"];
