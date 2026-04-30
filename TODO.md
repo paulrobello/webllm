@@ -970,61 +970,25 @@ check (item 1) still required at session start.
    plan
    [`docs/superpowers/plans/2026-04-29-embedding-bucket-c-implementation.md`](docs/superpowers/plans/2026-04-29-embedding-bucket-c-implementation.md).
 
-6. **Embedding bucket D — chat-model self-embedding. NEXT
-   SESSION FOCUS (queued 2026-04-29).** Add
-   `ModelInference.embed(tokenIds): Promise<Float32Array>` that
-   taps the post-`output_norm` hidden state on a chat model's
-   forward pass (same architecture truth source as bucket C:
-   `qwen3.cpp:98 res->t_embd = cur`), pools last-token, L2-
-   normalizes. Reuses ~70% of `CausalLMEmbedder.forwardEmbed`
-   logic — the architecture-routing groundwork (metaPrefix split,
-   EOS-append convention, hybrid-tier parity gate, per-binding
-   128 MiB cap doctrine) was battle-tested through bucket C and
-   is ready to generalize to chat models.
+6. **Embedding bucket D — chat-model self-embedding. CLOSED 2026-04-30.**
+   `ModelInference.embed(tokenIds)` shipped; `engine.embed` dispatches
+   through `inferenceEngines` for chat models with `embeddingCapable:
+   true`. **`qwen3-8b-iq3m`** is the single registered bucket D model
+   at v1; other archs follow as separate cycles.
 
-   **Motivation:** the **single-model-active deployment** doctrine.
-   For agent + Three.js use cases where retrieval is over in-domain
-   content (agent memory, dialogue history, semantic search over
-   game state), running the chat model in embedding mode avoids a
-   second model load and halves cold-start. Quality drops 5-15%
-   vs dedicated retrieval-tuned embedders on MTEB benchmarks but
-   is "good enough" for in-domain retrieval.
+   Parity 10/10 PASS at `cos >= 0.90` (IQ3_M-calibrated gate; new
+   third tier in the gate-by-quant-tier scheme alongside `hyb` 0.995
+   and default 0.999). 4-pair cosine distinguishability sanity passes
+   with clean margin (min paraphrase 0.918 > max unrelated 0.777).
+   Closure report
+   [`eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md`](eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md);
+   spec [`docs/superpowers/specs/2026-04-29-embedding-bucket-d-design.md`](docs/superpowers/specs/2026-04-29-embedding-bucket-d-design.md);
+   plan [`docs/superpowers/plans/2026-04-29-embedding-bucket-d.md`](docs/superpowers/plans/2026-04-29-embedding-bucket-d.md).
 
-   **Entry point — fresh-session start checklist:**
-   1. Daily upstream cadence check (item 1) — ~30s.
-   2. Read this stub + the bucket C closure report at
-      [`eval/reports/bucket-c-parity-2026-04-29/SUMMARY.md`](eval/reports/bucket-c-parity-2026-04-29/SUMMARY.md)
-      to refresh on the patterns that carry over (KV-cache
-      ownership, tap-point, EOS-append, hybrid-quant gate selection).
-   3. Invoke `superpowers:brainstorming` with the prompt:
-      *"Bucket D — chat-model self-embedding via
-      `ModelInference.embed(tokenIds)`. Reuse bucket C tap-point and
-      pooling; the open design questions are KV-cache interaction
-      (does embedding poison the chat session's cache, or do we
-      need a separate forward path that doesn't write to the cache?),
-      whether `engine.embed` should auto-fallback to chat models or
-      require explicit opt-in, and how to surface the quality-vs-
-      simplicity tradeoff in the public API."*
-   4. The brainstorm should land a spec at
-      `docs/superpowers/specs/2026-04-29-embedding-bucket-d-design.md`
-      then a plan at
-      `docs/superpowers/plans/2026-04-29-embedding-bucket-d.md`,
-      executed via `superpowers:subagent-driven-development` per
-      the global preference.
-
-   **Scope estimate (pre-brainstorm):** ~80-120 LOC. Add
-   `ModelInference.embed(tokenIds)`, widen `engine.embed(modelId, text)`
-   dispatch to include `inferenceEngines` lookup as a tertiary
-   fallback after `encoderEngines` and `causalEmbedderEngines`.
-   Parity gate strategy: capture sentence-transformers refs against
-   the chat model's HF base (or skip parity if no canonical
-   embedding head exists, and validate via cosine-distinguishability
-   tests on synthetic pairs instead). Open question for the spec.
-
-   **Decision rule for users:** the dedicated bucket C path
-   (Qwen3-Embedding-0.6B hybrid) ships as the **high-quality**
-   embedder; bucket D is the **simplicity / single-model-load**
-   embedder. CLAUDE.md documents the quality tradeoff.
+   Full bucket D block (Q1-Q5 design rationale, per-task commit map,
+   ref-capture recipe, IQ3_M gate calibration history, follow-up arch
+   cycles) archived to `TODO_ARCHIVE.md` under "Embedding bucket D
+   (closed 2026-04-30)".
 
 ---
 

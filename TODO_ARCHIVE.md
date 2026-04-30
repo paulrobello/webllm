@@ -4363,3 +4363,142 @@ insufficient-for-{encoder,jina-v2}-parity`,
 `jina-vs-nomic-ffn-activation-mismatch`).
 
 ---
+
+### Embedding bucket D (closed 2026-04-30)
+
+**Original queued entry (2026-04-29):**
+
+Add `ModelInference.embed(tokenIds): Promise<Float32Array>` that
+taps the post-`output_norm` hidden state on a chat model's
+forward pass (same architecture truth source as bucket C:
+`qwen3.cpp:98 res->t_embd = cur`), pools last-token, L2-
+normalizes. Reuses ~70% of `CausalLMEmbedder.forwardEmbed`
+logic — the architecture-routing groundwork (metaPrefix split,
+EOS-append convention, hybrid-tier parity gate, per-binding
+128 MiB cap doctrine) was battle-tested through bucket C and
+is ready to generalize to chat models.
+
+**Motivation:** the **single-model-active deployment** doctrine.
+For agent + Three.js use cases where retrieval is over in-domain
+content (agent memory, dialogue history, semantic search over
+game state), running the chat model in embedding mode avoids a
+second model load and halves cold-start. Quality drops 5-15%
+vs dedicated retrieval-tuned embedders on MTEB benchmarks but
+is "good enough" for in-domain retrieval.
+
+**Pre-brainstorm scope estimate:** ~80-120 LOC. Add
+`ModelInference.embed(tokenIds)`, widen `engine.embed(modelId, text)`
+dispatch to include `inferenceEngines` lookup as a tertiary
+fallback after `encoderEngines` and `causalEmbedderEngines`.
+Parity gate strategy: capture sentence-transformers refs against
+the chat model's HF base (or skip parity if no canonical
+embedding head exists, and validate via cosine-distinguishability
+tests on synthetic pairs instead). Open question for the spec.
+
+**Decision rule for users:** the dedicated bucket C path
+(Qwen3-Embedding-0.6B hybrid) ships as the **high-quality**
+embedder; bucket D is the **simplicity / single-model-load**
+embedder.
+
+---
+
+**Outcome (2026-04-30):**
+
+`ModelInference.embed(tokenIds)` shipped and `engine.embed`
+dispatches through `inferenceEngines` for chat models tagged
+`embeddingCapable: true`. `qwen3-8b-iq3m` is the single
+registered bucket D model at v1; other archs follow as
+separate cycles.
+
+Parity 10/10 PASS at `cos >= 0.90` (IQ3_M-calibrated gate; new
+third tier in the gate-by-quant-tier scheme alongside `hyb`
+0.995 and default 0.999). 4-pair distinguishability:
+min paraphrase 0.918 > max unrelated 0.777 (+0.141 margin).
+Bench: short p50 ~1000 ms / long p50 ~2000 ms (14-16× slower
+than bucket C; accepted — single-model-load saves second GGUF
+cold-start + ~2 GB VRAM).
+
+**Artifacts:**
+- Spec: [`docs/superpowers/specs/2026-04-29-embedding-bucket-d-design.md`](docs/superpowers/specs/2026-04-29-embedding-bucket-d-design.md)
+- Plan: [`docs/superpowers/plans/2026-04-29-embedding-bucket-d.md`](docs/superpowers/plans/2026-04-29-embedding-bucket-d.md)
+- Ref capture: `eval/refs/bucket-d/`
+- Parity report: [`eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md`](eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md)
+- Bench output: `eval/reports/embed-perf-qwen3-8b-2026-04-29/`
+
+**Per-task commit chronology (Tasks 1-9; base `5ca83bc`):**
+
+```
+504a907 feat(embed): add embeddingCapable flag to RegisteredModel
+9dc5f3b feat(embed): add ModelInference.embed for chat-model self-embedding
+62bfde6 fix(embed): apply normBias at output_norm tap; clarify intent
+20ebff2 feat(embed): wire engine.embed dispatch to bucket D path
+1381aa4 fix(embed): wire embeddingCapable through engine load path
+4acd4e0 fix(embed): thread embeddingCapable through adoptPreloadedModel
+2a55e3a feat(embed): enable bucket D on qwen3-8b-iq3m
+66f711a test(embed): pin bucket D parity refs for qwen3-8b-iq3m
+a5066b9 fix(refs): suppress Pyright import diagnostics on bucket D ref-capture
+b9861cc test(embed): add qwen3-8b-ref.json fixture output (bucket D parity)
+261e0b2 test(embed): extend parity harness for bucket D + 4-pair sanity
+48c30b6 feat(embed-perf): bench coverage for bucket D (qwen3-8b-iq3m)
+06dad2e docs(CLAUDE): require hfdownloader CLI for HuggingFace downloads
+43f058c docs(report): bucket D parity closure (qwen3-8b-iq3m)
+6263e74 docs(embed): document bucket D dispatch tier and quality tradeoff
+```
+
+**IQ3_M gate calibration:**
+
+The plan expected a `q4f16_1` default-quant registration and the
+standard `cos >= 0.999` gate. During Task 6 the registration's
+`defaultQuant` field was discovered to be incorrectly tagged as
+`"q4f16_1"` when the actual model file on disk is IQ3_M. IQ3_M
+quant noise accumulates across all 32 Qwen3-8B attention/FFN
+layers (unlike bucket C hybrid quant where only `token_embd` inherits
+quant error). The empirical parity band is `0.906-0.962` — above
+noise and meeting semantic utility bar, but well below f16-grade.
+
+Following bucket C precedent, the harness now selects among three
+gate tiers by `defaultQuant`:
+
+| `defaultQuant` | Gate       | Tier label                      |
+| -------------- | ---------- | ------------------------------- |
+| `"iq3m"`       | `>= 0.90`  | IQ3_M i-quant                   |
+| `"hyb"`        | `>= 0.995` | Hybrid Q4_K-on-`token_embd`     |
+| anything else  | `>= 0.999` | f16 / full-precision            |
+
+**Bugs and discoveries fixed during this cycle:**
+
+1. **`defaultQuant` mistag** — `qwen3-8b-iq3m` had `"q4f16_1"`; the
+   actual file is IQ3_M. Without the fix the 0.999 gate was applied
+   and 10/10 rows failed. Fixed in `261e0b2`.
+2. **`QuantFormat` union gaps** — `"iq3m"` and `"hyb"` were untyped
+   string literals; extended to first-class members so type-narrowing
+   on `defaultQuant` is exhaustive. Fixed in `261e0b2`.
+3. **`normBias` omission** — initial `forwardForEmbedding` applied
+   `normScale` but not `normBias` at the `output_norm` tap. Caught
+   in Task 2 code review; fixed in `62bfde6`.
+4. **Engine load-path threading** — `embeddingCapable` was added to
+   `ModelEntry` and read by `engine.embed` for dispatch, but neither
+   `loadModelFromBuffer` nor `adoptPreloadedModel` wrote it through.
+   Fixed in `1381aa4` and `4acd4e0`.
+5. **Stale `webllm-bundle.js`** — the pre-Task 1 bundle lacked
+   `embed` export and `embeddingCapable`. Rebuilt in `261e0b2`.
+6. **`real-model-page.js` chat-template skip** — the embed-perf bench
+   path gated on `referenceEncoder` checks that don't apply to bucket
+   D chat models. Fixed in `48c30b6`.
+
+**Follow-on arch cycles (watch list):**
+
+- Cross-arch generalisation: `ModelInference.embed` tap-point is
+  Qwen3-specific; next cycle parameterises by arch string so
+  `engine.embed` works across Llama, Mistral, Phi-3 without per-model
+  patches.
+- Concurrency mutex: a latent concurrent-forward race inside the WASM
+  ctx-stack was surfaced (bucket C bug 2: `ggml-webgpu.cpp:3659`
+  GGML_ASSERT). Not exposed by serial parity/bench runs, but agent
+  workloads interleaving chat + embedding will need a mutex or
+  serialisation queue around `engine.embed`.
+- Quality-tradeoff API: IQ3_M cosine band (0.906-0.962) is below
+  dedicated embedder quality; consider `qualityTier` or
+  `recommendedFor` on `ModelEntry` for informed deployment choices.
+
+---
