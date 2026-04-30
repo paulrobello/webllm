@@ -687,11 +687,20 @@ export class Tokenizer {
 				const item = heap.pop();
 				if (!item) break;
 
-				const { rank: _rank, left, right } = item;
+				const { rank, left, right } = item;
 
-				// Validate that the pair is still current
+				// Validate that the pair is still current. Adjacency + merge
+				// flags catch most stale entries, but they miss the case where
+				// `symText[left]` was extended by a prior merge — the position
+				// is still un-merged and still adjacent to `right`, but the
+				// stored rank no longer describes the current symbol pair.
+				// Re-derive the rank from current contents and skip if it
+				// disagrees; the correct (newer) entry was already pushed when
+				// the prior merge fired and will pop later.
 				if (symMerged[left] || symMerged[right]) continue;
 				if (symNext[left] !== right) continue;
+				const currentKey = `${symText[left]} ${symText[right]}`;
+				if (this.config.bpeRanks.get(currentKey) !== rank) continue;
 
 				// Merge right into left
 				symText[left] += symText[right];
