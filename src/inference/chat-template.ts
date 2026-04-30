@@ -1,4 +1,7 @@
-import type { ChatMessage } from "../core/chat-types.js";
+import type {
+	ChatMessage,
+	JsonSchemaParameterType,
+} from "../core/chat-types.js";
 import type { Tokenizer } from "./tokenizer.js";
 
 export type ChatTemplateType =
@@ -77,8 +80,9 @@ function formatLlama2(
 
 /**
  * Minimal tool schema for prompt injection — mirrors `ChatToolSchema` from
- * `core/chat-types.ts` without the import cycle. Keep the parameter `type`
- * union in lock-step with `ChatToolSchema` and `ToolParameter`.
+ * `core/chat-types.ts`. The parameter `type` union is sourced from
+ * `JsonSchemaParameterType` so drift across the three tool-schema mirrors
+ * (this one, `ChatToolSchema`, `ToolParameter`) is a typecheck error.
  */
 export interface ChatTemplateToolSchema {
 	name: string;
@@ -86,7 +90,7 @@ export interface ChatTemplateToolSchema {
 	parameters: Record<
 		string,
 		{
-			type: "string" | "number" | "integer" | "boolean" | "array" | "object";
+			type: JsonSchemaParameterType;
 			description?: string;
 			required?: boolean;
 		}

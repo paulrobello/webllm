@@ -7,6 +7,22 @@ export interface ChatMessage {
 }
 
 /**
+ * JSON Schema "type" values accepted in tool parameter schemas. Canonical
+ * source for the mirrors in `inference/chat-template.ts`
+ * (`ChatTemplateToolSchema`) and `characters/tool-system.ts`
+ * (`ToolParameter`). Importing this type instead of redeclaring the union
+ * makes drift a typecheck error — adding a new variant here propagates to
+ * every consumer.
+ */
+export type JsonSchemaParameterType =
+	| "string"
+	| "number"
+	| "integer"
+	| "boolean"
+	| "array"
+	| "object";
+
+/**
  * Tool / function schema passed into the chat template. Just the shape the
  * model needs in the prompt — handlers, responses, etc. live on the
  * Character/ToolSystem side and aren't serialised here.
@@ -17,7 +33,7 @@ export interface ChatToolSchema {
 	parameters: Record<
 		string,
 		{
-			type: "string" | "number" | "integer" | "boolean" | "array" | "object";
+			type: JsonSchemaParameterType;
 			description?: string;
 			required?: boolean;
 		}
