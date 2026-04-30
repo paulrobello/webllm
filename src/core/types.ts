@@ -11,6 +11,14 @@ export interface ModelLoadOptions {
 	contextLength?: number;
 	gpuLayers?: number;
 	lightweight?: boolean;
+	/**
+	 * When true, the model's hidden state (post-`output_norm`, last-token-pooled
+	 * and L2-normalized) is exposed for embedding via `engine.embed()`. Quality
+	 * trades 5-15% vs dedicated retrieval-tuned embedders; acceptable for in-domain
+	 * retrieval tasks. Set only on models that have passed the bucket D parity
+	 * gate (cos >= 0.999 vs PyTorch reference).
+	 */
+	embeddingCapable?: boolean;
 }
 
 /** Read-only handle returned after successfully loading a model. */

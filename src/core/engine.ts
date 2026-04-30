@@ -159,6 +159,7 @@ export class WebLLM {
 			memoryAllocations: [],
 			loaded: false,
 			activeSessions: 0,
+			embeddingCapable: options.embeddingCapable,
 		};
 		this._modelManager.register(entry);
 		return entry;
@@ -669,6 +670,7 @@ export class WebLLM {
 		data: ArrayBuffer | Uint8Array,
 		name: string,
 		wasmUrl?: string,
+		options?: Partial<ModelLoadOptions>,
 	): Promise<{
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
@@ -700,7 +702,10 @@ export class WebLLM {
 			inference = inf;
 		}
 
-		const handle = this.registerModelHandle(name, { priority: 0 });
+		const handle = this.registerModelHandle(name, {
+			priority: 0,
+			...options,
+		});
 		const entry = this._modelManager.get(handle.id);
 		if (entry) {
 			entry.hyperparams = parsed.hyperparams;
@@ -732,6 +737,7 @@ export class WebLLM {
 		name: string,
 		config: WebLLMConfig,
 		wasmUrl?: string,
+		options?: Partial<ModelLoadOptions>,
 	): Promise<{
 		handle: ModelHandle;
 		engine: WebLLM;
@@ -742,6 +748,7 @@ export class WebLLM {
 			data,
 			name,
 			wasmUrl,
+			options,
 		);
 		return { handle, engine, inference };
 	}
