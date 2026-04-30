@@ -315,7 +315,7 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 	// ── Qwen3-Embedding 0.6B (causal-LM-derived, last-token pooling) ──
 	{
 		name: "qwen3-embedding-0.6b",
-		model: "qwen3-embedding-0.6b-q0f16",
+		model: "qwen3-embedding-0.6b-hyb",
 		embedding: true,
 	},
 ];

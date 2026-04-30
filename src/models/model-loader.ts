@@ -61,18 +61,35 @@ export class ModelLoader {
 				? "qwen3-embedding"
 				: rawArch;
 
+		// `arch` is the project's *identity* tag (used for routing into the
+		// right inference class); `metaPrefix` is the GGUF metadata key prefix
+		// (always the on-disk `general.architecture` string). They diverge for
+		// causal-LM-derived embedders: Qwen3-Embedding GGUFs carry
+		// `general.architecture = "qwen3"` and store hyperparams under
+		// `qwen3.*` keys, but we tag the model as `qwen3-embedding` so the
+		// engine routes through `CausalLMEmbedder` instead of the chat path.
+		const metaPrefix: string = rawArch;
+
 		const embeddingLength = getMetaNumber(
 			ctx,
-			`${arch}.embedding_length`,
+			`${metaPrefix}.embedding_length`,
 			4096,
 		);
-		const headCount = getMetaNumber(ctx, `${arch}.attention.head_count`, 32);
+		const headCount = getMetaNumber(
+			ctx,
+			`${metaPrefix}.attention.head_count`,
+			32,
+		);
 
 		// BERT-family encoders use a plain LayerNorm epsilon under a different
 		// metadata key. Fall back to the RMSNorm key for non-encoder archs.
 		const normEpsilon = isEncoderArchitecture(arch)
-			? getMetaFloat(ctx, `${arch}.attention.layer_norm_epsilon`, 1e-12)
-			: getMetaFloat(ctx, `${arch}.attention.layer_norm_rms_epsilon`, 1e-5);
+			? getMetaFloat(ctx, `${metaPrefix}.attention.layer_norm_epsilon`, 1e-12)
+			: getMetaFloat(
+					ctx,
+					`${metaPrefix}.attention.layer_norm_rms_epsilon`,
+					1e-5,
+				);
 
 		// Pooling + causal flag live on encoder models; causal-LM embedders
 		// (e.g. qwen3-embedding) carry pooling_type=LAST. Causal defaults true elsewhere.
@@ -80,17 +97,20 @@ export class ModelLoader {
 		let causalAttention: boolean | undefined;
 		let alibiMaxBias: number | undefined;
 		if (isEncoderArchitecture(arch)) {
-			const pt = getMetaNumberOptional(ctx, `${arch}.pooling_type`) ?? 2;
+			const pt = getMetaNumberOptional(ctx, `${metaPrefix}.pooling_type`) ?? 2;
 			// llama.cpp enum: NONE=0, MEAN=1, CLS=2, LAST=3, RANK=4. We only
 			// implement CLS and MEAN for encoders; anything else falls back to CLS.
 			poolingType = pt === 1 ? "mean" : "cls";
 			causalAttention =
-				getMetaBooleanOptional(ctx, `${arch}.attention.causal`) ?? false;
+				getMetaBooleanOptional(ctx, `${metaPrefix}.attention.causal`) ?? false;
 			if (arch === "jina-bert-v2") {
 				// gaianet GGUF mirror omits this key; 8.0 is the upstream default
 				// (jina-bert-v2 reference impl + llama.cpp).
 				alibiMaxBias =
-					getMetaNumberOptional(ctx, `${arch}.attention.alibi_bias_max`) ?? 8.0;
+					getMetaNumberOptional(
+						ctx,
+						`${metaPrefix}.attention.alibi_bias_max`,
+					) ?? 8.0;
 			}
 		} else if (isCausalEmbedderArchitecture(arch)) {
 			// llama.cpp enum: LAST=3. Hard-pin "last-token" for the causal-LM-derived
@@ -100,34 +120,34 @@ export class ModelLoader {
 
 		return {
 			architecture: arch,
-			contextLength: getMetaNumber(ctx, `${arch}.context_length`, 2048),
+			contextLength: getMetaNumber(ctx, `${metaPrefix}.context_length`, 2048),
 			embeddingLength,
 			headCount,
 			headCountKv: getMetaNumber(
 				ctx,
-				`${arch}.attention.head_count_kv`,
+				`${metaPrefix}.attention.head_count_kv`,
 				headCount,
 			),
-			layerCount: getMetaNumber(ctx, `${arch}.block_count`, 32),
+			layerCount: getMetaNumber(ctx, `${metaPrefix}.block_count`, 32),
 			vocabularySize: 0, // filled after tokenizer parse
 			embeddingHeadLength: getMetaNumber(
 				ctx,
-				`${arch}.attention.key_length`,
+				`${metaPrefix}.attention.key_length`,
 				embeddingLength / headCount,
 			),
 			feedForwardLength: getMetaNumber(
 				ctx,
-				`${arch}.feed_forward_length`,
+				`${metaPrefix}.feed_forward_length`,
 				11008,
 			),
 			ropeFreqBase:
-				getMetaNumberOptional(ctx, `${arch}.rope_freq_base`) ??
-				getMetaNumberOptional(ctx, `${arch}.rope.freq_base`) ??
+				getMetaNumberOptional(ctx, `${metaPrefix}.rope_freq_base`) ??
+				getMetaNumberOptional(ctx, `${metaPrefix}.rope.freq_base`) ??
 				10000,
-			ropeScale: getMetaNumber(ctx, `${arch}.rope_scale`, 1),
+			ropeScale: getMetaNumber(ctx, `${metaPrefix}.rope_scale`, 1),
 			normEpsilon,
-			expertCount: getMetaNumber(ctx, `${arch}.expert_count`, 0),
-			expertUsedCount: getMetaNumber(ctx, `${arch}.expert_used_count`, 0),
+			expertCount: getMetaNumber(ctx, `${metaPrefix}.expert_count`, 0),
+			expertUsedCount: getMetaNumber(ctx, `${metaPrefix}.expert_used_count`, 0),
 			poolingType,
 			causalAttention,
 			alibiMaxBias,

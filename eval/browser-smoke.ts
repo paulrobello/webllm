@@ -121,6 +121,15 @@ export async function ensureModelDownloaded(
 
 	mkdirSync(destDir, { recursive: true });
 
+	// Local-only models (bucket C hybrid: token_embd Q4_K, rest f16, built
+	// via local llama-quantize — not published upstream) trust the local
+	// cache and skip the HF tree-fetch + size-verify entirely. Falls
+	// through to the normal download path if the cache is missing so the
+	// error message points at the recipe in eval/models.ts.
+	if (model.localGGUFOnly && existsSync(destPath)) {
+		return;
+	}
+
 	const repoUrl = model.ggufUrl;
 	if (!repoUrl.startsWith("https://huggingface.co/")) {
 		throw new Error(`Unsupported model URL format: ${repoUrl}`);

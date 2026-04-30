@@ -52,6 +52,17 @@ export interface BenchmarkModel {
 	 * `q0f32`; setting `ggufFilePattern: "f16"` pins the verified file.
 	 */
 	ggufFilePattern?: string;
+	/**
+	 * When true, the bench downloader treats any cached file at
+	 * `smoke-test/models/<id>.gguf` as authoritative and skips the
+	 * HuggingFace tree-fetch + size-verify entirely. Used for models
+	 * whose canonical GGUF is built locally rather than published
+	 * (e.g. the bucket C hybrid quant: `token_embd` Q4_K, rest f16,
+	 * not in any upstream mirror — see CLAUDE.md "Per-binding 128
+	 * MiB cap doctrine"). Falls back to the normal download path
+	 * if the local cache is missing.
+	 */
+	localGGUFOnly?: boolean;
 }
 
 /**
@@ -463,24 +474,35 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 	},
 
 	{
-		id: "qwen3-embedding-0.6b-q0f16",
-		name: "Qwen3 Embedding 0.6B",
+		id: "qwen3-embedding-0.6b-hyb",
+		name: "Qwen3 Embedding 0.6B (hybrid)",
 		family: "Qwen3-Embedding",
 		architecture: "qwen3-embedding",
 		paramsB: 0.6,
-		vramMB: 1300,
-		defaultQuant: "q0f16",
-		availableQuants: ["q0f16"],
+		vramMB: 1100,
+		// Hybrid quant: token_embd Q4_K (83 MiB; fits the 128 MiB WebGPU
+		// per-binding cap), all other weights f16. Per-row dequant on the
+		// embedding lookup doesn't compound through the forward, so parity
+		// against f16 sentence-transformers refs holds at >=0.999. See
+		// CLAUDE.md "Per-binding 128 MiB cap doctrine" for the recipe.
+		// Build locally:
+		//   llama-quantize --token-embedding-type Q4_K --allow-requantize \
+		//     <upstream-f16>.gguf qwen3-embedding-0.6b-hyb.gguf F16
+		defaultQuant: "hyb",
+		availableQuants: ["hyb"],
 		capabilities: { toolCalling: false, structuredOutput: false, vision: false, embedding: true },
 		license: "Apache-2.0",
 		contextLength: 32768,
 		tier: "ultrafast",
 		requiresShaderF16: false,
 		downloadUrl: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B",
+		// Hybrid GGUF is not published upstream; build locally per the
+		// recipe above. `localGGUFOnly: true` makes the bench downloader
+		// treat the local cache at `smoke-test/models/<id>.gguf` as
+		// authoritative and skip the HF tree-fetch + size-verify.
 		ggufUrl: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF",
-		// Mirror publishes `Qwen3-Embedding-0.6B-f16.gguf`; `f16` substring
-		// matches uniquely on this mirror.
-		ggufFilePattern: "f16",
+		ggufFilePattern: "hyb",
+		localGGUFOnly: true,
 	},
 
 	// --- Specialized models ---

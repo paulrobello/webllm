@@ -480,7 +480,19 @@ export class WebLLM {
 		const enc = this.encoderEngines.get(modelId);
 		if (enc) return enc.embed(new Int32Array(ids));
 		const cembed = this.causalEmbedderEngines.get(modelId);
-		if (cembed) return cembed.embed(new Int32Array(ids));
+		if (cembed) {
+			// Causal-LM-derived embedders require an explicit EOS marker at the
+			// end of the input (the model was fine-tuned to pool the hidden
+			// state at this position). sentence-transformers appends EOS via
+			// `add_special_tokens=True`; our `Tokenizer.encode()` does not, so
+			// we append it here to match the reference encoding behavior. Drop
+			// any existing trailing EOS (e.g. from a tokenizer that already
+			// added one) before re-appending so the count stays at one.
+			const eos = entry.tokenizer.eosId;
+			const withEos =
+				ids.length > 0 && ids[ids.length - 1] === eos ? ids : [...ids, eos];
+			return cembed.embed(new Int32Array(withEos));
+		}
 		throw new EncoderRequiredError(
 			modelId,
 			String(entry.hyperparams.architecture),

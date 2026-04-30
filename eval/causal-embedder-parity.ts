@@ -4,10 +4,18 @@
  * window.engine.embed(handleId, text) for each fixture × mode, compares
  * cosine similarity vs sentence-transformers reference vectors.
  *
- * Pass gate: cosine >= 0.999 on every row, |v|_2 == 1.0 ± 1e-3.
+ * Pass gate: cosine >= COSINE_GATE on every row, |v|_2 == 1.0 ± 1e-3.
+ *
+ * Gate selection: 0.999 for f16/full-precision GGUFs whose forward path
+ * matches the reference's numeric precision (sentence-transformers is
+ * fp32 PyTorch). 0.995 for hybrid-quant GGUFs (`defaultQuant === "hyb"`,
+ * Q4_K on `token_embd` + f16 elsewhere — see CLAUDE.md "Per-binding
+ * 128 MiB cap doctrine"); the Q4_K row-lookup error doesn't compound but
+ * does shift the last-token state by ~1e-3 cosine on multi-token inputs.
+ * Override with `--gate <value>`.
  *
  * Usage:
- *   bun eval/causal-embedder-parity.ts <modelId> <ref-file>
+ *   bun eval/causal-embedder-parity.ts <modelId> <ref-file> [--gate 0.999]
  *
  * Diagnostic ladder (if a row fails):
  *   1. All 10 rows fail uniformly (<0.5)         -> Signature C: prefix not applied
@@ -32,13 +40,30 @@ import {
 } from "./browser-smoke.js";
 import { getModelById } from "./models.js";
 
-const COSINE_GATE = 0.999;
+const COSINE_GATE_FULL = 0.999;
+const COSINE_GATE_HYBRID = 0.995;
 const MAGNITUDE_TOLERANCE = 1e-3;
 
-const [, , modelId, refPath] = process.argv;
+const args = process.argv.slice(2);
+let gateOverride: number | null = null;
+const positional: string[] = [];
+for (let i = 0; i < args.length; i++) {
+	if (args[i] === "--gate" && i + 1 < args.length) {
+		const parsed = Number.parseFloat(args[i + 1]);
+		if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+			console.error(`Invalid --gate value "${args[i + 1]}"`);
+			process.exit(2);
+		}
+		gateOverride = parsed;
+		i++;
+	} else {
+		positional.push(args[i]);
+	}
+}
+const [modelId, refPath] = positional;
 if (!modelId || !refPath) {
 	console.error(
-		"Usage: bun eval/causal-embedder-parity.ts <modelId> <ref-file>",
+		"Usage: bun eval/causal-embedder-parity.ts <modelId> <ref-file> [--gate 0.999]",
 	);
 	process.exit(2);
 }
@@ -92,10 +117,28 @@ function sleep(ms: number): Promise<void> {
  * Run a JS expression in the page and return the parsed `result` field
  * from agentchrome's `js exec` JSON envelope. Caller is responsible for
  * JSON-stringifying complex return values inside the script.
+ *
+ * Bucket C 1024-dim embeddings serialized to JSON exceed agentchrome's
+ * ~16 KB inline-response cap, so the response is offloaded to a temp
+ * file at `output_file` and stdout becomes `{output_file, summary, ...}`.
+ * Read the temp file in that case; the JSON inside has the same envelope
+ * shape as the inline path.
  */
 function jsExec(port: string, tab: string, script: string): string | undefined {
 	const out = agentchrome(port, tab, ["js", "exec", script]);
-	const resp = JSON.parse(out) as { result?: unknown; type?: string };
+	const resp = JSON.parse(out) as {
+		result?: unknown;
+		type?: string;
+		output_file?: string;
+	};
+	if (typeof resp.output_file === "string") {
+		const inner = JSON.parse(readFileSync(resp.output_file, "utf8")) as {
+			result?: unknown;
+		};
+		if (typeof inner.result === "string") return inner.result;
+		if (inner.result === undefined || inner.result === null) return undefined;
+		return String(inner.result);
+	}
 	if (typeof resp.result === "string") return resp.result;
 	if (resp.result === undefined || resp.result === null) return undefined;
 	return String(resp.result);
@@ -108,19 +151,35 @@ if (!model) {
 	);
 }
 
+const COSINE_GATE =
+	gateOverride ??
+	(model.defaultQuant === "hyb" ? COSINE_GATE_HYBRID : COSINE_GATE_FULL);
+console.log(
+	`Gate: cos >= ${COSINE_GATE}${
+		gateOverride !== null
+			? " (override)"
+			: model.defaultQuant === "hyb"
+				? " (hybrid Q4_K on token_embd vs full-precision reference)"
+				: ""
+	}`,
+);
+
 await ensureSmokeServerReachable();
 const { port, tab } = await resolveAgentchromeSession();
 await ensureModelDownloaded(model);
 
 const url = buildSmokeTestUrl(modelId, model.contextLength, {
-	// Reuse the embedPerf=single path to drive engine load. The smoke page
-	// exposes window.engine + window.handleId after engine construction;
-	// the parity harness then drives engine.embed via agentchrome js exec.
+	// Do NOT enable `embedPerf` here. The smoke page sets window.engine +
+	// window.handleId in [6/8] (engine construction), then later [8/8]
+	// runs `runEmbedPerfHook` which fires several warmup/measured
+	// `engine.embed()` calls. The harness polls only for the handleId and
+	// would race those in-page calls — concurrent forward graphs corrupt
+	// the shared WASM ctx stack and the next download asserts on
+	// `tensor->buffer != nullptr`. Skipping embedPerf leaves [8/8]'s hook
+	// as a no-op so the harness has exclusive control of engine.embed.
 	extraParams: {
-		embedPerf: "single",
-		embedFixture: "short",
-		embedReps: "1",
 		v: `${Date.now()}`,
+		ingest: "off",
 	},
 });
 console.log(`Navigating to ${url}`);

@@ -1,0 +1,19 @@
+Reference bundle: Qwen/Qwen3-Embedding-0.6B (sentence-transformers 3.4.1)
+Pooling: last-token
+Instruction prefix bytes: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+Fixtures: 10
+Gate: cos >= 0.995 (hybrid Q4_K on token_embd vs full-precision reference)
+Navigating to http://localhost:8031/real-model.html?model=qwen3-embedding-0.6b-hyb&ctx=32768&v=1777523842908&ingest=off
+Loaded qwen3-embedding-0.6b-hyb
+  row 0 document  cos=0.999294  mag=1.000000  PASS
+  row 0 query     cos=0.998830  mag=1.000000  PASS
+  row 1 document  cos=0.999348  mag=1.000000  PASS
+  row 1 query     cos=0.999453  mag=1.000000  PASS
+  row 2 document  cos=0.998989  mag=1.000000  PASS
+  row 2 query     cos=0.999563  mag=1.000000  PASS
+  row 3 document  cos=0.998343  mag=1.000000  PASS
+  row 3 query     cos=0.997572  mag=1.000000  PASS
+  row 4 document  cos=0.999148  mag=1.000000  PASS
+  row 4 query     cos=0.996333  mag=1.000000  PASS
+
+10/10 rows passed (gate cos >= 0.995, mag |v|_2 == 1.0 +/- 0.001)
