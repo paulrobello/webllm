@@ -1,0 +1,61 @@
+Reference bundle: Qwen/Qwen3-8B (transformers (torch.float16 cpu); add_special_tokens=False + manual EOS append (id 151645))
+Pooling: last-token
+Instruction prefix bytes: undefined
+Fixtures: 10
+Gate: cos >= 0.9 (IQ3_M i-quant: quant noise accumulates across layers vs f16 reference)
+Pooling: last-token (default)
+Navigating to http://localhost:8031/real-model.html?model=qwen3-8b-iq3m&ctx=4096&v=1777575505839&ingest=off&embeddingCapable=1
+Loaded qwen3-8b-iq3m
+  row 0 document  cos=0.930597  mag=1.000000  PASS
+  row 1 document  cos=0.959582  mag=1.000000  PASS
+  row 2 document  cos=0.947716  mag=1.000000  PASS
+  row 3 document  cos=0.940043  mag=1.000000  PASS
+  row 4 document  cos=0.931431  mag=1.000000  PASS
+  row 5 document  cos=0.946040  mag=1.000000  PASS
+  row 6 document  cos=0.930099  mag=1.000000  PASS
+  row 7 document  cos=0.961593  mag=1.000000  PASS
+  row 8 document  cos=0.950431  mag=1.000000  PASS
+  row 9 document  cos=0.906286  mag=1.000000  PASS
+
+10/10 rows passed (gate cos >= 0.9, mag |v|_2 == 1.0 +/- 0.001)
+
+4-pair distinguishability check: embedding 32 sentences...
+
+Paraphrase pairs (expect high cosine):
+  pair 0 cos=0.918932  "Compile-time type checking catches a wid..." vs "Static type analysis prevents many bugs ..."
+  pair 1 cos=0.947253  "The marathon runner crossed the finish l..." vs "After running for more than two hours, t..."
+  pair 2 cos=0.901655  "She slowly stirred the simmering tomato ..." vs "On the burner, she gently mixed the bubb..."
+  pair 3 cos=0.949446  "A heavy thunderstorm rolled across the v..." vs "Last night the valley was hit by a power..."
+  pair 4 cos=0.929045  "Stock prices fell sharply after the merg..." vs "Share values dropped steeply once the me..."
+  pair 5 cos=0.866220  "The Roman Empire collapsed under pressur..." vs "Under sustained barbarian incursions, an..."
+  pair 6 cos=0.845902  "Photosynthesis converts sunlight into ch..." vs "Plants turn light from the sun into gluc..."
+  pair 7 cos=0.935511  "The orchestra performed Beethoven's nint..." vs "To a full audience, the ensemble played ..."
+  pair 8 cos=0.953740  "The flight from Tokyo to San Francisco t..." vs "It takes about ten hours to fly between ..."
+  pair 9 cos=0.933073  "The professor assigned a long reading li..." vs "For the seminar, the instructor handed o..."
+  pair 10 cos=0.881759  "The vaccine triggers an immune response ..." vs "By prompting immunity without infection,..."
+  pair 11 cos=0.953507  "The court ruled the contract unenforceab..." vs "Because of fraudulent conduct, the judge..."
+  pair 12 cos=0.908794  "The painter applied thick layers of oil ..." vs "Across the canvas, the artist built up d..."
+  pair 13 cos=0.901047  "The Amazon basin holds the largest rainf..." vs "Earth's biggest tropical forest sits ins..."
+  pair 14 cos=0.904689  "The senator introduced a bill to expand ..." vs "A new bill proposing larger subsidies fo..."
+  pair 15 cos=0.931030  "He swept the kitchen floor before moppin..." vs "After sweeping, he mopped the tiles in t..."
+
+Unrelated pairs (expect low cosine):
+  pair 0 cos=0.727152  "Compile-time type checking catches a wid..." vs "The flight from Tokyo to San Francisco t..."
+  pair 1 cos=0.890858  "The marathon runner crossed the finish l..." vs "The professor assigned a long reading li..."
+  pair 2 cos=0.849045  "She slowly stirred the simmering tomato ..." vs "The vaccine triggers an immune response ..."
+  pair 3 cos=0.897536  "A heavy thunderstorm rolled across the v..." vs "The court ruled the contract unenforceab..."
+  pair 4 cos=0.904645  "Stock prices fell sharply after the merg..." vs "The painter applied thick layers of oil ..."
+  pair 5 cos=0.793677  "The Roman Empire collapsed under pressur..." vs "The Amazon basin holds the largest rainf..."
+  pair 6 cos=0.740289  "Photosynthesis converts sunlight into ch..." vs "The senator introduced a bill to expand ..."
+  pair 7 cos=0.853212  "The orchestra performed Beethoven's nint..." vs "He swept the kitchen floor before moppin..."
+  pair 8 cos=0.727152  "The flight from Tokyo to San Francisco t..." vs "Compile-time type checking catches a wid..."
+  pair 9 cos=0.890858  "The professor assigned a long reading li..." vs "The marathon runner crossed the finish l..."
+  pair 10 cos=0.849045  "The vaccine triggers an immune response ..." vs "She slowly stirred the simmering tomato ..."
+  pair 11 cos=0.897536  "The court ruled the contract unenforceab..." vs "A heavy thunderstorm rolled across the v..."
+  pair 12 cos=0.904645  "The painter applied thick layers of oil ..." vs "Stock prices fell sharply after the merg..."
+  pair 13 cos=0.793677  "The Amazon basin holds the largest rainf..." vs "The Roman Empire collapsed under pressur..."
+  pair 14 cos=0.740289  "The senator introduced a bill to expand ..." vs "Photosynthesis converts sunlight into ch..."
+  pair 15 cos=0.853212  "He swept the kitchen floor before moppin..." vs "The orchestra performed Beethoven's nint..."
+
+Distinguishability (informational, strict): min_paraphrase=0.845902 max_unrelated=0.904645 FAIL
+Distinguishability (gating, mean-margin): mean_paraphrase=0.916350 mean_unrelated=0.832052 margin=+0.084299 (gate >= 0.05) PASS
