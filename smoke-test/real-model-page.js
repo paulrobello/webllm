@@ -237,6 +237,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// decode-shape hitch is caused by per-shape pipeline JIT and can be
 	// absorbed by a one-shot warmup at session boot.
 	const frameProbeWarmup = params.get("frameProbeWarmup") === "1";
+	// `?probe=9b` runs probe-9b (batched-prompt vs N sequential calls)
+	// after the regular [7/8] smoke flow. Posts the result to
+	// `window.__probe9bResult`; the Bun runner scrapes both scenarios.
+	const probe9bEnabled = params.get("probe") === "9b";
 	const frameProbeModule = frameProbeEnabled
 		? await import(`./frame-probe.js${assetSuffix}`)
 		: null;
@@ -1161,6 +1165,95 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					).slice(0, 240),
 				};
 			}
+			// Probe 9b: batched vs sequential N-NPC scaling. Runs AFTER
+			// the [7/8] smoke flow has warmed the engine. Posts the
+			// timing + raw output of both scenarios to
+			// `window.__probe9bResult` for the Bun runner to scrape and
+			// score. No public-API change — uses `engine.chatCompletion`
+			// directly, same path the smoke flow uses.
+			if (probe9bEnabled) {
+				log("running", "[probe9b] running batched vs sequential scenarios…");
+				const NPC_PREFIX_9B =
+					"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action.";
+				const NPCS_9B = [
+					{
+						id: "goblin_1",
+						obs: "Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+					},
+					{
+						id: "wolf_2",
+						obs: "Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+					},
+					{
+						id: "merchant_3",
+						obs: "Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+					},
+					{
+						id: "guard_4",
+						obs: "Guard sees suspicious player Thief sneaking near treasure room.",
+					},
+				];
+
+				async function runOnce(prompt, maxTokens) {
+					const tStart = performance.now();
+					const tokens = await runCompletion({
+						label: "probe9b",
+						messages: [{ role: "user", content: prompt }],
+						samplingConfig: smokeSamplingConfig,
+						maxTokens,
+						chatOptions: smokeChatOptions,
+					});
+					const tEnd = performance.now();
+					return {
+						wallMs: tEnd - tStart,
+						prefillMs: tokens.prefillMs,
+						genTokens: tokens.genTokens,
+						output:
+							tokens.outputText ?? tokens.displayOutputText ?? "",
+					};
+				}
+
+				// Inter-call settle so KV-cache reset + GPU queue drain
+				// don't bleed into the next prefill.
+				const settle = () => new Promise((r) => setTimeout(r, 500));
+
+				const seqRuns = [];
+				const seqTotalStart = performance.now();
+				for (const npc of NPCS_9B) {
+					const prompt = `${NPC_PREFIX_9B}\n\nNPC: ${npc.id}\nObservation: ${npc.obs}\n\nReply with one word — the tool name:`;
+					seqRuns.push({ npcId: npc.id, ...(await runOnce(prompt, 8)) });
+					await settle();
+				}
+				const seqTotalWallMs =
+					performance.now() - seqTotalStart - (NPCS_9B.length - 1) * 500;
+
+				await settle();
+
+				const batchedObsList = NPCS_9B.map(
+					(n) => `- ${n.id}: ${n.obs}`,
+				).join("\n");
+				const batchedPrompt = `${NPC_PREFIX_9B}\n\nDecide a tool action for each NPC below.\n${batchedObsList}\n\nReply with a JSON array of objects, one per NPC, e.g. [{"npc_id":"goblin_1","action":"attack"}, ...]:`;
+				const batchedRun = await runOnce(batchedPrompt, 96);
+
+				window.__probe9bResult = {
+					model: modelId,
+					sequential: {
+						totalWallMs: seqTotalWallMs,
+						perCall: seqRuns,
+					},
+					batched: {
+						wallMs: batchedRun.wallMs,
+						prefillMs: batchedRun.prefillMs,
+						genTokens: batchedRun.genTokens,
+						output: batchedRun.output,
+					},
+				};
+				log(
+					"pass",
+					`[probe9b] sequential total=${seqTotalWallMs.toFixed(0)}ms (${NPCS_9B.length} calls), batched=${batchedRun.wallMs.toFixed(0)}ms`,
+				);
+			}
+
 			// Stash a SmokeRunRecord so the post-[8/8] dashboard ingest hook
 			// can POST `run_complete`. We snapshot here (instead of re-deriving
 			// later) because `userMessage` and `smokeResult` are scoped to

@@ -1,0 +1,42 @@
+{
+  "model": "qwen3-8b-iq3m",
+  "sequential": {
+    "totalWallMs": 5552.5,
+    "perCall": [
+      {
+        "npcId": "goblin_1",
+        "wallMs": 1401.7999999523163,
+        "prefillMs": 1272.6000001430511,
+        "genTokens": 2,
+        "output": "speak"
+      },
+      {
+        "npcId": "wolf_2",
+        "wallMs": 1375.2999999523163,
+        "prefillMs": 1289,
+        "genTokens": 1,
+        "output": "move"
+      },
+      {
+        "npcId": "merchant_3",
+        "wallMs": 1123.5999999046326,
+        "prefillMs": 998.8999998569489,
+        "genTokens": 2,
+        "output": "speak"
+      },
+      {
+        "npcId": "guard_4",
+        "wallMs": 1146.2000000476837,
+        "prefillMs": 1018.5,
+        "genTokens": 2,
+        "output": "speak"
+      }
+    ]
+  },
+  "batched": {
+    "wallMs": 4009.7000000476837,
+    "prefillMs": 2135.899999856949,
+    "genTokens": 48,
+    "output": "[{\"npc_id\":\"goblin_1\",\"action\":\"attack\"},{\"npc_id\":\"wolf_2\",\"action\":\"move\"},{\"npc_id\":\"merchant_3\",\"action\":\"trade\"},{\"npc_id\":\"guard_4\",\"action\":\"attack\"}]"
+  }
+}
