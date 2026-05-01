@@ -255,6 +255,27 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Qwen2.5 Coder 1.5B Instruct ────────────────────────────
+	{
+		name: "qwen2.5-coder-1.5b-warm",
+		model: "qwen2.5-coder-1.5b-q4f16",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
+	// ── Gemma 2 2B IT ─────────────────────────────────────────
+	{
+		name: "gemma-2-2b-warm",
+		model: "gemma-2-2b-q4f16",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
+	// ── Mistral 7B Instruct v0.3 IQ4_XS — IQ-family data point ─
+	{
+		name: "mistral-7b-v0.3-iq4xs-warm",
+		model: "mistral-7b-instruct-v0.3-iq4xs",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Llama 3.1 8B Instruct (wave 2 model 2) ────────────────
 	{
 		name: "llama-3.1-8b-warm",
@@ -379,14 +400,20 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"tinyllama-warm",
 		"smollm2-360m-warm",
 		"qwen2.5-1.5b-warm",
+		"qwen2.5-coder-1.5b-warm",
 		"smollm2-1.7b-warm",
 		"qwen2.5-3b-warm",
+		"gemma-2-2b-warm",
 		"llama-3.2-3b-warm",
 		"hermes-3-llama-3.2-3b-warm",
+		"phi-3.5-mini-warm",
 		"qwen3-4b-warm",
 		"qwen3-4b-thinking-warm",
 		"mistral-7b-v0.3-warm",
 		"mistral-7b-v0.3-q3km-warm",
+		"mistral-7b-v0.3-q5km-warm",
+		"mistral-7b-v0.3-iq4xs-warm",
+		"mistral-nemo-q4ks-warm",
 		"llama-3.1-8b-warm",
 		"qwen3-8b-warm",
 		"qwen3-8b-thinking-warm",
