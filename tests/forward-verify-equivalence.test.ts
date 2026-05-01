@@ -25,7 +25,7 @@ describe.skipIf(SHOULD_SKIP)("ModelInference.forwardVerify", () => {
 		const ggufCtx = GgufParser.parse(view) as GgufContext;
 
 		const wasm = new GgmlWasm();
-		await wasm.init({});
+		await wasm.init({} as Parameters<typeof wasm.init>[0]);
 		const inf = new ModelInference(wasm, parsed.hyperparams);
 		inf.loadWeights(ggufCtx, view);
 		inf.initKVCache(64);
@@ -62,7 +62,7 @@ describe.skipIf(SHOULD_SKIP)("ModelInference.forwardVerify", () => {
 		const ggufCtx = GgufParser.parse(view) as GgufContext;
 
 		const wasm = new GgmlWasm();
-		await wasm.init({});
+		await wasm.init({} as Parameters<typeof wasm.init>[0]);
 		const inf = new ModelInference(wasm, parsed.hyperparams);
 		inf.loadWeights(ggufCtx, view);
 		inf.initKVCache(64);
@@ -82,7 +82,7 @@ describe.skipIf(SHOULD_SKIP)("ModelInference.forwardVerify", () => {
 		const ggufCtx = GgufParser.parse(view);
 
 		const wasm = new GgmlWasm();
-		await wasm.init({});
+		await wasm.init({} as Parameters<typeof wasm.init>[0]);
 		const inf = new ModelInference(wasm, parsed.hyperparams);
 		inf.loadWeights(ggufCtx, view);
 		inf.initKVCache(64);
