@@ -45,8 +45,17 @@
 >
 > Profile-mode pins for the canonical 6 (3-run median, perturbed
 > -15 to -28% vs non-profile due to per-dispatch timestamp
-> sampling — see `eval/reports/pre-rebase-baselines-2026-04-28/
-> SUMMARY.md`): 87.9 / 68.2 / 44.0 / 29.7 / 23.5 / 21.8 tok/s.
+> sampling). Refreshed 2026-05-01 post-§27 rebase (mul-mat
+> vectorize fix #22578): **81.8 / 67.5 / 43.9 / 29.6 / 23.4 / 22.0
+> tok/s**. Pre-rebase 2026-05-01 same-day same-tip control was
+> 80.4 / 62.5 / 41.7 / 28.7 / 23.3 / 21.3 — every model improved
+> or held; matmul time decreased uniformly -1.4% to -5.0%. See
+> `eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`.
+> Earlier 2026-04-28 pre-rebase profile baselines (87.9 / 68.2 /
+> 44.0 / 29.7 / 23.5 / 21.8) supersede only on cross-day deltas
+> — environmental floor drift -3 to -8% over the 4-day gap, see
+> `eval/reports/pre-rebase-baselines-2026-05-01/SUMMARY.md` for
+> the drift table.
 >
 > Bench-full coverage at 1.7B landed (6 profiles · 3 off + 3 thinking)
 > with overall accuracy 82–89% and per-profile decode (smoke chat
@@ -813,11 +822,17 @@ rebuilt, MANIFESTs verified — see closure entry in Watch list).
 **Algorithmic-perf backlog fully cleared.** All algorithmic levers
 at the canonical 4-baseline are exhausted (§17-§29 closed matmul,
 FA, drafter, encoder, prefill-tiling, spec-decode families).
-Rebase cadence: 2026-04-29 fired (§32 template — small regressions
-accepted; 4 of 6 models −3% to −5% in profile-mode noise band, 2
-flat). One upstream `ggml-webgpu/` commit picked up
-(`d6a509400` FA support-check fix). Tip: `fa8b16a6f`.
-Sweep matrix at
+Rebase cadence: 2026-05-01 fired (§27 template — broad free win;
+every model +0.4% to +8.0%, matmul -1.4% to -5.0%). Two upstream
+`ggml-webgpu/` commits picked up: `c3c150539` (mul-mat /
+mul-mat-id vectorize fix #22578 — load-bearing) and
+`aab68217b` (upscale shader, image-gen op, not exercised by
+chat fleet). Tip: `e29753286`. Sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md);
+same-day pre-rebase control at
+[`eval/reports/pre-rebase-baselines-2026-05-01/SUMMARY.md`](eval/reports/pre-rebase-baselines-2026-05-01/SUMMARY.md).
+Prior cycle 2026-04-29 was §32 (small regressions accepted; 4/6
+models −3% to −5%; tip `fa8b16a6f`); sweep matrix at
 [`eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md).
 
 **MEMORY64 full bridge migration — CLOSED 2026-04-29.** All 8
@@ -885,9 +900,9 @@ Daily cadence check (item 1) still required at session start.
    webllm-browser-patches..origin/master --oneline --
    ggml/src/ggml-webgpu/ ggml/include/`. **If non-empty:** apply
    §32 procedure (rebase, sweep, classify per §27/§28/§32
-   templates). **If empty:** log and skip. Last clean run:
-   2026-04-29 (4 cadence checks done across 3 sessions; cumulative
-   7 upstream tags advanced, 0 in `ggml-webgpu/`).
+   templates). **If empty:** log and skip. Last fired:
+   2026-05-01 (§27 — mul-mat vectorize fix #22578, broad free win
+   on canonical 6, tip `e29753286`).
 
 2. **Phi-3 closure follow-ups.**
    - ~~(a) Runtime contiguous-tensor assertion in fused helpers.~~
