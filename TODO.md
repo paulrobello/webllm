@@ -1074,19 +1074,27 @@ Daily cadence check (item 1) still required at session start.
    calls"). Probes are independent and can run in any order; each
    declares its measurement, threshold, and downstream decision.
 
-   - **9a. Prefill-prefix-cache decomposition probe.** Measure how
-     much of the 660ms qwen3-8b-iq3m prefill is attributable to
-     stable prefix (system prompt + tool schemas) vs the variable
-     observation tail. Method: capture `prefillMs` for two prompts
-     of known token-counts that share an identical N-token prefix;
-     fit `prefillMs = a·prefix_tokens + b·tail_tokens` and report
-     the marginal cost of the prefix. Pass-meaningful threshold:
-     prefix accounts for ≥50% of prefill (i.e., prefix caching
-     would meaningfully shorten NPC ticks). Gates: whether
-     KV-cache-per-conversation-on-shared-weights multiplexing
-     (currently deferred per CLAUDE.md) becomes a load-bearing
-     work item for NPC scenarios. **No code change yet — this is
-     pure measurement.**
+   - **9a. Prefill-prefix-cache decomposition probe — CLOSED
+     2026-05-01, PASS.** Three NPC-shaped fixtures × 3 runs on
+     `qwen3-8b-iq3m` (post-§27 tip `e29753286`). Marginal token
+     costs: **a = 12.31 ms / prefix-token**, **b = 14.11 ms /
+     tail-token** (b/a = 1.15 — prefill essentially linear in
+     total tokens, small attention-quadratic premium for
+     tail-position tokens). Projected at canonical NPC prompt
+     P=400/T=40: prefill ≈ 5488 ms, **prefix's share = 89.7%**.
+     Verdict robust to worst-case b=a substitution (prefix is
+     91% of total tokens at that ratio). Closure report
+     [`eval/reports/probe-9a-2026-05-01/SUMMARY.md`](eval/reports/probe-9a-2026-05-01/SUMMARY.md).
+     **Downstream decision:** KV-cache-per-conversation-on-
+     shared-weights multiplexing is now load-bearing (was
+     "deferred" per CLAUDE.md). At 5.5 s prefill per tick, a
+     freshly-prefilled-from-scratch approach blows the
+     1-tick-per-second budget by 5.5×; prefix caching collapses
+     it to ~0.6 s tail-only. Spec is queued behind 9b/9c/9d
+     closure. Harness extension shipped: smoke `[7/8]` result
+     line now carries `tokensIn=N`; new probe runner at
+     `eval/probes/probe-9a-prefill-prefix.ts` and 3 fixtures in
+     `eval/fixtures/long-prompts.ts`.
    - **9b. Batched-prompt vs sequential probe.** For an N-NPC
      scenario, measure per-decision wall-time and tool-call
      correctness rate for two patterns at matched total token
