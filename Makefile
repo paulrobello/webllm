@@ -194,15 +194,19 @@ dashboard-serve: ## Run live benchmark dashboard (SSE backend, SQLite-persisted,
 dashboard-stop: ## Kill the dashboard server
 	lsof -ti:$(DASHBOARD_PORT) | xargs kill -9 2>/dev/null || true
 
-dashboard-db-reset: ## Stop the dashboard, delete its SQLite file (+WAL/SHM), next start is empty — bypass with FORCE=1
+dashboard-db-reset: ## Stop the dashboard, archive its SQLite file (+WAL/SHM) to eval/reports/archive/, next start is empty — bypass with FORCE=1
 	@if [ "$(FORCE)" != "1" ]; then \
-		printf 'About to delete $(DASHBOARD_DB) and its WAL/SHM sidecars (all bench history). Continue? [y/N] '; \
+		printf 'About to archive $(DASHBOARD_DB) and its WAL/SHM sidecars (all bench history) to eval/reports/archive/. Continue? [y/N] '; \
 		read ans; [ "$$ans" = "y" ] || [ "$$ans" = "Y" ] || { echo "aborted."; exit 1; }; \
 	fi
 	@lsof -ti:$(DASHBOARD_PORT) | xargs kill 2>/dev/null || true
 	@sleep 1
-	@rm -f $(DASHBOARD_DB) $(DASHBOARD_DB)-wal $(DASHBOARD_DB)-shm
-	@echo "removed $(DASHBOARD_DB) (and -wal/-shm sidecars if any)"
+	@mkdir -p eval/reports/archive
+	@TS=$$(date +%Y%m%d-%H%M%S); \
+	BASE=$$(basename $(DASHBOARD_DB) .db); \
+	if [ -f $(DASHBOARD_DB) ]; then mv $(DASHBOARD_DB) eval/reports/archive/$$BASE-$$TS.db; echo "archived $(DASHBOARD_DB) → eval/reports/archive/$$BASE-$$TS.db"; fi; \
+	if [ -f $(DASHBOARD_DB)-wal ]; then mv $(DASHBOARD_DB)-wal eval/reports/archive/$$BASE-$$TS.db-wal; fi; \
+	if [ -f $(DASHBOARD_DB)-shm ]; then mv $(DASHBOARD_DB)-shm eval/reports/archive/$$BASE-$$TS.db-shm; fi
 
 import-reports: ## Backfill JSON reports under eval/reports/ into the live dashboard (idempotent)
 	bun run eval/import-reports.ts
