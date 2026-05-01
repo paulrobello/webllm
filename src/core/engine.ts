@@ -467,6 +467,8 @@ export class WebLLM {
 				`Conversations require FA mode (flashAttn=true); model "${modelHandleId}" is in manual mode.`,
 			);
 		}
+		// options.maxContextTokens is forwarded unclamped; chatCompletion(conv,…)
+		// is where ConversationContextOverflowError fires against the model's max.
 		return this.conversationPool.create(modelHandleId, options);
 	}
 
