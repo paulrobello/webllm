@@ -270,6 +270,12 @@ function buildTemplateHarness() {
 			console,
 			window: {},
 			document,
+		} as {
+			console: Console;
+			window: Record<string, unknown>;
+			document: unknown;
+			render?: (report: unknown, compare: boolean) => void;
+			setupControls?: (report: unknown) => void;
 		},
 		elements: {
 			dimensionGrid,
@@ -327,6 +333,11 @@ test("eval report dimension cards filter results and reset back to all", () => {
 		],
 	};
 
+	// `vm.runInNewContext` injects `render` and `setupControls` into the
+	// sandbox context as side effects of the script body.
+	if (!context.render || !context.setupControls) {
+		throw new Error("template script did not inject render/setupControls");
+	}
 	context.render(report, false);
 	context.setupControls(report);
 
