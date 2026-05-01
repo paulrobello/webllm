@@ -768,7 +768,6 @@ export class WebLLM {
 				0,
 			);
 			seedSession.advance(lastPos);
-			for (const id of newTokens.slice(0, -1)) seedSession.pushToken(id);
 
 			const generatedIds: number[] = [];
 			for await (const chunk of generateTextStream({
