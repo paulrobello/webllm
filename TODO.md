@@ -1198,6 +1198,54 @@ Daily cadence check (item 1) still required at session start.
     Brainstorm/spec/plan via `superpowers:writing-plans` after
     9d closes.
 
+11. **Prefix cache via per-conversation KV snapshots — CLOSED
+    2026-05-01, PARTIAL.** Mechanism shipped: `WebLLM.createConversation`
+    / `disposeConversation` / `chatCompletion(conv, ...)` overload
+    + `serializeKVCache` / `loadKVCache` primitives + per-model
+    serialization chain. Spec
+    [`docs/superpowers/specs/2026-05-01-prefix-cache-design.md`](docs/superpowers/specs/2026-05-01-prefix-cache-design.md);
+    plan
+    [`docs/superpowers/plans/2026-05-01-prefix-cache.md`](docs/superpowers/plans/2026-05-01-prefix-cache.md).
+    Validation report
+    [`eval/reports/prefix-cache-validation-2026-05-01/SUMMARY.md`](eval/reports/prefix-cache-validation-2026-05-01/SUMMARY.md).
+
+    **Verdict: PARTIAL.** Mechanism end-to-end is correct
+    (`sharedLen=99` detected on every tick-2; KV round-trip
+    preserves output quality; conv isolation works). Per-call
+    GPU↔WASM I/O cost dominates the prefill savings at the
+    99-token shared-prefix scale tested: Pattern B tick-2 wall
+    2660 ms vs Pattern A's 2214 ms (+20%). Crossover analysis
+    in the report: save+load fixed cost ≈ 940 ms; prefill savings
+    ≈ 12.31 ms × shared_prefix_token_count. Crossover at ~76 tokens;
+    clear net wins predicted at 500-2000-token prefixes (typical
+    agent + Three.js NPC system prompt scale).
+
+    **v2 follow-ups queued (do not action without measurement):**
+    - **Fuse multi-tensor backend transfers.** A C++ batch primitive
+      (`backend_tensor_get_many` / `backend_tensor_set_many`) cuts
+      72 ASYNCIFY round-trips per call to 1. Estimated v2 win:
+      save+load 940 ms → 30-100 ms. Largest leverage. Needs a 12th
+      patch on the `webllm-browser-patches` stack.
+    - **Skip save when conversation is dormant.** A
+      `disposeConversation(conv, { skipSave: true })` hint or an
+      implicit dormancy heuristic. Avoids serialize cost entirely
+      when caller knows next call is far off.
+    - **Per-head offset reads.** Currently `serializeKVCache` reads
+      the full maxCtx-sized tensor per layer; a strided read of only
+      the populated `[0, nTokens)` slots cuts payload by `maxCtx /
+      nTokens`. Requires either a new C++ strided read primitive or
+      a WGSL gather kernel.
+    - **At-scale validation probe.** Re-run the validation probe
+      with 1000+ token system prompts to demonstrate the at-scale
+      win directly (current probe at 99-token prefix is below
+      crossover).
+
+    Six original spec follow-ups (LRU eviction, cross-conv prefix
+    sharing, Storage B GPU-resident KV, concurrent in-flight per
+    conversation, persistence across reloads, worker migration via
+    item 10) remain queued in the spec § "Known follow-ups" — surface
+    only when measured cost forces them.
+
 ---
 
 **Embedding-model expansion (2026-04-28).** Buckets A and B both
