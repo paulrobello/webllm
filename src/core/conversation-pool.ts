@@ -72,8 +72,9 @@ export class ConversationPool {
 		}
 	}
 
-	has(conv: ConversationHandle): boolean {
-		return this.entries.has(conv.id);
+	/** Throws ConversationNotFoundError if the handle has been disposed or never existed. */
+	assertExists(conv: ConversationHandle): void {
+		this._requireEntry(conv);
 	}
 
 	get(conv: ConversationHandle): KVSnapshot | undefined {
@@ -81,25 +82,31 @@ export class ConversationPool {
 	}
 
 	set(conv: ConversationHandle, snapshot: KVSnapshot): void {
-		const entry = this.requireHandle(conv);
+		const entry = this._requireEntry(conv);
 		entry.snapshot = snapshot;
 	}
 
 	options(conv: ConversationHandle): ConversationOptions {
-		return this.requireHandle(conv).options;
+		return this._requireEntry(conv).options;
 	}
 
-	requireHandle(conv: ConversationHandle): PoolEntry {
+	private _requireEntry(conv: ConversationHandle): PoolEntry {
 		const entry = this.entries.get(conv.id);
 		if (!entry) throw new ConversationNotFoundError(conv.id);
+		if (entry.handle.modelHandleId !== conv.modelHandleId) {
+			throw new ConversationNotFoundError(conv.id);
+		}
 		return entry;
 	}
 
 	tryAcquireLock(conv: ConversationHandle): (() => void) | null {
-		const entry = this.requireHandle(conv);
+		const entry = this._requireEntry(conv);
 		if (entry.locked) return null;
 		entry.locked = true;
+		let released = false;
 		return () => {
+			if (released) return;
+			released = true;
 			entry.locked = false;
 		};
 	}

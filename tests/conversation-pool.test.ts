@@ -11,7 +11,7 @@ describe("ConversationPool", () => {
 		const conv = pool.create("model-a");
 		expect(conv.id).toMatch(/^conv_/);
 		expect(conv.modelHandleId).toBe("model-a");
-		expect(pool.has(conv)).toBe(true);
+		expect(() => pool.assertExists(conv)).not.toThrow();
 	});
 
 	test("ids are unique across creates", () => {
@@ -25,8 +25,7 @@ describe("ConversationPool", () => {
 		const pool = new ConversationPool({ maxConversations: 4 });
 		const conv = pool.create("m");
 		pool.dispose(conv);
-		expect(pool.has(conv)).toBe(false);
-		expect(() => pool.requireHandle(conv)).toThrow(ConversationNotFoundError);
+		expect(() => pool.assertExists(conv)).toThrow(ConversationNotFoundError);
 	});
 
 	test("dispose is idempotent", () => {
@@ -56,8 +55,8 @@ describe("ConversationPool", () => {
 		const a = pool.create("model-a");
 		const b = pool.create("model-b");
 		pool.disposeAllForModel("model-a");
-		expect(pool.has(a)).toBe(false);
-		expect(pool.has(b)).toBe(true);
+		expect(() => pool.assertExists(a)).toThrow(ConversationNotFoundError);
+		expect(() => pool.assertExists(b)).not.toThrow();
 	});
 
 	test("set then get round-trips a snapshot", () => {
@@ -85,5 +84,25 @@ describe("ConversationPool", () => {
 		const release2 = pool.tryAcquireLock(conv);
 		expect(release2).not.toBeNull();
 		release2?.();
+	});
+
+	test("double-release of a lock does not steal a re-acquired lock", () => {
+		const pool = new ConversationPool({ maxConversations: 4 });
+		const conv = pool.create("m");
+		const release1 = pool.tryAcquireLock(conv);
+		expect(release1).not.toBeNull();
+		release1?.();
+		const release2 = pool.tryAcquireLock(conv);
+		expect(release2).not.toBeNull();
+		release1?.(); // double-release: must be a no-op
+		expect(pool.tryAcquireLock(conv)).toBeNull(); // release2 still owns the lock
+		release2?.();
+	});
+
+	test("requireHandle rejects fabricated handle with wrong modelHandleId", () => {
+		const pool = new ConversationPool({ maxConversations: 4 });
+		const conv = pool.create("model-a");
+		const fake = { id: conv.id, modelHandleId: "model-b" };
+		expect(() => pool.assertExists(fake)).toThrow(ConversationNotFoundError);
 	});
 });
