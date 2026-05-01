@@ -1,0 +1,47 @@
+[
+  {
+    "fixture": "probe9a-Pshort-Tshort",
+    "tokensIn": 85,
+    "prefillMs": 977
+  },
+  {
+    "fixture": "probe9a-Pshort-Tshort",
+    "tokensIn": 85,
+    "prefillMs": 977
+  },
+  {
+    "fixture": "probe9a-Pshort-Tshort",
+    "tokensIn": 85,
+    "prefillMs": 995
+  },
+  {
+    "fixture": "probe9a-Pshort-Tlong",
+    "tokensIn": 190,
+    "prefillMs": 2102
+  },
+  {
+    "fixture": "probe9a-Pshort-Tlong",
+    "tokensIn": 190,
+    "prefillMs": 2459
+  },
+  {
+    "fixture": "probe9a-Pshort-Tlong",
+    "tokensIn": 190,
+    "prefillMs": 2469
+  },
+  {
+    "fixture": "probe9a-Plong-Tshort",
+    "tokensIn": 305,
+    "prefillMs": 3686
+  },
+  {
+    "fixture": "probe9a-Plong-Tshort",
+    "tokensIn": 305,
+    "prefillMs": 3570
+  },
+  {
+    "fixture": "probe9a-Plong-Tshort",
+    "tokensIn": 305,
+    "prefillMs": 4078
+  }
+]
