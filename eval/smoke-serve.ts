@@ -17,6 +17,9 @@ const CONTENT_TYPES: Record<string, string> = {
 	".ico": "image/x-icon",
 	".wasm": "application/wasm",
 	".gguf": "application/octet-stream",
+	".glb": "model/gltf-binary",
+	".gltf": "model/gltf+json",
+	".bin": "application/octet-stream",
 };
 
 function contentTypeFor(path: string): string {

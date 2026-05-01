@@ -206,6 +206,34 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	const embedRepsRaw = params.get("embedReps");
 	const embedReps = embedRepsRaw ? Number.parseInt(embedRepsRaw, 10) : 30;
 	const embedFixture = params.get("embedFixture") ?? "short";
+	// Frame-probe gate: ?frameProbe=1 spins a small WebGL2 cube via rAF in
+	// parallel with [7/8] generation and reports per-phase frame deltas
+	// (baseline / prefill / decode / post). Answers the agent + Three.js
+	// coexistence question without running the full Three.js stack. See
+	// `smoke-test/frame-probe.js`.
+	const frameProbeEnabled = params.get("frameProbe") === "1";
+	const frameProbeBaselineMsRaw = Number(params.get("frameProbeBaselineMs"));
+	const frameProbeBaselineMs =
+		Number.isFinite(frameProbeBaselineMsRaw) && frameProbeBaselineMsRaw > 0
+			? Math.floor(frameProbeBaselineMsRaw)
+			: 3000;
+	// `?scene=<url>` switches the probe from the trivial cube to a real
+	// Three.js GLTF scene loaded at that URL. Use this to measure the
+	// "agent + Three.js coexistence" question with real GPU contention,
+	// not just main-thread scheduling.
+	const frameProbeSceneUrl = params.get("scene") || null;
+	// `?frameProbeCalls=N` runs N back-to-back chatCompletion calls in the
+	// same page load and reports per-call hitch distribution. Answers the
+	// question "is the decode hitch deterministic per-call or jitter?"
+	// — see `summarizeFrameProbeMulti` in `./frame-probe.js`.
+	const frameProbeCallsRaw = Number(params.get("frameProbeCalls"));
+	const frameProbeCalls =
+		Number.isFinite(frameProbeCallsRaw) && frameProbeCallsRaw > 1
+			? Math.floor(frameProbeCallsRaw)
+			: 1;
+	const frameProbeModule = frameProbeEnabled
+		? await import(`./frame-probe.js${assetSuffix}`)
+		: null;
 	document.body.innerHTML = getSmokePageShellMarkup();
 
 	const logEl = document.getElementById("log");
@@ -855,6 +883,38 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		} else {
 		log("running", "[7/8] Generating text...");
 		setProgress(90);
+		// Frame-probe: start the rAF logger BEFORE chat completion so the
+		// baseline window (configurable via ?frameProbeBaselineMs=) sits
+		// outside any inference work. Phase segmentation is wall-clock based
+		// — see `summarizeFrameProbe` in `./frame-probe.js`.
+		let frameProbeCtl = null;
+		let frameProbeChatStart = 0;
+		if (frameProbeEnabled && frameProbeModule) {
+			if (frameProbeSceneUrl) {
+				log("running", `[frameProbe] loading scene: ${frameProbeSceneUrl}`);
+			}
+			frameProbeCtl = await frameProbeModule.startFrameProbe({
+				sceneUrl: frameProbeSceneUrl,
+			});
+			if (frameProbeCtl.unsupported) {
+				log("warn", "[frameProbe] WebGL2 unavailable — probe disabled");
+				frameProbeCtl = null;
+			} else {
+				const info = frameProbeCtl.sceneInfo;
+				if (info?.kind === "gltf") {
+					log(
+						"pass",
+						`[frameProbe] scene loaded: ${info.triangles.toLocaleString()} tri in ${info.loadMs}ms`,
+					);
+				}
+				log(
+					"running",
+					`[frameProbe] baseline rAF (${frameProbeBaselineMs}ms idle)…`,
+				);
+				await new Promise((r) => setTimeout(r, frameProbeBaselineMs));
+				frameProbeChatStart = performance.now();
+			}
+		}
 		try {
 			if (debugMode) {
 				for (const prompt of ["The", "The quick brown", "Hello, how are you"]) {
@@ -951,6 +1011,127 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					smokeResult.outputText
 				: smokeResult.displayOutputText || smokeResult.outputText;
 			log("pass", `Assistant: ${assistantText}`);
+			// Frame-probe wrap: capture tEnd, hold a 1s post window, then
+			// segment + report. Surfaced both to the page log and to
+			// `window.__frameProbeResult` for agentchrome scrape.
+			//
+			// Multi-call mode (`?frameProbeCalls=N`, N>1): after the smoke
+			// call above, runs N-1 additional chatCompletion calls (same
+			// prompt, fresh KV state per call) so the per-call decode-hitch
+			// distribution can be inspected. The first call's result is
+			// preserved as the smoke record.
+			if (frameProbeCtl && frameProbeModule) {
+				const probeCalls = [
+					{
+						tStart: frameProbeChatStart,
+						prefillMs: smokeResult.prefillMs ?? 0,
+						tEnd: performance.now(),
+						genTokens: smokeResult.genTokens ?? 0,
+					},
+				];
+				if (frameProbeCalls > 1) {
+					log(
+						"running",
+						`[frameProbe] running ${frameProbeCalls - 1} additional call(s) for hitch-distribution analysis…`,
+					);
+					for (let i = 1; i < frameProbeCalls; i++) {
+						// Inter-call settle so the prior post window doesn't
+						// bleed into the next prefill. 500ms is long enough
+						// for the GPU queue to drain on the test scene.
+						await new Promise((r) => setTimeout(r, 500));
+						const tStartI = performance.now();
+						let resultI;
+						try {
+							resultI = await runCompletion({
+								label: smokePrompt.mode,
+								messages: [{ role: "user", content: userMessage }],
+								samplingConfig: smokeSamplingConfig,
+								maxTokens: smokeMaxTokens,
+								chatOptions: smokeChatOptions,
+							});
+						} catch (e) {
+							log(
+								"warn",
+								`[frameProbe] call ${i + 1}/${frameProbeCalls} failed: ${e.message}`,
+							);
+							break;
+						}
+						const tEndI = performance.now();
+						probeCalls.push({
+							tStart: tStartI,
+							prefillMs: resultI.prefillMs ?? 0,
+							tEnd: tEndI,
+							genTokens: resultI.genTokens ?? 0,
+						});
+						log(
+							"running",
+							`[frameProbe] call ${i + 1}/${frameProbeCalls}: ${resultI.genTokens}t in ${resultI.totalTime.toFixed(0)}ms (prefill ${resultI.prefillMs.toFixed(0)}ms, ${(resultI.genTokens / (resultI.genTime / 1000)).toFixed(1)} tok/s)`,
+						);
+					}
+				}
+				await new Promise((r) => setTimeout(r, 1000));
+				frameProbeCtl.stop({ removeOverlay: false });
+				const isMulti = probeCalls.length > 1;
+				let summary;
+				if (isMulti) {
+					summary = frameProbeModule.summarizeFrameProbeMulti({
+						samples: frameProbeCtl.samples,
+						tBaselineStart: frameProbeChatStart - frameProbeBaselineMs,
+						calls: probeCalls,
+					});
+					for (const line of frameProbeModule.formatFrameProbeMultiReport(
+						summary,
+					)) {
+						log("running", line);
+					}
+				} else {
+					summary = frameProbeModule.summarizeFrameProbe({
+						samples: frameProbeCtl.samples,
+						tStart: frameProbeChatStart,
+						prefillMs: smokeResult.prefillMs,
+						tEnd: probeCalls[0].tEnd,
+					});
+					for (const line of frameProbeModule.formatFrameProbeReport(
+						summary,
+					)) {
+						log("running", line);
+					}
+				}
+				const decodeMsFp = smokeResult.genTime ?? 0;
+				const baseFrameStats = isMulti
+					? {
+							baseline: summary.baseline,
+							post: summary.post,
+							perCall: summary.calls,
+						}
+					: {
+							baseline: summary.baseline,
+							prefill: summary.prefill,
+							decode: summary.decode,
+							post: summary.post,
+						};
+				window.__frameProbeResult = {
+					model: modelId,
+					mode: isMulti ? "multi" : "single",
+					callCount: probeCalls.length,
+					decodeTokens: smokeResult.genTokens ?? 0,
+					prefillMs: smokeResult.prefillMs ?? 0,
+					decodeMs: decodeMsFp,
+					tokensPerSec:
+						decodeMsFp > 0
+							? (smokeResult.genTokens ?? 0) / (decodeMsFp / 1000)
+							: 0,
+					frameStats: baseFrameStats,
+					verdict: isMulti ? null : summary.verdict,
+					sceneInfo: frameProbeCtl.sceneInfo,
+					calls: isMulti ? probeCalls : undefined,
+					sample: (
+						smokeResult.displayOutputText ||
+						smokeResult.outputText ||
+						""
+					).slice(0, 240),
+				};
+			}
 			// Stash a SmokeRunRecord so the post-[8/8] dashboard ingest hook
 			// can POST `run_complete`. We snapshot here (instead of re-deriving
 			// later) because `userMessage` and `smokeResult` are scoped to
@@ -990,6 +1171,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			setProgress(100);
 		} catch (e) {
 			log("fail", `[7/8] Generation failed: ${e.message}\n${e.stack || ""}`);
+			if (frameProbeCtl) frameProbeCtl.stop({ removeOverlay: true });
 			return;
 		}
 		}

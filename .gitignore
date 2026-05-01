@@ -53,6 +53,12 @@ smoke-test/webllm-wasm-mem64.wasm
 # Downloaded model files
 smoke-test/models/
 *.gguf
+
+# Frame-probe scene fixtures — local symlinks to glb assets outside the
+# repo. The directory ships, individual scenes are dev-local.
+smoke-test/scenes/*.glb
+smoke-test/scenes/*.gltf
+smoke-test/scenes/*.bin
 .pi/extensions/discord-relay/state.json
 handoff.md
 .worktrees/
