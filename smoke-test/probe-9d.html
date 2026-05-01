@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Probe 9d — Worker-resident hitch</title>
+<style>
+  body {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 16px;
+  }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  #log { white-space: pre-wrap; font-size: 12px; line-height: 1.4; }
+  .pass { color: #3fb950; }
+  .running { color: #d29922; }
+  .fail { color: #f85149; }
+  .info { color: #79c0ff; }
+</style>
+</head>
+<body>
+<h1>Probe 9d — Worker-resident hitch</h1>
+<div id="log"></div>
+<script type="module">
+import { startFrameProbe, summarizeFrameProbeMulti, formatFrameProbeMultiReport } from "./frame-probe.js";
+
+const params = new URLSearchParams(window.location.search);
+const modelId = params.get("model") || "qwen3-0.6b-q4f16";
+const contextLength = Number(params.get("ctx") || 4096);
+const numCalls = Number(params.get("calls") || 5);
+const baselineMs = Number(params.get("frameProbeBaselineMs") || 3000);
+
+const logEl = document.getElementById("log");
+function log(level, msg) {
+  const line = document.createElement("div");
+  line.className = level;
+  line.textContent = `[${level}] ${msg}`;
+  logEl.appendChild(line);
+  console.log(`[${level}]`, msg);
+}
+
+async function main() {
+  log("running", `model=${modelId} ctx=${contextLength} calls=${numCalls}`);
+
+  // Boot the worker FIRST so the inference engine is fully off-main-thread.
+  // The frame probe stays on main thread to measure render-loop hitches.
+  log("running", "Booting worker…");
+  const worker = new Worker("./probe-9d-worker.js", { type: "module" });
+
+  // Promise-ify postMessage: track responses by id.
+  const pending = new Map();
+  let nextId = 1;
+  worker.addEventListener("message", (e) => {
+    const m = e.data;
+    if (m.type === "init-done") {
+      const p = pending.get("init");
+      if (p) { pending.delete("init"); p.resolve(); }
+    } else if (m.type === "chat-done") {
+      const p = pending.get(m.id);
+      if (p) { pending.delete(m.id); p.resolve(m); }
+    } else if (m.type === "error") {
+      const key = m.id ?? "init";
+      const p = pending.get(key);
+      if (p) { pending.delete(key); p.reject(new Error(`${m.message}\n${m.stack || ""}`)); }
+    }
+  });
+
+  // Init the worker engine. Includes model fetch + WebGPU adapter +
+  // weight upload — significant work, but happens before the timed
+  // frame-probe window.
+  await new Promise((resolve, reject) => {
+    pending.set("init", { resolve, reject });
+    worker.postMessage({
+      type: "init",
+      modelId,
+      modelUrl: `./models/${modelId}.gguf`,
+      contextLength,
+      wasmUrl: "./webllm-wasm.js",
+    });
+  });
+  log("pass", "Worker init done.");
+
+  // Mount frame-probe (rAF tracker + cube on main thread).
+  log("running", "Starting frame probe (rAF tracker on main thread)…");
+  const ctl = await startFrameProbe({});
+  if (ctl.unsupported) {
+    log("fail", "frame probe: WebGL2 unavailable");
+    return;
+  }
+  log("running", `Baseline rAF idle (${baselineMs}ms)…`);
+  await new Promise(r => setTimeout(r, baselineMs));
+
+  const tBaselineStart = performance.now() - baselineMs;
+  const tProbeStart = performance.now();
+  const probeCalls = [];
+  const prompt = "Tell one short joke.";
+  for (let i = 0; i < numCalls; i++) {
+    // 500 ms inter-call settle (matches real-model-page.js multi-call)
+    if (i > 0) await new Promise(r => setTimeout(r, 500));
+    const tStart = performance.now();
+    const result = await new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ type: "chat", id, prompt, maxTokens: 16 });
+    });
+    const tEnd = performance.now();
+    probeCalls.push({
+      tStart,
+      tEnd,
+      prefillMs: result.prefillMs,
+      genTokens: result.genTokens,
+    });
+    log("running", `call ${i + 1}/${numCalls}: ${result.genTokens}t in ${(tEnd - tStart).toFixed(0)}ms (prefill ${result.prefillMs.toFixed(0)}ms)`);
+  }
+  await new Promise(r => setTimeout(r, 1000));
+  ctl.stop({ removeOverlay: false });
+
+  const summary = summarizeFrameProbeMulti({
+    samples: ctl.samples,
+    tBaselineStart,
+    calls: probeCalls,
+  });
+  for (const line of formatFrameProbeMultiReport(summary)) {
+    log("info", line);
+  }
+
+  window.__probe9dResult = {
+    model: modelId,
+    callCount: probeCalls.length,
+    frameStats: {
+      baseline: summary.baseline,
+      post: summary.post,
+      perCall: summary.calls,
+    },
+    calls: probeCalls,
+  };
+  log("pass", "[probe9d] window.__probe9dResult posted.");
+  // Synthesize a smoke-result-line so `waitForSmokeTestResult` in the
+  // Bun runner doesn't hang. The runner only needs the line as a
+  // "page is done" signal; values aren't load-bearing.
+  const last = probeCalls[probeCalls.length - 1];
+  const totalSec = ((tProbeStart - performance.now()) / -1000).toFixed(1);
+  log(
+    "pass",
+    `[7/8] Generated ${last.genTokens} tokens in ${totalSec}s (prefill: ${last.prefillMs.toFixed(0)}ms, decode: ${(last.tEnd - last.tStart - last.prefillMs).toFixed(0)}ms, ${(last.genTokens / Math.max(0.001, (last.tEnd - last.tStart - last.prefillMs) / 1000)).toFixed(1)} tok/s, finish=stop, tokensIn=0)`,
+  );
+}
+
+main().catch((err) => {
+  log("fail", `Fatal: ${err.message}\n${err.stack || ""}`);
+});
+</script>
+</body>
+</html>

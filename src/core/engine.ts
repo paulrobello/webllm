@@ -718,7 +718,12 @@ export class WebLLM {
 		} else {
 			const inf = new ModelInference(wasm, parsed.hyperparams);
 			inf.loadWeights(ggufCtx, view);
-			inf.initKVCache(parsed.kvCacheConfig.maxContextLength);
+			const requestedCtx = options?.contextLength;
+			const ctxLen =
+				typeof requestedCtx === "number" && requestedCtx > 0
+					? Math.min(requestedCtx, parsed.kvCacheConfig.maxContextLength)
+					: parsed.kvCacheConfig.maxContextLength;
+			inf.initKVCache(ctxLen);
 			inference = inf;
 		}
 
