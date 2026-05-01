@@ -45,6 +45,8 @@ import {
 	ConversationPool,
 } from "./conversation-pool.js";
 import {
+	ConversationBusyError,
+	ConversationContextOverflowError,
 	EncoderRequiredError,
 	InferenceEngineMissingError,
 	ModelNotFoundError,
@@ -117,6 +119,11 @@ export class WebLLM {
 	private causalEmbedderEngines = new Map<string, CausalLMEmbedder>();
 	private sessions = new Map<string, ConversationSession>();
 	private conversationPool: ConversationPool;
+	// Per-model lock chain. Two conversations on the same model share one
+	// working KV cache, so their load/prefill/decode/save phases must not
+	// interleave. Calls await the prior call's chainTail before entering
+	// their load phase.
+	private modelChatChains = new Map<string, Promise<void>>();
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
@@ -482,13 +489,278 @@ export class WebLLM {
 	 * Yields CompletionChunks with incremental text, followed by a final
 	 * done=true chunk carrying generation stats. The KV cache is reused
 	 * across calls when the message array grows incrementally.
+	 *
+	 * Two dispatch modes:
+	 *   - `chatCompletion(modelId, messages, config)` — model-id-based.
+	 *     Drives the engine's per-model session-tracker; the prior turn's
+	 *     working KV is reused via the existing delta-prefill heuristic.
+	 *   - `chatCompletion(conv, messages, config)` — conversation-handle-
+	 *     based. Performs longest-shared-token-prefix detection vs a saved
+	 *     KV snapshot, swaps it into the working KV, prefills the divergent
+	 *     tail, decodes, and saves an updated snapshot back into the pool.
+	 *     Two conversations on the same model are isolated via a per-model
+	 *     serialization chain.
 	 */
 	async *chatCompletion(
-		modelId: string,
+		first: string | ConversationHandle,
 		messages: ChatMessage[],
 		config?: CompletionConfig,
 	): AsyncGenerator<CompletionChunk, void> {
-		yield* this.generateStream(modelId, messages, config);
+		if (typeof first === "string") {
+			yield* this.generateStream(first, messages, config);
+			return;
+		}
+		yield* this.chatCompletionWithConversation(first, messages, config);
+	}
+
+	private async *chatCompletionWithConversation(
+		conv: ConversationHandle,
+		messages: ChatMessage[],
+		config?: CompletionConfig,
+	): AsyncGenerator<CompletionChunk, void> {
+		// 1. Validate handle + acquire per-conv lock (single-writer).
+		this.conversationPool.assertExists(conv);
+		const release = this.conversationPool.tryAcquireLock(conv);
+		if (!release) throw new ConversationBusyError(conv.id);
+
+		// 2. Per-model serialization chain — the working KV is shared across
+		// conversations on the same model. Wait for any prior conv call on
+		// this model to finish before entering our load/prefill/decode/save.
+		const prior = this.modelChatChains.get(conv.modelHandleId);
+		let resolveChain!: () => void;
+		const chainTail = new Promise<void>((res) => {
+			resolveChain = res;
+		});
+		this.modelChatChains.set(conv.modelHandleId, chainTail);
+		if (prior) await prior;
+
+		try {
+			// 3. Resolve model resources.
+			const entry = this._modelManager.get(conv.modelHandleId);
+			if (!entry) throw new ModelNotFoundError(conv.modelHandleId);
+			if (!entry.loaded || !entry.tokenizer) {
+				throw new ModelNotLoadedError(conv.modelHandleId);
+			}
+			const inf = this.inferenceEngines.get(conv.modelHandleId);
+			if (!inf) throw new InferenceEngineMissingError(conv.modelHandleId);
+			const tokenizer = entry.tokenizer;
+
+			if (config?.drafter !== undefined) {
+				throw new SpeculativeDecodingReservedError();
+			}
+
+			// 4. Tokenize the canonical prompt (chat template applied).
+			const newTokens = encodeChatPrompt(messages, tokenizer, {
+				enableThinking: config?.enableThinking,
+				tools: config?.tools,
+			});
+
+			// 5. Context-overflow check.
+			const convOpts = this.conversationPool.options(conv);
+			const maxCtx = convOpts.maxContextTokens ?? inf.maxContextLength;
+			if (newTokens.length > maxCtx) {
+				throw new ConversationContextOverflowError(
+					conv.id,
+					newTokens.length,
+					maxCtx,
+				);
+			}
+
+			// 6. Longest-shared-token-prefix vs prior snapshot.
+			const priorSnap = this.conversationPool.get(conv);
+			let sharedLen = 0;
+			if (priorSnap) {
+				const upper = Math.min(priorSnap.tokenIds.length, newTokens.length);
+				while (
+					sharedLen < upper &&
+					priorSnap.tokenIds[sharedLen] === newTokens[sharedLen]
+				) {
+					sharedLen++;
+				}
+			}
+
+			// 7. Load phase — swap snapshot's [0, sharedLen) into working KV.
+			if (sharedLen > 0 && priorSnap) {
+				await inf.loadKVCache(
+					priorSnap.kvBytes,
+					sharedLen,
+					priorSnap.tokenIds.length,
+				);
+			} else {
+				inf.resetKVCache();
+			}
+
+			// 8. Prefill all but the last prompt token manually. The last
+			// token is handed to generateTextStream as its prompt so its
+			// own prefill writes the final KV slot AND returns the logits
+			// needed to sample the first generated token. Edge cases:
+			//   - newTokens.length === 1: nothing to manually prefill.
+			//   - sharedLen === newTokens.length: every prompt token is
+			//     already in the loaded KV. The last slot WILL be rewritten
+			//     by generateTextStream's prefill — but since the model is
+			//     deterministic given conditioning, KV at that position is
+			//     identical, and this costs one cheap forward pass.
+			const lastTokenId = newTokens[newTokens.length - 1];
+			const lastPos = newTokens.length - 1;
+			const manualPrefillEnd = lastPos; // exclusive on the last token
+			if (sharedLen < manualPrefillEnd) {
+				const midIds = newTokens.slice(sharedLen, manualPrefillEnd);
+				const midPos = new Int32Array(midIds.length);
+				for (let i = 0; i < midIds.length; i++) midPos[i] = sharedLen + i;
+				await inf.forward(new Int32Array(midIds), midPos);
+			} else if (sharedLen > manualPrefillEnd) {
+				// Loaded KV is longer than the prompt minus its last token —
+				// truncate it back so generateTextStream's prefill writes the
+				// last slot (rather than reading stale data past its
+				// expected end).
+				inf.truncateKVCache(manualPrefillEnd);
+			}
+
+			// 9. Build sampler/genConfig (mirror generateStream's resolution).
+			const isQwenChatml =
+				String(entry.hyperparams.architecture).startsWith("qwen") &&
+				detectChatTemplate(tokenizer.options.chatTemplate ?? "") === "chatml";
+			const {
+				temperature: effectiveTemperature,
+				topK: effectiveTopK,
+				topP: effectiveTopP,
+				repetitionPenalty: effectiveRepetitionPenalty,
+			} = resolveSamplingParams({
+				samplingMode: config?.sampling ?? "auto",
+				isQwenChatml,
+				enableThinking: config?.enableThinking,
+				consumer: {
+					temperature: config?.temperature,
+					topK: config?.topK,
+					topP: config?.topP,
+					repetitionPenalty: config?.repetitionPenalty,
+				},
+			});
+			const sampler = new Sampler({
+				temperature: effectiveTemperature,
+				topK: effectiveTopK,
+				topP: effectiveTopP,
+				repetitionPenalty: effectiveRepetitionPenalty,
+				seed: config?.seed,
+			});
+			const genConfig: InternalGenerationOptions = {
+				maxTokens: config?.maxTokens ?? 512,
+				temperature: effectiveTemperature,
+				topK: effectiveTopK,
+				topP: effectiveTopP,
+				repetitionPenalty: effectiveRepetitionPenalty,
+				stopTokens: config?.stopTokenIds ? [...config.stopTokenIds] : undefined,
+				signal: config?.signal,
+			};
+
+			// 10. Decode loop — drive generateTextStream with the last prompt
+			// token as a single-token "prefill". generateTextStream's prefill
+			// rewrites slot `lastPos` (deterministic given the same
+			// conditioning, so KV is identical) and yields its logits to
+			// sample the first generated token. The session starts at
+			// `lastPos` so position arithmetic stays consistent.
+			const forwardPass = async (
+				ids: number[],
+				positions: number[],
+			): Promise<Float32Array> => {
+				return await inf.forward(
+					new Int32Array(ids),
+					new Int32Array(positions),
+				);
+			};
+			const forwardDecode =
+				typeof inf.forwardDecode === "function"
+					? async (
+							ids: number[],
+							positions: number[],
+							mode: DecodeMode,
+							topK?: number,
+						): Promise<DecodeResult> => {
+							return await inf.forwardDecode(
+								new Int32Array(ids),
+								new Int32Array(positions),
+								mode,
+								topK,
+							);
+						}
+					: undefined;
+
+			const seedSession = new InferenceSession(
+				{
+					maxTokens: genConfig.maxTokens,
+					temperature: genConfig.temperature,
+					topK: genConfig.topK,
+					topP: genConfig.topP,
+					repetitionPenalty: genConfig.repetitionPenalty,
+					contextOverflowPolicy: "truncate",
+				},
+				lastPos,
+			);
+			for (const id of newTokens.slice(0, -1)) seedSession.pushToken(id);
+
+			const generatedIds: number[] = [];
+			for await (const chunk of generateTextStream({
+				promptTokenIds: [lastTokenId],
+				sampler,
+				session: seedSession,
+				eosTokenId: tokenizer.eosId,
+				tokenizer,
+				forwardPass,
+				config: genConfig,
+				forwardDecode,
+			})) {
+				if (chunk.tokenId !== undefined) {
+					generatedIds.push(chunk.tokenId);
+				}
+				yield chunk;
+			}
+
+			// 12. Save phase. The working KV now holds [0, finalLen) where
+			// finalLen = newTokens.length + generatedCount. Snapshot and
+			// store under the conversation handle.
+			const finalLen = inf.cachedTokenCount;
+			const fullIds = new Array<number>(finalLen);
+			for (let i = 0; i < newTokens.length && i < finalLen; i++) {
+				fullIds[i] = newTokens[i];
+			}
+			// The generated-tail token ids matter only insofar as the next
+			// turn's longest-shared-prefix walk reaches them. A new user
+			// turn always introduces fresh tokens after the assistant
+			// response, so divergence happens at or before the first
+			// generated id. We store them faithfully when available; pad
+			// with -1 if generatedIds underruns finalLen (e.g., when
+			// generateTextStream advanced cachedTokenCount via its prefill
+			// without yielding a sampled token — shouldn't happen, but
+			// defensive).
+			for (let i = newTokens.length, g = 0; i < finalLen; i++, g++) {
+				fullIds[i] = g < generatedIds.length ? generatedIds[g] : -1;
+			}
+
+			const kvBytes = await inf.serializeKVCache(finalLen);
+			this.conversationPool.set(conv, {
+				conversationId: conv.id,
+				modelHandleId: conv.modelHandleId,
+				tokenIds: fullIds,
+				kvBytes,
+				byteSize: kvBytes.byteLength,
+				lastAccessMs: Date.now(),
+			});
+		} finally {
+			release();
+			resolveChain();
+			if (this.modelChatChains.get(conv.modelHandleId) === chainTail) {
+				this.modelChatChains.delete(conv.modelHandleId);
+			}
+		}
+	}
+
+	/**
+	 * @internal — for unit tests only. Returns the inference engine for a
+	 * model id so tests can spy on its KV-cache primitives. Not a stable
+	 * API; the field type is the public {@link ModelInference}.
+	 */
+	__debugInferenceForModel(modelId: string): ModelInference | undefined {
+		return this.inferenceEngines.get(modelId);
 	}
 
 	/**
