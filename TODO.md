@@ -1281,25 +1281,31 @@ appetite remains; none are forced.
     `characters/tool-system.ts`'s `ToolParameter`) now import it.
     Comment-based "lock-step" contract upgraded to a typecheck
     error. Pure type-only refactor — zero runtime cost.
-- **`tsconfig.json` widening to enforce test typechecks.** Currently
-  includes only `src/**/*.ts` — the `@ts-expect-error` gate in
-  `tests/generation-config-public.test.ts` is documentation, not
-  enforcement (`bun test` strips types; the gate fires only under
-  `tsc --noEmit` against test files). **Probed 2026-04-30:** widening
-  the include to `tests/**/*.ts` (excluding `eval/`) surfaces **101
-  latent errors** across the test tree — much larger than the
-  watch-list estimate (~5-15). Dominant categories: TS2341 private-
-  property access (25 hits, mostly `engine-streaming-api.test.ts`
-  poking at `_modelManager` / `inferenceEngines` / `sessions`),
-  TS2345/TS2322/TS2740 mock shape mismatches (30+ hits — mocks don't
-  satisfy the full `ModelInference` / `ModelHyperparams` interfaces),
-  TS2578 unused `@ts-expect-error` directives (4 hits) which are
-  the actual *latent regression evidence* — those `@ts-expect-error`
-  lines are documentation that doesn't fire. Cycle is its own thing
-  (not a quick win); needs internal-API hooks for testing or a
-  systematic mock-factory pass before widening can land. Probe log
-  retained at `/tmp/tsc-probe.log` ephemerally; if reopened, re-run
-  the probe rather than relying on stale state.
+- **`tsconfig.json` widening to enforce test typechecks. CLOSED 2026-04-30**
+  (commit `3328f8e`). Added `tsconfig.test.json` (extends main config)
+  with `include: ["src/**/*.ts", "tests/**/*.ts"]`,
+  `allowImportingTsExtensions: true` (safe under `noEmit`; resolves
+  the 6 TS5097 leaks where tests import `.ts` from `eval/`), and
+  `noUnusedLocals/Parameters` off (tests declare fixture vars not
+  always used). Wired into ship gate via new `typecheck:tests` script
+  (`package.json`) and `typecheck-tests` Makefile target; `checkall`
+  now runs it after the production typecheck.
+
+  Probe found 101 latent errors (vs watch-list estimate of 5-15);
+  driven to 0 file-by-file across 14 fix commits (`4114138` through
+  `bb802b6`). Patterns used: per-test cast-through-unknown helpers,
+  `smoke-test/*.d.ts` ambient shims for the three JS files tests
+  import, and an `EngineInternals` helper in
+  `engine-streaming-api.test.ts` that centralizes the unsafe
+  private-field access at one boundary instead of 18.
+
+  The load-bearing finding was the **TS2578 audit signal**: 4 unused
+  `@ts-expect-error` directives in `tests/generation-config-public.test.ts`
+  were silently inactive because the directives sat one line above the
+  property TS reports the error on. Fixed in `9890b31`. The public
+  `GenerationConfig` type was correct as-is; the test was the bug.
+  Convention going forward: place `@ts-expect-error` on the property
+  line, not the variable line.
 
 ### External-trigger candidates
 
