@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { ModelHyperparams } from "../src/core/types.js";
 import type { GgmlWasm } from "../src/inference/ggml-wasm.js";
 import { ModelInference } from "../src/inference/model-inference.js";
-import type { ModelHyperparams } from "../src/inference/types.js";
 
 // We never call any wasm method here — we only inspect the constructor
 // option behavior, which doesn't touch the WASM module. A null-typed cast
