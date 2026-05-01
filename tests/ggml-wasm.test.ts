@@ -248,7 +248,8 @@ describe("GgmlWasm detailed graph profiling controls", () => {
 			_webgpu_set_graph_profiling_enabled: (enabled) => {
 				calls.push(`profile:${enabled}`);
 			},
-			_graph_compute: (graph) => {
+			_graph_compute: (graphArg) => {
+				const graph = Number(graphArg);
 				calls.push(`compute-start:${graph}`);
 				const token = {};
 				const request = deferred();
@@ -357,7 +358,7 @@ describe("GgmlWasm.downloadFromTensor", () => {
 			_backend_tensor_get_async_callback_support: () => 1,
 			_backend_tensor_get_async_finish: (requestId, dstHeapPtr, size) => {
 				calls.push(`finish:${requestId}:${dstHeapPtr}:${size}`);
-				heapU8.set([1, 2, 3, 4], dstHeapPtr);
+				heapU8.set([1, 2, 3, 4], Number(dstHeapPtr));
 			},
 		});
 		const setTimeoutCalls: number[] = [];
@@ -407,7 +408,7 @@ describe("GgmlWasm.downloadFromTensor", () => {
 			},
 			_backend_tensor_get_async_finish: (requestId, dstHeapPtr, size) => {
 				calls.push(`finish:${requestId}:${dstHeapPtr}:${size}`);
-				heapU8.set([5, 6, 7, 8], dstHeapPtr);
+				heapU8.set([5, 6, 7, 8], Number(dstHeapPtr));
 			},
 		});
 
@@ -436,7 +437,7 @@ describe("GgmlWasm.downloadFromTensor", () => {
 			},
 			_backend_tensor_get_async_finish: (requestId, dstHeapPtr, size) => {
 				calls.push(`finish:${requestId}:${dstHeapPtr}:${size}`);
-				heapU8.set([9, 8, 7, 6], dstHeapPtr);
+				heapU8.set([9, 8, 7, 6], Number(dstHeapPtr));
 			},
 		});
 
