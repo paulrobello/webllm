@@ -209,6 +209,7 @@ export class ModelInference {
 	private kvLayers: LayerKVCache[] | null = null;
 	private kvBuf: BufferPtr = 0;
 	private nCached = 0;
+	private kvMaxContextLength = 0;
 	/** When true, `forward()` populates `lastTrace` on every call. */
 	traceEnabled = false;
 	/** Timing of the most recent `forward()` call, or null if never traced. */
@@ -449,6 +450,7 @@ export class ModelInference {
 
 		this.kvBuf = wasm.backendAllocCtxTensors();
 		this.nCached = 0;
+		this.kvMaxContextLength = maxContextLength;
 	}
 
 	resetKVCache(): void {
@@ -474,6 +476,174 @@ export class ModelInference {
 
 	get cachedTokenCount(): number {
 		return this.nCached;
+	}
+
+	/**
+	 * Maximum tokens this KV cache was sized for at `initKVCache`. Returns 0
+	 * if the cache hasn't been initialized.
+	 */
+	get maxContextLength(): number {
+		return this.kvMaxContextLength;
+	}
+
+	/**
+	 * Bytes of K + V per token, summed across all layers. Used by the
+	 * conversation pool to size snapshot allocations. Requires FA mode.
+	 */
+	get kvBytesPerToken(): number {
+		if (!this.flashAttn) {
+			throw new Error("kvBytesPerToken requires FA mode (flashAttn=true)");
+		}
+		const { hp } = this;
+		const elem = 2; // FA mode = F16
+		// 2 = K + V per layer; FA layout is symmetric.
+		return hp.layerCount * 2 * hp.embeddingHeadLength * hp.headCountKv * elem;
+	}
+
+	/**
+	 * Serialize positions [0, nTokens) of every layer's K and V into a flat
+	 * Uint8Array. Layout: [layer0.K | layer0.V | layer1.K | layer1.V | ...]
+	 * with each per-layer block dense at `nTokens` slots:
+	 * `headDim × nTokens × nKvHeads × elemBytes`.
+	 *
+	 * Requires FA mode (`flashAttn === true`). Manual-mode V has
+	 * `[maxCtx, headDim, nKvHeads]` layout so per-position bytes aren't
+	 * contiguous; manual-mode snapshotting is not needed for any production
+	 * path (FA is the 7B+ default per §24).
+	 */
+	serializeKVCache(nTokens: number): Uint8Array {
+		if (!this.flashAttn) {
+			throw new Error("serializeKVCache requires FA mode (flashAttn=true)");
+		}
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		if (nTokens < 0 || nTokens > this.nCached) {
+			throw new Error(
+				`serializeKVCache: nTokens=${nTokens} out of range [0, ${this.nCached}]`,
+			);
+		}
+		const { hp, wasm } = this;
+		const elem = 2; // FA mode = F16
+		const maxCtx = this.kvMaxContextLength;
+		const perHeadFullBytes = hp.embeddingHeadLength * maxCtx * elem;
+		const perHeadPopBytes = hp.embeddingHeadLength * nTokens * elem;
+		const perLayerOutBytes = hp.headCountKv * perHeadPopBytes;
+		const total = hp.layerCount * 2 * perLayerOutBytes;
+		const out = new Uint8Array(total);
+
+		// Read each tensor's full bytes through tensorGetData into a heap
+		// staging buffer (synchronous via ASYNCIFY). For each per-head slab,
+		// memcpy the leading nTokens slots into `out` at the correct offset.
+		// Per-head slab in tensor memory: headDim contiguous × maxCtx slots.
+		const fullKBytes = wasm.tensorNbytes(this.kvLayers[0].k); // == fullVBytes in FA
+		const stagePtr = wasm.malloc(fullKBytes);
+		try {
+			let outOff = 0;
+			for (let il = 0; il < hp.layerCount; il++) {
+				const kv = this.kvLayers[il];
+				for (const tensor of [kv.k, kv.v]) {
+					wasm.tensorGetData(tensor, stagePtr, fullKBytes);
+					// Re-derive heap view AFTER tensorGetData — heap may have
+					// grown across the WASM call and detached prior views.
+					const stageView = new Uint8Array(
+						wasm.heapU8.buffer,
+						stagePtr,
+						fullKBytes,
+					);
+					for (let h = 0; h < hp.headCountKv; h++) {
+						const slabSrc = h * perHeadFullBytes;
+						out.set(
+							stageView.subarray(slabSrc, slabSrc + perHeadPopBytes),
+							outOff,
+						);
+						outOff += perHeadPopBytes;
+					}
+				}
+			}
+		} finally {
+			wasm.free(stagePtr);
+		}
+		return out;
+	}
+
+	/**
+	 * Inverse of `serializeKVCache`. Writes positions [0, nTokens) of every
+	 * layer's K/V from the supplied buffer; uninitialized positions
+	 * [nTokens, maxCtx) are not touched (they're stale, but unused —
+	 * forwardSingle writes new positions before reading them).
+	 *
+	 * `snapshotLen` (default = `nTokens`) is the length the buffer was
+	 * serialized at. Must be ≥ `nTokens`. When `snapshotLen > nTokens`,
+	 * only the first `nTokens` slots of each per-head slab in `bytes` are
+	 * loaded; the remaining `(snapshotLen - nTokens)` slots' bytes are
+	 * skipped per slab. This supports loading a shared prefix from a
+	 * longer-stored snapshot without re-serializing.
+	 */
+	loadKVCache(bytes: Uint8Array, nTokens: number, snapshotLen?: number): void {
+		if (!this.flashAttn) {
+			throw new Error("loadKVCache requires FA mode (flashAttn=true)");
+		}
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		if (nTokens < 0 || nTokens > this.kvMaxContextLength) {
+			throw new Error(
+				`loadKVCache: nTokens=${nTokens} out of range [0, ${this.kvMaxContextLength}]`,
+			);
+		}
+		const sl = snapshotLen ?? nTokens;
+		if (sl < nTokens) {
+			throw new Error(`loadKVCache: snapshotLen=${sl} < nTokens=${nTokens}`);
+		}
+		const { hp, wasm } = this;
+		const elem = 2; // FA mode = F16
+		const maxCtx = this.kvMaxContextLength;
+		const perHeadFullBytes = hp.embeddingHeadLength * maxCtx * elem;
+		const perHeadSnapBytes = hp.embeddingHeadLength * sl * elem;
+		const perHeadLoadBytes = hp.embeddingHeadLength * nTokens * elem;
+		const perLayerInBytes = hp.headCountKv * perHeadSnapBytes;
+		const expected = hp.layerCount * 2 * perLayerInBytes;
+		if (bytes.byteLength !== expected) {
+			throw new Error(
+				`loadKVCache: byte length ${bytes.byteLength} != expected ${expected} (nTokens=${nTokens}, snapshotLen=${sl})`,
+			);
+		}
+
+		// Per K/V tensor: read full tensor into staging (preserves stale
+		// tail slots beyond `nTokens`), overwrite leading `nTokens` slot
+		// bytes from `bytes`, write whole tensor back via tensorSetData.
+		// inOff advances by `perHeadSnapBytes` per slab — when
+		// snapshotLen > nTokens we skip the unused tail of each slab in
+		// the source buffer.
+		const fullKBytes = wasm.tensorNbytes(this.kvLayers[0].k);
+		const stagePtr = wasm.malloc(fullKBytes);
+		try {
+			let inOff = 0;
+			for (let il = 0; il < hp.layerCount; il++) {
+				const kv = this.kvLayers[il];
+				for (const tensor of [kv.k, kv.v]) {
+					wasm.tensorGetData(tensor, stagePtr, fullKBytes);
+					// Re-derive heap view AFTER tensorGetData — heap may
+					// have grown across the WASM call.
+					const stageView = new Uint8Array(
+						wasm.heapU8.buffer,
+						stagePtr,
+						fullKBytes,
+					);
+					for (let h = 0; h < hp.headCountKv; h++) {
+						const slabDst = h * perHeadFullBytes;
+						stageView.set(
+							bytes.subarray(inOff, inOff + perHeadLoadBytes),
+							slabDst,
+						);
+						// Advance source by full snapshot slab; skip the
+						// unused tail when snapshotLen > nTokens.
+						inOff += perHeadSnapBytes;
+					}
+					wasm.tensorSetData(tensor, stagePtr, fullKBytes);
+				}
+			}
+		} finally {
+			wasm.free(stagePtr);
+		}
+		this.nCached = nTokens;
 	}
 
 	/**
