@@ -42,13 +42,13 @@ describe.skipIf(SHOULD_SKIP)("SpeculativeGenerator integration", () => {
 		// tokenizer / vocab / EOS so vocab parity holds. This exercises the
 		// spec path without needing a real second model in CI.
 		const wasmA = new GgmlWasm();
-		await wasmA.init({});
+		await wasmA.init({} as Parameters<typeof wasmA.init>[0]);
 		const target = new ModelInference(wasmA, parsed.hyperparams);
 		target.loadWeights(ggufCtx, view);
 		target.initKVCache(128);
 
 		const wasmB = new GgmlWasm();
-		await wasmB.init({});
+		await wasmB.init({} as Parameters<typeof wasmB.init>[0]);
 		const drafter = new ModelInference(wasmB, parsed.hyperparams);
 		drafter.loadWeights(ggufCtx, view);
 		drafter.initKVCache(128);
@@ -80,7 +80,7 @@ describe.skipIf(SHOULD_SKIP)("SpeculativeGenerator integration", () => {
 
 		// Non-spec path on a fresh target instance.
 		const wasmC = new GgmlWasm();
-		await wasmC.init({});
+		await wasmC.init({} as Parameters<typeof wasmC.init>[0]);
 		const baseline = new ModelInference(wasmC, parsed.hyperparams);
 		baseline.loadWeights(ggufCtx, view);
 		baseline.initKVCache(128);
@@ -106,7 +106,6 @@ describe.skipIf(SHOULD_SKIP)("SpeculativeGenerator integration", () => {
 				baseline.forward(new Int32Array(ids), new Int32Array(positions)),
 			config,
 			undefined,
-			undefined,
 		);
 		for await (const id of baselineGen) baselineTokens.push(id);
 
@@ -128,13 +127,13 @@ describe.skipIf(SHOULD_SKIP)("SpeculativeGenerator integration", () => {
 		const ggufCtx = GgufParser.parse(view);
 
 		const wasmA = new GgmlWasm();
-		await wasmA.init({});
+		await wasmA.init({} as Parameters<typeof wasmA.init>[0]);
 		const target = new ModelInference(wasmA, parsed.hyperparams);
 		target.loadWeights(ggufCtx, view);
 		target.initKVCache(128);
 
 		const wasmB = new GgmlWasm();
-		await wasmB.init({});
+		await wasmB.init({} as Parameters<typeof wasmB.init>[0]);
 		const drafter = new ModelInference(wasmB, parsed.hyperparams);
 		drafter.loadWeights(ggufCtx, view);
 		drafter.initKVCache(128);
@@ -207,9 +206,15 @@ function makeEngagementTokenizer(): Tokenizer {
 describe("WebLLM.generateStream drafter is reserved in v1", () => {
 	test("throws when drafter is set", async () => {
 		const tokenizer = makeEngagementTokenizer();
-		const engine = Object.create(WebLLM.prototype) as WebLLM &
-			Record<string, unknown>;
-		engine._modelManager = {
+		const engine = Object.create(WebLLM.prototype) as WebLLM;
+		// Tests intentionally inject minimal internal state via the unsafe
+		// cast boundary so the rest of the test stays type-safe.
+		const internals = engine as unknown as {
+			_modelManager: { get(id: string): unknown };
+			inferenceEngines: Map<string, unknown>;
+			sessions: Map<string, unknown>;
+		};
+		internals._modelManager = {
 			get: (id: string) =>
 				id === "target"
 					? {
@@ -219,7 +224,7 @@ describe("WebLLM.generateStream drafter is reserved in v1", () => {
 						}
 					: undefined,
 		};
-		engine.inferenceEngines = new Map([
+		internals.inferenceEngines = new Map<string, unknown>([
 			[
 				"target",
 				{
@@ -229,7 +234,7 @@ describe("WebLLM.generateStream drafter is reserved in v1", () => {
 				},
 			],
 		]);
-		engine.sessions = new Map();
+		internals.sessions = new Map<string, unknown>();
 
 		await expect(
 			(async () => {
