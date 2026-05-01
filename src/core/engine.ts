@@ -653,6 +653,71 @@ export class WebLLM {
 				signal: config?.signal,
 			};
 
+			// 9b. Qwen3 chat-ML special handling — mirrors the block in
+			// generateStream (engine.ts qwen-chatml block). Without this the
+			// conv path regresses qwen3 generation quality (think-mode mask,
+			// reentry forbidden tokens, dual EOS stop set). See CLAUDE.md
+			// regression note: <|im_end|> (151645) and <|endoftext|> (151643)
+			// are both valid end-of-turn tokens for qwen3 chat.
+			if (isQwenChatml) {
+				const imStartId = tokenizer.getId("<|im_start|>");
+				const imEndId = tokenizer.getId("<|im_end|>");
+				const endoftextId = tokenizer.getId("<|endoftext|>");
+				const thinkOpenId = tokenizer.getId("<think>");
+				const thinkCloseId = tokenizer.getId("</think>");
+				const toolCallOpenId = tokenizer.getId("<tool_call>");
+				const toolCallCloseId = tokenizer.getId("</tool_call>");
+				const toolResponseOpenId = tokenizer.getId("<tool_response>");
+				const toolResponseCloseId = tokenizer.getId("</tool_response>");
+				if (imStartId !== undefined) {
+					genConfig.forbiddenReentryTokens = [imStartId];
+				}
+				if (endoftextId !== undefined) {
+					genConfig.stopTokens = [...(config?.stopTokenIds ?? []), endoftextId];
+				}
+				if (config?.enableThinking === false) {
+					genConfig.tokenizer = tokenizer;
+				}
+				if (thinkOpenId !== undefined && thinkCloseId !== undefined) {
+					genConfig.tokenizer = tokenizer;
+					genConfig.thinkingOpenTokenId = thinkOpenId;
+					genConfig.thinkingCloseTokenId = thinkCloseId;
+					genConfig.enforceSingleThinkBlock = true;
+					genConfig.maskedTokensWhileThinking = [
+						thinkOpenId,
+						imStartId,
+						imEndId,
+						endoftextId,
+					].filter((id): id is number => id !== undefined);
+					genConfig.maskedTokensAfterThinkingUntilAnswer = [
+						thinkOpenId,
+						imStartId,
+						imEndId,
+						endoftextId,
+						toolCallOpenId,
+						toolCallCloseId,
+						toolResponseOpenId,
+						toolResponseCloseId,
+					].filter((id): id is number => id !== undefined);
+					// During the visible answer, the model must be allowed to
+					// terminate via `<|im_end|>` (the chat EOS) and
+					// `<|endoftext|>` (a secondary stop). Mask only the
+					// scaffolding controls so it can't relapse into a new
+					// `<think>`, `<|im_start|>`, or tool-call envelope.
+					genConfig.maskedTokensAfterAnswerStarts = [
+						thinkOpenId,
+						imStartId,
+						toolCallOpenId,
+						toolCallCloseId,
+						toolResponseOpenId,
+						toolResponseCloseId,
+					].filter((id): id is number => id !== undefined);
+					genConfig.requireVisibleAnswerAfterThinking = true;
+					genConfig.suppressWhitespaceOnlyAfterThinking = true;
+					genConfig.requireLeadingWhitespaceAfterThinking = true;
+				}
+			}
+
 			// 10. Decode loop — drive generateTextStream with the last prompt
 			// token as a single-token "prefill". generateTextStream's prefill
 			// rewrites slot `lastPos` (deterministic given the same
@@ -685,6 +750,12 @@ export class WebLLM {
 						}
 					: undefined;
 
+			// InferenceSession's constructor signature is (config, sequenceId);
+			// the second arg is a sequence id, NOT the starting position
+			// (the constructor unconditionally sets position=0). Use
+			// `advance(lastPos)` to seed the position so generateTextStream's
+			// prefill writes the last prompt token at slot `lastPos` rather
+			// than overwriting slot 0 of the loaded prefix.
 			const seedSession = new InferenceSession(
 				{
 					maxTokens: genConfig.maxTokens,
@@ -694,8 +765,9 @@ export class WebLLM {
 					repetitionPenalty: genConfig.repetitionPenalty,
 					contextOverflowPolicy: "truncate",
 				},
-				lastPos,
+				0,
 			);
+			seedSession.advance(lastPos);
 			for (const id of newTokens.slice(0, -1)) seedSession.pushToken(id);
 
 			const generatedIds: number[] = [];

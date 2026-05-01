@@ -176,6 +176,72 @@ describe("chatCompletion(conv, ...)", () => {
 		release?.();
 	});
 
+	test("second turn's prefill positions start after sharedLen", async () => {
+		const engine = createFakeEngine();
+		const conv = engine.createConversation("tl");
+		const internals = asInternals(engine);
+		const inf = internals.inferenceEngines.get("tl");
+		if (!inf) throw new Error("missing fake");
+
+		// Wrap inf.forward to log per-call (ids, positions).
+		const positionsLog: Array<{ ids: number[]; positions: number[] }> = [];
+		const origForward = inf.forward;
+		inf.forward = async (ids: Int32Array, positions: Int32Array) => {
+			positionsLog.push({ ids: [...ids], positions: [...positions] });
+			return origForward(ids, positions);
+		};
+
+		// First turn: cold start. inf.forward will be called with positions
+		// [0, 1, ..., n-1].
+		for await (const _chunk of engine.chatCompletion(
+			conv,
+			[{ role: "user", content: "p" }],
+			{ maxTokens: 1, temperature: 0 },
+		)) {
+			// drain
+		}
+		const turn1Positions = [...positionsLog];
+		expect(turn1Positions.length).toBeGreaterThan(0);
+		// First call's positions begin at 0.
+		expect(turn1Positions[0].positions[0]).toBe(0);
+
+		// Snapshot the first turn's prompt length — this is the lower-bound
+		// for sharedLen on turn 2 (the chat template will reproduce these
+		// tokens deterministically as the first part of the next prompt).
+		const snap1 = internals.conversationPool.get(conv);
+		expect(snap1).toBeDefined();
+		const turn1Len = snap1?.tokenIds.length ?? 0;
+		expect(turn1Len).toBeGreaterThan(0);
+
+		positionsLog.length = 0;
+
+		// Second turn: superset of turn 1 (same first user message + assistant + new user).
+		// sharedLen is at least the prefix common to turn 1's prompt and turn 2's
+		// prompt. The new prefill positions MUST start at >= sharedLen, NOT at 0.
+		// (The buggy code passed lastPos as sequenceId — the constructor ignored
+		// it and left position=0, which means every forward call began at 0,
+		// overwriting the loaded prefix's KV slot 0.)
+		for await (const _chunk of engine.chatCompletion(
+			conv,
+			[
+				{ role: "user", content: "p" },
+				{ role: "assistant", content: "i" },
+				{ role: "user", content: "h" },
+			],
+			{ maxTokens: 1, temperature: 0 },
+		)) {
+			// drain
+		}
+		const turn2Positions = [...positionsLog];
+		expect(turn2Positions.length).toBeGreaterThan(0);
+		// Second turn's prefill positions must START at >= sharedLen >= 1
+		// (BOS is always shared). With C1 unfixed this asserts as 0.
+		expect(turn2Positions[0].positions[0]).toBeGreaterThanOrEqual(1);
+
+		// Restore.
+		inf.forward = origForward;
+	});
+
 	test("shared-prefix path skips resetKVCache and uses loadKVCache", async () => {
 		const engine = createFakeEngine([4, 5, 2]);
 		const conv = engine.createConversation("tl");
