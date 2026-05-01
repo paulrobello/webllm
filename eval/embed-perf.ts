@@ -11,7 +11,7 @@
  *   bun run eval/embed-perf.ts --model qwen3-embedding-0.6b-hyb
  *   bun run eval/embed-perf.ts --mode single --fixture short   # one cell
  *   bun run eval/embed-perf.ts --reps 50                       # override single-mode reps
- *   bun run eval/embed-perf.ts --profile                       # also pass profile=1 to smoke page
+ *   bun run eval/embed-perf.ts --profile                       # also pass perfTrace=1 to smoke page
  *   bun run eval/embed-perf.ts --out eval/reports/embed-perf-2026-04-27/
  *
  * Requires:
@@ -91,7 +91,7 @@ async function runCell(
 			embedFixture: fixture,
 			v: `${Date.now()}`,
 			...(model.embeddingCapable ? { embeddingCapable: 1 } : {}),
-			...(profile ? { profile: 1 } : {}),
+			...(profile ? { perfTrace: 1 } : {}),
 		},
 	});
 	console.log(`  ${model.id} · ${mode} · ${fixture}`);

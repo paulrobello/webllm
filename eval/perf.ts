@@ -192,7 +192,7 @@ async function run(
 		const url = buildSmokeTestUrl(model.id, model.contextLength, {
 			extraParams: {
 				perf: `${Date.now()}-${i}`,
-				...(opts.profile ? { profile: 1 } : {}),
+				...(opts.profile ? { perfTrace: 1 } : {}),
 				...(opts.thinking ? { thinking: 1 } : {}),
 				...(opts.drafter ? { drafter: opts.drafter } : {}),
 				...(opts.fa ? { fa: opts.fa } : {}),

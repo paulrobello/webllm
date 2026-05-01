@@ -275,7 +275,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 
 	async function loadAndTest() {
 		const t0 = performance.now();
-		const profileMode = new URLSearchParams(window.location.search).has("profile");
+		const profileMode = new URLSearchParams(window.location.search).has("perfTrace");
 
 		// WebGPU init moved to step 1: subsequent steps stream the GGUF
 		// directly into the WASM heap, so the heap must exist first.
