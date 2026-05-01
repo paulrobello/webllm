@@ -39,7 +39,35 @@ The branch currently carries **eleven commits** on top of upstream
 (commit 8) are kept as a pair pending a proper replacement; treat them
 as a no-op until you hear otherwise.
 
-Last rebased onto upstream master 2026-04-29 to tip `b1d5f5b44`
+Last rebased onto upstream master 2026-05-01 to tip `b97ebdc98`
+("llama-quant : fix --tensor-type when default qtype is overridden").
+The 2026-04-29 → 2026-05-01 delta was small; 2 of the upstream commits
+touched `ggml-webgpu/`: `c3c150539` (mul-mat / mul-mat-id vectorize
+fix #22578 — load-bearing for chat decode) and `aab68217b` (upscale
+shader #22419 — image-gen op, not exercised by the chat fleet). The
+rebase replayed all 11 patches with **one trivial conflict**: both
+upstream `aab68217b` (UPSCALE) and our local browser bundle
+(`9b009201f`, the rebased `7bbb2416c`) added new `case` arms to the
+same `switch (op)` in `ggml-webgpu.cpp`. Resolved by keeping both
+arms. WASM sizes: wasm32 2,482,377 bytes, wasm64 2,526,224 bytes.
+Ship gate 513/12/0. Post-rebase tip: `e29753286`.
+
+Sweep classification: **§27 template — broad free win, no
+regressions**. Same-day same-tip pre-rebase control captured per
+§32a doctrine; comparing post-rebase against that baseline (NOT the
+4-day-old 2026-04-28 matrix — environmental floor drifted -3 to
+-8% in profile mode over the gap), every model improved or held
+(+0.4% to +8.0% tok/s) and matmul median time decreased uniformly
+(-1.4% to -5.0%). The win attributes cleanly to `c3c150539`'s
+vectorize-corner fix on the per-decode mat-vec kernel. Full sweep
+matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](../eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md);
+same-day pre-rebase control at
+[`eval/reports/pre-rebase-baselines-2026-05-01/SUMMARY.md`](../eval/reports/pre-rebase-baselines-2026-05-01/SUMMARY.md).
+
+#### Earlier rebase (2026-04-29, §32)
+
+Rebased onto upstream master 2026-04-29 to tip `b1d5f5b44`
 ("sync : ggml"). The 2026-04-28-eve → 2026-04-29 delta was 14 commits;
 1 of them touched `ggml-webgpu/` (#22492 FlashAttention support-check
 fix — adds an early-out when `decisions.path == FLASH_ATTN_PATH_NONE`

@@ -1,0 +1,130 @@
+cd src/wasm && mkdir -p build && cd build && \
+	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
+	emcmake cmake .. \
+		-DGGML_WEBGPU=ON \
+		-DGGML_WEBGPU_JSPI=OFF \
+		-DEMDAWNWEBGPU_DIR=/Users/probello/Repos/webllm/vendor/emdawnwebgpu \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DGGML_CPU=OFF \
+		-DGGML_BLAS=OFF \
+		-DGGML_METAL=OFF \
+		-DGGML_ACCELERATE=OFF \
+		-DGGML_CUDA=OFF \
+		-DGGML_OPENMP=OFF \
+		-DGGML_NATIVE=OFF \
+		-DGGML_LLAMAFILE=OFF \
+		-DGGML_BUILD_TESTS=OFF \
+		-DGGML_BUILD_EXAMPLES=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DGGML_BACKEND_DL=OFF \
+		-DWEBLLM_ASSERTIONS=0 && \
+	cmake --build . --config Release -j
+emcmake: cmake .. -DGGML_WEBGPU=ON -DGGML_WEBGPU_JSPI=OFF -DEMDAWNWEBGPU_DIR=/Users/probello/Repos/webllm/vendor/emdawnwebgpu -DCMAKE_BUILD_TYPE=Release -DGGML_CPU=OFF -DGGML_BLAS=OFF -DGGML_METAL=OFF -DGGML_ACCELERATE=OFF -DGGML_CUDA=OFF -DGGML_OPENMP=OFF -DGGML_NATIVE=OFF -DGGML_LLAMAFILE=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DWEBLLM_ASSERTIONS=0 -DCMAKE_TOOLCHAIN_FILE=/Users/probello/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/Users/probello/emsdk/node/22.16.0_64bit/bin/node in directory /Users/probello/Repos/webllm/src/wasm/build
+-- The ASM compiler identification is unknown
+-- Found assembler: /Users/probello/emsdk/upstream/emscripten/emcc
+-- Setting GGML_NATIVE_DEFAULT to OFF
+-- CMAKE_SYSTEM_PROCESSOR: x86
+-- GGML_SYSTEM_ARCH: UNKNOWN
+-- Shader output dir: /Users/probello/Repos/webllm/src/wasm/build/ggml/src/ggml-webgpu/generated
+-- Including WebGPU backend
+-- ggml version: 0.10.1
+-- ggml commit:  e29753286
+-- Configuring done (2.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build
+[  5%] Built target generate_shaders
+[ 57%] Built target ggml-base
+[ 73%] Built target ggml-webgpu
+[ 84%] Built target webllm-wasm
+[100%] Built target ggml
+cd src/wasm && mkdir -p build-mem64 && cd build-mem64 && \
+	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
+	emcmake cmake .. \
+		-DGGML_WEBGPU=ON \
+		-DGGML_WEBGPU_JSPI=OFF \
+		-DEMDAWNWEBGPU_DIR=/Users/probello/Repos/webllm/vendor/emdawnwebgpu \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DGGML_CPU=OFF \
+		-DGGML_BLAS=OFF \
+		-DGGML_METAL=OFF \
+		-DGGML_ACCELERATE=OFF \
+		-DGGML_CUDA=OFF \
+		-DGGML_OPENMP=OFF \
+		-DGGML_NATIVE=OFF \
+		-DGGML_LLAMAFILE=OFF \
+		-DGGML_BUILD_TESTS=OFF \
+		-DGGML_BUILD_EXAMPLES=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DGGML_BACKEND_DL=OFF \
+		-DWEBLLM_BUILD_MEM64=ON \
+		-DCMAKE_C_FLAGS="-sMEMORY64=1" \
+		-DCMAKE_CXX_FLAGS="-sMEMORY64=1" \
+		-DWEBLLM_ASSERTIONS=0 && \
+	cmake --build . --target webllm-wasm-mem64 --config Release -j
+emcmake: cmake .. -DGGML_WEBGPU=ON -DGGML_WEBGPU_JSPI=OFF -DEMDAWNWEBGPU_DIR=/Users/probello/Repos/webllm/vendor/emdawnwebgpu -DCMAKE_BUILD_TYPE=Release -DGGML_CPU=OFF -DGGML_BLAS=OFF -DGGML_METAL=OFF -DGGML_ACCELERATE=OFF -DGGML_CUDA=OFF -DGGML_OPENMP=OFF -DGGML_NATIVE=OFF -DGGML_LLAMAFILE=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DWEBLLM_BUILD_MEM64=ON -DCMAKE_C_FLAGS=-sMEMORY64=1 -DCMAKE_CXX_FLAGS=-sMEMORY64=1 -DWEBLLM_ASSERTIONS=0 -DCMAKE_TOOLCHAIN_FILE=/Users/probello/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/Users/probello/emsdk/node/22.16.0_64bit/bin/node in directory /Users/probello/Repos/webllm/src/wasm/build-mem64
+-- The ASM compiler identification is unknown
+-- Found assembler: /Users/probello/emsdk/upstream/emscripten/emcc
+-- Setting GGML_NATIVE_DEFAULT to OFF
+-- CMAKE_SYSTEM_PROCESSOR: x86
+-- GGML_SYSTEM_ARCH: UNKNOWN
+-- Shader output dir: /Users/probello/Repos/webllm/src/wasm/build-mem64/ggml/src/ggml-webgpu/generated
+-- Including WebGPU backend
+-- ggml version: 0.10.1
+-- ggml commit:  e29753286
+-- Configuring done (2.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build-mem64
+[  6%] Built target generate_shaders
+[ 68%] Built target ggml-base
+[ 87%] Built target ggml-webgpu
+[100%] Built target webllm-wasm-mem64
+bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+Bundled 33 modules in 6ms
+
+  webllm-bundle.js  224.41 KB  (entry point)
+
+cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
+cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
+smoke server running on http://localhost:8031
+=== smoke-bench: tinyllama-1.1b-chat-q4_0, 3 runs ===
+WEBLLM_WASM_VARIANT= bun run eval/perf.ts --model tinyllama-1.1b-chat-q4_0 --runs 3 --profile 
+Run 1/3... 81.8 tok/s
+Run 2/3... 42.6 tok/s
+Run 3/3... 83.9 tok/s
+
+Inference perf — TinyLlama 1.1B Chat v1.0 (tinyllama-1.1b-chat-q4_0)
+Timestamp: 2026-05-01T19:26:10.420Z
+Prompt:    "Tell one short joke."
+
+Run  Tokens  Wall(ms)  Total(ms)  Prefill(ms)  Decode(ms)  tok/s
+---  ------  --------  ---------  -----------  ----------  -----
+  1      64      3541       1000          169         782   81.8
+  2      64      3353       1700          167        1504   42.6
+  3      64      2249        900          169         762   83.9
+---  ------  --------  ---------  -----------  ----------  -----
+p50*     64      3541       1000          169         782   81.8
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+vs baseline (2026-04-22T19:09:16.644Z): 93.5 tok/s → 81.8 tok/s (-11.7 / -12.5%)
+
+Per-phase decode timing — mode=topk (189 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.00        0.00     0.00    0.0%
+buildGraphMs           0.21        0.20     0.30    1.3%
+backendAllocMs         0.04        0.00     0.10    0.2%
+uploadLeavesMs         0.01        0.00     0.00    0.0%
+graphComputeMs        14.51       10.80    12.30   91.2%
+downloadResultMs       1.14        1.10     1.40    7.2%
+teardownMs             0.00        0.00     0.00    0.0%
+totalMs               15.91       12.20    13.70  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs       189     11.46      9.50     10.70   79.0%
+backendEncodeOverheadMs      189      2.37      2.30      2.70   16.4%
+backendMatmulMs             189      4.32      4.13      5.11   29.8%
+backendAttentionMs          189      0.39      0.39      0.59    2.7%
+backendDispatchCount        189     450.0     450.0     450.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
