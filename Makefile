@@ -129,7 +129,11 @@ wasm-build-mem64: ## Build only the wasm64 (MEMORY64) production binary
 wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
 wasm-build-debug: wasm-clean wasm-build
 
-wasm-clean: ## Remove WASM build artifacts (both wasm32 and wasm64 trees)
+wasm-clean: ## Remove WASM build artifacts (both wasm32 and wasm64 trees) — bypass with FORCE=1
+	@if [ "$(FORCE)" != "1" ]; then \
+		printf 'About to delete src/wasm/build and src/wasm/build-mem64 (full rebuild needed). Continue? [y/N] '; \
+		read ans; [ "$$ans" = "y" ] || [ "$$ans" = "Y" ] || { echo "aborted."; exit 1; }; \
+	fi
 	rm -rf src/wasm/build src/wasm/build-mem64
 
 # ---------------------------------------------------------------------------
@@ -190,7 +194,11 @@ dashboard-serve: ## Run live benchmark dashboard (SSE backend, SQLite-persisted,
 dashboard-stop: ## Kill the dashboard server
 	lsof -ti:$(DASHBOARD_PORT) | xargs kill -9 2>/dev/null || true
 
-dashboard-db-reset: ## Stop the dashboard, delete its SQLite file (+WAL/SHM), next start is empty
+dashboard-db-reset: ## Stop the dashboard, delete its SQLite file (+WAL/SHM), next start is empty — bypass with FORCE=1
+	@if [ "$(FORCE)" != "1" ]; then \
+		printf 'About to delete $(DASHBOARD_DB) and its WAL/SHM sidecars (all bench history). Continue? [y/N] '; \
+		read ans; [ "$$ans" = "y" ] || [ "$$ans" = "Y" ] || { echo "aborted."; exit 1; }; \
+	fi
 	@lsof -ti:$(DASHBOARD_PORT) | xargs kill 2>/dev/null || true
 	@sleep 1
 	@rm -f $(DASHBOARD_DB) $(DASHBOARD_DB)-wal $(DASHBOARD_DB)-shm
@@ -281,5 +289,9 @@ run-all: checkall bench-perf ## Run all quality checks plus offline micro-benchm
 # ---------------------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------------------
-clean: wasm-clean ## Remove all build artifacts
-	rm -rf dist node_modules
+clean: ## Remove all build artifacts (dist, node_modules, src/wasm/build*) — bypass with FORCE=1
+	@if [ "$(FORCE)" != "1" ]; then \
+		printf 'About to delete dist, node_modules, src/wasm/build, src/wasm/build-mem64 (full reinstall + WASM rebuild needed). Continue? [y/N] '; \
+		read ans; [ "$$ans" = "y" ] || [ "$$ans" = "Y" ] || { echo "aborted."; exit 1; }; \
+	fi
+	rm -rf dist node_modules src/wasm/build src/wasm/build-mem64
