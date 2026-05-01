@@ -42,6 +42,12 @@ test("runInteractiveChatTurn routes through the engine completion runner with se
 			samplingConfig,
 			maxTokens,
 			chatOptions,
+		}: {
+			label: string;
+			messages: Array<{ role: string; content: string }>;
+			samplingConfig: Record<string, unknown>;
+			maxTokens: number;
+			chatOptions: Record<string, unknown>;
 		}) {
 			completionCalls.push({
 				label,
