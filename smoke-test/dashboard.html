@@ -35,7 +35,7 @@
       <span id="eval-progress-label" class="dim"></span>
     </div>
   </div>
-  <div id="evals-empty" class="bar-empty">no eval runs yet — try <code>bun run eval/cli.ts --model &lt;id&gt; --live-bench-url http://localhost:8033</code></div>
+  <div id="evals-empty" class="bar-empty">no eval runs yet — try <code>make bench-browser-eval PROFILE=&lt;name&gt; WEBLLM_LIVE_BENCH_URL=http://localhost:8033</code> or <code>make bench-full</code></div>
   <div id="evals-body" hidden>
     <h3 class="section-title">latest by model</h3>
     <div id="evals-dimensions" class="dim-grid"></div>
@@ -263,7 +263,7 @@
     <h2>Runs <span id="embedding-run-count" class="dim">0</span></h2>
     <div class="legend dim">embedding-only profiles</div>
   </div>
-  <div id="embedding-runs-empty" class="bar-empty">no embedding runs yet</div>
+  <div id="embedding-runs-empty" class="bar-empty">encoder profiles produce eval reports (charts above) but no speed-run records — the bench harness skips the chat-smoke phase for embedding profiles since encoders have no causal-LM path. This panel is structurally empty unless a future per-encoder speed harness is wired in.</div>
   <div id="embedding-runs-wrap" class="table-wrap" hidden>
     <!-- B5: Δ total ms column shipped alongside total ms (mirrors the
          pattern in the main runs table). Δ cosine deferred — cosine lives
