@@ -572,10 +572,11 @@ export class ModelInference {
 	 * skipped per slab. This supports loading a shared prefix from a
 	 * longer-stored snapshot without re-serializing.
 	 *
-	 * Async because KV tensors are backend-allocated (WebGPU). Reads route
-	 * through `wasm.downloadFromTensor` (async via ASYNCIFY). Writes use
-	 * `wasm.uploadToTensor`, which is sync but stages through a transient
-	 * heap buffer internally. Callers must `await`.
+	 * Async signature retained for callers; internally this method does no
+	 * awaits. Writes use `wasm.uploadToTensor`, which is sync but stages
+	 * through a transient heap buffer internally. We deliberately avoid
+	 * the ASYNCIFY readback that would otherwise dominate cost — see the
+	 * comment on the upload loop below for rationale.
 	 */
 	async loadKVCache(
 		bytes: Uint8Array,
@@ -609,29 +610,32 @@ export class ModelInference {
 			);
 		}
 
-		// Per K/V tensor: read full tensor via async backend readback
-		// (preserves stale tail slots beyond `nTokens`), overwrite leading
-		// `nTokens` slot bytes from `bytes`, write whole tensor back via
-		// uploadToTensor (sync; stages internally). inOff advances by
+		// Per K/V tensor: build a full-sized JS staging buffer with the
+		// leading `nTokens` slots of each per-head slab populated from
+		// `bytes`, then upload the whole tensor in one write. The tail
+		// positions [nTokens, maxCtx) are zero-filled (Uint8Array default);
+		// they're never read because the model only reads up to `nCached`
+		// (which we set to `nTokens` after the load), so the tail content
+		// doesn't matter. This avoids the async ASYNCIFY readback round-
+		// trip that previously dominated the cost (~576 MiB GPU↔WASM
+		// traffic per call on Qwen3-8B). inOff advances by
 		// `perHeadSnapBytes` per slab — when snapshotLen > nTokens we skip
 		// the unused tail of each slab in the source buffer.
 		const fullKBytes = wasm.tensorNbytes(this.kvLayers[0].k);
+		const stage = new Uint8Array(fullKBytes);
 		let inOff = 0;
 		for (let il = 0; il < hp.layerCount; il++) {
 			const kv = this.kvLayers[il];
 			for (const tensor of [kv.k, kv.v]) {
-				const fullTensor = await wasm.downloadFromTensor(tensor, fullKBytes, 0);
+				stage.fill(0);
 				for (let h = 0; h < hp.headCountKv; h++) {
 					const slabDst = h * perHeadFullBytes;
-					fullTensor.set(
-						bytes.subarray(inOff, inOff + perHeadLoadBytes),
-						slabDst,
-					);
+					stage.set(bytes.subarray(inOff, inOff + perHeadLoadBytes), slabDst);
 					// Advance source by full snapshot slab; skip the
 					// unused tail when snapshotLen > nTokens.
 					inOff += perHeadSnapBytes;
 				}
-				wasm.uploadToTensor(tensor, fullTensor, 0);
+				wasm.uploadToTensor(tensor, stage, 0);
 			}
 		}
 		this.nCached = nTokens;
