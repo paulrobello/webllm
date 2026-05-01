@@ -71,7 +71,7 @@ test("smoke prompt helpers respect BOS policy and build a chat prompt", () => {
 	const prompt = buildSmokePrompt(
 		"Tell one short joke.",
 		{ enableThinking: false },
-		(messages, tokenizer, chatOptions) => {
+		(messages: unknown, tokenizer: unknown, chatOptions: unknown) => {
 			expect(messages).toEqual([
 				{ role: "user", content: "Tell one short joke." },
 			]);
