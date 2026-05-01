@@ -1,0 +1,175 @@
+{
+  "model": "qwen3-0.6b-q4f16",
+  "callCount": 5,
+  "frameStats": {
+    "baseline": {
+      "n": 358,
+      "mean": 8.33,
+      "median": 8.3,
+      "p95": 9,
+      "max": 9.4,
+      "drops60": 0,
+      "drops30": 0,
+      "drops50": 0
+    },
+    "post": {
+      "n": 120,
+      "mean": 8.33,
+      "median": 8.3,
+      "p95": 8.9,
+      "max": 9.3,
+      "drops60": 0,
+      "drops30": 0,
+      "drops50": 0
+    },
+    "perCall": [
+      {
+        "index": 0,
+        "prefill": {
+          "n": 16,
+          "mean": 8.3,
+          "median": 8.3,
+          "p95": 9.4,
+          "max": 9.4,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 26,
+          "mean": 8.35,
+          "median": 8.3,
+          "p95": 8.8,
+          "max": 9.1,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        }
+      },
+      {
+        "index": 1,
+        "prefill": {
+          "n": 9,
+          "mean": 8.39,
+          "median": 8.3,
+          "p95": 9.4,
+          "max": 9.4,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 24,
+          "mean": 8.33,
+          "median": 8.4,
+          "p95": 9.3,
+          "max": 9.4,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        }
+      },
+      {
+        "index": 2,
+        "prefill": {
+          "n": 9,
+          "mean": 8.34,
+          "median": 8.4,
+          "p95": 9.2,
+          "max": 9.2,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 24,
+          "mean": 8.32,
+          "median": 8.3,
+          "p95": 8.6,
+          "max": 9,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        }
+      },
+      {
+        "index": 3,
+        "prefill": {
+          "n": 10,
+          "mean": 8.25,
+          "median": 8.3,
+          "p95": 8.5,
+          "max": 8.5,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 24,
+          "mean": 8.37,
+          "median": 8.3,
+          "p95": 8.7,
+          "max": 9.1,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        }
+      },
+      {
+        "index": 4,
+        "prefill": {
+          "n": 10,
+          "mean": 8.35,
+          "median": 8.4,
+          "p95": 8.9,
+          "max": 8.9,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 25,
+          "mean": 8.34,
+          "median": 8.3,
+          "p95": 9.2,
+          "max": 9.2,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        }
+      }
+    ]
+  },
+  "calls": [
+    {
+      "tStart": 3811.7999999523163,
+      "tEnd": 4158.899999856949,
+      "prefillMs": 126.79999995231628,
+      "genTokens": 16
+    },
+    {
+      "tStart": 4660,
+      "tEnd": 4937.599999904633,
+      "prefillMs": 75.90000009536743,
+      "genTokens": 16
+    },
+    {
+      "tStart": 5438.799999952316,
+      "tEnd": 5717,
+      "prefillMs": 81,
+      "genTokens": 16
+    },
+    {
+      "tStart": 6217.799999952316,
+      "tEnd": 6501.299999952316,
+      "prefillMs": 79.60000014305115,
+      "genTokens": 16
+    },
+    {
+      "tStart": 7002.5,
+      "tEnd": 7290,
+      "prefillMs": 81.70000004768372,
+      "genTokens": 16
+    }
+  ]
+}
