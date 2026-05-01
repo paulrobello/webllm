@@ -23,7 +23,6 @@
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "bench": "bun run bench/run.ts",
     "bench:eval": "bun run eval/cli.ts",
-    "bench:eval:interactive": "bun run eval/cli.ts -i",
     "bench:inference": "bun run eval/perf.ts",
     "bench:chat-smoke": "bun run eval/chat-smoke.ts",
     "bench:chat-smoke:matrix": "bun run eval/chat-smoke-matrix.ts",

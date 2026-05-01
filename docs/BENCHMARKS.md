@@ -248,42 +248,43 @@ bun run bench
 
 ### Model Quality Evaluation
 
+Accuracy evaluation requires real WebGPU inference; there is no offline-only
+path. Use `bench-browser-eval` (per profile) or `bench-full` (full sweep) —
+both drive the smoke page in Chrome and stream results to the live dashboard.
+
 ```bash
-# List all 36 evaluation tasks
+# List all 44 evaluation tasks (offline; no engine needed)
 make bench-eval-list
 
-# Run evaluation against a model (CI mode)
-make bench-eval -- --model llama-3.2-3b-q4_k_m
+# Single profile — needs `make dashboard-serve` running on $(DASHBOARD_PORT)
+make bench-browser-eval PROFILE=qwen3-0.6b-off-warm \
+    WEBLLM_LIVE_BENCH_URL=http://localhost:8033
 
-# Run a single dimension
-bun run bench:eval --model llama-3.2-3b-q4_k_m --dimension tool-calling
-
-# Interactive mode — pick tasks and see live results
-make bench-eval-interactive
-
-# Custom output directory and parameters
-bun run bench:eval -m llama-3.2-3b-q4_k_m -o ./my-reports --temperature 0.3 --max-tokens 512
+# Full profile set, speed + accuracy, dashboard-streamed
+make bench-full
 ```
 
 ### Run Everything
 
 ```bash
-# Performance + evaluation
-make bench-all
+# Quality checks + offline micro-benchmarks (no browser)
+make run-all
+
+# Real-browser end-to-end sweep (needs dashboard)
+make bench-full
 ```
 
 ### CLI Reference
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--model` | `-m` | Model ID to evaluate (required) |
-| `--dimension` | `-d` | Run only one dimension (`tool-calling`, `reasoning`, `instruction-following`) |
-| `--interactive` | `-i` | Interactive mode with live output |
-| `--output` | `-o` | Report output directory (default: `eval/reports`) |
-| `--temperature` | `-t` | Override sampling temperature |
-| `--max-tokens` | | Override max tokens per task |
-| `--timeout` | | Per-task timeout in ms (default: 30000) |
-| `--list` | | List all tasks and exit |
+`eval/cli.ts` is retained for offline introspection (`--list`, `--models`)
+only — it cannot run accuracy tasks because it has no engine. The browser
+harness is `eval/browser-eval.ts` (invoked by `bench-browser-eval`) and
+`eval/bench.ts` (invoked by `bench-full`).
+
+| Flag | Description |
+|------|-------------|
+| `--list` | List all tasks and exit |
+| `--models` | List benchmark models and exit |
 
 ## Interpreting Results
 

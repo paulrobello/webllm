@@ -1,7 +1,7 @@
 .PHONY: build test lint lint-fix fmt typecheck checkall clean install deps \
         wasm-build wasm-build-wasm32 wasm-build-mem64 wasm-clean \
-        bench bench-perf bench-eval bench-eval-interactive bench-eval-list \
-        bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full bench-all \
+        bench bench-perf bench-eval-list \
+        bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full \
         smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench mem64-probe \
         dashboard-serve dashboard-stop dashboard-db-reset import-reports agentchrome-stop stop-all \
         run-all help
@@ -224,12 +224,6 @@ bench: bench-perf ## Run default benchmark suite
 bench-perf: ## Run micro-benchmarks
 	bun run bench
 
-bench-eval: ## Run model eval benchmark (generates HTML report)
-	bun run bench:eval -m $(MODEL) --html
-
-bench-eval-interactive: ## Run model eval interactively
-	bun run bench:eval -m $(MODEL) -i --html
-
 bench-eval-list: ## List available eval tasks
 	bun run bench:eval --list
 
@@ -272,8 +266,6 @@ bench-full: smoke-restart ## Speed + accuracy for every configured profile, stre
 	@WEBLLM_LIVE_BENCH_URL=http://localhost:$(DASHBOARD_PORT) \
 		bun run eval/bench.ts --profiles full --fail-fast
 
-bench-all: bench-perf bench-eval ## Run all benchmarks
-
 .PHONY: bench-prefill-tiling
 bench-prefill-tiling: ## Run the §22 prefill-tile measurement matrix into eval/reports/prefill-tiling-2026-04-27/
 	@echo "==> see docs/superpowers/plans/2026-04-27-prefill-tiling.md Task 5"
@@ -284,7 +276,7 @@ bench-prefill-tiling: ## Run the §22 prefill-tile measurement matrix into eval/
 # ---------------------------------------------------------------------------
 # Combined targets
 # ---------------------------------------------------------------------------
-run-all: checkall bench-all ## Run all quality checks then all benchmarks
+run-all: checkall bench-perf ## Run all quality checks plus offline micro-benchmarks (real-browser sweeps live in `bench-full`)
 
 # ---------------------------------------------------------------------------
 # Clean

@@ -225,12 +225,12 @@ The smoke-test page accepts URL overrides for `thinking`, `ctx`, `max`,
 ### Benchmarks
 
 ```bash
-make bench-perf                    # Mitata micro-benchmarks (no browser)
-make bench-eval                    # Offline task eval (HTML report)
-make bench-inference               # End-to-end Chrome inference perf
-make bench-chat-smoke-matrix       # Default browser-driven chat matrix
-make bench-chat-smoke-matrix-full  # Full matrix incl. Qwen3 thinking-on
-make bench-all                     # Offline subset (bench-perf + bench-eval)
+make bench-perf                       # Mitata micro-benchmarks (no browser)
+make bench-inference                  # End-to-end Chrome inference perf
+make bench-chat-smoke-matrix          # Default browser-driven chat matrix
+make bench-chat-smoke-matrix-full     # Full matrix incl. Qwen3 thinking-on
+make bench-browser-eval PROFILE=<p>   # Real-browser accuracy eval for one profile (needs dashboard)
+make bench-full                       # Speed + accuracy across the full profile set (needs dashboard)
 ```
 
 Browser-driven targets automatically restart a fresh smoke-test server each
