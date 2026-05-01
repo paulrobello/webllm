@@ -25,6 +25,10 @@ export type {
 export { WebLLM } from "./core/engine.js";
 export type { WebLLMErrorCode } from "./core/errors.js";
 export {
+	ConversationBusyError,
+	ConversationContextOverflowError,
+	ConversationNotFoundError,
+	ConversationPoolFullError,
 	EncoderRequiredError,
 	InferenceEngineMissingError,
 	ModelNotFoundError,

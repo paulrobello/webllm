@@ -13,7 +13,11 @@ export type WebLLMErrorCode =
 	| "MODEL_NOT_LOADED"
 	| "INFERENCE_ENGINE_MISSING"
 	| "ENCODER_REQUIRED"
-	| "SPECULATIVE_DECODING_RESERVED";
+	| "SPECULATIVE_DECODING_RESERVED"
+	| "CONVERSATION_NOT_FOUND"
+	| "CONVERSATION_POOL_FULL"
+	| "CONVERSATION_CONTEXT_OVERFLOW"
+	| "CONVERSATION_BUSY";
 
 /** Base class for all errors thrown by the public WebLLM API. */
 export class WebLLMError extends Error {
@@ -96,5 +100,79 @@ export class SpeculativeDecodingReservedError extends WebLLMError {
 			"SPECULATIVE_DECODING_RESERVED",
 		);
 		this.name = "SpeculativeDecodingReservedError";
+	}
+}
+
+/**
+ * Thrown when a caller references a conversation id that the engine has no
+ * record of — disposed, never created, or invalidated by a model unload.
+ */
+export class ConversationNotFoundError extends WebLLMError {
+	readonly conversationId: string;
+	constructor(conversationId: string) {
+		super(
+			`Conversation "${conversationId}" not found (disposed, never created, or model unloaded)`,
+			"CONVERSATION_NOT_FOUND",
+		);
+		this.name = "ConversationNotFoundError";
+		this.conversationId = conversationId;
+	}
+}
+
+/**
+ * Thrown when `engine.createConversation()` is called while the per-engine
+ * conversation pool is at its configured cap. Caller must dispose an existing
+ * conversation before creating another.
+ */
+export class ConversationPoolFullError extends WebLLMError {
+	readonly liveConversationIds: readonly string[];
+	constructor(liveConversationIds: readonly string[]) {
+		super(
+			`Conversation pool full (${liveConversationIds.length} live: ${liveConversationIds.join(", ")}). Dispose one before creating another.`,
+			"CONVERSATION_POOL_FULL",
+		);
+		this.name = "ConversationPoolFullError";
+		this.liveConversationIds = liveConversationIds;
+	}
+}
+
+/**
+ * Thrown when appending a message to a conversation would exceed the model's
+ * configured context window.
+ */
+export class ConversationContextOverflowError extends WebLLMError {
+	readonly conversationId: string;
+	readonly requestedTokens: number;
+	readonly maxContextTokens: number;
+	constructor(
+		conversationId: string,
+		requestedTokens: number,
+		maxContextTokens: number,
+	) {
+		super(
+			`Conversation "${conversationId}" would exceed context: ${requestedTokens} tokens > ${maxContextTokens} max`,
+			"CONVERSATION_CONTEXT_OVERFLOW",
+		);
+		this.name = "ConversationContextOverflowError";
+		this.conversationId = conversationId;
+		this.requestedTokens = requestedTokens;
+		this.maxContextTokens = maxContextTokens;
+	}
+}
+
+/**
+ * Thrown when a second `chatCompletion` / `generateStream` call lands on a
+ * conversation that already has an in-flight call. Conversations are
+ * single-writer.
+ */
+export class ConversationBusyError extends WebLLMError {
+	readonly conversationId: string;
+	constructor(conversationId: string) {
+		super(
+			`Conversation "${conversationId}" has an in-flight chatCompletion call`,
+			"CONVERSATION_BUSY",
+		);
+		this.name = "ConversationBusyError";
+		this.conversationId = conversationId;
 	}
 }
