@@ -1095,38 +1095,43 @@ Daily cadence check (item 1) still required at session start.
      line now carries `tokensIn=N`; new probe runner at
      `eval/probes/probe-9a-prefill-prefix.ts` and 3 fixtures in
      `eval/fixtures/long-prompts.ts`.
-   - **9b. Batched-prompt vs sequential probe.** For an N-NPC
-     scenario, measure per-decision wall-time and tool-call
-     correctness rate for two patterns at matched total token
-     budgets: (i) N sequential `chatCompletion` calls each
-     deciding one NPC, (ii) one `chatCompletion` call with all
-     N observations, asked for `[{npc_id, action}, ...]`.
-     Fixture: synthetic 4-NPC observation set. Decision: which
-     scaling pattern is canonical for the agent harness. Pass-
-     fail threshold for batched: ≥0.7× per-NPC quality of
-     sequential at ≤0.4× total wall time (i.e., real
-     batching win). **Probe-only; the agent harness work that
-     consumes the result is queued separately.**
-   - **9c. Hitch-warmup probe.** Validate the hypothesis that
-     a one-shot decode-shape warmup at session boot eliminates
-     the deterministic ~50ms hitch from the first user-visible
-     NPC tick. Method: extend the multi-call probe with a
-     pre-baseline throwaway `chatCompletion` (say, 4 tokens),
-     then measure the same per-call decode-max distribution.
-     Pass: call-0 `decode_max` falls into the 8.3-12ms band
-     (matches subsequent-call decode_max minus the structural
-     hitch). Decision: whether the warmup-call pattern goes
-     into the engine init path or stays an application-level
-     concern.
-   - **9d. Worker-prototype hitch probe.** Spike a minimal
-     Worker-resident inference path (engine + WASM in a
-     `DedicatedWorker`; `chatCompletion` driven via `postMessage`
-     from main thread). Measure the multi-call decode-hitch
-     distribution from the main-thread render loop's perspective.
-     Pass: main-thread decode-phase `>50ms` drops → 0 across
-     5 sequential calls (worker absorbs the structural hitch).
-     Gates the dual-mode item below — worker isn't worth the
-     plumbing if the hitch survives the thread move.
+   - **9b. Batched-prompt vs sequential probe — CLOSED 2026-05-01,
+     PARTIAL.** N=4 NPCs on `qwen3-8b-iq3m`. Quality 100% / 100%
+     (4/4 each, ratio 1.00 ≥ 0.70 ✅), wall ratio 0.72 (> 0.40 ❌
+     — batched 4010 ms vs sequential 5553 ms). The JSON-wrapper
+     decode overhead (48 vs 7 tokens) ate the projected ≥60% wall
+     savings. **Decision:** sequential remains the canonical
+     agent-tick pattern, hard-dependent on prefix caching (probe
+     9a). With prefix caching projected ~150 ms/tick (≥6 Hz
+     budget). Batched would re-win at N≥16-20 or with constrained
+     JSON decoding. Closure report
+     [`eval/reports/probe-9b-2026-05-01/SUMMARY.md`](eval/reports/probe-9b-2026-05-01/SUMMARY.md).
+   - **9c. Hitch-warmup probe — CLOSED 2026-05-01, FAIL.**
+     Same-page-load A/B with `?frameProbeWarmup=1` toggle on
+     `qwen3-8b-iq3m`. Per-call decode_max (control vs warmup):
+     41.7 / 41.7 / 41.7 / 41.6 / 50.0 vs 41.6 / 41.6 / 58.3 /
+     42.1 / 40.8. Warmup does NOT reduce call-0 decode_max; the
+     hitch persists *every* call regardless. **Decision:** do
+     NOT bake warmup into engine init — hitch is per-call
+     structural overhead, not first-call shape JIT. Closure
+     report
+     [`eval/reports/probe-9c-2026-05-01/SUMMARY.md`](eval/reports/probe-9c-2026-05-01/SUMMARY.md).
+   - **9d. Worker-prototype hitch probe — CLOSED 2026-05-01,
+     PASS (5.5× hitch reduction).** Spike at
+     `smoke-test/probe-9d.html` + `smoke-test/probe-9d-worker.js`
+     drives a Worker-resident `WebLLM.loadModelFromBuffer` engine
+     on `qwen3-0.6b-q4f16` (smaller model used for spike
+     tractability — 7B+ needs the smoke page's heap-streaming
+     loader inside the worker). Same-day same-model main-thread
+     control vs worker decode_max:
+     main 41.0/33.6/58.3/49.8/58.2 (med 49.8) vs worker
+     9.1/9.4/9.0/9.1/9.2 (med 9.1) — **5.5× reduction**, hitch
+     fully absorbed. Public API fix shipped: `loadModelFromBuffer`
+     now honors `options.contextLength` (was previously hard-coded
+     to GGUF max, OOMing 32 K-context KV in the worker memory
+     budget). **Decision:** item 10 (dual-mode worker) is the
+     load-bearing path forward. Closure report
+     [`eval/reports/probe-9d-2026-05-01/SUMMARY.md`](eval/reports/probe-9d-2026-05-01/SUMMARY.md).
 
 10. **Dual-mode deployment (main-thread + worker) — queued 2026-05-01.**
     Goal: the same `WebLLM.init` / `loadModel` / `chatCompletion`
@@ -1136,8 +1141,10 @@ Daily cadence check (item 1) still required at session start.
     structural decode hitch off the render loop is load-bearing
     once tick rates exceed ~1Hz.
 
-    **Gate:** probe 9d must pass first. If the hitch persists in
-    a worker, the dual-mode work doesn't pay off and gets parked.
+    **Gate: PASSED 2026-05-01.** Probe 9d measured 5.5× decode_max
+    reduction (main 49.8 ms median → worker 9.1 ms median) with
+    the hitch fully absorbed from the main-thread render-loop
+    perspective. Dual-mode work is now justified by data.
 
     Scope (sketched, not committed):
     - Engine init path that detects `typeof importScripts !== "undefined"`
