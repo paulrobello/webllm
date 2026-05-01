@@ -315,7 +315,14 @@ function tryServeStatic(
 			status: 200,
 			headers: {
 				"content-type": contentTypeFor(filePath),
-				"cache-control": "no-cache",
+				// `no-store, max-age=0` — never cache the dashboard's HTML/JS/CSS
+				// in the browser. Soft reload (Cmd-R) reliably picks up code
+				// changes without needing Cmd-Shift-R or a manual cache-bust.
+				// `no-cache` (the previous setting) is weaker: it permits cached
+				// reuse with revalidation, and Chrome was observed serving stale
+				// dashboard.js after live-server restarts because the response
+				// lacks ETag/Last-Modified validators.
+				"cache-control": "no-store, max-age=0",
 				...corsHeaders(),
 			},
 		});
