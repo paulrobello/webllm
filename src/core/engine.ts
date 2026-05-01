@@ -40,6 +40,11 @@ import type {
 	StreamInput,
 } from "./chat-types.js";
 import {
+	type ConversationHandle,
+	type ConversationOptions,
+	ConversationPool,
+} from "./conversation-pool.js";
+import {
 	EncoderRequiredError,
 	InferenceEngineMissingError,
 	ModelNotFoundError,
@@ -111,6 +116,7 @@ export class WebLLM {
 	private encoderEngines = new Map<string, EncoderInference>();
 	private causalEmbedderEngines = new Map<string, CausalLMEmbedder>();
 	private sessions = new Map<string, ConversationSession>();
+	private conversationPool: ConversationPool;
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
@@ -121,6 +127,9 @@ export class WebLLM {
 			frameBudgetMs: config.frameBudgetMs ?? 8,
 		});
 		this._pipelineCache = new PipelineCache(config.cacheDir ?? "webllm-cache");
+		this.conversationPool = new ConversationPool({
+			maxConversations: config.maxConversations ?? 4,
+		});
 	}
 
 	static async init(config: WebLLMConfig): Promise<WebLLM> {
@@ -164,6 +173,7 @@ export class WebLLM {
 	}
 
 	async unloadModel(id: string): Promise<void> {
+		this.conversationPool.disposeAllForModel(id);
 		this.sessions.delete(id);
 		const inf = this.inferenceEngines.get(id);
 		if (inf) {
@@ -439,6 +449,29 @@ export class WebLLM {
 			config: genConfig,
 			forwardDecode,
 		});
+	}
+
+	createConversation(
+		modelHandleId: string,
+		options: ConversationOptions = {},
+	): ConversationHandle {
+		const entry = this._modelManager.get(modelHandleId);
+		if (!entry) throw new ModelNotFoundError(modelHandleId);
+		if (!entry.loaded || !entry.tokenizer) {
+			throw new ModelNotLoadedError(modelHandleId);
+		}
+		const inf = this.inferenceEngines.get(modelHandleId);
+		if (!inf) throw new InferenceEngineMissingError(modelHandleId);
+		if (!inf.flashAttn) {
+			throw new Error(
+				`Conversations require FA mode (flashAttn=true); model "${modelHandleId}" is in manual mode.`,
+			);
+		}
+		return this.conversationPool.create(modelHandleId, options);
+	}
+
+	disposeConversation(conv: ConversationHandle): void {
+		this.conversationPool.dispose(conv);
 	}
 
 	/**

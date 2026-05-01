@@ -3,6 +3,8 @@ export interface WebLLMConfig {
 	cacheDir?: string;
 	memoryBudget: number;
 	frameBudgetMs?: number;
+	/** Maximum concurrent conversations per loaded model. Default: 4. */
+	maxConversations?: number;
 }
 
 /** Options passed when loading a model into the engine. */

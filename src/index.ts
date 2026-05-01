@@ -22,6 +22,11 @@ export type {
 	StreamInput,
 	StreamStats,
 } from "./core/chat-types.js";
+export type {
+	ConversationHandle,
+	ConversationOptions,
+	KVSnapshot,
+} from "./core/conversation-pool.js";
 export { WebLLM } from "./core/engine.js";
 export type { WebLLMErrorCode } from "./core/errors.js";
 export {
