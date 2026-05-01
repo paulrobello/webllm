@@ -20,13 +20,14 @@
     "lint:fix": "biome check --fix src tests",
     "fmt": "biome format --write src tests",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "bench": "bun run bench/run.ts",
     "bench:eval": "bun run eval/cli.ts",
     "bench:eval:interactive": "bun run eval/cli.ts -i",
     "bench:inference": "bun run eval/perf.ts",
     "bench:chat-smoke": "bun run eval/chat-smoke.ts",
     "bench:chat-smoke:matrix": "bun run eval/chat-smoke-matrix.ts",
-    "checkall": "bun run fmt && bun run lint && bun run typecheck && bun run test"
+    "checkall": "bun run fmt && bun run lint && bun run typecheck && bun run typecheck:tests && bun run test"
   },
   "keywords": ["llm", "webgpu", "inference", "browser", "llama-cpp", "gguf"],
   "license": "MIT",

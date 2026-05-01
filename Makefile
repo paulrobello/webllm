@@ -59,10 +59,13 @@ lint: ## Lint source with Biome
 lint-fix: ## Lint and auto-fix
 	bun run lint:fix
 
-typecheck: ## Run TypeScript type checking
+typecheck: ## Run TypeScript type checking (production: src/**)
 	bun run typecheck
 
-checkall: fmt lint typecheck test ## Format, lint, typecheck, and test
+typecheck-tests: ## Run TypeScript type checking against tests/** under tsconfig.test.json
+	bun run typecheck:tests
+
+checkall: fmt lint typecheck typecheck-tests test ## Format, lint, typecheck (src + tests), and test
 
 # ---------------------------------------------------------------------------
 # WASM Build (Emscripten / ggml-webgpu)
