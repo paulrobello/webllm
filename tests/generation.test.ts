@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
 	type GenerationConfig,
+	type GenerationResult,
 	Generator,
 	type InternalGenerationOptions,
 } from "../src/inference/generation.js";
+import type { DecodeMode } from "../src/inference/model-inference.js";
 import { Sampler } from "../src/inference/sampler.js";
 import {
 	TokenAttribute,
@@ -174,7 +176,7 @@ describe("Generator", () => {
 			repetitionPenalty: 1,
 		};
 
-		let result: Awaited<ReturnType<typeof Generator.generate>["return"]>;
+		let result: GenerationResult | undefined;
 		const gen = Generator.generate(
 			[1],
 			sampler,
@@ -851,7 +853,7 @@ describe("Generator", () => {
 		async function decodeStep(
 			_ids: number[],
 			_pos: number[],
-			mode: "full" | "greedy" | "topk",
+			mode: DecodeMode,
 			topK?: number,
 		) {
 			decodeCalls.push({ mode, topK });
