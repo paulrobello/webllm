@@ -262,7 +262,20 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
-	// ── Gemma 2 2B IT ─────────────────────────────────────────
+	// ── Gemma 2 2B IT — DEMOTED 2026-05-01 ────────────────────
+	// Profile retained for future re-probe but NOT in the `full`
+	// set. Gemma 2 introduces post-attention LayerNorm, post-FFW
+	// LayerNorm, alternating sliding-window attention, attention/
+	// output logit soft-capping, and tied output↔embedding weights.
+	// The patched ggml-webgpu fork doesn't fully implement those
+	// arch-specific features; the model loads + generates 64 tokens
+	// at 54 tok/s but emits coherent-but-incoherent output ("RSSSF
+	// suprême suprême estúdio estúdio…") consistent with broken
+	// internal math. See closure report at
+	// eval/reports/gemma2-demote-2026-05-01/SUMMARY.md.
+	// Do not re-add to `full` without re-running smoke + verifying
+	// the failure no longer reproduces (likely needs upstream
+	// ggml-webgpu coverage of the four gemma2 quirks above).
 	{
 		name: "gemma-2-2b-warm",
 		model: "gemma-2-2b-q4f16",
@@ -403,7 +416,6 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"qwen2.5-coder-1.5b-warm",
 		"smollm2-1.7b-warm",
 		"qwen2.5-3b-warm",
-		"gemma-2-2b-warm",
 		"llama-3.2-3b-warm",
 		"hermes-3-llama-3.2-3b-warm",
 		"phi-3.5-mini-warm",
