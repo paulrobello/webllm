@@ -103,6 +103,17 @@ export interface CompletionConfig {
 	drafter?: string;
 	/** Reserved in v1 — see `drafter` above. */
 	draftLength?: number;
+	/**
+	 * When true on a `chatCompletion(conv, ...)` call, skip the post-decode
+	 * snapshot save. Use when the caller knows this is the last call before
+	 * dispose, or for one-shot ticks where reusing the prefix isn't valuable.
+	 * Eliminates the per-call ~1.5 s GPU↔WASM serialize cost. The conv's
+	 * prior snapshot is left untouched; subsequent calls on the same conv
+	 * after a `skipSave: true` call will NOT see this call's KV state — they
+	 * fall back to longest-shared-prefix against whatever snapshot existed
+	 * before. Ignored on the legacy `chatCompletion(modelId, ...)` path.
+	 */
+	skipSave?: boolean;
 }
 
 /** Input accepted by the public streaming API. */

@@ -788,34 +788,39 @@ export class WebLLM {
 
 			// 12. Save phase. The working KV now holds [0, finalLen) where
 			// finalLen = newTokens.length + generatedCount. Snapshot and
-			// store under the conversation handle.
-			const finalLen = inf.cachedTokenCount;
-			const fullIds = new Array<number>(finalLen);
-			for (let i = 0; i < newTokens.length && i < finalLen; i++) {
-				fullIds[i] = newTokens[i];
-			}
-			// The generated-tail token ids matter only insofar as the next
-			// turn's longest-shared-prefix walk reaches them. A new user
-			// turn always introduces fresh tokens after the assistant
-			// response, so divergence happens at or before the first
-			// generated id. We store them faithfully when available; pad
-			// with -1 if generatedIds underruns finalLen (e.g., when
-			// generateTextStream advanced cachedTokenCount via its prefill
-			// without yielding a sampled token — shouldn't happen, but
-			// defensive).
-			for (let i = newTokens.length, g = 0; i < finalLen; i++, g++) {
-				fullIds[i] = g < generatedIds.length ? generatedIds[g] : -1;
-			}
+			// store under the conversation handle. Skip when the caller
+			// flagged `skipSave` — the ~1.5 s serialize cost is the
+			// dominant per-call overhead, and ticks that won't reuse the
+			// prefix don't pay it.
+			if (config?.skipSave !== true) {
+				const finalLen = inf.cachedTokenCount;
+				const fullIds = new Array<number>(finalLen);
+				for (let i = 0; i < newTokens.length && i < finalLen; i++) {
+					fullIds[i] = newTokens[i];
+				}
+				// The generated-tail token ids matter only insofar as the next
+				// turn's longest-shared-prefix walk reaches them. A new user
+				// turn always introduces fresh tokens after the assistant
+				// response, so divergence happens at or before the first
+				// generated id. We store them faithfully when available; pad
+				// with -1 if generatedIds underruns finalLen (e.g., when
+				// generateTextStream advanced cachedTokenCount via its prefill
+				// without yielding a sampled token — shouldn't happen, but
+				// defensive).
+				for (let i = newTokens.length, g = 0; i < finalLen; i++, g++) {
+					fullIds[i] = g < generatedIds.length ? generatedIds[g] : -1;
+				}
 
-			const kvBytes = await inf.serializeKVCache(finalLen);
-			this.conversationPool.set(conv, {
-				conversationId: conv.id,
-				modelHandleId: conv.modelHandleId,
-				tokenIds: fullIds,
-				kvBytes,
-				byteSize: kvBytes.byteLength,
-				lastAccessMs: Date.now(),
-			});
+				const kvBytes = await inf.serializeKVCache(finalLen);
+				this.conversationPool.set(conv, {
+					conversationId: conv.id,
+					modelHandleId: conv.modelHandleId,
+					tokenIds: fullIds,
+					kvBytes,
+					byteSize: kvBytes.byteLength,
+					lastAccessMs: Date.now(),
+				});
+			}
 		} finally {
 			release();
 			resolveChain();

@@ -301,4 +301,83 @@ describe("chatCompletion(conv, ...)", () => {
 		inf.resetKVCache = origReset;
 		inf.loadKVCache = origLoad;
 	});
+
+	test("skipSave=true skips serializeKVCache and leaves prior snapshot untouched", async () => {
+		const engine = createFakeEngine();
+		const conv = engine.createConversation("tl");
+		const internals = asInternals(engine);
+		const inf = internals.inferenceEngines.get("tl");
+		if (!inf) throw new Error("missing fake");
+
+		let serializeCalls = 0;
+		const origSerialize = inf.serializeKVCache;
+		inf.serializeKVCache = async (n: number) => {
+			serializeCalls++;
+			return origSerialize(n);
+		};
+
+		// Seed a sentinel snapshot so we can prove it's untouched after the call.
+		const sentinel = new Uint8Array([0xab, 0xcd]);
+		internals.conversationPool.set(conv, {
+			conversationId: conv.id,
+			modelHandleId: "tl",
+			tokenIds: [1, 2, 3],
+			kvBytes: sentinel,
+			byteSize: sentinel.byteLength,
+			lastAccessMs: 0,
+		});
+
+		for await (const _ of engine.chatCompletion(
+			conv,
+			[{ role: "user", content: "p" }],
+			{ maxTokens: 1, temperature: 0, skipSave: true },
+		)) {
+			// drain
+		}
+
+		expect(serializeCalls).toBe(0);
+		const snap = internals.conversationPool.get(conv);
+		expect(snap?.kvBytes).toBe(sentinel);
+
+		inf.serializeKVCache = origSerialize;
+	});
+
+	test("skipSave omitted (default) still serializes and updates snapshot", async () => {
+		const engine = createFakeEngine();
+		const conv = engine.createConversation("tl");
+		const internals = asInternals(engine);
+		const inf = internals.inferenceEngines.get("tl");
+		if (!inf) throw new Error("missing fake");
+
+		let serializeCalls = 0;
+		const origSerialize = inf.serializeKVCache;
+		inf.serializeKVCache = async (n: number) => {
+			serializeCalls++;
+			return origSerialize(n);
+		};
+
+		const sentinel = new Uint8Array([0xab, 0xcd]);
+		internals.conversationPool.set(conv, {
+			conversationId: conv.id,
+			modelHandleId: "tl",
+			tokenIds: [1, 2, 3],
+			kvBytes: sentinel,
+			byteSize: sentinel.byteLength,
+			lastAccessMs: 0,
+		});
+
+		for await (const _ of engine.chatCompletion(
+			conv,
+			[{ role: "user", content: "p" }],
+			{ maxTokens: 1, temperature: 0 },
+		)) {
+			// drain
+		}
+
+		expect(serializeCalls).toBe(1);
+		const snap = internals.conversationPool.get(conv);
+		expect(snap?.kvBytes).not.toBe(sentinel);
+
+		inf.serializeKVCache = origSerialize;
+	});
 });
