@@ -31,7 +31,7 @@ describe.skipIf(SHOULD_SKIP)("ModelInference.embed", () => {
 		const ggufCtx = GgufParser.parse(view) as GgufContext;
 
 		const wasm = new GgmlWasm();
-		await wasm.init({});
+		await wasm.init({} as Parameters<typeof wasm.init>[0]);
 		const inf = new ModelInference(wasm, parsed.hyperparams);
 		inf.loadWeights(ggufCtx, view);
 		inf.initKVCache(64);
