@@ -866,15 +866,19 @@ causal LM support (closed 2026-04-29)".
 **Status:** algorithmic-perf backlog cleared (§17-§29 + Phi-3
 support shipped). TS API audit (a)-(f) closed 2026-04-29; full
 narrative archived to `TODO_ARCHIVE.md`. Embedding bucket C
-(Qwen3-Embedding-0.6B-hyb) closed 2026-04-29 — see item 5 below
-for the closure stub and `eval/reports/bucket-c-parity-2026-04-29/SUMMARY.md`
-for the report. **Next session focus queued 2026-04-29: embedding
-bucket D (chat-model self-embedding via `ModelInference.embed(tokenIds)`)**
-— see item 6 below. Bucket D inherits the per-binding 128 MiB cap
-doctrine, the metaPrefix split, the EOS-append convention, and the
-hybrid-tier parity gate (0.995) from bucket C; brainstorm/spec/plan
-via `superpowers:writing-plans` is the entry point. Daily cadence
-check (item 1) still required at session start.
+(Qwen3-Embedding-0.6B-hyb) closed 2026-04-29 (item 5). Embedding
+bucket D (qwen3-8b-iq3m self-embed) closed 2026-04-30 (item 6);
+Phi-3.5-mini bucket D extension §28 NEGATIVE 2026-04-30 (item 7).
+**Next session focus queued 2026-05-01: NPC scenario sizing probes
+(items 9a-9d) under the probe-first preferred-path doctrine, then
+dual-mode (main-thread + worker) deployment support gated on probe
+9d (item 10).** First-class frame-probe mode shipped 2026-05-01
+(item 8); deterministic ~50ms decode-shape hitch confirmed across
+5 sequential calls — that finding is what triggers items 9c
+(hitch-warmup) and 9d/10 (worker migration). Probe-first means:
+no architecture decision (prefix caching, worker plumbing, batched
+prompt scheduling) lands before the matching probe produces data.
+Daily cadence check (item 1) still required at session start.
 
 1. **Daily upstream cadence check (REQUIRED, ~30s).** Procedure:
    `cd ~/Repos/llama.cpp && git fetch origin && git log
@@ -1019,6 +1023,150 @@ check (item 1) still required at session start.
    No follow-on cycle queued. Phi-3.5-mini bucket D resurrection
    would require trying a higher-precision quant (Q5_K_M / Q6_K /
    f16) and rerunning the harness; see closure report retire-path.
+
+8. **Frame-probe coexistence baseline (queued 2026-05-01).** First-class
+   `?frameProbe=1` mode landed on the smoke page (`smoke-test/frame-
+   probe.js` + `real-model-page.js` integration; `?scene=<url>` for
+   GLTF stress, `?frameProbeCalls=N` for hitch-distribution mode).
+   Multi-call probe on `qwen3-8b-iq3m` confirmed:
+
+   - Render loop median 8.3ms (120Hz baseline) holds across baseline,
+     prefill, decode, post — main-thread async path is sufficient
+     for the agent + Three.js coexistence case at typical scene
+     cost (~3K tri Mountain_01 fixture).
+   - Decode tok/s held at 24.7-25.0 across 5 sequential calls
+     (within 1% of the trivial-cube baseline).
+   - **Per-call decode hitch is DETERMINISTIC** — every call has
+     exactly one ~42-58ms drop in decode (median 49.3ms across 5
+     calls; aggregate `>50ms` rate 2/481 frames). Pattern classifier
+     "DETERMINISTIC (every call hitches in a narrow band)". Hypothesis:
+     prefill→decode shape transition lands in the first 1-2 decode
+     rAF frames.
+   - At 3.8M-tri stress scene: GPU contention dominates (24fps
+     baseline, decode tok/s collapses 25 → 2.8). Main-thread async
+     is fine; physical GPU is the bottleneck. Worker doesn't help
+     this case (shared VRAM + single physical GPU).
+
+   **Probe-first preferred-path doctrine** (per CLAUDE.md
+   "Probe-first is the default"): every architecture decision below
+   gates on a measurement first. Don't pre-commit to a Worker
+   migration, prefix-cache implementation, or NPC tick-rate
+   target until the matching probe lands.
+
+9. **NPC scenario sizing probes (queued 2026-05-01).** Triggered
+   by the user-stated agent + Three.js coexistence target
+   ("LLM's control NPC's not just dialog but actions through tool
+   calls"). Probes are independent and can run in any order; each
+   declares its measurement, threshold, and downstream decision.
+
+   - **9a. Prefill-prefix-cache decomposition probe.** Measure how
+     much of the 660ms qwen3-8b-iq3m prefill is attributable to
+     stable prefix (system prompt + tool schemas) vs the variable
+     observation tail. Method: capture `prefillMs` for two prompts
+     of known token-counts that share an identical N-token prefix;
+     fit `prefillMs = a·prefix_tokens + b·tail_tokens` and report
+     the marginal cost of the prefix. Pass-meaningful threshold:
+     prefix accounts for ≥50% of prefill (i.e., prefix caching
+     would meaningfully shorten NPC ticks). Gates: whether
+     KV-cache-per-conversation-on-shared-weights multiplexing
+     (currently deferred per CLAUDE.md) becomes a load-bearing
+     work item for NPC scenarios. **No code change yet — this is
+     pure measurement.**
+   - **9b. Batched-prompt vs sequential probe.** For an N-NPC
+     scenario, measure per-decision wall-time and tool-call
+     correctness rate for two patterns at matched total token
+     budgets: (i) N sequential `chatCompletion` calls each
+     deciding one NPC, (ii) one `chatCompletion` call with all
+     N observations, asked for `[{npc_id, action}, ...]`.
+     Fixture: synthetic 4-NPC observation set. Decision: which
+     scaling pattern is canonical for the agent harness. Pass-
+     fail threshold for batched: ≥0.7× per-NPC quality of
+     sequential at ≤0.4× total wall time (i.e., real
+     batching win). **Probe-only; the agent harness work that
+     consumes the result is queued separately.**
+   - **9c. Hitch-warmup probe.** Validate the hypothesis that
+     a one-shot decode-shape warmup at session boot eliminates
+     the deterministic ~50ms hitch from the first user-visible
+     NPC tick. Method: extend the multi-call probe with a
+     pre-baseline throwaway `chatCompletion` (say, 4 tokens),
+     then measure the same per-call decode-max distribution.
+     Pass: call-0 `decode_max` falls into the 8.3-12ms band
+     (matches subsequent-call decode_max minus the structural
+     hitch). Decision: whether the warmup-call pattern goes
+     into the engine init path or stays an application-level
+     concern.
+   - **9d. Worker-prototype hitch probe.** Spike a minimal
+     Worker-resident inference path (engine + WASM in a
+     `DedicatedWorker`; `chatCompletion` driven via `postMessage`
+     from main thread). Measure the multi-call decode-hitch
+     distribution from the main-thread render loop's perspective.
+     Pass: main-thread decode-phase `>50ms` drops → 0 across
+     5 sequential calls (worker absorbs the structural hitch).
+     Gates the dual-mode item below — worker isn't worth the
+     plumbing if the hitch survives the thread move.
+
+10. **Dual-mode deployment (main-thread + worker) — queued 2026-05-01.**
+    Goal: the same `WebLLM.init` / `loadModel` / `chatCompletion`
+    API runs identically in main-thread and Worker contexts.
+    Application code chooses per deployment. Triggered by the NPC
+    scenario (agent + Three.js coexistence) where moving the
+    structural decode hitch off the render loop is load-bearing
+    once tick rates exceed ~1Hz.
+
+    **Gate:** probe 9d must pass first. If the hitch persists in
+    a worker, the dual-mode work doesn't pay off and gets parked.
+
+    Scope (sketched, not committed):
+    - Engine init path that detects `typeof importScripts !== "undefined"`
+      (worker context) and loads the WASM accordingly. Worker variant
+      uses a `DedicatedWorker` boot script that constructs `GgmlWasm`,
+      `ModelInference`, and the engine handle entirely off-main-thread.
+    - Main-thread façade: `WebLLM.initInWorker(opts)` returns an
+      object with the same `chatCompletion` / `embed` surface, marshaling
+      calls via `postMessage` and yielding `AsyncIterable<ChunkEvent>`
+      that drains a worker-side stream. Public chat / tool-call
+      surface from `engine.ts` should not need to change — only its
+      construction path.
+    - Resource transfer: tokenized prompts marshal as `Int32Array`
+      (transferable). Generated chunks marshal as `{text, tokenIds,
+      done, finishReason}` JSON. KV-cache + WebGPU resources stay
+      worker-resident — no cross-thread WebGPU sharing required for
+      the agent use case (LLM emits tool calls, main thread executes
+      world-state + Three.js — one-way data flow).
+    - Smoke parity: new `?worker=1` page-level flag on `real-model.html`
+      that boots the engine in worker mode; `[7/8]` chat regression
+      runs identically. `?frameProbe=1` continues to mount the
+      WebGL2/Three.js cube on main and proves the hitch absence.
+    - Bench parity: `eval/bench.ts` and `eval/perf.ts` gain a
+      `--worker` flag that flips the same construction path. Decode
+      tok/s should match main-thread within ±5% (postMessage hop
+      adds ≤1ms/token, lost in noise at 25-100 tok/s).
+    - Embedder parity: `engine.embed` paths (encoder, causal-LM
+      embedder, bucket D self-embed) all run in worker. `embed-perf`
+      bench runs `--worker` mode to validate.
+
+    **Out of scope for the dual-mode commit:** SharedArrayBuffer
+    weight sharing across multiple workers (project is
+    single-model-active per CLAUDE.md); cross-worker WebGPU
+    resource handoff (no current consumer); `SharedWorker`
+    multi-tab inference (no consumer).
+
+    **Risk register:**
+    - ASYNCIFY in worker context: emscripten supports it; should
+      work identically. Probe with the existing 1-token forward to
+      confirm before committing engine plumbing.
+    - WebGPU device limits: `navigator.gpu.requestAdapter()` works
+      in workers since Chrome 113+. No device-feature regressions
+      expected, but the `[diagnoseAlloc]` probe should be re-run
+      from the worker side to confirm `maxStorageBufferBindingSize`
+      etc. match main-thread.
+    - Catalog and asset loaders: any `fetch` paths (`./models/*.gguf`,
+      `./scenes/*.glb` for the frame-probe) need to resolve from the
+      worker's `self.location` correctly. Smoke server is fine —
+      same-origin paths just work.
+
+    Brainstorm/spec/plan via `superpowers:writing-plans` after
+    9d closes.
 
 ---
 
