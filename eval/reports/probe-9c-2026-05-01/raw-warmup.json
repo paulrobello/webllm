@@ -1,0 +1,186 @@
+{
+  "model": "qwen3-8b-iq3m",
+  "mode": "multi",
+  "callCount": 5,
+  "decodeTokens": 21,
+  "prefillMs": 558.6000001430511,
+  "decodeMs": 822.2999997138977,
+  "tokensPerSec": 25.538124780866493,
+  "frameStats": {
+    "baseline": {
+      "n": 354,
+      "mean": 8.43,
+      "median": 8.3,
+      "p95": 9,
+      "max": 41.2,
+      "drops60": 1,
+      "drops30": 1,
+      "drops50": 0
+    },
+    "post": {
+      "n": 121,
+      "mean": 8.33,
+      "median": 8.3,
+      "p95": 8.9,
+      "max": 9.3,
+      "drops60": 0,
+      "drops30": 0,
+      "drops50": 0
+    },
+    "perCall": [
+      {
+        "index": 0,
+        "prefill": {
+          "n": 67,
+          "mean": 8.33,
+          "median": 8.3,
+          "p95": 8.9,
+          "max": 9.3,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 94,
+          "mean": 8.69,
+          "median": 8.3,
+          "p95": 9.2,
+          "max": 41.6,
+          "drops60": 1,
+          "drops30": 1,
+          "drops50": 0
+        }
+      },
+      {
+        "index": 1,
+        "prefill": {
+          "n": 67,
+          "mean": 8.35,
+          "median": 8.3,
+          "p95": 9.1,
+          "max": 9.2,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 96,
+          "mean": 8.68,
+          "median": 8.3,
+          "p95": 8.9,
+          "max": 41.6,
+          "drops60": 1,
+          "drops30": 1,
+          "drops50": 0
+        }
+      },
+      {
+        "index": 2,
+        "prefill": {
+          "n": 52,
+          "mean": 13.46,
+          "median": 8.3,
+          "p95": 9.2,
+          "max": 275,
+          "drops60": 1,
+          "drops30": 1,
+          "drops50": 1
+        },
+        "decode": {
+          "n": 97,
+          "mean": 9.19,
+          "median": 8.3,
+          "p95": 9.1,
+          "max": 58.3,
+          "drops60": 2,
+          "drops30": 2,
+          "drops50": 1
+        }
+      },
+      {
+        "index": 3,
+        "prefill": {
+          "n": 67,
+          "mean": 8.33,
+          "median": 8.3,
+          "p95": 9.1,
+          "max": 9.3,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 94,
+          "mean": 8.69,
+          "median": 8.3,
+          "p95": 9.2,
+          "max": 42.1,
+          "drops60": 1,
+          "drops30": 1,
+          "drops50": 0
+        }
+      },
+      {
+        "index": 4,
+        "prefill": {
+          "n": 67,
+          "mean": 8.33,
+          "median": 8.3,
+          "p95": 8.7,
+          "max": 9.2,
+          "drops60": 0,
+          "drops30": 0,
+          "drops50": 0
+        },
+        "decode": {
+          "n": 95,
+          "mean": 8.68,
+          "median": 8.3,
+          "p95": 9.1,
+          "max": 40.8,
+          "drops60": 1,
+          "drops30": 1,
+          "drops50": 0
+        }
+      }
+    ]
+  },
+  "verdict": null,
+  "sceneInfo": {
+    "kind": "cube",
+    "triangles": 12
+  },
+  "calls": [
+    {
+      "tStart": 8372.700000047684,
+      "prefillMs": 558.6000001430511,
+      "tEnd": 9754.099999904633,
+      "genTokens": 21
+    },
+    {
+      "tStart": 10255.200000047684,
+      "prefillMs": 561.2000000476837,
+      "tEnd": 11654.299999952316,
+      "genTokens": 21
+    },
+    {
+      "tStart": 12155.299999952316,
+      "prefillMs": 698.0999999046326,
+      "tEnd": 13743.799999952316,
+      "genTokens": 21
+    },
+    {
+      "tStart": 14244.5,
+      "prefillMs": 557.5,
+      "tEnd": 15621.700000047684,
+      "genTokens": 21
+    },
+    {
+      "tStart": 16123,
+      "prefillMs": 561.7999999523163,
+      "tEnd": 17512.299999952316,
+      "genTokens": 21
+    }
+  ],
+  "sample": "Why don't skeletons fight each other?  \nBecause they don’t have the *guts*. 😄"
+}

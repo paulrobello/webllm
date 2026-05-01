@@ -231,6 +231,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		Number.isFinite(frameProbeCallsRaw) && frameProbeCallsRaw > 1
 			? Math.floor(frameProbeCallsRaw)
 			: 1;
+	// `?frameProbeWarmup=1` runs a throwaway 4-token chatCompletion AFTER
+	// the baseline rAF window but BEFORE timing the multi-call probe.
+	// Tests probe-9c hypothesis: that the deterministic ~50ms call-0
+	// decode-shape hitch is caused by per-shape pipeline JIT and can be
+	// absorbed by a one-shot warmup at session boot.
+	const frameProbeWarmup = params.get("frameProbeWarmup") === "1";
 	const frameProbeModule = frameProbeEnabled
 		? await import(`./frame-probe.js${assetSuffix}`)
 		: null;
@@ -992,6 +998,29 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			};
 			const smokeMaxTokens =
 				maxTokensOverride ?? (thinkingEnabled ? 1024 : 64);
+			// Probe 9c: optional warmup throwaway. Runs a 4-token
+			// chatCompletion BEFORE the timed multi-call probe so the
+			// per-shape pipeline JIT cost is amortized off the timed
+			// path. After warmup, re-anchor `frameProbeChatStart` so
+			// frame-probe segmentation excludes the warmup window.
+			if (frameProbeWarmup && frameProbeCtl) {
+				log("running", "[frameProbe] warmup throwaway (4 tokens)…");
+				try {
+					await runCompletion({
+						label: smokePrompt.mode,
+						messages: [{ role: "user", content: userMessage }],
+						samplingConfig: smokeSamplingConfig,
+						maxTokens: 4,
+						chatOptions: smokeChatOptions,
+					});
+				} catch (e) {
+					log("warn", `[frameProbe] warmup failed: ${e.message}`);
+				}
+				// Settle so warmup's GPU queue drains before the timed
+				// probe; matches the inter-call gap in multi-call mode.
+				await new Promise((r) => setTimeout(r, 500));
+				frameProbeChatStart = performance.now();
+			}
 			const smokeResult = await runCompletion({
 				label: smokePrompt.mode,
 				messages: [{ role: "user", content: userMessage }],
