@@ -247,6 +247,11 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// `window.__probePrefixCacheResult` for the Bun driver at
 	// `eval/probes/probe-prefix-cache-validation-2026-05-01.ts`.
 	const probePrefixCacheEnabled = params.get("probe") === "prefix-cache";
+	// `?probe=prefix-cache-at-scale` runs the same matrix but with a
+	// ~3-4× longer NPC system prefix (~1500-2000 tokens) to validate the
+	// at-scale case. Posts to `window.__probePrefixCacheAtScaleResult`.
+	const probePrefixCacheAtScaleEnabled =
+		params.get("probe") === "prefix-cache-at-scale";
 	const frameProbeModule = frameProbeEnabled
 		? await import(`./frame-probe.js${assetSuffix}`)
 		: null;
@@ -1266,14 +1271,22 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			// timed calls. Pattern A uses the modelId path (full re-prefill
 			// every call); pattern B uses per-NPC ConversationHandles.
 			// PASS = pattern B's tick-2 median lands in 75-150 ms band.
-			if (probePrefixCacheEnabled) {
+			if (probePrefixCacheEnabled || probePrefixCacheAtScaleEnabled) {
+				const probeTag = probePrefixCacheAtScaleEnabled
+					? "probe-prefix-cache-at-scale"
+					: "probe-prefix-cache";
 				log(
 					"running",
-					"[probe-prefix-cache] running pattern A (no handles) then pattern B (with handles)…",
+					`[${probeTag}] running pattern A (no handles) then pattern B (with handles)…`,
 				);
 
-				const NPC_PREFIX_PFX =
+				const NPC_PREFIX_BASE =
 					"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action. Detailed tool reference. move(x, y): walk the NPC to grid coordinates (x, y); fails if path is blocked, slowed by terrain. speak(text): emit a short utterance audible to NPCs and players within 12 tiles; logs to chat. attack(target): initiate combat with target NPC or player id; honors faction rules and aggro tables. use_item(item): consume from inventory; potions restore hp/mp, scrolls cast spells, food triggers regen ticks. trade(player): open trade window with target player id; both parties must accept. Stat semantics: hp is current health out of max_hp, depletes from damage and regenerates outside combat; mp is mana for spells, regenerates faster than hp; level scales damage and resists; position is current grid cell as (x, y); inventory is a list of item ids. Decision rules: prefer survival over aggression below 30% hp, prefer engagement above 70% hp, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction NPCs.";
+				const NPC_PREFIX_AT_SCALE_TAIL =
+					" Combat formulas: damage = (attacker.attack × roll(0.85, 1.15)) − defender.defense; critical = roll(0.05) doubles damage; magic resist applies after physical reduction; armor pen = max(0, attacker.armorPen − defender.armor × 0.5). Faction relations: orcs vs humans (-3); elves vs orcs (-2); humans vs elves (+1); dwarves vs orcs (-2); dwarves vs elves (-1); all factions neutral to merchants and guards; bounty hunters honor contracts above factions. Status effects: poison ticks 5 hp/turn for 3 turns; stun blocks attack and movement for 1 turn; haste doubles speed for 2 turns; bleed ticks 3 hp/turn for 4 turns; burn ticks 4 hp/turn for 2 turns and disables ice spells; freeze halts movement for 2 turns; charm flips faction temporarily; silence disables spell-cast for 3 turns; root anchors position for 2 turns. Loot tables: low-tier mobs drop 1-3 gp + 30% chance common item; mid-tier add 50% rare drop; bosses always drop legendary + 100-500 gp; chests scale with dungeon depth; quest items bypass random rolls and always drop. Aggro mechanics: damage taken adds threat = damage; healing adds threat = healing × 0.5; threat decays 10%/turn outside combat; taunt forces +200 threat; stealth halves all threat generation; pets generate threat scaled by 0.5. Inventory rules: max 50 slots; weight cap = 10 × strength; over-cap halves movement and disables sprint; equipped gear does not count toward slot count but counts toward weight; consumables stack to 99; quest items have dedicated tab. Trade rules: equal-faction trade tax 5%; cross-faction tax 15%; criminal-status disables trade entirely; black-market merchants accept stolen goods at 30% discount; bartering skill reduces tax by up to 5%. Speech rules: NPCs respond to mentioned proper nouns within 2-tile range; ambient chatter triggers every 10 turns of inactivity; greeting lines vary by faction stance; aggressive NPCs taunt before melee engagement; merchants advertise wares every 30 turns. World map: continents Aerthos (north), Vorden (east), Mirrowyn (south), Karaduun (west), Skyreach (sky-bound floating islands); 7 capitals (Aerthos: Ivormere, Whitestone; Vorden: Hexspire; Mirrowyn: Sunhold, Tideglass; Karaduun: Dustforge; Skyreach: Aerie); 24 minor towns; tunnels link via teleport gates aligned to leyline nodes. Day/night: 24 in-game hours = 1 real hour; nocturnal mobs +20% attack at night, day-active +20% perception by day; dawn and dusk are spawn windows for rare mobs; lunar phases gate werewolf transformations and certain quest triggers. Weather rules: rain slows fire spells by 25% and boosts water spells; snow halves movement on outdoor tiles and applies cold-vulnerability +10%; sandstorms blind ranged attacks beyond 4 tiles; fog masks stealth detection by +30%; thunderstorms power-spike lightning casters by 15% but interrupt long channels on 5% chance per turn. Crafting rules: tier-1 recipes need 1 common + 1 raw material; tier-2 add a refined component; legendary recipes require a quest-rare core; failed crafts return 50% of inputs; specialization perks reduce material cost by up to 20%. Quest log rules: at most 25 active quests; abandoned quests have a 24-hour cooldown; daily resets at server midnight; weekly raids cap at 7 entries; bounty boards refresh every 4 hours. Movement and pathing: NPCs use A* over a 4-connected grid; line-of-sight raycasts ignore translucent props; pets hold a leash radius of 12 tiles unless aggro overrides; mounted NPCs cost 2× weight but move at 2× speed. Animation timing: attack windup 250 ms, recovery 350 ms; cast windup scales with spell tier 200-1500 ms; interrupt windows occur during the first 60% of windup; dodge i-frames last 240 ms; block reduces damage by 50% for 200 ms after press. Audio cues: footsteps audible within 6 tiles indoors and 9 tiles outdoors; spellcasts emit element-specific cues; combat music kicks in within 12 tiles of any aggro source; merchant jingles play within 4 tiles of stalls.";
+				const NPC_PREFIX_PFX = probePrefixCacheAtScaleEnabled
+					? NPC_PREFIX_BASE + NPC_PREFIX_AT_SCALE_TAIL
+					: NPC_PREFIX_BASE;
 				const NPCS_PFX = [
 					{
 						id: "goblin_1",
@@ -1451,15 +1464,20 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					.filter((r) => r.tick === 2)
 					.map((r) => r.prefillMs);
 
-				window.__probePrefixCacheResult = {
+				const probeResultObj = {
 					model: modelId,
 					patternA,
 					patternB,
 				};
+				if (probePrefixCacheAtScaleEnabled) {
+					window.__probePrefixCacheAtScaleResult = probeResultObj;
+				} else {
+					window.__probePrefixCacheResult = probeResultObj;
+				}
 
 				log(
 					"pass",
-					`[probe-prefix-cache] tick-2 medians: A=${median(tick2A).toFixed(0)}ms, B=${median(tick2B).toFixed(0)}ms`,
+					`[${probeTag}] tick-2 medians: A=${median(tick2A).toFixed(0)}ms, B=${median(tick2B).toFixed(0)}ms`,
 				);
 			}
 
