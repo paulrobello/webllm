@@ -510,8 +510,13 @@ export class ModelInference {
 	 * `[maxCtx, headDim, nKvHeads]` layout so per-position bytes aren't
 	 * contiguous; manual-mode snapshotting is not needed for any production
 	 * path (FA is the 7B+ default per §24).
+	 *
+	 * Async because KV tensors are backend-allocated (WebGPU); their host
+	 * memory at `tensor->data` is not readable. Reads route through
+	 * `wasm.downloadFromTensor`, which uses `_backend_tensor_get_async_*`
+	 * and ASYNCIFY internally. Callers must `await`.
 	 */
-	serializeKVCache(nTokens: number): Uint8Array {
+	async serializeKVCache(nTokens: number): Promise<Uint8Array> {
 		if (!this.flashAttn) {
 			throw new Error("serializeKVCache requires FA mode (flashAttn=true)");
 		}
@@ -530,37 +535,26 @@ export class ModelInference {
 		const total = hp.layerCount * 2 * perLayerOutBytes;
 		const out = new Uint8Array(total);
 
-		// Read each tensor's full bytes through tensorGetData into a heap
-		// staging buffer (synchronous via ASYNCIFY). For each per-head slab,
+		// Read each tensor's full bytes via async backend readback. The
+		// returned Uint8Array is a fresh buffer (not a heap view), so no
+		// re-derivation is needed across awaits. For each per-head slab,
 		// memcpy the leading nTokens slots into `out` at the correct offset.
 		// Per-head slab in tensor memory: headDim contiguous × maxCtx slots.
 		const fullKBytes = wasm.tensorNbytes(this.kvLayers[0].k); // == fullVBytes in FA
-		const stagePtr = wasm.malloc(fullKBytes);
-		try {
-			let outOff = 0;
-			for (let il = 0; il < hp.layerCount; il++) {
-				const kv = this.kvLayers[il];
-				for (const tensor of [kv.k, kv.v]) {
-					wasm.tensorGetData(tensor, stagePtr, fullKBytes);
-					// Re-derive heap view AFTER tensorGetData — heap may have
-					// grown across the WASM call and detached prior views.
-					const stageView = new Uint8Array(
-						wasm.heapU8.buffer,
-						stagePtr,
-						fullKBytes,
+		let outOff = 0;
+		for (let il = 0; il < hp.layerCount; il++) {
+			const kv = this.kvLayers[il];
+			for (const tensor of [kv.k, kv.v]) {
+				const fullBytes = await wasm.downloadFromTensor(tensor, fullKBytes, 0);
+				for (let h = 0; h < hp.headCountKv; h++) {
+					const slabSrc = h * perHeadFullBytes;
+					out.set(
+						fullBytes.subarray(slabSrc, slabSrc + perHeadPopBytes),
+						outOff,
 					);
-					for (let h = 0; h < hp.headCountKv; h++) {
-						const slabSrc = h * perHeadFullBytes;
-						out.set(
-							stageView.subarray(slabSrc, slabSrc + perHeadPopBytes),
-							outOff,
-						);
-						outOff += perHeadPopBytes;
-					}
+					outOff += perHeadPopBytes;
 				}
 			}
-		} finally {
-			wasm.free(stagePtr);
 		}
 		return out;
 	}
@@ -577,8 +571,17 @@ export class ModelInference {
 	 * loaded; the remaining `(snapshotLen - nTokens)` slots' bytes are
 	 * skipped per slab. This supports loading a shared prefix from a
 	 * longer-stored snapshot without re-serializing.
+	 *
+	 * Async because KV tensors are backend-allocated (WebGPU). Reads route
+	 * through `wasm.downloadFromTensor` (async via ASYNCIFY). Writes use
+	 * `wasm.uploadToTensor`, which is sync but stages through a transient
+	 * heap buffer internally. Callers must `await`.
 	 */
-	loadKVCache(bytes: Uint8Array, nTokens: number, snapshotLen?: number): void {
+	async loadKVCache(
+		bytes: Uint8Array,
+		nTokens: number,
+		snapshotLen?: number,
+	): Promise<void> {
 		if (!this.flashAttn) {
 			throw new Error("loadKVCache requires FA mode (flashAttn=true)");
 		}
@@ -606,42 +609,30 @@ export class ModelInference {
 			);
 		}
 
-		// Per K/V tensor: read full tensor into staging (preserves stale
-		// tail slots beyond `nTokens`), overwrite leading `nTokens` slot
-		// bytes from `bytes`, write whole tensor back via tensorSetData.
-		// inOff advances by `perHeadSnapBytes` per slab — when
-		// snapshotLen > nTokens we skip the unused tail of each slab in
-		// the source buffer.
+		// Per K/V tensor: read full tensor via async backend readback
+		// (preserves stale tail slots beyond `nTokens`), overwrite leading
+		// `nTokens` slot bytes from `bytes`, write whole tensor back via
+		// uploadToTensor (sync; stages internally). inOff advances by
+		// `perHeadSnapBytes` per slab — when snapshotLen > nTokens we skip
+		// the unused tail of each slab in the source buffer.
 		const fullKBytes = wasm.tensorNbytes(this.kvLayers[0].k);
-		const stagePtr = wasm.malloc(fullKBytes);
-		try {
-			let inOff = 0;
-			for (let il = 0; il < hp.layerCount; il++) {
-				const kv = this.kvLayers[il];
-				for (const tensor of [kv.k, kv.v]) {
-					wasm.tensorGetData(tensor, stagePtr, fullKBytes);
-					// Re-derive heap view AFTER tensorGetData — heap may
-					// have grown across the WASM call.
-					const stageView = new Uint8Array(
-						wasm.heapU8.buffer,
-						stagePtr,
-						fullKBytes,
+		let inOff = 0;
+		for (let il = 0; il < hp.layerCount; il++) {
+			const kv = this.kvLayers[il];
+			for (const tensor of [kv.k, kv.v]) {
+				const fullTensor = await wasm.downloadFromTensor(tensor, fullKBytes, 0);
+				for (let h = 0; h < hp.headCountKv; h++) {
+					const slabDst = h * perHeadFullBytes;
+					fullTensor.set(
+						bytes.subarray(inOff, inOff + perHeadLoadBytes),
+						slabDst,
 					);
-					for (let h = 0; h < hp.headCountKv; h++) {
-						const slabDst = h * perHeadFullBytes;
-						stageView.set(
-							bytes.subarray(inOff, inOff + perHeadLoadBytes),
-							slabDst,
-						);
-						// Advance source by full snapshot slab; skip the
-						// unused tail when snapshotLen > nTokens.
-						inOff += perHeadSnapBytes;
-					}
-					wasm.tensorSetData(tensor, stagePtr, fullKBytes);
+					// Advance source by full snapshot slab; skip the
+					// unused tail when snapshotLen > nTokens.
+					inOff += perHeadSnapBytes;
 				}
+				wasm.uploadToTensor(tensor, fullTensor, 0);
 			}
-		} finally {
-			wasm.free(stagePtr);
 		}
 		this.nCached = nTokens;
 	}

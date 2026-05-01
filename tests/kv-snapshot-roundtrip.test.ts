@@ -52,11 +52,11 @@ describe.skipIf(SHOULD_SKIP)("ModelInference KV snapshot round-trip", () => {
 		// Snapshot path: same prefill, serialize, reset, load, forward.
 		inf.resetKVCache();
 		await inf.forward(ids, positions);
-		const snapshot = inf.serializeKVCache(N);
+		const snapshot = await inf.serializeKVCache(N);
 		expect(snapshot.byteLength).toBeGreaterThan(0);
 		inf.resetKVCache();
 		expect(inf.cachedTokenCount).toBe(0);
-		inf.loadKVCache(snapshot, N);
+		await inf.loadKVCache(snapshot, N);
 		expect(inf.cachedTokenCount).toBe(N);
 		const restoredLogits = await inf.forward(
 			new Int32Array([idArr[N - 1]]),
@@ -110,9 +110,9 @@ describe.skipIf(SHOULD_SKIP)("ModelInference KV snapshot round-trip", () => {
 		const headPos = new Int32Array(N - 1);
 		for (let i = 0; i < N - 1; i++) headPos[i] = i;
 		await inf.forward(headIds, headPos);
-		const partial = inf.serializeKVCache(N - 1);
+		const partial = await inf.serializeKVCache(N - 1);
 		inf.resetKVCache();
-		inf.loadKVCache(partial, N - 1);
+		await inf.loadKVCache(partial, N - 1);
 		expect(inf.cachedTokenCount).toBe(N - 1);
 		await inf.forward(new Int32Array([idArr[N - 1]]), new Int32Array([N - 1]));
 		const tailLogits = await inf.forward(
@@ -147,7 +147,7 @@ describe.skipIf(SHOULD_SKIP)("ModelInference KV snapshot round-trip", () => {
 		inf.initKVCache(64);
 
 		const tooSmall = new Uint8Array(8);
-		expect(() => inf.loadKVCache(tooSmall, 4)).toThrow(/byte/i);
+		await expect(inf.loadKVCache(tooSmall, 4)).rejects.toThrow(/byte/i);
 
 		await inf.dispose();
 		await wasm.shutdown();
