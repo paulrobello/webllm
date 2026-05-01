@@ -1002,7 +1002,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 
 			log(
 				"pass",
-				`[7/8] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason})`,
+				`[7/8] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason}, tokensIn=${smokePrompt.tokens.length})`,
 			);
 			log("pass", `User: ${userMessage}`);
 			const assistantText = thinkingEnabled

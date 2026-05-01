@@ -74,6 +74,7 @@ export interface SmokeTestResult {
 	tokensPerSecond: number;
 	completionPageMs: number;
 	finishReason?: string;
+	tokensIn?: number;
 }
 
 export function agentchrome(
@@ -456,7 +457,7 @@ export async function waitForSmokeTestResult(
 ): Promise<SmokeTestResult> {
 	const deadline = Date.now() + 360_000;
 	const script = `(() => {
-		const pattern = new RegExp("Generated (\\\\d+) tokens in ([0-9.]+)s \\\\(prefill: (\\\\d+)ms, decode: (\\\\d+)ms, ([0-9.]+) tok\\\\/s(?:, finish=([^)]+))?\\\\)");
+		const pattern = new RegExp("Generated (\\\\d+) tokens in ([0-9.]+)s \\\\(prefill: (\\\\d+)ms, decode: (\\\\d+)ms, ([0-9.]+) tok\\\\/s(?:, finish=([^,)]+))?(?:, tokensIn=(\\\\d+))?\\\\)");
 		const t = document.getElementById("log")?.textContent ?? "";
 		const m = t.match(pattern);
 		if (!m) return "";
@@ -467,6 +468,7 @@ export async function waitForSmokeTestResult(
 			decodeMs: +m[4],
 			tokensPerSecond: +m[5],
 			finishReason: m[6] ? m[6].trim() : undefined,
+			tokensIn: m[7] ? +m[7] : undefined,
 			completionPageMs: performance.now(),
 		});
 	})()`;
