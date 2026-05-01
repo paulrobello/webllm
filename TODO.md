@@ -1321,13 +1321,26 @@ Three open candidates, all conditional:
 
 - **Upstream `ggml-webgpu` rebase + free-win sweep.** Trigger:
   upstream actually moves on the `ggml-webgpu/` surface again.
-  Running base is now `f9f33654a` (post-§32). Mechanical sweep
-  on the 6-model fleet against the new baselines (tinyllama-q4_0
-  ~107, qwen3-0.6b ~87, qwen3-1.7b ~61, mistral-7b-q4ks ~35,
-  llama-3.1-8b-iq3m ~27, qwen3-8b-iq3m ~26). Three documented
-  outcome templates: §27 (free-win), §28 (negative result, lever
-  closed harder), §32 (small regression, accepted). Pick the
-  template that matches the data and document.
+  Running base is now `a95a11e5b` (post-§28-on-#22504, see closure
+  below). Mechanical sweep on the 6-model fleet against the new
+  baselines (tinyllama-q4_0 ~107, qwen3-0.6b ~87, qwen3-1.7b ~61,
+  mistral-7b-q4ks ~35, llama-3.1-8b-iq3m ~27, qwen3-8b-iq3m ~26).
+  Three documented outcome templates: §27 (free-win), §28
+  (negative result, lever closed harder), §32 (small regression,
+  accepted). Pick the template that matches the data and document.
+
+  **Last rebase 2026-04-30 — #22504 fast-iquant-matmul / #22514
+  vulkan-tensor-2d → §28 negative result.** Hypothesis: #22504
+  delivers iquant gains analogous to #22344's +80% on
+  qwen3-8b-iq3m. Outcome: NO measured gain on either IQ3_M model
+  (-0.5 to -0.9 tok/s deltas; same-day same-environment rebase
+  delta on tinyllama -1.6%, well within sampling noise). Rebase
+  adopted anyway (option value of staying current, §32-style).
+  Closure report:
+  [`eval/reports/post-rebase-22504-2026-04-30/SUMMARY.md`](eval/reports/post-rebase-22504-2026-04-30/SUMMARY.md).
+  Process lesson codified: any cross-day comparison vs a saved
+  baseline now requires a same-day same-tip control as the first
+  data point in the bench window — see SUMMARY's "Process notes".
 
 ### Deferred (out of scope per current ceilings)
 
