@@ -1,0 +1,119 @@
+{
+  "model": "qwen3-8b-iq3m",
+  "patternA": [
+    {
+      "npcId": "goblin_1",
+      "tick": 1,
+      "prefillMs": 1293.7000000476837,
+      "wallMs": 1624.2999999523163,
+      "output": "\nOkay, let's see."
+    },
+    {
+      "npcId": "goblin_1",
+      "tick": 2,
+      "prefillMs": 775.4000000953674,
+      "wallMs": 1086.1000001430511,
+      "output": "\nOkay, the hero is getting"
+    },
+    {
+      "npcId": "wolf_2",
+      "tick": 1,
+      "prefillMs": 1284.7000000476837,
+      "wallMs": 1600.0999999046326,
+      "output": "\nOkay, let's see."
+    },
+    {
+      "npcId": "wolf_2",
+      "tick": 2,
+      "prefillMs": 760.8999998569489,
+      "wallMs": 1077.7999999523163,
+      "output": "\nOkay, the wolf is hungry"
+    },
+    {
+      "npcId": "merchant_3",
+      "tick": 1,
+      "prefillMs": 1016,
+      "wallMs": 1328.1999998092651,
+      "output": "\nOkay, let's see."
+    },
+    {
+      "npcId": "merchant_3",
+      "tick": 2,
+      "prefillMs": 757.9000000953674,
+      "wallMs": 1070.2999999523163,
+      "output": "\nOkay, the hero asked about"
+    },
+    {
+      "npcId": "guard_4",
+      "tick": 1,
+      "prefillMs": 994.7000000476837,
+      "wallMs": 1313.2999999523163,
+      "output": "\nOkay, let's see."
+    },
+    {
+      "npcId": "guard_4",
+      "tick": 2,
+      "prefillMs": 761.2999999523163,
+      "wallMs": 1081.5999999046326,
+      "output": "\nOkay, so the guard_"
+    }
+  ],
+  "patternB": [
+    {
+      "npcId": "goblin_1",
+      "tick": 1,
+      "prefillMs": 44.200000047683716,
+      "wallMs": 1858.5999999046326,
+      "output": "\nOkay, let's see"
+    },
+    {
+      "npcId": "goblin_1",
+      "tick": 2,
+      "prefillMs": 42.10000014305115,
+      "wallMs": 1604,
+      "output": "\nOkay, the goblin"
+    },
+    {
+      "npcId": "wolf_2",
+      "tick": 1,
+      "prefillMs": 42.299999952316284,
+      "wallMs": 1805,
+      "output": "\nOkay, let's think"
+    },
+    {
+      "npcId": "wolf_2",
+      "tick": 2,
+      "prefillMs": 38.200000047683716,
+      "wallMs": 1506.2999999523163,
+      "output": "\nOkay, let's break"
+    },
+    {
+      "npcId": "merchant_3",
+      "tick": 1,
+      "prefillMs": 43.90000009536743,
+      "wallMs": 1538.4000000953674,
+      "output": "\nOkay, let's see"
+    },
+    {
+      "npcId": "merchant_3",
+      "tick": 2,
+      "prefillMs": 38.59999990463257,
+      "wallMs": 1512.2999999523163,
+      "output": "\nOkay, let me think"
+    },
+    {
+      "npcId": "guard_4",
+      "tick": 1,
+      "prefillMs": 41.799999952316284,
+      "wallMs": 1527.0999999046326,
+      "output": "\nOkay, let's see"
+    },
+    {
+      "npcId": "guard_4",
+      "tick": 2,
+      "prefillMs": 37.5,
+      "wallMs": 1482.7999999523163,
+      "output": "\nOkay, let's break"
+    }
+  ]
+}
