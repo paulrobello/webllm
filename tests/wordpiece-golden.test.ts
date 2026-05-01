@@ -88,10 +88,14 @@ describe.skipIf(!fixturesPresent)("WordPiece HF golden parity", () => {
 	});
 
 	test("special token ids match HF defaults", () => {
-		expect(tok?.config.clsTokenId).toBe(101);
-		expect(tok?.config.sepTokenId).toBe(102);
-		expect(tok?.config.unkTokenId).toBe(100);
-		expect(tok?.config.padTokenId).toBe(0);
+		// Tokenizer.config is private; tests peek at it to verify the
+		// loader populated the right special-token ids. Cast through
+		// unknown to keep the rest of the test type-safe.
+		const cfg = (tok as unknown as { config: Record<string, unknown> })?.config;
+		expect(cfg?.clsTokenId).toBe(101);
+		expect(cfg?.sepTokenId).toBe(102);
+		expect(cfg?.unkTokenId).toBe(100);
+		expect(cfg?.padTokenId).toBe(0);
 	});
 
 	for (const c of golden?.cases ?? []) {
