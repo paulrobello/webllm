@@ -1235,10 +1235,21 @@ Daily cadence check (item 1) still required at session start.
       the populated `[0, nTokens)` slots cuts payload by `maxCtx /
       nTokens`. Requires either a new C++ strided read primitive or
       a WGSL gather kernel.
-    - **At-scale validation probe.** Re-run the validation probe
-      with 1000+ token system prompts to demonstrate the at-scale
-      win directly (current probe at 99-token prefix is below
-      crossover).
+    - **At-scale validation probe — RAN 2026-05-01, FAIL.** Re-ran
+      with ~1325-token system prefix. Pattern B is still ~20%
+      slower (+485 ms) — same magnitude as v1. Phase A diagnostic
+      confirmed sharedLen tracks tick-1's `newTokens.length` exactly
+      at every prefix scale (mechanism is healthy); the v1 cost
+      decomposition was wrong because Pattern A already benefits
+      from the engine's per-model **session-tracker** prefix cache
+      (`engine.ts:932`), so the comparison was never "cache vs
+      no-cache". Pattern B beats Pattern A only when conversations
+      **interleave** on the same model — sequential probes can't
+      demonstrate the win. Report:
+      [`eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md`](eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md).
+      Follow-up: a `probe-prefix-cache-interleaved-*` driver that
+      round-robins NPC ticks (NPC_1 t1 → NPC_2 t1 → ... → NPC_1 t2
+      → ...) is needed to isolate the per-conv-snapshot value-add.
 
     Six original spec follow-ups (LRU eviction, cross-conv prefix
     sharing, Storage B GPU-resident KV, concurrent in-flight per
