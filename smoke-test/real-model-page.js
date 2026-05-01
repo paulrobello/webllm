@@ -241,6 +241,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// after the regular [7/8] smoke flow. Posts the result to
 	// `window.__probe9bResult`; the Bun runner scrapes both scenarios.
 	const probe9bEnabled = params.get("probe") === "9b";
+	// `?probe=prefix-cache` runs the prefix-cache validation probe
+	// (4 NPCs × 2 ticks each, pattern A: no handles / pattern B: with
+	// per-NPC ConversationHandles). Posts the timing matrix to
+	// `window.__probePrefixCacheResult` for the Bun driver at
+	// `eval/probes/probe-prefix-cache-validation-2026-05-01.ts`.
+	const probePrefixCacheEnabled = params.get("probe") === "prefix-cache";
 	const frameProbeModule = frameProbeEnabled
 		? await import(`./frame-probe.js${assetSuffix}`)
 		: null;
@@ -1251,6 +1257,209 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				log(
 					"pass",
 					`[probe9b] sequential total=${seqTotalWallMs.toFixed(0)}ms (${NPCS_9B.length} calls), batched=${batchedRun.wallMs.toFixed(0)}ms`,
+				);
+			}
+
+			// Probe prefix-cache: validates that conversation-handle-mode
+			// `chatCompletion(conv, ...)` actually skips the shared prefix
+			// on a 2nd tick. Two patterns × 4 NPCs × 2 ticks per NPC = 16
+			// timed calls. Pattern A uses the modelId path (full re-prefill
+			// every call); pattern B uses per-NPC ConversationHandles.
+			// PASS = pattern B's tick-2 median lands in 75-150 ms band.
+			if (probePrefixCacheEnabled) {
+				log(
+					"running",
+					"[probe-prefix-cache] running pattern A (no handles) then pattern B (with handles)…",
+				);
+
+				const NPC_PREFIX_PFX =
+					"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action. Detailed tool reference. move(x, y): walk the NPC to grid coordinates (x, y); fails if path is blocked, slowed by terrain. speak(text): emit a short utterance audible to NPCs and players within 12 tiles; logs to chat. attack(target): initiate combat with target NPC or player id; honors faction rules and aggro tables. use_item(item): consume from inventory; potions restore hp/mp, scrolls cast spells, food triggers regen ticks. trade(player): open trade window with target player id; both parties must accept. Stat semantics: hp is current health out of max_hp, depletes from damage and regenerates outside combat; mp is mana for spells, regenerates faster than hp; level scales damage and resists; position is current grid cell as (x, y); inventory is a list of item ids. Decision rules: prefer survival over aggression below 30% hp, prefer engagement above 70% hp, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction NPCs.";
+				const NPCS_PFX = [
+					{
+						id: "goblin_1",
+						obs1:
+							"Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+						obs2:
+							"Hero is now at distance 4 and drew a sword. Goblin hp 22/40.",
+					},
+					{
+						id: "wolf_2",
+						obs1:
+							"Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+						obs2:
+							"Rabbit fled into bushes. A second hunter wolf approached.",
+					},
+					{
+						id: "merchant_3",
+						obs1:
+							"Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+						obs2:
+							"Hero asked about the rare potion. Hero gold balance now 80.",
+					},
+					{
+						id: "guard_4",
+						obs1:
+							"Guard sees suspicious player Thief sneaking near treasure room.",
+						obs2:
+							"Thief drew a dagger and lunged toward the chest.",
+					},
+				];
+
+				// Tick 1: [system, user(obs1)]
+				// Tick 2: [system, user(obs1), assistant(canned reply), user(obs2)]
+				// The shared prefix in tick-2 against tick-1's snapshot covers
+				// [system, user(obs1)] in token space; tick 2 only has to
+				// prefill the divergent [assistant, user(obs2)] tail.
+				const buildTick1 = (npc) => [
+					{ role: "system", content: NPC_PREFIX_PFX },
+					{
+						role: "user",
+						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+					},
+				];
+				const buildTick2 = (npc, prevAssistant) => [
+					{ role: "system", content: NPC_PREFIX_PFX },
+					{
+						role: "user",
+						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+					},
+					{ role: "assistant", content: prevAssistant },
+					{
+						role: "user",
+						content: `NPC: ${npc.id}\nObservation: ${npc.obs2}\n\nReply with one word — the tool name:`,
+					},
+				];
+
+				// Inter-call settle so KV-cache reset + GPU queue drain don't
+				// bleed into the next prefill (matches probe9b cadence).
+				const settle = () => new Promise((r) => setTimeout(r, 500));
+
+				async function runChat(arg, messages) {
+					const tStart = performance.now();
+					const stream = smokeEngine.chatCompletion(arg, messages, {
+						maxTokens: 32,
+					});
+					let prefillMs = 0;
+					let firstTokenAt = 0;
+					let firstChunkSeen = false;
+					const generatedIds = [];
+					let stats = null;
+					for await (const chunk of stream) {
+						if (chunk.done) {
+							stats = chunk.stats ?? null;
+							continue;
+						}
+						if (!firstChunkSeen) {
+							firstTokenAt = performance.now();
+							prefillMs = firstTokenAt - tStart;
+							firstChunkSeen = true;
+						}
+						if (chunk.tokenId !== undefined) {
+							generatedIds.push(chunk.tokenId);
+						}
+					}
+					const wallMs = performance.now() - tStart;
+					// Prefer the engine's official prefill timing (covers the
+					// pure prefill phase, no first-decode overhead).
+					if (
+						stats &&
+						typeof stats.timeToFirstTokenMs === "number" &&
+						stats.timeToFirstTokenMs > 0
+					) {
+						prefillMs = stats.timeToFirstTokenMs;
+					}
+					const outputText = tokenizer.decode(generatedIds);
+					return { wallMs, prefillMs, output: outputText };
+				}
+
+				// Pattern A: handle-id path with no ConversationHandle. Each
+				// call sees full re-prefill via the engine's per-model session
+				// tracker. NB: the smoke page registers the model under a
+				// synthetic `handleId` (not the user-facing config `modelId`),
+				// so we drive the engine via `smokeEngineHandleId`.
+				const engineHandleId = smokeEngineHandleId;
+				const patternA = [];
+				smokeEngine.resetConversation(engineHandleId);
+				await settle();
+				for (const npc of NPCS_PFX) {
+					const r1 = await runChat(engineHandleId, buildTick1(npc));
+					patternA.push({
+						npcId: npc.id,
+						tick: 1,
+						prefillMs: r1.prefillMs,
+						wallMs: r1.wallMs,
+						output: r1.output,
+					});
+					await settle();
+					const r2 = await runChat(
+						engineHandleId,
+						buildTick2(npc, r1.output),
+					);
+					patternA.push({
+						npcId: npc.id,
+						tick: 2,
+						prefillMs: r2.prefillMs,
+						wallMs: r2.wallMs,
+						output: r2.output,
+					});
+					await settle();
+				}
+				smokeEngine.resetConversation(engineHandleId);
+				await settle();
+
+				// Pattern B: per-NPC ConversationHandle. Tick 1 populates the
+				// snapshot; tick 2 should hit the prefix cache.
+				const patternB = [];
+				const convs = NPCS_PFX.map(() =>
+					smokeEngine.createConversation(engineHandleId),
+				);
+				try {
+					for (let i = 0; i < NPCS_PFX.length; i++) {
+						const npc = NPCS_PFX[i];
+						const r1 = await runChat(convs[i], buildTick1(npc));
+						patternB.push({
+							npcId: npc.id,
+							tick: 1,
+							prefillMs: r1.prefillMs,
+							wallMs: r1.wallMs,
+							output: r1.output,
+						});
+						await settle();
+						const r2 = await runChat(convs[i], buildTick2(npc, r1.output));
+						patternB.push({
+							npcId: npc.id,
+							tick: 2,
+							prefillMs: r2.prefillMs,
+							wallMs: r2.wallMs,
+							output: r2.output,
+						});
+						await settle();
+					}
+				} finally {
+					for (const c of convs) smokeEngine.disposeConversation(c);
+				}
+
+				const median = (xs) => {
+					const s = xs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+					if (s.length === 0) return 0;
+					return s[Math.floor(s.length / 2)];
+				};
+				const tick2A = patternA
+					.filter((r) => r.tick === 2)
+					.map((r) => r.prefillMs);
+				const tick2B = patternB
+					.filter((r) => r.tick === 2)
+					.map((r) => r.prefillMs);
+
+				window.__probePrefixCacheResult = {
+					model: modelId,
+					patternA,
+					patternB,
+				};
+
+				log(
+					"pass",
+					`[probe-prefix-cache] tick-2 medians: A=${median(tick2A).toFixed(0)}ms, B=${median(tick2B).toFixed(0)}ms`,
 				);
 			}
 
