@@ -102,6 +102,22 @@ function createLogits(tokenId: number, vocabSize: number): Float32Array {
 const QWEN_TMPL = `{%- for message in messages %}{%- if (message.role == "user") or (message.role == "system" and not loop.first) %}{{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}{%- elif message.role == "assistant" %}{{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}{%- endif %}{%- endfor %}{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- if enable_thinking is defined and enable_thinking is false %}{{- '<think>\n\n</think>\n\n' }}{%- endif %}{%- endif %}`;
 const originalSample = Sampler.prototype.sample;
 
+// Tests intentionally inject minimal internal state into a WebLLM
+// instance. This shape narrows the unsafe cast to a single boundary so
+// the rest of each test stays type-safe. The runtime shape of
+// _modelManager / inferenceEngines / sessions is more complex than
+// these tests need; `unknown` values keep us from reimplementing the
+// full ModelInference / ModelEntry surface in the test fixtures.
+type EngineInternals = {
+	_modelManager: { get(id: string): unknown };
+	inferenceEngines: Map<string, unknown>;
+	sessions: Map<string, unknown>;
+};
+
+function asInternals(engine: WebLLM): EngineInternals {
+	return engine as unknown as EngineInternals;
+}
+
 function createTestEngine(sequence: number[]): WebLLM {
 	return createTestEngineWithTokenizer(createTokenizer(), sequence);
 }
@@ -112,9 +128,9 @@ function createTestEngineWithTokenizer(
 	architecture = "llama",
 ): WebLLM {
 	let step = 0;
-	const engine = Object.create(WebLLM.prototype) as WebLLM &
-		Record<string, unknown>;
-	engine._modelManager = {
+	const engine = Object.create(WebLLM.prototype) as WebLLM;
+	const internals = asInternals(engine);
+	internals._modelManager = {
 		get: () => ({
 			loaded: true,
 			tokenizer,
@@ -123,7 +139,7 @@ function createTestEngineWithTokenizer(
 			},
 		}),
 	};
-	engine.inferenceEngines = new Map([
+	internals.inferenceEngines = new Map<string, unknown>([
 		[
 			"model",
 			{
@@ -137,7 +153,7 @@ function createTestEngineWithTokenizer(
 			},
 		],
 	]);
-	engine.sessions = new Map();
+	internals.sessions = new Map<string, unknown>();
 	return engine;
 }
 
@@ -164,7 +180,8 @@ describe("WebLLM.generateStream", () => {
 				tokenId: chunk.tokenId,
 				done: chunk.done,
 			});
-			if (chunk.done) finalStats = chunk.stats as Record<string, unknown>;
+			if (chunk.done)
+				finalStats = chunk.stats as unknown as Record<string, unknown>;
 		}
 
 		expect(chunks).toEqual([
@@ -217,7 +234,8 @@ describe("WebLLM.generateStream", () => {
 			if (!chunk.done && chunk.tokenId !== undefined) {
 				emittedTokenIds.push(chunk.tokenId);
 			}
-			if (chunk.done) finalStats = chunk.stats as Record<string, unknown>;
+			if (chunk.done)
+				finalStats = chunk.stats as unknown as Record<string, unknown>;
 		}
 
 		expect(emittedTokenIds).toEqual([4]);
@@ -249,7 +267,8 @@ describe("WebLLM.generateStream", () => {
 				tokenId: chunk.tokenId,
 				done: chunk.done,
 			});
-			if (chunk.done) finalStats = chunk.stats as Record<string, unknown>;
+			if (chunk.done)
+				finalStats = chunk.stats as unknown as Record<string, unknown>;
 		}
 
 		expect(chunks).toEqual([
@@ -285,16 +304,16 @@ describe("WebLLM.generateStream", () => {
 			getId: () => undefined,
 			decode: () => "",
 		} as unknown as Tokenizer;
-		const engine = Object.create(WebLLM.prototype) as WebLLM &
-			Record<string, unknown>;
-		engine._modelManager = {
+		const engine = Object.create(WebLLM.prototype) as WebLLM;
+		const internals = asInternals(engine);
+		internals._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		engine.inferenceEngines = new Map([
+		internals.inferenceEngines = new Map<string, unknown>([
 			[
 				"model",
 				{
@@ -308,7 +327,7 @@ describe("WebLLM.generateStream", () => {
 				},
 			],
 		]);
-		engine.sessions = new Map();
+		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -342,16 +361,16 @@ describe("WebLLM.generateStream", () => {
 			getId: () => undefined,
 			decode: () => "",
 		} as unknown as Tokenizer;
-		const engine = Object.create(WebLLM.prototype) as WebLLM &
-			Record<string, unknown>;
-		engine._modelManager = {
+		const engine = Object.create(WebLLM.prototype) as WebLLM;
+		const internals = asInternals(engine);
+		internals._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		engine.inferenceEngines = new Map([
+		internals.inferenceEngines = new Map<string, unknown>([
 			[
 				"model",
 				{
@@ -361,7 +380,7 @@ describe("WebLLM.generateStream", () => {
 				},
 			],
 		]);
-		engine.sessions = new Map();
+		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -409,16 +428,16 @@ describe("WebLLM.generateStream", () => {
 			getId: () => undefined,
 			decode: () => "",
 		} as unknown as Tokenizer;
-		const engine = Object.create(WebLLM.prototype) as WebLLM &
-			Record<string, unknown>;
-		engine._modelManager = {
+		const engine = Object.create(WebLLM.prototype) as WebLLM;
+		const internals = asInternals(engine);
+		internals._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		engine.inferenceEngines = new Map([
+		internals.inferenceEngines = new Map<string, unknown>([
 			[
 				"model",
 				{
@@ -428,7 +447,7 @@ describe("WebLLM.generateStream", () => {
 				},
 			],
 		]);
-		engine.sessions = new Map();
+		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream("model", [
 			{ role: "user", content: "Hello" },
@@ -475,16 +494,16 @@ describe("WebLLM.generateStream", () => {
 			getId: () => undefined,
 			decode: () => "",
 		} as unknown as Tokenizer;
-		const engine = Object.create(WebLLM.prototype) as WebLLM &
-			Record<string, unknown>;
-		engine._modelManager = {
+		const engine = Object.create(WebLLM.prototype) as WebLLM;
+		const internals = asInternals(engine);
+		internals._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		engine.inferenceEngines = new Map([
+		internals.inferenceEngines = new Map<string, unknown>([
 			[
 				"model",
 				{
@@ -494,7 +513,7 @@ describe("WebLLM.generateStream", () => {
 				},
 			],
 		]);
-		engine.sessions = new Map();
+		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -528,16 +547,16 @@ describe("WebLLM.generateStream", () => {
 			getId: () => undefined,
 			decode: () => "",
 		} as unknown as Tokenizer;
-		const engine = Object.create(WebLLM.prototype) as WebLLM &
-			Record<string, unknown>;
-		engine._modelManager = {
+		const engine = Object.create(WebLLM.prototype) as WebLLM;
+		const internals = asInternals(engine);
+		internals._modelManager = {
 			get: () => ({
 				loaded: true,
 				tokenizer,
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		engine.inferenceEngines = new Map([
+		internals.inferenceEngines = new Map<string, unknown>([
 			[
 				"model",
 				{
@@ -547,7 +566,7 @@ describe("WebLLM.generateStream", () => {
 				},
 			],
 		]);
-		engine.sessions = new Map();
+		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -579,7 +598,8 @@ describe("WebLLM.generateStream", () => {
 				tokenId: chunk.tokenId,
 				done: chunk.done,
 			});
-			if (chunk.done) finalStats = chunk.stats as Record<string, unknown>;
+			if (chunk.done)
+				finalStats = chunk.stats as unknown as Record<string, unknown>;
 		}
 
 		expect(chunks).toEqual([
