@@ -5,39 +5,42 @@ describe("Public GenerationConfig surface", () => {
 	test("rejects internal steering fields at the type level", () => {
 		// These assignments must NOT compile. If any does, the public type
 		// is leaking internal steering fields and the split has regressed.
+		// Each @ts-expect-error sits directly above the offending property
+		// because TS reports excess-property errors at the property line,
+		// not at the surrounding `const` declaration.
 
-		// @ts-expect-error — thinkingOpenTokenId is internal-only
 		const _a: GenerationConfig = {
 			maxTokens: 10,
 			temperature: 1,
 			topK: 0,
 			topP: 1,
 			repetitionPenalty: 1,
+			// @ts-expect-error — thinkingOpenTokenId is internal-only
 			thinkingOpenTokenId: 42,
 		};
 
-		// @ts-expect-error — maskedTokensWhileThinking is internal-only
 		const _b: GenerationConfig = {
 			maxTokens: 10,
 			temperature: 1,
 			topK: 0,
 			topP: 1,
 			repetitionPenalty: 1,
+			// @ts-expect-error — maskedTokensWhileThinking is internal-only
 			maskedTokensWhileThinking: [1, 2, 3],
 		};
 
-		// @ts-expect-error — requireVisibleAnswerAfterThinking is internal-only
 		const _c: GenerationConfig = {
 			maxTokens: 10,
 			temperature: 1,
 			topK: 0,
 			topP: 1,
 			repetitionPenalty: 1,
+			// @ts-expect-error — requireVisibleAnswerAfterThinking is internal-only
 			requireVisibleAnswerAfterThinking: true,
 		};
 
-		// @ts-expect-error — prompt was dropped entirely
 		const _d: GenerationConfig = {
+			// @ts-expect-error — prompt was dropped entirely
 			prompt: "hi",
 			maxTokens: 10,
 			temperature: 1,
