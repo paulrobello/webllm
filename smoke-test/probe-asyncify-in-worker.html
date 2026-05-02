@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>ASYNCIFY in worker probe</title>
+<style>body{font:12px monospace;background:#0d1117;color:#c9d1d9;padding:16px}
+.pass{color:#3fb950}.fail{color:#f85149}.info{color:#79c0ff}</style></head>
+<body><div id="log"></div>
+<script type="module">
+const log = (cls, msg) => {
+	const d = document.createElement("div");
+	d.className = cls;
+	d.textContent = `[${cls}] ${msg}`;
+	document.getElementById("log").appendChild(d);
+	console.log(`[${cls}]`, msg);
+};
+log("info", "booting worker…");
+const w = new Worker("./probe-asyncify-in-worker-worker.js", { type: "module" });
+w.addEventListener("message", (e) => {
+	if (e.data.type === "done") {
+		log("pass", `init=${e.data.tInitMs.toFixed(0)}ms gen=${e.data.tGenMs.toFixed(0)}ms tokens=${e.data.nTokens}`);
+		log("info", `output: ${JSON.stringify(e.data.text)}`);
+		log("info", `tokenIds: ${JSON.stringify(e.data.tokenIds)}`);
+		log("pass", `[7/8] Generated ${e.data.nTokens} tokens in ${(e.data.tGenMs/1000).toFixed(1)}s (finish=stop, tokensIn=0)`);
+	} else {
+		log("fail", e.data.message);
+		if (e.data.stack) log("fail", e.data.stack);
+	}
+});
+w.postMessage({ type: "run" });
+</script></body></html>
