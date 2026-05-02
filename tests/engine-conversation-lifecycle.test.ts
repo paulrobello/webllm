@@ -74,54 +74,58 @@ function createFakeEngine(opts?: {
 }
 
 describe("engine conversation lifecycle", () => {
-	test("createConversation returns a fresh handle for a loaded model", () => {
+	test("createConversation returns a fresh handle for a loaded model", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
+		const conv = await engine.createConversation("tl");
 		expect(conv.modelHandleId).toBe("tl");
 		expect(conv.id).toMatch(/^conv_/);
-		engine.disposeConversation(conv);
+		await engine.disposeConversation(conv);
 	});
 
-	test("createConversation on missing model throws ModelNotFoundError", () => {
+	test("createConversation on missing model throws ModelNotFoundError", async () => {
 		const engine = createFakeEngine();
-		expect(() => engine.createConversation("nope")).toThrow(ModelNotFoundError);
+		expect(engine.createConversation("nope")).rejects.toThrow(
+			ModelNotFoundError,
+		);
 	});
 
-	test("createConversation on unloaded model throws ModelNotLoadedError", () => {
+	test("createConversation on unloaded model throws ModelNotLoadedError", async () => {
 		const engine = createFakeEngine({ loaded: false });
-		expect(() => engine.createConversation("tl")).toThrow(ModelNotLoadedError);
+		expect(engine.createConversation("tl")).rejects.toThrow(
+			ModelNotLoadedError,
+		);
 	});
 
-	test("createConversation rejects manual-mode model", () => {
+	test("createConversation rejects manual-mode model", async () => {
 		const engine = createFakeEngine({ flashAttn: false });
-		expect(() => engine.createConversation("tl")).toThrow(/FA mode/i);
+		expect(engine.createConversation("tl")).rejects.toThrow(/FA mode/i);
 	});
 
-	test("disposeConversation is idempotent", () => {
+	test("disposeConversation is idempotent", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
-		engine.disposeConversation(conv);
-		expect(() => engine.disposeConversation(conv)).not.toThrow();
+		const conv = await engine.createConversation("tl");
+		await engine.disposeConversation(conv);
+		expect(engine.disposeConversation(conv)).resolves.toBeUndefined();
 	});
 
-	test("createConversation at cap evicts LRU non-locked entry", () => {
+	test("createConversation at cap evicts LRU non-locked entry", async () => {
 		const engine = createFakeEngine({ maxConversations: 2 });
-		const a = engine.createConversation("tl");
-		const b = engine.createConversation("tl");
+		const a = await engine.createConversation("tl");
+		const b = await engine.createConversation("tl");
 		// `a` is the oldest non-locked entry; create() should evict it.
-		const c = engine.createConversation("tl");
+		const c = await engine.createConversation("tl");
 		// `a` is gone, `b` and `c` survive.
 		const internals = asInternals(engine);
 		expect(() => internals.conversationPool.assertExists(a)).toThrow();
 		expect(() => internals.conversationPool.assertExists(b)).not.toThrow();
 		expect(() => internals.conversationPool.assertExists(c)).not.toThrow();
-		engine.disposeConversation(b);
-		engine.disposeConversation(c);
+		await engine.disposeConversation(b);
+		await engine.disposeConversation(c);
 	});
 
 	test("unloadModel disposes all conversations attached to that model", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
+		const conv = await engine.createConversation("tl");
 		// Spy on the pool to confirm disposeAllForModel was called.
 		const internals = asInternals(engine);
 		let disposed = "";

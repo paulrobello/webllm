@@ -140,8 +140,8 @@ function createFakeEngine(sequence: number[] = [4, 5, 2]): WebLLM {
 describe("chatCompletion(conv, ...)", () => {
 	test("on disposed handle throws ConversationNotFoundError", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
-		engine.disposeConversation(conv);
+		const conv = await engine.createConversation("tl");
+		await engine.disposeConversation(conv);
 
 		let threw: unknown;
 		try {
@@ -159,7 +159,7 @@ describe("chatCompletion(conv, ...)", () => {
 
 	test("concurrent call on the same handle throws ConversationBusyError", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
+		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
 		// Pre-acquire the lock to simulate an in-flight call.
 		const release = internals.conversationPool.tryAcquireLock(conv);
@@ -182,7 +182,7 @@ describe("chatCompletion(conv, ...)", () => {
 
 	test("second turn's prefill positions start after sharedLen", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
+		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
 		const inf = internals.inferenceEngines.get("tl");
 		if (!inf) throw new Error("missing fake");
@@ -248,7 +248,7 @@ describe("chatCompletion(conv, ...)", () => {
 
 	test("shared-prefix path skips resetKVCache and uses loadKVCache", async () => {
 		const engine = createFakeEngine([4, 5, 2]);
-		const conv = engine.createConversation("tl");
+		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
 		const inf = internals.inferenceEngines.get("tl");
 		if (!inf) throw new Error("missing fake");
@@ -308,7 +308,7 @@ describe("chatCompletion(conv, ...)", () => {
 
 	test("skipSave=true skips serializeKVCache and leaves prior snapshot untouched", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
+		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
 		const inf = internals.inferenceEngines.get("tl");
 		if (!inf) throw new Error("missing fake");
@@ -348,7 +348,7 @@ describe("chatCompletion(conv, ...)", () => {
 
 	test("skipSave omitted (default) still serializes and updates snapshot", async () => {
 		const engine = createFakeEngine();
-		const conv = engine.createConversation("tl");
+		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
 		const inf = internals.inferenceEngines.get("tl");
 		if (!inf) throw new Error("missing fake");
@@ -387,10 +387,10 @@ describe("chatCompletion(conv, ...)", () => {
 });
 
 describe("forkConversation", () => {
-	test("fork copies src snapshot into a new handle", () => {
+	test("fork copies src snapshot into a new handle", async () => {
 		const engine = createFakeEngine();
 		const internals = asInternals(engine);
-		const src = engine.createConversation("tl");
+		const src = await engine.createConversation("tl");
 
 		// Seed src with a snapshot so fork has something to clone.
 		const seededIds = [1, 3, 5, 7];
@@ -404,7 +404,7 @@ describe("forkConversation", () => {
 			lastAccessMs: 0,
 		});
 
-		const fork = engine.forkConversation(src);
+		const fork = await engine.forkConversation(src);
 		expect(fork.id).not.toBe(src.id);
 		expect(fork.modelHandleId).toBe("tl");
 
@@ -419,10 +419,10 @@ describe("forkConversation", () => {
 		);
 	});
 
-	test("fork is independent — mutating src snapshot does not change fork", () => {
+	test("fork is independent — mutating src snapshot does not change fork", async () => {
 		const engine = createFakeEngine();
 		const internals = asInternals(engine);
-		const src = engine.createConversation("tl");
+		const src = await engine.createConversation("tl");
 
 		const seededIds = [1, 3, 5];
 		internals.conversationPool.set(src, {
@@ -433,7 +433,7 @@ describe("forkConversation", () => {
 			byteSize: 3,
 			lastAccessMs: 0,
 		});
-		const fork = engine.forkConversation(src);
+		const fork = await engine.forkConversation(src);
 
 		// Mutate src's snapshot in-place (e.g., a subsequent chatCompletion call).
 		const srcSnap = internals.conversationPool.get(src);
@@ -446,20 +446,20 @@ describe("forkConversation", () => {
 		expect(forkSnap?.kvBytes[0]).toBe(0xaa);
 	});
 
-	test("fork on disposed handle throws ConversationNotFoundError", () => {
+	test("fork on disposed handle throws ConversationNotFoundError", async () => {
 		const engine = createFakeEngine();
-		const src = engine.createConversation("tl");
-		engine.disposeConversation(src);
-		expect(() => engine.forkConversation(src)).toThrow(
+		const src = await engine.createConversation("tl");
+		await engine.disposeConversation(src);
+		expect(engine.forkConversation(src)).rejects.toThrow(
 			ConversationNotFoundError,
 		);
 	});
 
-	test("fork on un-populated handle throws ConversationNotPopulatedError", () => {
+	test("fork on un-populated handle throws ConversationNotPopulatedError", async () => {
 		const engine = createFakeEngine();
-		const src = engine.createConversation("tl");
+		const src = await engine.createConversation("tl");
 		// No snapshot ever set.
-		expect(() => engine.forkConversation(src)).toThrow(
+		expect(engine.forkConversation(src)).rejects.toThrow(
 			ConversationNotPopulatedError,
 		);
 	});

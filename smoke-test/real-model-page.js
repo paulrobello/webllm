@@ -1449,8 +1449,8 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// Pattern B: per-NPC ConversationHandle. Tick 1 populates the
 				// snapshot; tick 2 should hit the prefix cache.
 				const patternB = [];
-				const convs = NPCS_PFX.map(() =>
-					smokeEngine.createConversation(engineHandleId),
+				const convs = await Promise.all(
+					NPCS_PFX.map(() => smokeEngine.createConversation(engineHandleId)),
 				);
 				try {
 					for (let i = 0; i < NPCS_PFX.length; i++) {
@@ -1475,7 +1475,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						await settle();
 					}
 				} finally {
-					for (const c of convs) smokeEngine.disposeConversation(c);
+					for (const c of convs) await smokeEngine.disposeConversation(c);
 				}
 
 				const median = (xs) => {
@@ -1705,8 +1705,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// re-prefilling the persona.
 				const patternB = [];
 				const patternBRecallCues = new Array(NPCS_INTERLEAVED.length);
-				const convs = NPCS_INTERLEAVED.map(() =>
-					smokeEngine.createConversation(engineHandleId),
+				const convs = await Promise.all(
+					NPCS_INTERLEAVED.map(() =>
+						smokeEngine.createConversation(engineHandleId),
+					),
 				);
 				try {
 					for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
@@ -1738,7 +1740,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						await settle();
 					}
 				} finally {
-					for (const c of convs) smokeEngine.disposeConversation(c);
+					for (const c of convs) await smokeEngine.disposeConversation(c);
 				}
 
 				const med = (xs) => {
@@ -1856,8 +1858,8 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// chatCompletion has no snapshot, so it prefills the entire
 				// shared prefix from scratch.
 				const patternX = [];
-				const baselineConvs = NPCS_FORK.map(() =>
-					smokeEngine.createConversation(engineHandleId),
+				const baselineConvs = await Promise.all(
+					NPCS_FORK.map(() => smokeEngine.createConversation(engineHandleId)),
 				);
 				try {
 					for (let i = 0; i < NPCS_FORK.length; i++) {
@@ -1872,7 +1874,8 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						await settle();
 					}
 				} finally {
-					for (const c of baselineConvs) smokeEngine.disposeConversation(c);
+					for (const c of baselineConvs)
+						await smokeEngine.disposeConversation(c);
 				}
 
 				// Reset the per-model session tracker so its KV doesn't bleed
@@ -1888,7 +1891,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// chatCompletion. The fork's first call should find the
 				// shared prefix in the inherited snapshot and prefill only
 				// the divergent NPC tail.
-				const baseConv = smokeEngine.createConversation(engineHandleId);
+				const baseConv = await smokeEngine.createConversation(engineHandleId);
 				let baseTickMs = 0;
 				try {
 					// Prime base with [system, user="ping"]. The "ping" user
@@ -1903,8 +1906,8 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					baseTickMs = performance.now() - baseStart;
 
 					const patternY = [];
-					const forkConvs = NPCS_FORK.map(() =>
-						smokeEngine.forkConversation(baseConv),
+					const forkConvs = await Promise.all(
+						NPCS_FORK.map(() => smokeEngine.forkConversation(baseConv)),
 					);
 					try {
 						for (let i = 0; i < NPCS_FORK.length; i++) {
@@ -1922,7 +1925,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 							await settle();
 						}
 					} finally {
-						for (const c of forkConvs) smokeEngine.disposeConversation(c);
+						for (const c of forkConvs) await smokeEngine.disposeConversation(c);
 					}
 
 					const med = (xs) => {
@@ -1941,7 +1944,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						`[${probeTag}] median wall: X=${med(patternX.map((r) => r.wallMs)).toFixed(0)}ms, Y=${med(patternY.map((r) => r.wallMs)).toFixed(0)}ms`,
 					);
 				} finally {
-					smokeEngine.disposeConversation(baseConv);
+					await smokeEngine.disposeConversation(baseConv);
 				}
 			}
 

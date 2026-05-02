@@ -488,10 +488,10 @@ export class WebLLM {
 		});
 	}
 
-	createConversation(
+	async createConversation(
 		modelHandleId: string,
 		options: ConversationOptions = {},
-	): ConversationHandle {
+	): Promise<ConversationHandle> {
 		const entry = this._modelManager.get(modelHandleId);
 		if (!entry) throw new ModelNotFoundError(modelHandleId);
 		if (!entry.loaded || !entry.tokenizer) {
@@ -509,7 +509,7 @@ export class WebLLM {
 		return this.conversationPool.create(modelHandleId, options);
 	}
 
-	disposeConversation(conv: ConversationHandle): void {
+	async disposeConversation(conv: ConversationHandle): Promise<void> {
 		this.conversationPool.dispose(conv);
 	}
 
@@ -533,7 +533,7 @@ export class WebLLM {
 	 * Spec follow-up #2 (cross-conversation prefix sharing) — copy-from-
 	 * prefix-store path; no C++ patch.
 	 */
-	forkConversation(src: ConversationHandle): ConversationHandle {
+	async forkConversation(src: ConversationHandle): Promise<ConversationHandle> {
 		return this.conversationPool.fork(src);
 	}
 
