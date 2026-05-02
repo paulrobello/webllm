@@ -1220,36 +1220,42 @@ Daily cadence check (item 1) still required at session start.
     clear net wins predicted at 500-2000-token prefixes (typical
     agent + Three.js NPC system prompt scale).
 
-    **v2 follow-ups queued (do not action without measurement):**
-    - **Fuse multi-tensor backend transfers.** A C++ batch primitive
-      (`backend_tensor_get_many` / `backend_tensor_set_many`) cuts
-      72 ASYNCIFY round-trips per call to 1. Estimated v2 win:
-      save+load 940 ms → 30-100 ms. Largest leverage. Needs a 12th
-      patch on the `webllm-browser-patches` stack.
-    - **Skip save when conversation is dormant.** A
-      `disposeConversation(conv, { skipSave: true })` hint or an
-      implicit dormancy heuristic. Avoids serialize cost entirely
-      when caller knows next call is far off.
-    - **Per-head offset reads.** Currently `serializeKVCache` reads
-      the full maxCtx-sized tensor per layer; a strided read of only
-      the populated `[0, nTokens)` slots cuts payload by `maxCtx /
-      nTokens`. Requires either a new C++ strided read primitive or
-      a WGSL gather kernel.
-    - **At-scale validation probe — RAN 2026-05-01, FAIL.** Re-ran
-      with ~1325-token system prefix. Pattern B is still ~20%
-      slower (+485 ms) — same magnitude as v1. Phase A diagnostic
-      confirmed sharedLen tracks tick-1's `newTokens.length` exactly
-      at every prefix scale (mechanism is healthy); the v1 cost
-      decomposition was wrong because Pattern A already benefits
-      from the engine's per-model **session-tracker** prefix cache
-      (`engine.ts:932`), so the comparison was never "cache vs
-      no-cache". Pattern B beats Pattern A only when conversations
-      **interleave** on the same model — sequential probes can't
-      demonstrate the win. Report:
+    **v2 follow-ups status (2026-05-02 update):**
+    - **Batch multi-tensor backend transfers — LANDED, PARTIAL.**
+      Phase 1a pipelined readback via the existing async-request API
+      (commit `71ea997`); Phase 1b batched uploads via the existing
+      `_backend_tensor_set3` primitive 72 → 24 calls (commit
+      `979593f`). Closed ~38% of the at-scale gap (+485 ms → +300 ms).
+      Round-trip lever now exhausted — residual is bandwidth-bound
+      (~600 MB transferred per save+load against ~1-2 GB/s effective
+      WebGPU↔CPU bandwidth). A C++ `backend_tensor_get_many` is no
+      longer expected to move the needle.
+    - **`skipSave` dormancy hint — LANDED** (commit `9a3849c`).
+      Caller-explicit `CompletionConfig.skipSave: true` bypasses the
+      post-decode `serializeKVCache`. Needs an interleaved probe to
+      demonstrate value.
+    - **Per-head strided reads — NEXT GATING LEVER.** Bandwidth-bound
+      residual makes payload reduction the only path forward.
+      Currently `serializeKVCache` / `loadKVCache` operate on full
+      maxCtx-sized tensors; only `[0, finalLen)` per head slab is
+      populated. Strided reads cut payload by `maxCtx / finalLen`
+      (3.1× at 1325/4096; up to ~5× shorter prefixes). Projected to
+      take Pattern B tick-2 wall from 2.72 s → ~2.0-2.2 s, finally
+      faster than Pattern A. Tracked as task #693.
+    - **Interleaved probe — NOT YET RUN.** Required to demonstrate
+      Pattern B's actual value proposition (per-conv-snapshot beats
+      session tracker). A `probe-prefix-cache-interleaved-*` driver
+      that round-robins NPC ticks (NPC_1 t1 → NPC_2 t1 → ... →
+      NPC_1 t2 → ...) is the gating measurement; tracked as task
+      #692.
+    - **At-scale validation probe — RAN 2026-05-01 (FAIL), RE-RAN
+      2026-05-02 (FAIL, but +300 ms instead of +485 ms after Phase
+      1a+1b).** Mechanism healthy at every prefix scale; the v1 cost
+      decomposition was wrong because Pattern A already benefits from
+      the engine's per-model **session-tracker** prefix cache
+      (`engine.ts:932`), so the sequential comparison was never
+      "cache vs no-cache". Report:
       [`eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md`](eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md).
-      Follow-up: a `probe-prefix-cache-interleaved-*` driver that
-      round-robins NPC ticks (NPC_1 t1 → NPC_2 t1 → ... → NPC_1 t2
-      → ...) is needed to isolate the per-conv-snapshot value-add.
 
     Six original spec follow-ups (LRU eviction, cross-conv prefix
     sharing, Storage B GPU-resident KV, concurrent in-flight per
