@@ -23,8 +23,8 @@
 - `tests/webllm-proxy-surface.test.ts` — surface-reflection sentinel.
 - `tests/worker-bridge-protocol.test.ts` — envelope round-trip tests.
 - `tests/webllm-proxy-integration.test.ts` — proxy + stub-worker end-to-end.
-- `eval/probes/probe-asyncify-in-worker.html` — Task 1 probe page.
-- `eval/probes/probe-asyncify-in-worker-worker.js` — Task 1 worker script.
+- `smoke-test/probe-asyncify-in-worker.html` — Task 1 probe page (lives under smoke-test/ because `make smoke-serve` serves that root).
+- `smoke-test/probe-asyncify-in-worker-worker.js` — Task 1 worker script.
 - `eval/reports/dual-mode-worker-2026-05-02/` — final closure report directory.
 
 **Modified:**
@@ -46,8 +46,8 @@
 **Why first:** Probe 9d used a tiny model and the public `loadModelFromBuffer` factory. We need to confirm the *production* engine path (registered model, `chatCompletion` with system prompt) still works in a worker before plumbing the proxy. Also surfaces any `import.meta.url` resolution surprises early (Risk: bundling).
 
 **Files:**
-- Create: `eval/probes/probe-asyncify-in-worker.html`
-- Create: `eval/probes/probe-asyncify-in-worker-worker.js`
+- Create: `smoke-test/probe-asyncify-in-worker.html`
+- Create: `smoke-test/probe-asyncify-in-worker-worker.js`
 - Create: `eval/reports/probe-asyncify-in-worker-2026-05-02/SUMMARY.md`
 
 - [ ] **Step 1: Make sure smoke server is up**
@@ -60,7 +60,7 @@ Expected: server running on port 8031 (or `make smoke-restart` if it's stale).
 
 - [ ] **Step 2: Write the worker script**
 
-Create `eval/probes/probe-asyncify-in-worker-worker.js`:
+Create `smoke-test/probe-asyncify-in-worker-worker.js`:
 
 ```js
 // Probe: confirm ASYNCIFY-driven graphCompute survives in a DedicatedWorker
@@ -68,21 +68,21 @@ Create `eval/probes/probe-asyncify-in-worker-worker.js`:
 // factory). Fires WebLLM.init() inside the worker, registers qwen3-0.6b
 // via loadModelFromBuffer, runs a 16-token chatCompletion, posts result.
 
-import { WebLLM } from "/webllm-bundle.js";
+import { WebLLM } from "./webllm-bundle.js";
 
 self.addEventListener("message", async (e) => {
 	if (e.data?.type !== "run") return;
 	try {
 		const t0 = performance.now();
 		const engine = await WebLLM.init({ memoryBudget: 8e9 });
-		const resp = await fetch("/models/qwen3-0.6b-q4f16.gguf");
+		const resp = await fetch("./models/qwen3-0.6b-q4f16.gguf");
 		if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 		const buf = await resp.arrayBuffer();
 		const handle = await engine.loadModelFromBuffer(
 			buf,
 			"qwen3-0.6b-q4f16",
 			{ priority: 0, contextLength: 4096 },
-			"/webllm-wasm.js",
+			"./webllm-wasm.js",
 		);
 		const tInit = performance.now() - t0;
 
@@ -116,7 +116,7 @@ self.addEventListener("message", async (e) => {
 
 - [ ] **Step 3: Write the probe HTML**
 
-Create `eval/probes/probe-asyncify-in-worker.html`:
+Create `smoke-test/probe-asyncify-in-worker.html`:
 
 ```html
 <!doctype html>
@@ -133,7 +133,7 @@ const log = (cls, msg) => {
 	console.log(`[${cls}]`, msg);
 };
 log("info", "booting worker…");
-const w = new Worker("/eval/probes/probe-asyncify-in-worker-worker.js", { type: "module" });
+const w = new Worker("./probe-asyncify-in-worker-worker.js", { type: "module" });
 w.addEventListener("message", (e) => {
 	if (e.data.type === "done") {
 		log("pass", `init=${e.data.tInitMs.toFixed(0)}ms gen=${e.data.tGenMs.toFixed(0)}ms tokens=${e.data.nTokens}`);
@@ -158,12 +158,12 @@ Expected: `dist/index.js` rebuilt without errors.
 
 - [ ] **Step 5: Drive the probe through agentchrome**
 
-Reuse the existing browser session (per CLAUDE.md "agentchrome usage" rules). Navigate the existing tab to `http://localhost:8031/eval/probes/probe-asyncify-in-worker.html?v=1`.
+Reuse the existing browser session (per CLAUDE.md "agentchrome usage" rules). Navigate the existing tab to `http://localhost:8031/probe-asyncify-in-worker.html?v=1`.
 
 ```bash
 agentchrome connect --status
 agentchrome --port <PORT> tabs list
-agentchrome navigate http://localhost:8031/eval/probes/probe-asyncify-in-worker.html?v=1 --tab <TAB_ID>
+agentchrome navigate http://localhost:8031/probe-asyncify-in-worker.html?v=1 --tab <TAB_ID>
 ```
 
 Wait for `[pass] Generated N tokens` line in `#log`. Capture page text + console.
@@ -179,7 +179,7 @@ Create `eval/reports/probe-asyncify-in-worker-2026-05-02/SUMMARY.md` with:
 - [ ] **Step 7: Commit the probe**
 
 ```bash
-git add eval/probes/probe-asyncify-in-worker.html eval/probes/probe-asyncify-in-worker-worker.js
+git add smoke-test/probe-asyncify-in-worker.html smoke-test/probe-asyncify-in-worker-worker.js
 git add -f eval/reports/probe-asyncify-in-worker-2026-05-02/SUMMARY.md
 git commit -m "probe: ASYNCIFY in DedicatedWorker — production engine path"
 ```
