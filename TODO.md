@@ -1242,12 +1242,31 @@ Daily cadence check (item 1) still required at session start.
       (3.1× at 1325/4096; up to ~5× shorter prefixes). Projected to
       take Pattern B tick-2 wall from 2.72 s → ~2.0-2.2 s, finally
       faster than Pattern A. Tracked as task #693.
-    - **Interleaved probe — NOT YET RUN.** Required to demonstrate
-      Pattern B's actual value proposition (per-conv-snapshot beats
-      session tracker). A `probe-prefix-cache-interleaved-*` driver
-      that round-robins NPC ticks (NPC_1 t1 → NPC_2 t1 → ... →
-      NPC_1 t2 → ...) is the gating measurement; tracked as task
-      #692.
+    - **Interleaved probe — RAN 2026-05-02, PASS (83% wall
+      savings).** Round-robin matrix with per-NPC distinct
+      ~1100-token personas defeats Pattern A's session-tracker
+      cache. Pattern B tick-2 wall 2702 ms vs A's 15853 ms.
+      Confirms the prefix-cache value proposition: per-conv KV
+      snapshots are load-bearing for any workload that interleaves
+      multiple distinct conversations on the same model. Report:
+      [`eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md`](eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md).
+      Surfaced an engine session-tracker bug as a side finding —
+      see below.
+
+    **Engine session-tracker bug (correctness, surfaced 2026-05-02
+    by interleaved probe):** the delta-encoding fast-path at
+    `src/core/engine.ts:934-944` trusts `promptMessages.length >
+    prevMsgCount` as a continuation signal without verifying the
+    leading `prevMsgCount` messages still match the cached prompt.
+    In interleaved multi-conversation use (cross-NPC tick-2 on
+    Pattern A), this produces a silently corrupt output — the model
+    reasons against the wrong NPC's KV with the new tail appended.
+    Pattern B (conv-handle path) is unaffected and is therefore
+    **required for correctness**, not just performance, in
+    interleaved workloads. Filed as task #694; fix options: snapshot
+    cached prompt tokens and verify leading-prefix, fall through to
+    full-reset on cross-conv use, or require a conv handle for
+    interleaved workloads.
     - **At-scale validation probe — RAN 2026-05-01 (FAIL), RE-RAN
       2026-05-02 (FAIL, but +300 ms instead of +485 ms after Phase
       1a+1b).** Mechanism healthy at every prefix scale; the v1 cost
