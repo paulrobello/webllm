@@ -1297,16 +1297,23 @@ Daily cadence check (item 1) still required at session start.
       locked. Monotonic `accessSeq` for ordering. Four new tests
       under `describe("LRU eviction")` in
       `tests/conversation-pool.test.ts`.
-    - **#2 Cross-conv prefix sharing — LANDED 2026-05-02** (commit
-      `72d228c`). `WebLLM.forkConversation(srcConv)` deep-copies a
-      source conversation's snapshot into a new handle; first
-      chatCompletion on the fork prefills only the divergent tail
-      via the existing longest-shared-token-prefix walk. New error
+    - **#2 Cross-conv prefix sharing — LANDED + VALIDATED
+      2026-05-02** (impl: commit `72d228c`; e2e probe).
+      `WebLLM.forkConversation(srcConv)` deep-copies a source
+      conversation's snapshot into a new handle; first chatCompletion
+      on the fork prefills only the divergent tail via the existing
+      longest-shared-token-prefix walk. New error
       `ConversationNotPopulatedError`. Four new tests under
       `describe("forkConversation")` in
-      `tests/chat-completion-conversation.test.ts`. Per-call savings
-      ≈ shared-prefix prefill cost (~14.5 s for a 1100-token
-      persona at qwen3-8b-iq3m) on every spawn after the first.
+      `tests/chat-completion-conversation.test.ts`. End-to-end probe
+      `probe-prefix-cache-fork-2026-05-02` confirmed **72% per-NPC
+      wall-time savings** (Pattern Y first-tick 2.4 s vs Pattern X
+      8.8 s on qwen3-8b-iq3m) and **17.2 s net spawn savings at
+      N=4 NPCs**, with break-even at N≈2. Report:
+      [`eval/reports/prefix-cache-fork-2026-05-02/SUMMARY.md`](eval/reports/prefix-cache-fork-2026-05-02/SUMMARY.md).
+      Smoke page bumped to `maxConversations: 8` (default 4) since
+      fork pattern holds `1 base + N forks` simultaneously —
+      consumers spawning many forks should raise the cap.
     - **#3 Storage B (GPU-resident KV)** — queued. Requires `ggml-
       webgpu` patches. Defer until per-call overhead is measured
       against real harness usage and the API has stabilized.
