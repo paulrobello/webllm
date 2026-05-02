@@ -5,6 +5,13 @@ export interface WebLLMConfig {
 	frameBudgetMs?: number;
 	/** Maximum concurrent conversations per loaded model. Default: 4. */
 	maxConversations?: number;
+	/**
+	 * Run engine in a DedicatedWorker. Default false.
+	 *
+	 * When true, WebGPU + ggml-wasm execute off-main-thread; the returned
+	 * WebLLM is a proxy. All public methods retain their signatures.
+	 */
+	worker?: boolean;
 }
 
 /** Options passed when loading a model into the engine. */

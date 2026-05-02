@@ -17,7 +17,7 @@ const PROXIED_METHODS: ReadonlyArray<keyof WebLLMProxy & string> = [
 	"createConversation",
 	"disposeConversation",
 	"forkConversation",
-	// "dispose" — added on WebLLM by Task 8; uncomment then.
+	"dispose",
 ];
 
 describe("WebLLMProxy — surface mirror sentinel", () => {

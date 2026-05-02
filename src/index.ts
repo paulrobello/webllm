@@ -152,3 +152,83 @@ export type { KVCacheConfig, KVCell } from "./models/kv-cache.js";
 export { KVCache } from "./models/kv-cache.js";
 export type { ParsedModel } from "./models/model-loader.js";
 export { ModelLoader } from "./models/model-loader.js";
+
+// ─── Worker bundle re-entry ──────────────────────────────────
+//
+// When the same bundle module is loaded inside a DedicatedWorker
+// (via `new Worker(import.meta.url, { type: "module" })`), boot the
+// message-handler host instead of just exposing the public exports.
+// Main-thread bundle loads see the typeof check fail and skip this.
+// biome-ignore lint/suspicious/noExplicitAny: globalThis narrowing for WebWorker types not in tsconfig lib
+const _workerGlobals = globalThis as any;
+if (
+	typeof _workerGlobals.DedicatedWorkerGlobalScope !== "undefined" &&
+	_workerGlobals instanceof _workerGlobals.DedicatedWorkerGlobalScope
+) {
+	type WebLLMType = import("./core/engine.js").WebLLM;
+	const { WebLLM } = await import("./core/engine.js");
+	const { startWorkerHost } = await import("./core/webllm-worker-host.js");
+	const { serializeError } = await import("./core/webllm-error-codec.js");
+	let engine: WebLLMType | null = null;
+	startWorkerHost({
+		// The host stores `engine` once init lands; method-calls
+		// before init result in "unknown engine method" which becomes
+		// a GENERIC error main-thread.
+		get engine() {
+			if (!engine) throw new Error("worker engine not initialized");
+			return engine;
+		},
+		postMessage: (m) => (self as unknown as Worker).postMessage(m),
+		receive: (handler) => {
+			self.addEventListener("message", (e) => {
+				const msg = (e as MessageEvent).data;
+				// Intercept init: the host treats it as a no-op so the
+				// bundle entry owns engine construction.
+				if (msg?.type === "init") {
+					void (async () => {
+						try {
+							engine = await WebLLM.init({
+								...msg.config,
+								worker: false,
+							});
+							(self as unknown as Worker).postMessage({
+								type: "init-done",
+								id: msg.id,
+							});
+						} catch (err) {
+							(self as unknown as Worker).postMessage({
+								type: "method-error",
+								id: msg.id,
+								error: serializeError(err),
+							});
+						}
+					})();
+					return;
+				}
+				// Intercept dispose: the host treats it as a no-op too,
+				// but production needs to call engine.dispose() before
+				// the proxy's terminate() drops the worker.
+				if (msg?.type === "dispose") {
+					void (async () => {
+						try {
+							if (engine) await engine.dispose();
+							(self as unknown as Worker).postMessage({
+								type: "method-result",
+								id: msg.id,
+								value: undefined,
+							});
+						} catch (err) {
+							(self as unknown as Worker).postMessage({
+								type: "method-error",
+								id: msg.id,
+								error: serializeError(err),
+							});
+						}
+					})();
+					return;
+				}
+				handler(msg);
+			});
+		},
+	});
+}

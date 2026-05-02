@@ -135,6 +135,15 @@ export function pickWasmUrl(
 		: "webllm-wasm.js";
 }
 
+function isWorkerContext(): boolean {
+	// biome-ignore lint/suspicious/noExplicitAny: globalThis narrowing for WebWorker types not in tsconfig lib
+	const g = globalThis as any;
+	return (
+		typeof g.DedicatedWorkerGlobalScope !== "undefined" &&
+		g instanceof g.DedicatedWorkerGlobalScope
+	);
+}
+
 export class WebLLM {
 	private _config: WebLLMConfig;
 	private _memoryPool: MemoryPool;
@@ -170,7 +179,13 @@ export class WebLLM {
 	}
 
 	static async init(config: WebLLMConfig): Promise<WebLLM> {
-		return new WebLLM(config);
+		if (config.worker && !isWorkerContext()) {
+			const { WebLLMProxy } = await import("./webllm-proxy.js");
+			// The proxy mirrors WebLLM's public surface; its TS type is
+			// structurally compatible enough to return as WebLLM.
+			return WebLLMProxy.init(config) as unknown as Promise<WebLLM>;
+		}
+		return new WebLLM({ ...config, worker: false });
 	}
 
 	/**
@@ -233,6 +248,26 @@ export class WebLLM {
 			this.wasmModules.delete(id);
 		}
 		await this._modelManager.unregister(id);
+	}
+
+	/**
+	 * Release all engine resources: unload every model, free the WebGPU
+	 * device, drop the wasm module references. After dispose(), the engine
+	 * is unusable. Worker-mode callers see worker.terminate() too via
+	 * WebLLMProxy.dispose().
+	 */
+	async dispose(): Promise<void> {
+		const ids = [
+			...this.inferenceEngines.keys(),
+			...this.encoderEngines.keys(),
+			...this.causalEmbedderEngines.keys(),
+		];
+		const seen = new Set<string>();
+		for (const id of ids) {
+			if (seen.has(id)) continue;
+			seen.add(id);
+			await this.unloadModel(id);
+		}
 	}
 
 	async loadLightweightModel(
