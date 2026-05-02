@@ -2002,6 +2002,8 @@ if (
 
 > **Note for the implementer:** the `get engine()` accessor pattern lets the host start receiving messages before `init` lands — only the `init` handler resolves the engine. If `init` arrives multiple times the second one overwrites; document this as undefined behavior (consumers shouldn't double-init a single Worker).
 
+> **Important — dispose must reach the engine.** `webllm-worker-host.ts` deliberately treats `init` and `dispose` as no-ops (it's the bundle entry's job to own engine lifecycle). The proxy's `dispose()` is fire-and-forget today (Task 5). So the bundle entry's receive handler must intercept `{ type: "dispose", id }` BEFORE delegating to `startWorkerHost`, call `await engine.dispose()`, and post `{ type: "method-result", id }` (or just let the proxy's subsequent `worker.terminate()` close the channel). Otherwise `engine.dispose()` never fires inside the worker → leaked WebGPU device + heap. Add this `dispose` arm alongside the `init` arm in the bundle-entry receive switch.
+
 - [ ] **Step 5: Build the bundle**
 
 ```bash
