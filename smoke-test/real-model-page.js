@@ -252,6 +252,17 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// at-scale case. Posts to `window.__probePrefixCacheAtScaleResult`.
 	const probePrefixCacheAtScaleEnabled =
 		params.get("probe") === "prefix-cache-at-scale";
+	// `?probe=prefix-cache-interleaved` defeats the per-model session-
+	// tracker prefix cache by round-robining NPCs (NPC_1 t1 → NPC_2 t1 →
+	// NPC_3 t1 → NPC_4 t1 → NPC_1 t2 → NPC_2 t2 → ...) with per-NPC
+	// distinct ~1200-token personas, so each NPC's prompt diverges very
+	// early from any sibling's. Pattern A's session tracker can only
+	// preserve the small shared framework intro; tick-2 calls must
+	// re-prefill the entire per-NPC persona. Pattern B reloads the
+	// per-conv KV snapshot and prefills only the tail. Posts to
+	// `window.__probePrefixCacheInterleavedResult`.
+	const probePrefixCacheInterleavedEnabled =
+		params.get("probe") === "prefix-cache-interleaved";
 	const frameProbeModule = frameProbeEnabled
 		? await import(`./frame-probe.js${assetSuffix}`)
 		: null;
@@ -1478,6 +1489,262 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				log(
 					"pass",
 					`[${probeTag}] tick-2 medians: A=${median(tick2A).toFixed(0)}ms, B=${median(tick2B).toFixed(0)}ms`,
+				);
+			}
+
+			// Probe prefix-cache-interleaved: defeats Pattern A's session-
+			// tracker cache by round-robining NPC ticks. Per-NPC personas
+			// are distinct from token-3 onward (NPC name appears in the
+			// first sentence), so longest-shared-prefix between any two
+			// sibling NPCs is just the small shared framework intro. After
+			// NPC_4 tick-1, the session tracker holds NPC_4's KV; NPC_1
+			// tick-2 must re-prefill the entire NPC_1 persona (~1100
+			// tokens). Pattern B reloads NPC_1's per-conv snapshot in
+			// ~1.4 s (post-batch) and prefills only the divergent tail.
+			if (probePrefixCacheInterleavedEnabled) {
+				const probeTag = "probe-prefix-cache-interleaved";
+				log(
+					"running",
+					`[${probeTag}] running interleaved pattern A then pattern B…`,
+				);
+
+				// Tiny shared framework intro — small enough that all of
+				// Pattern A's session-tracker savings come from this one
+				// block, regardless of which NPC was last computed.
+				const FRAMEWORK_INTRO =
+					"You are an NPC AI controller. Pick exactly one tool name as the action. Available tools: move, speak, attack, use_item, trade.";
+
+				// Build a per-NPC persona by repeating a paragraph that
+				// embeds the NPC's id very early. The first occurrence of
+				// the id forces token-level divergence from any sibling
+				// NPC's persona; everything after that lives in the
+				// divergent tail and must be re-prefilled when the session
+				// tracker holds a different NPC's KV.
+				function buildPersona(npcId, role, locale, era) {
+					const para = `Persona for ${npcId} (role ${role}, locale ${locale}, era ${era}). ${npcId} was raised in the ${locale} territories during the ${era} cycle, where ${role} duties shaped a particular discipline of restraint, observation, and reaction. ${npcId} maintains the customary tactical doctrine of its kin: prefer survival below thirty percent vitality, prefer engagement above seventy percent vitality, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction agents. ${npcId} keeps a personal log of grievances, of bargains, of debts, of small mercies — these influence which tool ${npcId} reaches for first when pressed. ${npcId} prefers tools that reflect the ethic of ${role}: a guard chooses confrontation, a merchant chooses speech, a hunter chooses pursuit, a trader chooses bargain. ${npcId}'s ${era}-cycle training instructs that the first response is rarely the correct one, and that observing the field for an extra heartbeat distinguishes survivors from casualties.`;
+					// Repeat 6× so persona lands at ~1100 tokens.
+					return Array.from({ length: 6 }, () => para).join(" ");
+				}
+
+				const NPCS_INTERLEAVED = [
+					{
+						id: "goblin_1",
+						persona: buildPersona(
+							"goblin_1",
+							"raider",
+							"Bonewood",
+							"Skullsplit",
+						),
+						obs1:
+							"Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+						obs2:
+							"Hero is now at distance 4 and drew a sword. Goblin hp 22/40.",
+					},
+					{
+						id: "wolf_2",
+						persona: buildPersona(
+							"wolf_2",
+							"hunter",
+							"Frostmoor",
+							"Longwinter",
+						),
+						obs1:
+							"Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+						obs2:
+							"Rabbit fled into bushes. A second hunter wolf approached.",
+					},
+					{
+						id: "merchant_3",
+						persona: buildPersona(
+							"merchant_3",
+							"trader",
+							"Sunhold",
+							"Goldspring",
+						),
+						obs1:
+							"Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+						obs2:
+							"Hero asked about the rare potion. Hero gold balance now 80.",
+					},
+					{
+						id: "guard_4",
+						persona: buildPersona(
+							"guard_4",
+							"sentinel",
+							"Ivormere",
+							"Stoneward",
+						),
+						obs1:
+							"Guard sees suspicious player Thief sneaking near treasure room.",
+						obs2:
+							"Thief drew a dagger and lunged toward the chest.",
+					},
+				];
+
+				const buildTick1 = (npc) => [
+					{
+						role: "system",
+						content: `${FRAMEWORK_INTRO}\n\n${npc.persona}`,
+					},
+					{
+						role: "user",
+						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+					},
+				];
+				const buildTick2 = (npc, prevAssistant) => [
+					{
+						role: "system",
+						content: `${FRAMEWORK_INTRO}\n\n${npc.persona}`,
+					},
+					{
+						role: "user",
+						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+					},
+					{ role: "assistant", content: prevAssistant },
+					{
+						role: "user",
+						content: `NPC: ${npc.id}\nObservation: ${npc.obs2}\n\nReply with one word — the tool name:`,
+					},
+				];
+
+				const settle = () => new Promise((r) => setTimeout(r, 500));
+
+				async function runChat(arg, messages) {
+					const tStart = performance.now();
+					const stream = smokeEngine.chatCompletion(arg, messages, {
+						maxTokens: 32,
+					});
+					let prefillMs = 0;
+					let firstTokenAt = 0;
+					let firstChunkSeen = false;
+					const generatedIds = [];
+					let stats = null;
+					for await (const chunk of stream) {
+						if (chunk.done) {
+							stats = chunk.stats ?? null;
+							continue;
+						}
+						if (!firstChunkSeen) {
+							firstTokenAt = performance.now();
+							prefillMs = firstTokenAt - tStart;
+							firstChunkSeen = true;
+						}
+						if (chunk.tokenId !== undefined) {
+							generatedIds.push(chunk.tokenId);
+						}
+					}
+					const wallMs = performance.now() - tStart;
+					if (
+						stats &&
+						typeof stats.timeToFirstTokenMs === "number" &&
+						stats.timeToFirstTokenMs > 0
+					) {
+						prefillMs = stats.timeToFirstTokenMs;
+					}
+					const outputText = tokenizer.decode(generatedIds);
+					return { wallMs, prefillMs, output: outputText };
+				}
+
+				const engineHandleId = smokeEngineHandleId;
+
+				// Pattern A interleaved: round-robin all tick-1s, then all
+				// tick-2s. Session tracker is forced to invalidate the
+				// per-NPC persona on every cross-NPC call.
+				const patternA = [];
+				const patternARecallCues = new Array(NPCS_INTERLEAVED.length);
+				smokeEngine.resetConversation(engineHandleId);
+				await settle();
+				for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
+					const npc = NPCS_INTERLEAVED[i];
+					const r1 = await runChat(engineHandleId, buildTick1(npc));
+					patternA.push({
+						npcId: npc.id,
+						tick: 1,
+						prefillMs: r1.prefillMs,
+						wallMs: r1.wallMs,
+						output: r1.output,
+					});
+					patternARecallCues[i] = r1.output;
+					await settle();
+				}
+				for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
+					const npc = NPCS_INTERLEAVED[i];
+					const r2 = await runChat(
+						engineHandleId,
+						buildTick2(npc, patternARecallCues[i]),
+					);
+					patternA.push({
+						npcId: npc.id,
+						tick: 2,
+						prefillMs: r2.prefillMs,
+						wallMs: r2.wallMs,
+						output: r2.output,
+					});
+					await settle();
+				}
+				smokeEngine.resetConversation(engineHandleId);
+				await settle();
+
+				// Pattern B interleaved: same matrix, per-NPC handles. Each
+				// NPC's tick-2 reloads its own KV snapshot rather than
+				// re-prefilling the persona.
+				const patternB = [];
+				const patternBRecallCues = new Array(NPCS_INTERLEAVED.length);
+				const convs = NPCS_INTERLEAVED.map(() =>
+					smokeEngine.createConversation(engineHandleId),
+				);
+				try {
+					for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
+						const npc = NPCS_INTERLEAVED[i];
+						const r1 = await runChat(convs[i], buildTick1(npc));
+						patternB.push({
+							npcId: npc.id,
+							tick: 1,
+							prefillMs: r1.prefillMs,
+							wallMs: r1.wallMs,
+							output: r1.output,
+						});
+						patternBRecallCues[i] = r1.output;
+						await settle();
+					}
+					for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
+						const npc = NPCS_INTERLEAVED[i];
+						const r2 = await runChat(
+							convs[i],
+							buildTick2(npc, patternBRecallCues[i]),
+						);
+						patternB.push({
+							npcId: npc.id,
+							tick: 2,
+							prefillMs: r2.prefillMs,
+							wallMs: r2.wallMs,
+							output: r2.output,
+						});
+						await settle();
+					}
+				} finally {
+					for (const c of convs) smokeEngine.disposeConversation(c);
+				}
+
+				const med = (xs) => {
+					const s = xs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+					if (s.length === 0) return 0;
+					return s[Math.floor(s.length / 2)];
+				};
+				const tick2A = patternA
+					.filter((r) => r.tick === 2)
+					.map((r) => r.prefillMs);
+				const tick2B = patternB
+					.filter((r) => r.tick === 2)
+					.map((r) => r.prefillMs);
+				window.__probePrefixCacheInterleavedResult = {
+					model: modelId,
+					patternA,
+					patternB,
+				};
+				log(
+					"pass",
+					`[${probeTag}] tick-2 medians: A=${med(tick2A).toFixed(0)}ms, B=${med(tick2B).toFixed(0)}ms`,
 				);
 			}
 
