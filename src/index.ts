@@ -33,6 +33,7 @@ export {
 	ConversationBusyError,
 	ConversationContextOverflowError,
 	ConversationNotFoundError,
+	ConversationNotPopulatedError,
 	ConversationPoolFullError,
 	EncoderRequiredError,
 	InferenceEngineMissingError,

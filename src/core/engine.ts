@@ -514,6 +514,30 @@ export class WebLLM {
 	}
 
 	/**
+	 * Spawn a new conversation that inherits a deep copy of `src`'s KV
+	 * snapshot. The new conversation's first `chatCompletion` call will
+	 * find the inherited snapshot via the longest-shared-token-prefix
+	 * walk and prefill only the divergent tail.
+	 *
+	 * Use case: multiple agents (e.g. NPCs) sharing a long system /
+	 * persona prefix. Drive one base conversation through the shared
+	 * prefix once, then fork it per-agent — each fork pays only the
+	 * agent-specific tail prefill instead of re-prefilling the shared
+	 * prefix from scratch.
+	 *
+	 * Throws `ConversationNotFoundError` if `src` doesn't exist (or was
+	 * disposed). Throws `ConversationNotPopulatedError` if `src` has
+	 * no snapshot yet — drive at least one `chatCompletion` call on
+	 * `src` before forking.
+	 *
+	 * Spec follow-up #2 (cross-conversation prefix sharing) — copy-from-
+	 * prefix-store path; no C++ patch.
+	 */
+	forkConversation(src: ConversationHandle): ConversationHandle {
+		return this.conversationPool.fork(src);
+	}
+
+	/**
 	 * Streaming chat completion with multi-turn KV cache reuse.
 	 *
 	 * Yields CompletionChunks with incremental text, followed by a final

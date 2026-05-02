@@ -15,6 +15,7 @@ export type WebLLMErrorCode =
 	| "ENCODER_REQUIRED"
 	| "SPECULATIVE_DECODING_RESERVED"
 	| "CONVERSATION_NOT_FOUND"
+	| "CONVERSATION_NOT_POPULATED"
 	| "CONVERSATION_POOL_FULL"
 	| "CONVERSATION_CONTEXT_OVERFLOW"
 	| "CONVERSATION_BUSY";
@@ -115,6 +116,23 @@ export class ConversationNotFoundError extends WebLLMError {
 			"CONVERSATION_NOT_FOUND",
 		);
 		this.name = "ConversationNotFoundError";
+		this.conversationId = conversationId;
+	}
+}
+
+/**
+ * Thrown when `engine.forkConversation(srcConv)` is called against a
+ * conversation that has no KV snapshot yet (i.e., never had a successful
+ * `chatCompletion` call). A fork would have nothing to inherit.
+ */
+export class ConversationNotPopulatedError extends WebLLMError {
+	readonly conversationId: string;
+	constructor(conversationId: string) {
+		super(
+			`Conversation "${conversationId}" has no KV snapshot yet — drive at least one chatCompletion call before forking`,
+			"CONVERSATION_NOT_POPULATED",
+		);
+		this.name = "ConversationNotPopulatedError";
 		this.conversationId = conversationId;
 	}
 }

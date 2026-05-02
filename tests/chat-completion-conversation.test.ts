@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ConversationPool } from "../src/core/conversation-pool.js";
-import { WebLLM } from "../src/index.js";
+import {
+	ConversationNotFoundError,
+	ConversationNotPopulatedError,
+	WebLLM,
+} from "../src/index.js";
 import {
 	TokenAttribute,
 	type TokenData,
@@ -379,5 +383,84 @@ describe("chatCompletion(conv, ...)", () => {
 		expect(snap?.kvBytes).not.toBe(sentinel);
 
 		inf.serializeKVCache = origSerialize;
+	});
+});
+
+describe("forkConversation", () => {
+	test("fork copies src snapshot into a new handle", () => {
+		const engine = createFakeEngine();
+		const internals = asInternals(engine);
+		const src = engine.createConversation("tl");
+
+		// Seed src with a snapshot so fork has something to clone.
+		const seededIds = [1, 3, 5, 7];
+		const seededBytes = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+		internals.conversationPool.set(src, {
+			conversationId: src.id,
+			modelHandleId: "tl",
+			tokenIds: [...seededIds],
+			kvBytes: seededBytes,
+			byteSize: seededBytes.byteLength,
+			lastAccessMs: 0,
+		});
+
+		const fork = engine.forkConversation(src);
+		expect(fork.id).not.toBe(src.id);
+		expect(fork.modelHandleId).toBe("tl");
+
+		const forkSnap = internals.conversationPool.get(fork);
+		expect(forkSnap).toBeDefined();
+		expect(forkSnap?.tokenIds).toEqual(seededIds);
+		expect(forkSnap?.byteSize).toBe(seededBytes.byteLength);
+		// Fork must be a deep copy: separate kvBytes buffer + tokenIds array.
+		expect(forkSnap?.kvBytes).not.toBe(seededBytes);
+		expect(Array.from(forkSnap?.kvBytes ?? [])).toEqual(
+			Array.from(seededBytes),
+		);
+	});
+
+	test("fork is independent — mutating src snapshot does not change fork", () => {
+		const engine = createFakeEngine();
+		const internals = asInternals(engine);
+		const src = engine.createConversation("tl");
+
+		const seededIds = [1, 3, 5];
+		internals.conversationPool.set(src, {
+			conversationId: src.id,
+			modelHandleId: "tl",
+			tokenIds: [...seededIds],
+			kvBytes: new Uint8Array([0xaa, 0xbb, 0xcc]),
+			byteSize: 3,
+			lastAccessMs: 0,
+		});
+		const fork = engine.forkConversation(src);
+
+		// Mutate src's snapshot in-place (e.g., a subsequent chatCompletion call).
+		const srcSnap = internals.conversationPool.get(src);
+		if (!srcSnap) throw new Error("src snapshot missing");
+		srcSnap.tokenIds.push(99);
+		srcSnap.kvBytes[0] = 0xff;
+
+		const forkSnap = internals.conversationPool.get(fork);
+		expect(forkSnap?.tokenIds).toEqual(seededIds);
+		expect(forkSnap?.kvBytes[0]).toBe(0xaa);
+	});
+
+	test("fork on disposed handle throws ConversationNotFoundError", () => {
+		const engine = createFakeEngine();
+		const src = engine.createConversation("tl");
+		engine.disposeConversation(src);
+		expect(() => engine.forkConversation(src)).toThrow(
+			ConversationNotFoundError,
+		);
+	});
+
+	test("fork on un-populated handle throws ConversationNotPopulatedError", () => {
+		const engine = createFakeEngine();
+		const src = engine.createConversation("tl");
+		// No snapshot ever set.
+		expect(() => engine.forkConversation(src)).toThrow(
+			ConversationNotPopulatedError,
+		);
 	});
 });
