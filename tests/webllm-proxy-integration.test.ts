@@ -143,3 +143,89 @@ describe("WebLLMProxy — non-streaming", () => {
 		await expect(inFlight).rejects.toThrow(/dispose/i);
 	});
 });
+
+describe("WebLLMProxy — streaming", () => {
+	function makeStreamingEngine() {
+		return {
+			async *chatCompletion(
+				_modelId: string,
+				_msgs: unknown[],
+				config?: { signal?: AbortSignal },
+			) {
+				const sig = config?.signal;
+				const chunks = [
+					{ text: "a", tokenId: 1, done: false },
+					{ text: "b", tokenId: 2, done: false },
+					{ text: "c", tokenId: 3, done: false },
+					{ text: "", done: true, stats: { decodeTokensPerSec: 100 } },
+				];
+				for (const c of chunks) {
+					if (sig?.aborted) return;
+					await new Promise((r) => setTimeout(r, 0));
+					yield c;
+				}
+			},
+			async dispose() {},
+		};
+	}
+
+	test("chatCompletion yields all chunks in order", async () => {
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({
+			engine: makeStreamingEngine(),
+			postMessage: hostPost,
+			receive: hostReceive,
+		});
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const seen: string[] = [];
+		for await (const chunk of proxy.chatCompletion("m1", [
+			{ role: "user", content: "hi" },
+		])) {
+			if (chunk.text) seen.push(chunk.text);
+		}
+		expect(seen).toEqual(["a", "b", "c"]);
+	});
+
+	test("chatCompletion early-break sends stream-cancel", async () => {
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({
+			engine: makeStreamingEngine(),
+			postMessage: hostPost,
+			receive: hostReceive,
+		});
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		let count = 0;
+		for await (const chunk of proxy.chatCompletion("m1", [
+			{ role: "user", content: "hi" },
+		])) {
+			count += 1;
+			if (chunk.tokenId === 1) break;
+		}
+		expect(count).toBe(1);
+	});
+
+	test("chatCompletion propagates worker-side stream-error as typed error", async () => {
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		const { ModelNotFoundError } = await import("../src/core/errors.js");
+		startWorkerHost({
+			engine: {
+				// biome-ignore lint/correctness/useYield: intentional throw before yield
+				async *chatCompletion() {
+					throw new ModelNotFoundError("m1");
+				},
+				async dispose() {},
+			},
+			postMessage: hostPost,
+			receive: hostReceive,
+		});
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const consume = async () => {
+			for await (const _c of proxy.chatCompletion("m1", [
+				{ role: "user", content: "hi" },
+			])) {
+				/* drain */
+			}
+		};
+		await expect(consume()).rejects.toBeInstanceOf(ModelNotFoundError);
+	});
+});

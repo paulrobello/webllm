@@ -7,6 +7,7 @@
  * and back the AsyncIterableIterator they return with a per-stream queue.
  */
 
+import type { GenerationStreamChunk } from "../inference/generation.js";
 import type {
 	ConversationHandle,
 	ConversationOptions,
@@ -15,9 +16,11 @@ import type { ModelHandle, WebLLMConfig } from "./types.js";
 import { reconstructError } from "./webllm-error-codec.js";
 import {
 	makeRequestId,
+	makeStreamId,
 	type ProxyToWorker,
 	type RequestId,
 	type SerializedError,
+	type StreamId,
 	type WorkerToProxy,
 } from "./worker-bridge.js";
 
@@ -35,6 +38,18 @@ export class WebLLMProxy {
 	private pending = new Map<
 		RequestId,
 		{ resolve: (v: unknown) => void; reject: (e: unknown) => void }
+	>();
+	private streams = new Map<
+		StreamId,
+		{
+			queue: GenerationStreamChunk[];
+			waiters: Array<{
+				resolve: (r: IteratorResult<GenerationStreamChunk>) => void;
+				reject: (e: unknown) => void;
+			}>;
+			errored: unknown | null;
+			done: boolean;
+		}
 	>();
 	private disposed = false;
 
@@ -110,6 +125,18 @@ export class WebLLMProxy {
 		this.callMethod<Float32Array>("embed", [modelId, text]);
 	chat = (modelId: string, prompt: string, config?: unknown) =>
 		this.callMethod<string>("chat", [modelId, prompt, config]);
+	chatCompletion = (
+		modelOrConv: string | ConversationHandle,
+		messages: unknown[],
+		config?: unknown,
+	): AsyncIterableIterator<GenerationStreamChunk> =>
+		this.startStream("chatCompletion", [modelOrConv, messages, config]);
+	generateStream = (
+		modelId: string,
+		input: unknown,
+		config?: unknown,
+	): AsyncIterableIterator<GenerationStreamChunk> =>
+		this.startStream("generateStream", [modelId, input, config]);
 	createConversation = (
 		modelHandleId: string,
 		opts?: ConversationOptions,
@@ -206,13 +233,38 @@ export class WebLLMProxy {
 				}
 				return;
 			}
-			case "stream-chunk":
-			case "stream-done":
-			case "stream-error":
-				// Routed by the streaming task (Task 6) — leave a no-op
-				// hook here for now so the unit tests for non-streaming
-				// methods don't trip over unhandled-event warnings.
+			case "stream-chunk": {
+				const s = this.streams.get(m.streamId);
+				if (!s) return;
+				if (s.waiters.length > 0) {
+					const w = s.waiters.shift();
+					w?.resolve({ value: m.chunk, done: false });
+				} else {
+					s.queue.push(m.chunk);
+				}
 				return;
+			}
+			case "stream-done": {
+				const s = this.streams.get(m.streamId);
+				if (!s) return;
+				s.done = true;
+				const waiters = s.waiters;
+				s.waiters = [];
+				for (const w of waiters) w.resolve({ value: undefined, done: true });
+				return;
+			}
+			case "stream-error": {
+				const s = this.streams.get(m.streamId);
+				if (!s) return;
+				const err = reconstructError(m.error);
+				s.errored = err;
+				// Reject any pending waiters directly — otherwise the for-await
+				// loop terminates on a stale done=true and never re-enters next().
+				const waiters = s.waiters;
+				s.waiters = [];
+				for (const w of waiters) w.reject(err);
+				return;
+			}
 			case "log":
 				return;
 		}
@@ -230,10 +282,84 @@ export class WebLLMProxy {
 			p.reject(rebuilt);
 		}
 		this.pending.clear();
+		for (const s of this.streams.values()) {
+			s.errored = rebuilt;
+			const waiters = s.waiters;
+			s.waiters = [];
+			for (const w of waiters) w.reject(rebuilt);
+		}
+		this.streams.clear();
 		try {
 			this.worker.terminate();
 		} catch {
 			// ignore
 		}
+	}
+
+	private startStream(
+		name: "chatCompletion" | "generateStream",
+		args: unknown[],
+	): AsyncIterableIterator<GenerationStreamChunk> {
+		if (this.disposed) {
+			const err = new Error("WebLLM proxy disposed");
+			// biome-ignore lint/correctness/useYield: throw-only generator surfaces error to consumer
+			return (async function* () {
+				throw err;
+			})();
+		}
+		const streamId = makeStreamId();
+		this.streams.set(streamId, {
+			queue: [],
+			waiters: [],
+			errored: null,
+			done: false,
+		});
+		this.worker.postMessage({ type: "stream-start", streamId, name, args });
+		const self = this;
+		let cancelled = false;
+		const iter: AsyncIterableIterator<GenerationStreamChunk> = {
+			[Symbol.asyncIterator]() {
+				return this;
+			},
+			next(): Promise<IteratorResult<GenerationStreamChunk>> {
+				const s = self.streams.get(streamId);
+				if (!s) {
+					return Promise.resolve({ value: undefined, done: true });
+				}
+				if (s.errored) {
+					const err = s.errored;
+					self.streams.delete(streamId);
+					return Promise.reject(err);
+				}
+				if (s.queue.length > 0) {
+					const value = s.queue.shift() as GenerationStreamChunk;
+					return Promise.resolve({ value, done: false });
+				}
+				if (s.done) {
+					self.streams.delete(streamId);
+					return Promise.resolve({ value: undefined, done: true });
+				}
+				return new Promise((resolve, reject) =>
+					s.waiters.push({ resolve, reject }),
+				);
+			},
+			return(): Promise<IteratorResult<GenerationStreamChunk>> {
+				if (!cancelled) {
+					cancelled = true;
+					try {
+						self.worker.postMessage({ type: "stream-cancel", streamId });
+					} catch {
+						// ignore
+					}
+				}
+				self.streams.delete(streamId);
+				return Promise.resolve({ value: undefined, done: true });
+			},
+			throw(e?: unknown): Promise<IteratorResult<GenerationStreamChunk>> {
+				self.streams.delete(streamId);
+				return Promise.reject(e);
+			},
+		};
+		return iter;
 	}
 }
