@@ -263,6 +263,18 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// `window.__probePrefixCacheInterleavedResult`.
 	const probePrefixCacheInterleavedEnabled =
 		params.get("probe") === "prefix-cache-interleaved";
+	// `?probe=prefix-cache-fork` measures the cross-conv prefix sharing
+	// win delivered by `WebLLM.forkConversation`. Pattern X (baseline):
+	// each NPC creates a fresh conv via createConversation; first
+	// chatCompletion prefills the full ~1325-token shared system
+	// prefix. Pattern Y (forked): one base conv is primed with the
+	// shared system prefix, then forked per NPC; each fork's first
+	// chatCompletion finds the shared prefix in the inherited
+	// snapshot via the longest-shared-token-prefix walk and prefills
+	// only the divergent tail. Posts to
+	// `window.__probePrefixCacheForkResult`.
+	const probePrefixCacheForkEnabled =
+		params.get("probe") === "prefix-cache-fork";
 	const frameProbeModule = frameProbeEnabled
 		? await import(`./frame-probe.js${assetSuffix}`)
 		: null;
@@ -600,6 +612,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			}
 			smokeEngine = await WebLLM.init({
 				memoryBudget: 2_000_000_000,
+				// Default is 4; the prefix-cache-fork probe runs 1 base
+				// + 4 forks = 5 concurrent conversations.
+				maxConversations: 8,
 			});
 			const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
 				modelId,
@@ -1746,6 +1761,188 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					"pass",
 					`[${probeTag}] tick-2 medians: A=${med(tick2A).toFixed(0)}ms, B=${med(tick2B).toFixed(0)}ms`,
 				);
+			}
+
+			// Probe prefix-cache-fork: measures forkConversation's
+			// cross-conv prefix sharing win on the first-tick-per-NPC.
+			// Pattern X (baseline): each NPC creates a fresh conv;
+			// first chatCompletion prefills the entire ~1325-token
+			// shared system prefix. Pattern Y (forked): a base conv
+			// is primed with the shared prefix once, then forked per
+			// NPC; each fork's first chatCompletion finds the shared
+			// prefix in the inherited snapshot and prefills only the
+			// divergent tail.
+			if (probePrefixCacheForkEnabled) {
+				const probeTag = "probe-prefix-cache-fork";
+				log(
+					"running",
+					`[${probeTag}] running pattern X (baseline) then pattern Y (forked)…`,
+				);
+
+				const SHARED_SYSTEM =
+					"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action. Detailed tool reference. move(x, y): walk the NPC to grid coordinates (x, y); fails if path is blocked, slowed by terrain. speak(text): emit a short utterance audible to NPCs and players within 12 tiles; logs to chat. attack(target): initiate combat with target NPC or player id; honors faction rules and aggro tables. use_item(item): consume from inventory; potions restore hp/mp, scrolls cast spells, food triggers regen ticks. trade(player): open trade window with target player id; both parties must accept. Stat semantics: hp is current health out of max_hp, depletes from damage and regenerates outside combat; mp is mana for spells, regenerates faster than hp; level scales damage and resists; position is current grid cell as (x, y); inventory is a list of item ids. Decision rules: prefer survival over aggression below 30% hp, prefer engagement above 70% hp, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction NPCs. Combat formulas: damage = (attacker.attack × roll(0.85, 1.15)) − defender.defense; critical = roll(0.05) doubles damage; magic resist applies after physical reduction; armor pen = max(0, attacker.armorPen − defender.armor × 0.5). Faction relations: orcs vs humans (-3); elves vs orcs (-2); humans vs elves (+1); dwarves vs orcs (-2); dwarves vs elves (-1); all factions neutral to merchants and guards; bounty hunters honor contracts above factions. Status effects: poison ticks 5 hp/turn for 3 turns; stun blocks attack and movement for 1 turn; haste doubles speed for 2 turns; bleed ticks 3 hp/turn for 4 turns; burn ticks 4 hp/turn for 2 turns and disables ice spells; freeze halts movement for 2 turns; charm flips faction temporarily; silence disables spell-cast for 3 turns; root anchors position for 2 turns. Loot tables: low-tier mobs drop 1-3 gp + 30% chance common item; mid-tier add 50% rare drop; bosses always drop legendary + 100-500 gp; chests scale with dungeon depth; quest items bypass random rolls and always drop. Aggro mechanics: damage taken adds threat = damage; healing adds threat = healing × 0.5; threat decays 10%/turn outside combat; taunt forces +200 threat; stealth halves all threat generation; pets generate threat scaled by 0.5.";
+				const NPCS_FORK = [
+					{
+						id: "goblin_1",
+						obs:
+							"Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+					},
+					{
+						id: "wolf_2",
+						obs:
+							"Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+					},
+					{
+						id: "merchant_3",
+						obs:
+							"Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+					},
+					{
+						id: "guard_4",
+						obs:
+							"Guard sees suspicious player Thief sneaking near treasure room.",
+					},
+				];
+
+				const buildFirstTick = (npc) => [
+					{ role: "system", content: SHARED_SYSTEM },
+					{
+						role: "user",
+						content: `NPC: ${npc.id}\nObservation: ${npc.obs}\n\nReply with one word — the tool name:`,
+					},
+				];
+
+				const settle = () => new Promise((r) => setTimeout(r, 500));
+
+				async function runChatFork(arg, messages) {
+					const tStart = performance.now();
+					const stream = smokeEngine.chatCompletion(arg, messages, {
+						maxTokens: 32,
+					});
+					let prefillMs = 0;
+					let firstTokenAt = 0;
+					let firstChunkSeen = false;
+					const generatedIds = [];
+					let stats = null;
+					for await (const chunk of stream) {
+						if (chunk.done) {
+							stats = chunk.stats ?? null;
+							continue;
+						}
+						if (!firstChunkSeen) {
+							firstTokenAt = performance.now();
+							prefillMs = firstTokenAt - tStart;
+							firstChunkSeen = true;
+						}
+						if (chunk.tokenId !== undefined) {
+							generatedIds.push(chunk.tokenId);
+						}
+					}
+					const wallMs = performance.now() - tStart;
+					if (
+						stats &&
+						typeof stats.timeToFirstTokenMs === "number" &&
+						stats.timeToFirstTokenMs > 0
+					) {
+						prefillMs = stats.timeToFirstTokenMs;
+					}
+					const outputText = tokenizer.decode(generatedIds);
+					return { wallMs, prefillMs, output: outputText };
+				}
+
+				const engineHandleId = smokeEngineHandleId;
+
+				// Pattern X (baseline): each NPC gets a fresh conv. First
+				// chatCompletion has no snapshot, so it prefills the entire
+				// shared prefix from scratch.
+				const patternX = [];
+				const baselineConvs = NPCS_FORK.map(() =>
+					smokeEngine.createConversation(engineHandleId),
+				);
+				try {
+					for (let i = 0; i < NPCS_FORK.length; i++) {
+						const npc = NPCS_FORK[i];
+						const r = await runChatFork(baselineConvs[i], buildFirstTick(npc));
+						patternX.push({
+							npcId: npc.id,
+							prefillMs: r.prefillMs,
+							wallMs: r.wallMs,
+							output: r.output,
+						});
+						await settle();
+					}
+				} finally {
+					for (const c of baselineConvs) smokeEngine.disposeConversation(c);
+				}
+
+				// Reset the per-model session tracker so its KV doesn't bleed
+				// into pattern Y. (Without this, the engine's session tracker
+				// would already hold the shared prefix from pattern X's last
+				// call, masking the fork win — pattern Y's "base prime" call
+				// would be a session-tracker hit, not a fresh prefill.)
+				smokeEngine.resetConversation(engineHandleId);
+				await settle();
+
+				// Pattern Y (forked): prime a base conv with the shared
+				// prefix, fork per NPC, drive the same first-tick
+				// chatCompletion. The fork's first call should find the
+				// shared prefix in the inherited snapshot and prefill only
+				// the divergent NPC tail.
+				const baseConv = smokeEngine.createConversation(engineHandleId);
+				let baseTickMs = 0;
+				try {
+					// Prime base with [system, user="ping"]. The "ping" user
+					// message is generic — every fork's first call will
+					// diverge at the first NPC-specific token, sharing only
+					// the [system] prefix. This is the realistic spawn pattern.
+					const baseStart = performance.now();
+					await runChatFork(baseConv, [
+						{ role: "system", content: SHARED_SYSTEM },
+						{ role: "user", content: "ping" },
+					]);
+					baseTickMs = performance.now() - baseStart;
+
+					const patternY = [];
+					const forkConvs = NPCS_FORK.map(() =>
+						smokeEngine.forkConversation(baseConv),
+					);
+					try {
+						for (let i = 0; i < NPCS_FORK.length; i++) {
+							const npc = NPCS_FORK[i];
+							const r = await runChatFork(
+								forkConvs[i],
+								buildFirstTick(npc),
+							);
+							patternY.push({
+								npcId: npc.id,
+								prefillMs: r.prefillMs,
+								wallMs: r.wallMs,
+								output: r.output,
+							});
+							await settle();
+						}
+					} finally {
+						for (const c of forkConvs) smokeEngine.disposeConversation(c);
+					}
+
+					const med = (xs) => {
+						const s = xs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+						if (s.length === 0) return 0;
+						return s[Math.floor(s.length / 2)];
+					};
+					window.__probePrefixCacheForkResult = {
+						model: modelId,
+						baseTickMs,
+						patternX,
+						patternY,
+					};
+					log(
+						"pass",
+						`[${probeTag}] median wall: X=${med(patternX.map((r) => r.wallMs)).toFixed(0)}ms, Y=${med(patternY.map((r) => r.wallMs)).toFixed(0)}ms`,
+					);
+				} finally {
+					smokeEngine.disposeConversation(baseConv);
+				}
 			}
 
 			// Stash a SmokeRunRecord so the post-[8/8] dashboard ingest hook

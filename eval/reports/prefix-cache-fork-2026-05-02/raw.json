@@ -1,0 +1,56 @@
+{
+  "model": "qwen3-8b-iq3m",
+  "baseTickMs": 8128.799999952316,
+  "patternX": [
+    {
+      "npcId": "goblin_1",
+      "prefillMs": 40,
+      "wallMs": 8773.299999952316,
+      "output": "\nOkay, let's see. The goblin_1 is observing the Hero approaching at a distance of 8. The Hero is hostile. The"
+    },
+    {
+      "npcId": "wolf_2",
+      "prefillMs": 40.200000047683716,
+      "wallMs": 8756.600000143051,
+      "output": "\nOkay, let's see. The NPC is a wolf named wolf_2. The observation says the wolf sees a wounded rabbit at a distance of"
+    },
+    {
+      "npcId": "merchant_3",
+      "prefillMs": 38.700000047683716,
+      "wallMs": 8715.599999904633,
+      "output": "\nOkay, let's see. The NPC is a merchant named merchant_3, and the observation says they have new wares. The player Hero"
+    },
+    {
+      "npcId": "guard_4",
+      "prefillMs": 44.200000047683716,
+      "wallMs": 8200.799999952316,
+      "output": "\nOkay, let's see. The NPC is guard_4, and the observation is that the guard sees a suspicious player, Thief, sneaking"
+    }
+  ],
+  "patternY": [
+    {
+      "npcId": "goblin_1",
+      "prefillMs": 40.90000009536743,
+      "wallMs": 2409.100000143051,
+      "output": "\nOkay, let's see. The goblin_1 is observing the Hero approaching at a distance of 8. The Hero is hostile. The"
+    },
+    {
+      "npcId": "wolf_2",
+      "prefillMs": 43.40000009536743,
+      "wallMs": 2487.9000000953674,
+      "output": "\nOkay, let's see. The NPC is a wolf named wolf_2. The observation says it sees a wounded rabbit at a distance of "
+    },
+    {
+      "npcId": "merchant_3",
+      "prefillMs": 41.10000014305115,
+      "wallMs": 2436.0999999046326,
+      "output": "\nOkay, let's see. The player is approaching the merchant with 200 gold and a neutral stance. The merchant's goal is to"
+    },
+    {
+      "npcId": "guard_4",
+      "prefillMs": 41.10000014305115,
+      "wallMs": 2413.5,
+      "output": "\nOkay, let's see. The NPC is guard_4, and the observation is that the guard sees a suspicious player, Thief, sneaking"
+    }
+  ]
+}
