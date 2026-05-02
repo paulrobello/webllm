@@ -139,6 +139,58 @@ describe("webllm-worker-host", () => {
 		]);
 	});
 
+	test("stream-cancel posted immediately after stream-start aborts the stream (no race)", async () => {
+		const { channel, postToProxy } = makeChannel();
+		// Engine that yields slowly so we have a chance to see whether the
+		// cancel landed. Yields are spaced out one microtask each.
+		const engine = {
+			async *chatCompletion(
+				_modelId: string,
+				_msgs: unknown[],
+				config?: { signal?: AbortSignal },
+			) {
+				const sig = config?.signal;
+				for (let i = 0; i < 100; i++) {
+					if (sig?.aborted) return;
+					yield { text: String(i), tokenId: i, done: false };
+					await new Promise((r) => setTimeout(r, 0));
+				}
+				yield { text: "", done: true };
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: postToProxy,
+			receive(handler) {
+				channel.postToHost = (m) => handler(m);
+			},
+		});
+
+		// Synchronously: start stream, then immediately cancel.
+		channel.postToHost({
+			type: "stream-start",
+			streamId: 42,
+			name: "chatCompletion",
+			args: ["m1", [{ role: "user", content: "go" }], {}],
+		});
+		channel.postToHost({ type: "stream-cancel", streamId: 42 });
+
+		// Drain microtasks; the stream should have aborted before producing
+		// anywhere near 100 chunks.
+		for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+
+		const chunkCount = channel.proxyInbox.filter(
+			(m) => m.type === "stream-chunk",
+		).length;
+		const lastType = channel.proxyInbox[channel.proxyInbox.length - 1]?.type;
+		// Far less than 100 chunks if cancellation worked.
+		expect(chunkCount).toBeLessThan(20);
+		// The stream still terminates cleanly with stream-done (the host
+		// posts stream-done after the loop exits).
+		expect(lastType).toBe("stream-done");
+	});
+
 	test("unknown method returns method-error with GENERIC code", async () => {
 		const { channel, postToProxy } = makeChannel();
 		const engine = makeFakeEngine();

@@ -46,9 +46,12 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 			case "method-call":
 				void handleMethodCall(msg);
 				return;
-			case "stream-start":
-				void handleStreamStart(msg);
+			case "stream-start": {
+				const ac = new AbortController();
+				aborts.set(msg.streamId, ac);
+				void handleStreamStart(msg, ac);
 				return;
+			}
 			case "stream-cancel": {
 				const ac = aborts.get(msg.streamId);
 				if (ac) ac.abort();
@@ -84,9 +87,8 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 
 	async function handleStreamStart(
 		msg: Extract<ProxyToWorker, { type: "stream-start" }>,
+		ac: AbortController,
 	) {
-		const ac = new AbortController();
-		aborts.set(msg.streamId, ac);
 		// Inject signal into config (last arg, expected to be an
 		// optional config object). If args is shorter or last arg is
 		// not an object, append a fresh config; consumers tolerate
