@@ -1289,11 +1289,34 @@ Daily cadence check (item 1) still required at session start.
       "cache vs no-cache". Report:
       [`eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md`](eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md).
 
-    Six original spec follow-ups (LRU eviction, cross-conv prefix
-    sharing, Storage B GPU-resident KV, concurrent in-flight per
-    conversation, persistence across reloads, worker migration via
-    item 10) remain queued in the spec § "Known follow-ups" — surface
-    only when measured cost forces them.
+    Spec § "Known follow-ups" status:
+    - **#1 LRU eviction — LANDED 2026-05-02** (commit `e16e3a5`).
+      `ConversationPool.create()` at capacity now evicts the oldest
+      non-locked entry instead of throwing.
+      `ConversationPoolFullError` raised only when every entry is
+      locked. Monotonic `accessSeq` for ordering. Four new tests
+      under `describe("LRU eviction")` in
+      `tests/conversation-pool.test.ts`.
+    - **#2 Cross-conv prefix sharing — LANDED 2026-05-02** (commit
+      `72d228c`). `WebLLM.forkConversation(srcConv)` deep-copies a
+      source conversation's snapshot into a new handle; first
+      chatCompletion on the fork prefills only the divergent tail
+      via the existing longest-shared-token-prefix walk. New error
+      `ConversationNotPopulatedError`. Four new tests under
+      `describe("forkConversation")` in
+      `tests/chat-completion-conversation.test.ts`. Per-call savings
+      ≈ shared-prefix prefill cost (~14.5 s for a 1100-token
+      persona at qwen3-8b-iq3m) on every spawn after the first.
+    - **#3 Storage B (GPU-resident KV)** — queued. Requires `ggml-
+      webgpu` patches. Defer until per-call overhead is measured
+      against real harness usage and the API has stabilized.
+    - **#4 Concurrent in-flight per conversation** — queued.
+      Requires KV cloning at concurrency request time. Defer.
+    - **#5 Persistence across reloads** — queued. IndexedDB-backed
+      snapshot store with app opt-in. Defer until a consumer asks.
+    - **#6 Worker migration (item 10)** — queued. Pool needs to
+      live worker-side once dual-mode ships. Defer until item 10
+      starts.
 
 ---
 
