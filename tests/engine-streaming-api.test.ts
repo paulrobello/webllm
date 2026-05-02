@@ -579,6 +579,141 @@ describe("WebLLM.generateStream", () => {
 		expect(usedSeededRng).toBe(true);
 	});
 
+	test("session-tracker delta path is skipped when leading messages diverge", async () => {
+		// Regression for the bug surfaced by
+		// `eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md`:
+		// the delta-encoding fast-path at `engine.ts:prepareChatPrompt`
+		// trusted `promptMessages.length > prevMsgCount` as a continuation
+		// signal without verifying the cached prompt's leading messages
+		// match. In interleaved cross-conversation use, the model would
+		// silently reason against the previous conversation's KV with the
+		// new tail appended.
+		//
+		// Setup: drive three calls on the modelId path —
+		//   1. system_a + user_a   (cold start, full prefill, length=2)
+		//   2. system_b + user_b   (different leading system, length=2 — should reset)
+		//   3. system_a + user_a + assistant_a + user_a2  (extends call 1's
+		//      prompt to length=4, but cached state is from call 2 — must
+		//      reset, NOT take the delta path)
+		//
+		// We instrument `forward` to record (ids, positions) and assert that
+		// call 3's first forward starts at position 0 (full reset). Before
+		// the fix, it incorrectly started past position 0 because the engine
+		// trusted the message-count growth.
+		//
+		// The default `createTestEngineWithTokenizer` fake doesn't track
+		// `cachedTokenCount`, which would short-circuit the buggy condition
+		// (`session.currentPosition === inf.cachedTokenCount` becomes false
+		// because cachedTokenCount stays at 0). Build a realistic fake here
+		// that mirrors `ModelInference`'s positional bookkeeping so the bug
+		// can manifest.
+		const tokenizer = createQwenChatTokenizer();
+		const engine = Object.create(WebLLM.prototype) as WebLLM;
+		const internals = asInternals(engine);
+		type RealisticInfer = {
+			forward: (
+				ids: Int32Array,
+				positions: Int32Array,
+			) => Promise<Float32Array>;
+			cachedTokenCount: number;
+			resetKVCache: () => void;
+		};
+		const sequence = [7, 2];
+		let step = 0;
+		const fake: RealisticInfer = {
+			forward: async (_ids: Int32Array, positions: Int32Array) => {
+				const lastPos = positions[positions.length - 1] ?? -1;
+				fake.cachedTokenCount = lastPos + 1;
+				const tokenId = sequence[Math.min(step, sequence.length - 1)];
+				step++;
+				return createLogits(tokenId, tokenizer.vocabSize);
+			},
+			cachedTokenCount: 0,
+			resetKVCache: () => {
+				fake.cachedTokenCount = 0;
+			},
+		};
+		internals._modelManager = {
+			get: () => ({
+				loaded: true,
+				tokenizer,
+				hyperparams: { architecture: "qwen3" },
+			}),
+		};
+		internals.inferenceEngines = new Map<string, unknown>([["model", fake]]);
+		internals.sessions = new Map<string, unknown>();
+
+		const calls: Array<{ firstPosition: number; resetCount: number }> = [];
+		let resetCount = 0;
+		const origReset = fake.resetKVCache;
+		fake.resetKVCache = () => {
+			resetCount++;
+			origReset.call(fake);
+		};
+		const origForward = fake.forward;
+		let perCallFirstSeen = false;
+		let pendingFirstPos = -1;
+		fake.forward = async (ids: Int32Array, positions: Int32Array) => {
+			if (!perCallFirstSeen) {
+				pendingFirstPos = positions[0] ?? -1;
+				perCallFirstSeen = true;
+			}
+			return origForward(ids, positions);
+		};
+
+		const drainCall = async (
+			messages: {
+				role: "system" | "user" | "assistant";
+				content: string;
+			}[],
+		) => {
+			perCallFirstSeen = false;
+			pendingFirstPos = -1;
+			step = 0;
+			const beforeResets = resetCount;
+			for await (const _chunk of engine.chatCompletion("model", messages, {
+				maxTokens: 1,
+				temperature: 0,
+				enableThinking: false,
+			})) {
+				// drain
+			}
+			calls.push({
+				firstPosition: pendingFirstPos,
+				resetCount: resetCount - beforeResets,
+			});
+		};
+
+		await drainCall([
+			{ role: "system", content: "alpha" },
+			{ role: "user", content: "p" },
+		]);
+		await drainCall([
+			{ role: "system", content: "beta" },
+			{ role: "user", content: "p" },
+		]);
+		await drainCall([
+			{ role: "system", content: "alpha" },
+			{ role: "user", content: "p" },
+			{ role: "assistant", content: "h" },
+			{ role: "user", content: "p" },
+		]);
+
+		// Call 1 is the cold start — position should be 0.
+		expect(calls[0].firstPosition).toBe(0);
+		// Call 2 has a different leading system message. Length didn't grow,
+		// so the delta path is skipped purely on length grounds.
+		expect(calls[1].firstPosition).toBe(0);
+		expect(calls[1].resetCount).toBeGreaterThanOrEqual(1);
+		// Call 3 is the bug repro: length grew (2 → 4) and cachedTokenCount
+		// matches session.currentPosition (the realistic fake tracks both),
+		// but the cached state's leading system is "beta" (call 2), not
+		// "alpha" (call 3). The fix must detect the mismatch and full-reset
+		// rather than take the delta path.
+		expect(calls[2].firstPosition).toBe(0);
+		expect(calls[2].resetCount).toBeGreaterThanOrEqual(1);
+	});
+
 	test("qwen chatCompletion yields visible assistant text through think tokens", async () => {
 		const engine = createTestEngineWithTokenizer(
 			createQwenChatTokenizer(),

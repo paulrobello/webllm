@@ -72,6 +72,36 @@ import {
 interface ConversationSession {
 	session: InferenceSession;
 	messageCount: number;
+	/**
+	 * Snapshot of the leading messages from the previous call's prompt.
+	 * The delta-encoding fast-path in `prepareChatPrompt` is only safe when
+	 * the new prompt's leading `messageCount` messages match this snapshot
+	 * — otherwise the cached KV is from a different conversation and a
+	 * delta append would silently produce a corrupt response. Stored as a
+	 * shallow array of `{ role, content }` so caller-side mutation of the
+	 * passed-in messages can't poison the snapshot.
+	 */
+	cachedMessages: ChatMessage[];
+}
+
+/**
+ * True when the cached prompt's leading messages still appear at the start
+ * of the new prompt. The delta-encoding fast-path in `prepareChatPrompt`
+ * relies on this — if cached and new diverge on the leading slice, the
+ * cached KV is from a different conversation and reusing it would silently
+ * produce a corrupt response. Bug surfaced 2026-05-02 by the interleaved
+ * NPC probe (`eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md`).
+ */
+function leadingMessagesMatch(
+	cached: readonly ChatMessage[],
+	next: readonly ChatMessage[],
+): boolean {
+	if (cached.length === 0 || cached.length > next.length) return false;
+	for (let i = 0; i < cached.length; i++) {
+		if (cached[i].role !== next[i].role) return false;
+		if (cached[i].content !== next[i].content) return false;
+	}
+	return true;
 }
 
 /**
@@ -934,7 +964,8 @@ export class WebLLM {
 		if (
 			promptMessages.length > prevMsgCount &&
 			prevMsgCount > 0 &&
-			session.currentPosition === inf.cachedTokenCount
+			session.currentPosition === inf.cachedTokenCount &&
+			leadingMessagesMatch(sessionInfo.cachedMessages, promptMessages)
 		) {
 			const delta = formatChatDelta(
 				promptMessages,
@@ -953,6 +984,10 @@ export class WebLLM {
 			inf.resetKVCache();
 		}
 		sessionInfo.messageCount = promptMessages.length;
+		sessionInfo.cachedMessages = promptMessages.map((m) => ({
+			role: m.role,
+			content: m.content,
+		}));
 		return promptTokens;
 	}
 
@@ -972,6 +1007,7 @@ export class WebLLM {
 					0,
 				),
 				messageCount: 0,
+				cachedMessages: [],
 			};
 			this.sessions.set(modelId, entry);
 		}
