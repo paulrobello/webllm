@@ -1,17 +1,17 @@
 # Prefix-cache at-scale validation — qwen3-8b-iq3m
 
 **Model:** qwen3-8b-iq3m (~1800-character / ~1325-token NPC system prefix; 4 NPC × 2 ticks × 2 patterns; maxTokens=32; FA on)
-**Date:** 2026-05-01
-**Verdict:** **FAIL** — Pattern B tick-2 wall is +485 ms / +19.9% vs Pattern A tick-2 even at ~1325 shared tokens. The v1 cost decomposition was wrong: Pattern A already benefits from the engine's per-model session-tracker prefix cache, so the comparison was never "cache vs no-cache" — it was "session-tracker cache (no extra I/O)" vs "conv path (adds save+load round-trip per call)".
+**Date:** 2026-05-02
+**Verdict:** **FAIL** — Pattern B tick-2 wall is +300 ms / +12.4% vs Pattern A tick-2 even at ~1325 shared tokens. The v1 cost decomposition was wrong: Pattern A already benefits from the engine's per-model session-tracker prefix cache, so the comparison was never "cache vs no-cache" — it was "session-tracker cache (no extra I/O)" vs "conv path (adds save+load round-trip per call)".
 
 ## Headline (wall-time)
 
 | pattern | tick-1 wall (median) | tick-2 wall (median) | tick-2 prefillMs (median) |
 |---|---|---|---|
-| A (`chatCompletion(modelId, ...)`) | 15881.0 ms | 2429.3 ms | 1040.3 ms |
-| B (`chatCompletion(conv, ...)`)    | 16056.8 ms | 2913.9 ms | 46.2 ms |
+| A (`chatCompletion(modelId, ...)`) | 15861.2 ms | 2424.7 ms | 1050.0 ms |
+| B (`chatCompletion(conv, ...)`)    | 15933.2 ms | 2724.4 ms | 45.6 ms |
 
-**Pattern B tick-2 wall is +485 ms / +19.9% vs Pattern A tick-2.** Same direction *and similar magnitude* as v1 (+446 ms / +20.1% at ~315 shared tokens), even though shared prefix grew ~4×.
+**Pattern B tick-2 wall is +300 ms / +12.4% vs Pattern A tick-2.** Same direction *and similar magnitude* as v1 (+446 ms / +20.1% at ~315 shared tokens), even though shared prefix grew ~4×.
 
 ## sharedLen distribution (Phase A diagnostic)
 
@@ -46,7 +46,7 @@ The v1 SUMMARY's prediction:
 
 The actual at-scale data:
 - shared_tokens ≈ 1325, predicted prefill savings = 12.31 × 1325 ≈ **16,310 ms**
-- Pattern A tick-2 prefillMs is only **1040 ms total** (not 16K ms)
+- Pattern A tick-2 prefillMs is only **1050 ms total** (not 16K ms)
 
 **The v1 decomposition assumed Pattern A would re-prefill the entire prompt every tick.** It doesn't. Pattern A's modelId path uses the engine's session-tracker prefix cache (`session.currentPosition === inf.cachedTokenCount`, `engine.ts:932`). Within a single NPC's tick-1 → tick-2 window, the session tracker still holds tick-1's KV state, so tick-2 only re-prefills the divergent assistant+user-2 tail (~80 tokens). That's why Pattern A tick-2 prefill is ~1035 ms regardless of whether the prefix is 315 or 1325 tokens — the prefill cost is dominated by the **divergent tail** (~80 tokens at ~12.5 ms/token), not the shared prefix.
 
@@ -68,6 +68,24 @@ save+load overhead is roughly flat at **~1.4-1.5 s** even with kvBytes growing 4
 
 Net: Pattern B is **always ~450 ms slower** than Pattern A in this NPC pattern, regardless of how long the system prefix is.
 
+## v2 #1 (batch transfer) trajectory
+
+Two phases of round-trip batching landed against this probe:
+
+| build | Pattern A tick-2 wall | Pattern B tick-2 wall | gap | gap closure vs initial |
+|---|---|---|---|---|
+| pre-batch (initial run) | 2429.3 ms | 2913.9 ms | +485 ms | — |
+| Phase 1a: pipelined readback (`beginDownloadFromTensor` async-request batch) | (unchanged) | (unchanged) | — | ~0% |
+| Phase 1a + 1b: batched upload (`_backend_tensor_set3`, 72 → 24 sync calls) | 2424.7 ms | 2724.4 ms | +300 ms | **~38%** |
+
+Phase 1a alone moved the needle very little — readback was already partially overlapped on the WebGPU command queue, so JS-level promise pipelining didn't buy much. Phase 1b gave a real ~190 ms cut on Pattern B by collapsing 72 sync ASYNCIFY-suspending uploads into 24 batched calls.
+
+The remaining ~300 ms gap is now bandwidth-bound, not round-trip-bound:
+
+- KV tensor footprint per snapshot ≈ 36 layers × 2 (k+v) × 8 heads × 128 head_dim × 4096 maxCtx × 2 B/f16 = **~600 MB**.
+- At ~1-2 GB/s effective WebGPU↔CPU transfer bandwidth, 600 MB read + 600 MB write per save+load = **600-1200 ms of pure transfer**, even with zero round-trip overhead.
+- Going below this floor requires **payload reduction**, not further round-trip batching. Strided reads of just `[0, finalLen)` per head slab would cut payload by `maxCtx / finalLen` ≈ 3.1× at 1325/4096. Projected save+load: ~470 ms; projected Pattern B tick-2 wall: ~2.0-2.2 s, finally faster than Pattern A.
+
 ## When would Pattern B actually win?
 
 Pattern B beats Pattern A only when Pattern A *cannot* use its session-tracker cache. That happens when **multiple conversations interleave on the same model**:
@@ -81,41 +99,41 @@ The current probe matrix (NPC_1 tick-1 → NPC_1 tick-2 → NPC_2 tick-1 → NPC
 ## Pattern A per-call detail
 
 ```
-  goblin_1     tick=1  prefill=14497.3ms  wall=15890.0ms  output="Okay, let's break this down. The"
-  goblin_1     tick=2  prefill= 1046.8ms  wall= 2444.6ms  output="Okay, let's see. The goblin is a"
-  wolf_2       tick=1  prefill=14500.0ms  wall=15881.0ms  output="Okay, let's see. The NPC is a wo"
-  wolf_2       tick=2  prefill= 1023.0ms  wall= 2412.4ms  output="Okay, let's break this down. The"
-  merchant_3   tick=1  prefill=14413.7ms  wall=15797.3ms  output="Okay, let's see. The NPC is a me"
-  merchant_3   tick=2  prefill= 1040.3ms  wall= 2429.3ms  output="Okay, let's break this down. The"
-  guard_4      tick=1  prefill=14392.1ms  wall=15791.0ms  output="Okay, let's see. The NPC is a gu"
-  guard_4      tick=2  prefill= 1030.7ms  wall= 2426.7ms  output="Okay, let's break this down. The"
+  goblin_1     tick=1  prefill=14458.2ms  wall=15838.7ms  output="Okay, let's break this down. The"
+  goblin_1     tick=2  prefill= 1057.3ms  wall= 2435.9ms  output="Okay, let's see. The goblin is a"
+  wolf_2       tick=1  prefill=14500.6ms  wall=15861.2ms  output="Okay, let's see. The NPC is a wo"
+  wolf_2       tick=2  prefill= 1034.0ms  wall= 2397.8ms  output="Okay, let's break this down. The"
+  merchant_3   tick=1  prefill=14546.9ms  wall=15902.1ms  output="Okay, let's break this down. The"
+  merchant_3   tick=2  prefill= 1050.0ms  wall= 2424.7ms  output="Okay, let's see. The NPC is merc"
+  guard_4      tick=1  prefill=14467.5ms  wall=15846.6ms  output="Okay, let's break down what's ha"
+  guard_4      tick=2  prefill= 1030.9ms  wall= 2403.0ms  output="Okay, let's see. The guard is fa"
 ```
 
 ## Pattern B per-call detail
 
 ```
-  goblin_1     tick=1  prefill=   45.9ms  wall=16034.1ms  output="Okay, let's break this down. The"
-  goblin_1     tick=2  prefill=   45.0ms  wall= 2964.2ms  output="Okay, let's think through this. "
-  wolf_2       tick=1  prefill=   47.3ms  wall=16056.8ms  output="Okay, let's see. The NPC is a wo"
-  wolf_2       tick=2  prefill=   46.2ms  wall= 2913.9ms  output="Okay, let's break this down. The"
-  merchant_3   tick=1  prefill=   47.4ms  wall=16159.6ms  output="Okay, let's see. The NPC is a me"
-  merchant_3   tick=2  prefill=   46.5ms  wall= 2911.1ms  output="Okay, let's break this down. The"
-  guard_4      tick=1  prefill=   46.3ms  wall=16003.8ms  output="Okay, let's see. The NPC is guar"
-  guard_4      tick=2  prefill=   45.9ms  wall= 2871.6ms  output="Okay, let's break this down. The"
+  goblin_1     tick=1  prefill=   41.1ms  wall=15921.2ms  output="Okay, let's break this down. The"
+  goblin_1     tick=2  prefill=   47.9ms  wall= 2758.4ms  output="Okay, let's see. The goblin is a"
+  wolf_2       tick=1  prefill=   45.3ms  wall=15963.6ms  output="Okay, let's see. The NPC is a wo"
+  wolf_2       tick=2  prefill=   45.3ms  wall= 2724.4ms  output="Okay, let's break this down. The"
+  merchant_3   tick=1  prefill=   45.8ms  wall=15933.2ms  output="Okay, let's see. The NPC is a me"
+  merchant_3   tick=2  prefill=   45.4ms  wall= 2706.8ms  output="Okay, let's break this down. The"
+  guard_4      tick=1  prefill=   47.8ms  wall=15910.0ms  output="Okay, let's see. The NPC is a gu"
+  guard_4      tick=2  prefill=   45.6ms  wall= 2715.5ms  output="Okay, let's break this down. The"
 ```
 
 ## Verdict rationale
 
-**FAIL** — Pattern B tick-2 wall is 19.9% SLOWER than A even at the at-scale prefix. The v1 cost decomposition (940 ms fixed + 12.31 ms × shared_tokens) does not match observed data — per-call overhead must scale with prefix size or there is per-call decode overhead unaccounted for.
+**FAIL** — Pattern B tick-2 wall is 12.4% slower than A even at the at-scale prefix, after both batching phases of v2 #1 landed. Phase 1a + 1b closed ~38% of the original gap (+485 ms → +300 ms), confirming round-trip overhead was a real component but not the dominant one. The remaining gap is bandwidth-bound: ~600 MB transferred per save+load against ~1-2 GB/s effective WebGPU↔CPU bandwidth. Round-trip batching is now exhausted as a lever; the next move is **payload reduction** via strided per-head reads.
 
-FAIL at this probe matrix. Pattern B is ~22% slower regardless of prefix size, and the gap doesn't close as prefix grows (it stays ~450-500 ms). The mechanism works correctly (sharedLen detection 100%, KV round-trip preserves state) but the load-bearing comparison was apples-to-oranges all along: Pattern A's session-tracker prefix cache makes Pattern A as fast as Pattern B's prefill phase, while Pattern B pays an extra ~1.4 s save+load round-trip per call.
+The mechanism works correctly (sharedLen detection 100%, KV round-trip preserves state). The load-bearing finding remains: Pattern A's session-tracker prefix cache makes Pattern A as fast as Pattern B's prefill phase in this *sequential* matrix, while Pattern B pays an extra ~1.45 s save+load round-trip per call (now ~1.25 s post-batching). Demonstrating Pattern B's value requires an **interleaved** probe matrix that defeats the session tracker.
 
 ## Updated v2 priority
 
 1. **Re-frame the prefix-cache value proposition.** Per-conversation snapshot reuse is *not* a win against single-stream sequential calls — those already benefit from the per-model session tracker. The win is only against **interleaved multi-conversation workloads** (multi-NPC concurrent agents on shared weights). Future probes must measure that interleaved pattern explicitly, not the sequential pattern.
-2. **#1 (batch-transfer multi-tensor I/O) is now gating, not nice-to-have.** Even in the interleaved regime, save+load adds ~1.4 s per call. To make per-conv snapshots viable for real-time agent ticks (target <500 ms per call), the 72 ASYNCIFY round-trips per save and 72 per load must be fused into single command-buffers (`backend_tensor_get_many` / `backend_tensor_set_many`). Order-of-magnitude reduction needed.
-3. **Skip-save-on-disposal heuristic.** If a conversation handle is disposed without further use, save phase is pure waste. Add `disposeConversation(conv, { skipFinalSave: true })`.
-4. **Per-head strided readback.** `downloadFromTensor` reads full maxCtx-sized tensors; only `[0, finalLen)` is populated. Strided reads would cut payload by `maxCtx / finalLen` (typically 3-5× at 1325/4096).
+2. **#1 (batch-transfer multi-tensor I/O) — partially landed, diminishing returns ahead.** Phase 1a (read pipelining) + Phase 1b (`backendTensorSet3` write batching) closed ~38% of the gap, leaving ~300 ms residual that is **bandwidth-bound** (~600 MB transfer per save+load against 1-2 GB/s effective WebGPU↔CPU bandwidth). Further round-trip reductions will not move the needle; the next lever is **payload reduction**.
+3. **#4 (per-head strided readback) is now the gating bandwidth lever.** `downloadFromTensor` reads full maxCtx-sized tensors; only `[0, finalLen)` is populated. Strided per-head reads would cut payload by `maxCtx / finalLen` (3.1× at 1325/4096, up to ~5× for shorter prefixes). Projected to make Pattern B tick-2 wall faster than Pattern A in this matrix, and to scale much better in the interleaved regime.
+4. **Skip-save-on-disposal heuristic** (`skipSave`) — landed in commit `9a3849c`. Caller-explicit; needs an interleaved probe to demonstrate its value.
 
 ## Caveats
 

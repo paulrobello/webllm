@@ -4,115 +4,115 @@
     {
       "npcId": "goblin_1",
       "tick": 1,
-      "prefillMs": 14497.299999952316,
-      "wallMs": 15890,
+      "prefillMs": 14458.200000047684,
+      "wallMs": 15838.700000047684,
       "output": "\nOkay, let's break this down. The NPC is a goblin named goblin_1. The observation says the goblin sees the Hero approaching"
     },
     {
       "npcId": "goblin_1",
       "tick": 2,
-      "prefillMs": 1046.7999999523163,
-      "wallMs": 2444.5999999046326,
+      "prefillMs": 1057.2999999523163,
+      "wallMs": 2435.899999856949,
       "output": "\nOkay, let's see. The goblin is at distance 4 from the Hero, who has drawn a sword. The goblin's HP is"
     },
     {
       "npcId": "wolf_2",
       "tick": 1,
-      "prefillMs": 14500,
-      "wallMs": 15881,
+      "prefillMs": 14500.599999904633,
+      "wallMs": 15861.200000047684,
       "output": "\nOkay, let's see. The NPC is a wolf named wolf_2. The observation says it sees a wounded rabbit at a distance of 5"
     },
     {
       "npcId": "wolf_2",
       "tick": 2,
-      "prefillMs": 1023,
-      "wallMs": 2412.4000000953674,
+      "prefillMs": 1034,
+      "wallMs": 2397.7999999523163,
       "output": "\nOkay, let's break this down. The NPC is wolf_2, which is a wolf. The previous observation mentioned that the rabbit was wounded and"
     },
     {
       "npcId": "merchant_3",
       "tick": 1,
-      "prefillMs": 14413.700000047684,
-      "wallMs": 15797.299999952316,
-      "output": "\nOkay, let's see. The NPC is a merchant named merchant_3, and they have new wares. The player, Hero, is approaching"
+      "prefillMs": 14546.900000095367,
+      "wallMs": 15902.100000143051,
+      "output": "\nOkay, let's break this down. The NPC is a merchant named merchant_3, and the observation says they have new wares. The player"
     },
     {
       "npcId": "merchant_3",
       "tick": 2,
-      "prefillMs": 1040.2999999523163,
-      "wallMs": 2429.2999999523163,
-      "output": "\nOkay, let's break this down. The NPC is a merchant, and the player has asked about a rare potion. The player's gold has decreased"
+      "prefillMs": 1050,
+      "wallMs": 2424.7000000476837,
+      "output": "\nOkay, let's see. The NPC is merchant_3, a merchant. The observation says the hero asked about a rare potion and now has "
     },
     {
       "npcId": "guard_4",
       "tick": 1,
-      "prefillMs": 14392.099999904633,
-      "wallMs": 15791,
-      "output": "\nOkay, let's see. The NPC is a guard named guard_4. The observation says the guard sees a suspicious player, Thief, sneaking"
+      "prefillMs": 14467.5,
+      "wallMs": 15846.599999904633,
+      "output": "\nOkay, let's break down what's happening here. The NPC is a guard named guard_4. The observation says the guard sees a suspicious player"
     },
     {
       "npcId": "guard_4",
       "tick": 2,
-      "prefillMs": 1030.7000000476837,
-      "wallMs": 2426.7000000476837,
-      "output": "\nOkay, let's break this down. The guard_4 is an NPC in a fantasy MMO. The current observation is that the Thief has drawn a"
+      "prefillMs": 1030.9000000953674,
+      "wallMs": 2403,
+      "output": "\nOkay, let's see. The guard is facing a thief who has drawn a dagger and lunged toward the chest. The guard's response needs to"
     }
   ],
   "patternB": [
     {
       "npcId": "goblin_1",
       "tick": 1,
-      "prefillMs": 45.90000009536743,
-      "wallMs": 16034.100000143051,
-      "output": "\nOkay, let's break this down. The goblin_1 is an NPC in a fantasy MMO. The observation says the goblin sees the"
+      "prefillMs": 41.10000014305115,
+      "wallMs": 15921.200000047684,
+      "output": "\nOkay, let's break this down. The NPC is a goblin named goblin_1. The observation says the goblin sees the Hero"
     },
     {
       "npcId": "goblin_1",
       "tick": 2,
-      "prefillMs": 45,
-      "wallMs": 2964.2000000476837,
-      "output": "\nOkay, let's think through this. The goblin is at 22/40 HP. The hero is now at distance 4"
+      "prefillMs": 47.90000009536743,
+      "wallMs": 2758.4000000953674,
+      "output": "\nOkay, let's see. The goblin is at distance 4 from the Hero, who has drawn a sword. The goblin's HP"
     },
     {
       "npcId": "wolf_2",
       "tick": 1,
-      "prefillMs": 47.299999952316284,
-      "wallMs": 16056.799999952316,
+      "prefillMs": 45.30000019073486,
+      "wallMs": 15963.600000143051,
       "output": "\nOkay, let's see. The NPC is a wolf named wolf_2. The observation says it sees a wounded rabbit at a distance of "
     },
     {
       "npcId": "wolf_2",
       "tick": 2,
-      "prefillMs": 46.200000047683716,
-      "wallMs": 2913.9000000953674,
+      "prefillMs": 45.299999952316284,
+      "wallMs": 2724.4000000953674,
       "output": "\nOkay, let's break this down. The NPC is wolf_2, which is a wolf. The previous observation mentioned that the rabbit was wounded"
     },
     {
       "npcId": "merchant_3",
       "tick": 1,
-      "prefillMs": 47.39999985694885,
-      "wallMs": 16159.600000143051,
-      "output": "\nOkay, let's see. The NPC is a merchant named merchant_3, and they have new wares. The player Hero is approaching with"
+      "prefillMs": 45.799999952316284,
+      "wallMs": 15933.199999809265,
+      "output": "\nOkay, let's see. The NPC is a merchant named merchant_3. The observation says the merchant has new wares and the player Hero"
     },
     {
       "npcId": "merchant_3",
       "tick": 2,
-      "prefillMs": 46.5,
-      "wallMs": 2911.0999999046326,
-      "output": "\nOkay, let's break this down. The NPC is a merchant, and the player has asked about a rare potion. The player's gold has"
+      "prefillMs": 45.39999985694885,
+      "wallMs": 2706.7999999523163,
+      "output": "\nOkay, let's break this down. The NPC is merchant_3, a merchant. The observation says the Hero asked about a rare potion and"
     },
     {
       "npcId": "guard_4",
       "tick": 1,
-      "prefillMs": 46.299999952316284,
-      "wallMs": 16003.799999952316,
-      "output": "\nOkay, let's see. The NPC is guard_4, and the observation is that the guard sees a suspicious player, Thief, sneaking"
+      "prefillMs": 47.799999952316284,
+      "wallMs": 15910,
+      "output": "\nOkay, let's see. The NPC is a guard named guard_4. The observation says the guard sees a suspicious player, Thief, sne"
     },
     {
       "npcId": "guard_4",
       "tick": 2,
-      "prefillMs": 45.90000009536743,
-      "wallMs": 2871.5999999046326,
+      "prefillMs": 45.59999990463257,
+      "wallMs": 2715.5,
       "output": "\nOkay, let's break this down. The guard_4 is an NPC in a fantasy MMO. The current observation is that the Thief has drawn"
     }
   ]
