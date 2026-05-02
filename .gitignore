@@ -63,3 +63,4 @@ smoke-test/scenes/*.bin
 handoff.md
 .worktrees/
 .pi/extensions/discord-relay/state.json
+graphify-out/
