@@ -4502,3 +4502,140 @@ gate tiers by `defaultQuant`:
   `recommendedFor` on `ModelEntry` for informed deployment choices.
 
 ---
+
+## Prefix cache via per-conversation KV snapshots (closed 2026-05-02; archived from TODO.md)
+
+Originally TODO.md item 11. End-to-end mechanism, batch-transfer
+trajectory, interleaved-probe correctness fix, and the two LANDED
+spec follow-ups (LRU eviction + forkConversation cross-conv prefix
+sharing) all closed.
+
+Spec: [`docs/superpowers/specs/2026-05-01-prefix-cache-design.md`](docs/superpowers/specs/2026-05-01-prefix-cache-design.md).
+Plan: [`docs/superpowers/plans/2026-05-01-prefix-cache.md`](docs/superpowers/plans/2026-05-01-prefix-cache.md).
+
+### Mechanism (CLOSED 2026-05-01, PARTIAL initial verdict)
+
+`WebLLM.createConversation` / `disposeConversation` /
+`chatCompletion(conv, ...)` overload + `serializeKVCache` /
+`loadKVCache` primitives + per-model serialization chain.
+
+Initial verdict was PARTIAL because the v1 cost decomposition was
+wrong: Pattern A's per-model session-tracker prefix cache was
+already covering the sequential-NPC matrix the validation probe
+ran. The mechanism itself was correct — sharedLen detection 100%,
+KV round-trip preserved output quality, conv isolation worked. The
+apples-to-apples comparison required the interleaved probe (see
+below). Validation report:
+[`eval/reports/prefix-cache-validation-2026-05-01/SUMMARY.md`](eval/reports/prefix-cache-validation-2026-05-01/SUMMARY.md).
+
+### v2 follow-ups status
+
+- **Batch multi-tensor backend transfers — LANDED, PARTIAL.**
+  Phase 1a pipelined readback via the existing async-request API
+  (commit `71ea997`); Phase 1b batched uploads via the existing
+  `_backend_tensor_set3` primitive 72 → 24 calls (commit
+  `979593f`). Closed ~38% of the at-scale gap (+485 ms → +300 ms).
+  Round-trip lever exhausted — residual is bandwidth-bound
+  (~600 MB transferred per save+load against ~1-2 GB/s effective
+  WebGPU↔CPU bandwidth). A C++ `backend_tensor_get_many` is no
+  longer expected to move the needle.
+- **`skipSave` dormancy hint — LANDED** (commit `9a3849c`).
+  Caller-explicit `CompletionConfig.skipSave: true` bypasses the
+  post-decode `serializeKVCache`.
+- **Per-head strided reads — PROBED 2026-05-02, NEGATIVE
+  (§28 template).** Cut readback payload from 576 MB → 195 MB via
+  `headCountKv` strided per-head reads (no C++ patch — the
+  existing `beginDownloadFromTensor` API supports offset/size).
+  Wall-time effect was ~0% on the interleaved probe
+  (2719 → 2736 ms): per-call overhead at 576 strided reads
+  cancelled the bandwidth savings vs 72 full reads. The
+  bandwidth-bound floor estimate was wrong — Phase 1a's
+  pipelining already hid the readback behind the WebGPU command
+  queue. Updated mental model: load (sync ASYNCIFY upload), not
+  save, is the dominant per-call I/O cost. Strided writes would
+  need a new C++ batch primitive (`backend_tensor_set_strided`
+  or similar); deferred — adds patch-stack drift surface without
+  a probe showing wall-time win. Strided save change not committed;
+  report:
+  [`eval/reports/prefix-cache-strided-save-2026-05-02/SUMMARY.md`](eval/reports/prefix-cache-strided-save-2026-05-02/SUMMARY.md).
+- **Interleaved probe — RAN 2026-05-02, PASS (83% wall savings).**
+  Round-robin matrix with per-NPC distinct ~1100-token personas
+  defeats Pattern A's session-tracker cache. Pattern B tick-2 wall
+  2702 ms vs A's 15853 ms. Confirms the prefix-cache value
+  proposition: per-conv KV snapshots are load-bearing for any
+  workload that interleaves multiple distinct conversations on the
+  same model. Report:
+  [`eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md`](eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md).
+- **At-scale validation probe — RAN 2026-05-01 (FAIL), RE-RAN
+  2026-05-02 (FAIL, +300 ms after Phase 1a+1b).** Mechanism
+  healthy at every prefix scale; the v1 cost decomposition was
+  wrong because Pattern A already benefits from the engine's
+  per-model session-tracker prefix cache (`engine.ts:932`), so the
+  sequential comparison was never "cache vs no-cache". Report:
+  [`eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md`](eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md).
+
+### Engine session-tracker bug — FIXED 2026-05-02 (commit `c8d1530`)
+
+Surfaced as a side finding from the interleaved probe. The
+delta-encoding fast-path at `src/core/engine.ts:prepareChatPrompt`
+trusted `promptMessages.length > prevMsgCount` as a continuation
+signal without verifying the leading `prevMsgCount` messages still
+matched the cached prompt. In interleaved multi-conversation use
+(cross-NPC tick-2 on Pattern A), it silently reused another NPC's
+KV with the new tail appended.
+
+Fix snapshots leading messages (`cachedMessages: ChatMessage[]`)
+on the `ConversationSession` and adds a `leadingMessagesMatch`
+guard to the fast-path condition; mismatch falls through to the
+existing full-reset branch. Regression test:
+`tests/engine-streaming-api.test.ts` ("session-tracker delta path
+is skipped when leading messages diverge"). Post-fix re-run of the
+interleaved probe (commit `752421c`) confirmed all Pattern A
+tick-2 outputs now reference their NPC and pay the honest ~15 s
+re-prefill — Pattern B's win held at 84%. Implication: conv-handle
+mode is required for **correctness** in interleaved workloads,
+not just performance.
+
+### Spec § "Known follow-ups" — LANDED items
+
+- **#1 LRU eviction — LANDED 2026-05-02** (commit `e16e3a5`).
+  `ConversationPool.create()` at capacity now evicts the oldest
+  non-locked entry instead of throwing.
+  `ConversationPoolFullError` raised only when every entry is
+  locked. Monotonic `accessSeq` for ordering. Four new tests
+  under `describe("LRU eviction")` in
+  `tests/conversation-pool.test.ts`.
+- **#2 Cross-conv prefix sharing — LANDED + VALIDATED 2026-05-02**
+  (impl: commit `72d228c`; e2e probe).
+  `WebLLM.forkConversation(srcConv)` deep-copies a source
+  conversation's snapshot into a new handle; first chatCompletion
+  on the fork prefills only the divergent tail via the existing
+  longest-shared-token-prefix walk. New error
+  `ConversationNotPopulatedError`. Four new tests under
+  `describe("forkConversation")` in
+  `tests/chat-completion-conversation.test.ts`. End-to-end probe
+  `probe-prefix-cache-fork-2026-05-02` confirmed **72% per-NPC
+  wall-time savings** (Pattern Y first-tick 2.4 s vs Pattern X
+  8.8 s on qwen3-8b-iq3m) and **17.2 s net spawn savings at
+  N=4 NPCs**, with break-even at N≈2. Report:
+  [`eval/reports/prefix-cache-fork-2026-05-02/SUMMARY.md`](eval/reports/prefix-cache-fork-2026-05-02/SUMMARY.md).
+  Smoke page bumped to `maxConversations: 8` (default 4) since
+  fork pattern holds `1 base + N forks` simultaneously —
+  consumers spawning many forks should raise the cap.
+
+### Probe / report inventory
+
+- `eval/reports/prefix-cache-validation-2026-05-01/SUMMARY.md` — v1 (PARTIAL)
+- `eval/reports/prefix-cache-at-scale-2026-05-01/SUMMARY.md` — at-scale (FAIL)
+- `eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md` — interleaved (PASS, 83% / 84%)
+- `eval/reports/prefix-cache-strided-save-2026-05-02/SUMMARY.md` — strided save (NEGATIVE)
+- `eval/reports/prefix-cache-fork-2026-05-02/SUMMARY.md` — fork e2e (PASS, 72%)
+
+### Headline numbers (qwen3-8b-iq3m, FA on)
+
+| matrix | Pattern A wall | Pattern B wall | savings |
+|---|---|---|---|
+| Sequential at-scale (1325-token shared) | 2424 ms | 2724 ms | -12.4% (Pattern A wins via session tracker) |
+| Interleaved (1100-token per-NPC distinct) | 15854 ms | 2702 ms | **+83%** (Pattern B wins) |
+| Fork first-tick spawn (1325-token shared) | 8757 ms | 2436 ms | **+72% per NPC, 17.2 s at N=4** |
+
