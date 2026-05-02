@@ -99,7 +99,8 @@ test("loadRuns orders by timestamp and respects limit/order args", () => {
 
 test("upsertRun persists mode column ('main' default, 'worker' when set)", () => {
 	// Pre-Task-9 record (no mode field) should land as 'main' via the
-	// column DEFAULT, and round-trip without a `mode` key on the JSON
+	// `upsertRun` 'main' fallback (record.mode ?? "main" is bound as a
+	// parameter), and round-trip without a `mode` key on the JSON
 	// (since we only persist what was passed in).
 	upsertRun(db, makeRun({ runId: "r-legacy" }));
 	const legacyRow = db
