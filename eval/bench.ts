@@ -49,6 +49,7 @@ function main(): void {
 			"live-bench-url": { type: "string" },
 			"list-profiles": { type: "boolean" },
 			"fail-fast": { type: "boolean" },
+			worker: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -123,6 +124,7 @@ function main(): void {
 				"--profile",
 				entry.profile.name,
 			];
+			if (values.worker) speedArgs.push("--worker");
 			const ok = runChild(speedArgs, childEnv);
 			results.push({ label, ok, phase: "speed" });
 			if (!ok && failFast) break;
@@ -196,6 +198,7 @@ Options:
       --live-bench-url <url>  Stream events to dashboard (env: ${LIVE_BENCH_URL_ENV})
       --list-profiles    List available profiles + profile sets
       --fail-fast        Stop on first failure
+      --worker           Run engine inside a DedicatedWorker (speed pass only)
   -h, --help             Show this help
 
 Examples:

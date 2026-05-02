@@ -97,6 +97,35 @@ test("loadRuns orders by timestamp and respects limit/order args", () => {
 	expect(limited).toHaveLength(2);
 });
 
+test("upsertRun persists mode column ('main' default, 'worker' when set)", () => {
+	// Pre-Task-9 record (no mode field) should land as 'main' via the
+	// column DEFAULT, and round-trip without a `mode` key on the JSON
+	// (since we only persist what was passed in).
+	upsertRun(db, makeRun({ runId: "r-legacy" }));
+	const legacyRow = db
+		.prepare("SELECT mode FROM runs WHERE run_id = ?")
+		.get("r-legacy") as { mode: string };
+	expect(legacyRow.mode).toBe("main");
+
+	// Explicit 'worker' record should round-trip through the column AND
+	// the embedded record_json (since the JSON snapshot is the canonical
+	// payload — the column exists for SQL slicing on cross-mode A/Bs).
+	upsertRun(db, makeRun({ runId: "r-worker", mode: "worker" }));
+	const workerRow = db
+		.prepare("SELECT mode FROM runs WHERE run_id = ?")
+		.get("r-worker") as { mode: string };
+	expect(workerRow.mode).toBe("worker");
+	const reloaded = loadRuns(db).find((r) => r.runId === "r-worker");
+	expect(reloaded?.mode).toBe("worker");
+
+	// Upsert overwrite swaps the column too (worker → main re-classification).
+	upsertRun(db, makeRun({ runId: "r-worker", mode: "main" }));
+	const reclassified = db
+		.prepare("SELECT mode FROM runs WHERE run_id = ?")
+		.get("r-worker") as { mode: string };
+	expect(reclassified.mode).toBe("main");
+});
+
 test("clearRuns removes everything and returns the count", () => {
 	upsertRun(db, makeRun({ runId: "r-a" }));
 	upsertRun(db, makeRun({ runId: "r-b" }));

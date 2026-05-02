@@ -35,6 +35,8 @@ export interface SmokeRunParams {
 	seed?: number;
 }
 
+export type SmokeRunMode = "main" | "worker";
+
 export interface SmokeRunRecord {
 	schemaVersion: typeof SMOKE_RUN_SCHEMA_VERSION;
 	timestamp: string;
@@ -42,6 +44,13 @@ export interface SmokeRunRecord {
 	model: string;
 	page: SmokeTestPage;
 	thinking: "off" | "on";
+	/**
+	 * Engine host context — `'main'` (legacy default) when the engine runs
+	 * on the page main thread, `'worker'` when wrapped by `WebLLMProxy` and
+	 * driven via a `DedicatedWorker` (Task 8). Optional for backward-compat
+	 * with run records persisted before this field was introduced.
+	 */
+	mode?: SmokeRunMode;
 	prompt: string;
 	params: SmokeRunParams;
 	oneShot?: SmokeRunOneShot;
@@ -82,6 +91,7 @@ export function buildSmokeRunRecord(input: {
 	modelId: string;
 	page: SmokeTestPage;
 	thinking: "off" | "on";
+	mode?: SmokeRunMode;
 	prompt: string;
 	contextLength: number;
 	params: SmokeRunParams;
@@ -113,6 +123,7 @@ export function buildSmokeRunRecord(input: {
 		},
 	};
 	if (input.profile) record.profile = input.profile.name;
+	if (input.mode) record.mode = input.mode;
 	if (input.oneShotResult) {
 		record.oneShot = {
 			assistantText: input.oneShotAssistantText ?? "",

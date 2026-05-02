@@ -105,6 +105,8 @@ function main(): void {
 			"decode-tokens": { type: "string" },
 			// §22 prefill-tiling addition
 			"prefill-tile": { type: "string" },
+			// Dual-mode worker deployment: route engine through DedicatedWorker
+			worker: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -136,6 +138,7 @@ function main(): void {
 		promptFixture: values["prompt-fixture"],
 		decodeTokens: values["decode-tokens"],
 		prefillTile: values["prefill-tile"],
+		worker: values.worker ?? false,
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -157,6 +160,7 @@ async function run(
 		promptFixture?: string;
 		decodeTokens?: string;
 		prefillTile?: string;
+		worker: boolean;
 	},
 ): Promise<void> {
 	await ensureSmokeServerReachable();
@@ -202,6 +206,7 @@ async function run(
 				...(fixturePrompt ? { prompt: fixturePrompt } : {}),
 				...(opts.decodeTokens ? { max: opts.decodeTokens } : {}),
 				...(wasmVariant === "mem64" ? { wasm: "mem64" } : {}),
+				...(opts.worker ? { worker: 1 } : {}),
 			},
 		});
 		agentchrome(port, tab, ["navigate", url]);
@@ -490,6 +495,7 @@ Options:
                         Override max-tokens for decode (sets ?max=<n>)
       --prefill-tile <n>
                         Enable §22 prefill-tile chunking with tile size n (default off)
+      --worker          Run engine inside a DedicatedWorker via WebLLMProxy
   -h, --help            Show this help
 
 Prereqs:

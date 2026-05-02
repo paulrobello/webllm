@@ -53,6 +53,7 @@ function main(): void {
 			"runs-dir": { type: "string" },
 			"no-save": { type: "boolean" },
 			"live-bench-url": { type: "string" },
+			worker: { type: "boolean" },
 		},
 		strict: true,
 	});
@@ -93,6 +94,7 @@ function main(): void {
 		runsDir: values["runs-dir"],
 		save: !values["no-save"],
 		liveBenchUrl: resolveLiveBenchUrl(values["live-bench-url"]),
+		worker: values.worker ?? false,
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -111,6 +113,7 @@ async function run(
 		runsDir?: string;
 		save: boolean;
 		liveBenchUrl: string | null;
+		worker: boolean;
 	},
 ): Promise<void> {
 	const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -136,6 +139,7 @@ async function run(
 		chatSmoke: Date.now(),
 	};
 	if (thinking === "on") extraParams.thinking = 1;
+	if (opts.worker) extraParams.worker = 1;
 	// Tell the page where to POST its system profile so we can scrape
 	// the resulting systemId for the run_complete record.
 	if (opts.liveBenchUrl) extraParams.ingest = opts.liveBenchUrl;
@@ -202,6 +206,7 @@ async function run(
 		modelId: model.id,
 		page,
 		thinking,
+		mode: opts.worker ? "worker" : "main",
 		prompt,
 		contextLength,
 		params,
@@ -279,6 +284,7 @@ Options:
       --runs-dir <dir>  Directory for run records (default: eval/reports/smoke-runs)
       --no-save         Skip writing a JSON run record
       --live-bench-url <url>  Push events to live dashboard backend (env: WEBLLM_LIVE_BENCH_URL)
+      --worker          Run engine inside a DedicatedWorker via WebLLMProxy
   -h, --help            Show this help
 
 Prereqs:

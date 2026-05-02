@@ -196,6 +196,13 @@ function validateRunComplete(
 	if (typeof b.model !== "string" || !b.model.length) {
 		throw new Error("run_complete.model required");
 	}
+	// `mode` is optional for backward-compat with pre-Task-9 ingesters; when
+	// absent the persistence layer defaults the column to 'main'. If the
+	// caller does send a value it must be one of the two valid host
+	// contexts so cross-mode A/B slices stay clean.
+	if (b.mode !== undefined && b.mode !== "main" && b.mode !== "worker") {
+		throw new Error('run_complete.mode must be "main" or "worker" when set');
+	}
 	return b as SmokeRunRecord & { runId: string; systemId?: string };
 }
 

@@ -5,7 +5,7 @@ import type { SystemProfile } from "../src/evaluation/system-profile.ts";
 import type { SmokeRunRecord } from "./smoke-runs.ts";
 import type { EvalReport } from "./types.ts";
 
-export const LIVE_DB_SCHEMA_VERSION = 3;
+export const LIVE_DB_SCHEMA_VERSION = 4;
 
 export type PersistedRun = SmokeRunRecord & {
 	runId: string;
@@ -32,6 +32,7 @@ export function openLiveDb(path: string): Database {
 			page TEXT NOT NULL,
 			thinking TEXT NOT NULL,
 			system_id TEXT,
+			mode TEXT DEFAULT 'main',
 			record_json TEXT NOT NULL,
 			inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
 		);
@@ -75,14 +76,25 @@ export function openLiveDb(path: string): Database {
 		}
 	}
 
+	// v4: dual-mode worker deployment. `mode` records the engine's host
+	// context — 'main' when the engine ran on the page main thread (legacy
+	// default), 'worker' when wrapped by `WebLLMProxy` and driven from a
+	// DedicatedWorker. Defaulted to 'main' so pre-v4 rows are scored as
+	// main-thread runs in cross-mode A/B comparisons.
+	try {
+		db.exec(`ALTER TABLE runs ADD COLUMN mode TEXT DEFAULT 'main';`);
+	} catch {
+		// column already exists — fresh DB or prior migration ran
+	}
+
 	db.exec(`PRAGMA user_version = ${LIVE_DB_SCHEMA_VERSION};`);
 	return db;
 }
 
 export function upsertRun(db: Database, record: PersistedRun): void {
 	db.prepare(
-		`INSERT INTO runs (run_id, timestamp, profile, model, page, thinking, system_id, record_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO runs (run_id, timestamp, profile, model, page, thinking, system_id, mode, record_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(run_id) DO UPDATE SET
 		   timestamp = excluded.timestamp,
 		   profile = excluded.profile,
@@ -90,6 +102,7 @@ export function upsertRun(db: Database, record: PersistedRun): void {
 		   page = excluded.page,
 		   thinking = excluded.thinking,
 		   system_id = excluded.system_id,
+		   mode = excluded.mode,
 		   record_json = excluded.record_json`,
 	).run(
 		record.runId,
@@ -99,6 +112,7 @@ export function upsertRun(db: Database, record: PersistedRun): void {
 		record.page,
 		record.thinking,
 		record.systemId ?? null,
+		record.mode ?? "main",
 		JSON.stringify(record),
 	);
 }

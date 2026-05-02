@@ -171,6 +171,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// §4 Flash Attention gate: ?fa=on toggles ggml_flash_attn_ext + the
 	// FA-ready V-cache layout. Default off — preserves §18-revert behavior.
 	const flashAttnEnabled = params.get("fa") === "on";
+	// Dual-mode worker deployment: `?worker=1` runs the engine inside a
+	// DedicatedWorker (same-bundle re-entry via `WebLLMProxy`). The
+	// public TS surface is identical between main-thread and worker
+	// modes; only the host context differs. The dashboard records
+	// `mode=worker|main` for cross-mode A/B perf comparison.
+	const useWorker = params.get("worker") === "1";
 	// Bucket D embedding gate: ?embeddingCapable=1 dispatches to the hidden-state
 	// embedding path when adopted into the engine. Gates parity testing for
 	// causal-LM-derived embedders (Qwen3-Embedding, etc).
@@ -615,6 +621,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// Default is 4; the prefix-cache-fork probe runs 1 base
 				// + 4 forks = 5 concurrent conversations.
 				maxConversations: 8,
+				// `?worker=1` routes through `WebLLMProxy` → DedicatedWorker
+				// re-entry into the same bundle. Public surface is unchanged.
+				worker: useWorker,
 			});
 			const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
 				modelId,
@@ -1967,6 +1976,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				model: modelId,
 				page: "smoke",
 				thinking: thinkingEnabled ? "on" : "off",
+				mode: useWorker ? "worker" : "main",
 				prompt: userMessage,
 				params: {
 					contextLength: Number.isFinite(requestedContextLength)

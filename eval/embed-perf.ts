@@ -83,6 +83,7 @@ async function runCell(
 	port: string,
 	tab: string,
 	profile: boolean,
+	worker: boolean,
 ): Promise<CellResult> {
 	const url = buildSmokeTestUrl(model.id, model.contextLength, {
 		extraParams: {
@@ -92,6 +93,7 @@ async function runCell(
 			v: `${Date.now()}`,
 			...(model.embeddingCapable ? { embeddingCapable: 1 } : {}),
 			...(profile ? { perfTrace: 1 } : {}),
+			...(worker ? { worker: 1 } : {}),
 		},
 	});
 	console.log(`  ${model.id} · ${mode} · ${fixture}`);
@@ -156,6 +158,7 @@ async function main(): Promise<void> {
 			port: { type: "string" },
 			tab: { type: "string" },
 			out: { type: "string" },
+			worker: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -163,7 +166,7 @@ async function main(): Promise<void> {
 
 	if (values.help) {
 		console.log(
-			"Usage: bun run eval/embed-perf.ts [--model <id>] [--mode single|batch] [--fixture short|long|batchMixed] [--reps N] [--profile] [--out <dir>]",
+			"Usage: bun run eval/embed-perf.ts [--model <id>] [--mode single|batch] [--fixture short|long|batchMixed] [--reps N] [--profile] [--worker] [--out <dir>]",
 		);
 		process.exit(0);
 	}
@@ -211,6 +214,7 @@ async function main(): Promise<void> {
 					port,
 					tab,
 					values.profile === true,
+					values.worker === true,
 				);
 				cells.push(cell);
 				const logPath = `${outDir}${id}_${mode}_${fix}.json`;
