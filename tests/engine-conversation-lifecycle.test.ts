@@ -104,13 +104,19 @@ describe("engine conversation lifecycle", () => {
 		expect(() => engine.disposeConversation(conv)).not.toThrow();
 	});
 
-	test("createConversation throws ConversationPoolFullError at cap", () => {
+	test("createConversation at cap evicts LRU non-locked entry", () => {
 		const engine = createFakeEngine({ maxConversations: 2 });
 		const a = engine.createConversation("tl");
 		const b = engine.createConversation("tl");
-		expect(() => engine.createConversation("tl")).toThrow(/pool full/i);
-		engine.disposeConversation(a);
+		// `a` is the oldest non-locked entry; create() should evict it.
+		const c = engine.createConversation("tl");
+		// `a` is gone, `b` and `c` survive.
+		const internals = asInternals(engine);
+		expect(() => internals.conversationPool.assertExists(a)).toThrow();
+		expect(() => internals.conversationPool.assertExists(b)).not.toThrow();
+		expect(() => internals.conversationPool.assertExists(c)).not.toThrow();
 		engine.disposeConversation(b);
+		engine.disposeConversation(c);
 	});
 
 	test("unloadModel disposes all conversations attached to that model", async () => {

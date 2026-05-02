@@ -31,12 +31,22 @@ interface PoolEntry {
 	options: ConversationOptions;
 	snapshot: KVSnapshot | null;
 	locked: boolean;
+	/**
+	 * Monotonic access ordinal — bumped on every operation that touches
+	 * the entry (`get`, `set`, `options`, `tryAcquireLock`, plus initial
+	 * creation). Used by `create()` to pick the LRU non-locked entry to
+	 * evict when the pool is at capacity. A counter (rather than
+	 * `Date.now()`) avoids ties for back-to-back operations within the
+	 * same millisecond.
+	 */
+	accessSeq: number;
 }
 
 export class ConversationPool {
 	private readonly entries = new Map<string, PoolEntry>();
 	private readonly maxConversations: number;
 	private nextId = 1;
+	private accessCounter = 0;
 
 	constructor(config: ConversationPoolConfig) {
 		this.maxConversations = config.maxConversations;
@@ -47,7 +57,15 @@ export class ConversationPool {
 		options: ConversationOptions = {},
 	): ConversationHandle {
 		if (this.entries.size >= this.maxConversations) {
-			throw new ConversationPoolFullError([...this.entries.keys()]);
+			// LRU eviction: drop the oldest non-locked entry. If every
+			// entry is locked (in-flight chatCompletion), there's nothing
+			// safe to evict and we surface the full-pool error to the
+			// caller. Spec follow-up #1.
+			const victim = this._findLruEvictable();
+			if (!victim) {
+				throw new ConversationPoolFullError([...this.entries.keys()]);
+			}
+			this.entries.delete(victim.handle.id);
 		}
 		const id = `conv_${this.nextId++}`;
 		const handle: ConversationHandle = { id, modelHandleId };
@@ -56,8 +74,20 @@ export class ConversationPool {
 			options,
 			snapshot: null,
 			locked: false,
+			accessSeq: ++this.accessCounter,
 		});
 		return handle;
+	}
+
+	private _findLruEvictable(): PoolEntry | null {
+		let oldest: PoolEntry | null = null;
+		for (const entry of this.entries.values()) {
+			if (entry.locked) continue;
+			if (oldest === null || entry.accessSeq < oldest.accessSeq) {
+				oldest = entry;
+			}
+		}
+		return oldest;
 	}
 
 	dispose(conv: ConversationHandle): void {
@@ -78,7 +108,10 @@ export class ConversationPool {
 	}
 
 	get(conv: ConversationHandle): KVSnapshot | undefined {
-		return this.entries.get(conv.id)?.snapshot ?? undefined;
+		const entry = this.entries.get(conv.id);
+		if (!entry) return undefined;
+		entry.accessSeq = ++this.accessCounter;
+		return entry.snapshot ?? undefined;
 	}
 
 	set(conv: ConversationHandle, snapshot: KVSnapshot): void {
@@ -96,6 +129,7 @@ export class ConversationPool {
 		if (entry.handle.modelHandleId !== conv.modelHandleId) {
 			throw new ConversationNotFoundError(conv.id);
 		}
+		entry.accessSeq = ++this.accessCounter;
 		return entry;
 	}
 
