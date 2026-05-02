@@ -1234,14 +1234,22 @@ Daily cadence check (item 1) still required at session start.
       Caller-explicit `CompletionConfig.skipSave: true` bypasses the
       post-decode `serializeKVCache`. Needs an interleaved probe to
       demonstrate value.
-    - **Per-head strided reads — NEXT GATING LEVER.** Bandwidth-bound
-      residual makes payload reduction the only path forward.
-      Currently `serializeKVCache` / `loadKVCache` operate on full
-      maxCtx-sized tensors; only `[0, finalLen)` per head slab is
-      populated. Strided reads cut payload by `maxCtx / finalLen`
-      (3.1× at 1325/4096; up to ~5× shorter prefixes). Projected to
-      take Pattern B tick-2 wall from 2.72 s → ~2.0-2.2 s, finally
-      faster than Pattern A. Tracked as task #693.
+    - **Per-head strided reads — PROBED 2026-05-02, NEGATIVE
+      (§28 template).** Cut readback payload from 576 MB → 195 MB
+      via `headCountKv` strided per-head reads (no C++ patch — the
+      existing `beginDownloadFromTensor` API supports offset/size).
+      Wall-time effect was ~0% on the interleaved probe
+      (2719 → 2736 ms): per-call overhead at 576 strided reads
+      cancelled the bandwidth savings vs 72 full reads. The
+      bandwidth-bound floor estimate was wrong — Phase 1a's
+      pipelining already hid the readback behind the WebGPU command
+      queue. Updated mental model: load (sync ASYNCIFY upload), not
+      save, is the dominant per-call I/O cost. Strided writes would
+      need a new C++ batch primitive (`backend_tensor_set_strided`
+      or similar); deferred — adds patch-stack drift surface
+      without a probe showing wall-time win. Strided save change
+      not committed; report:
+      [`eval/reports/prefix-cache-strided-save-2026-05-02/SUMMARY.md`](eval/reports/prefix-cache-strided-save-2026-05-02/SUMMARY.md).
     - **Interleaved probe — RAN 2026-05-02, PASS (83% wall
       savings).** Round-robin matrix with per-NPC distinct
       ~1100-token personas defeats Pattern A's session-tracker

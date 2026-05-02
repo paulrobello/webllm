@@ -522,6 +522,16 @@ export class ModelInference {
 	 * and returns the bytes; we do per-head slab compaction in between.
 	 * Cuts cost by ~10× vs awaiting each tensor individually (72
 	 * round-trips → 1 batched begin + 72 finishes).
+	 *
+	 * Per-head strided reads probed 2026-05-02: cut payload from full
+	 * maxCtx-sized reads to only `[0, nTokens)` per head slab (576 MB
+	 * → 195 MB on Qwen3-8B at 1325 shared tokens, 4096 maxCtx).
+	 * Wall-time effect was a wash on the interleaved probe
+	 * (2719 → 2736 ms); per-call overhead at 576 strided reads
+	 * cancelled the bandwidth savings vs 72 full reads. The readback
+	 * isn't actually the bandwidth bottleneck — Phase 1a already
+	 * hides it behind the WebGPU command queue. Negative result
+	 * documented in TODO §11.
 	 */
 	async serializeKVCache(nTokens: number): Promise<Uint8Array> {
 		if (!this.flashAttn) {
