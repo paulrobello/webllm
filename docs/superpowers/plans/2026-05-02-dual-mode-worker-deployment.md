@@ -78,11 +78,11 @@ self.addEventListener("message", async (e) => {
 		const resp = await fetch("./models/qwen3-0.6b-q4f16.gguf");
 		if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 		const buf = await resp.arrayBuffer();
-		const handle = await engine.loadModelFromBuffer(
+		const { handle } = await engine.loadModelFromBuffer(
 			buf,
 			"qwen3-0.6b-q4f16",
-			{ priority: 0, contextLength: 4096 },
 			"./webllm-wasm.js",
+			{ priority: 0, contextLength: 4096 },
 		);
 		const tInit = performance.now() - t0;
 
@@ -1270,18 +1270,19 @@ export class WebLLMProxy {
 
 	// ────────── public WebLLM surface (non-streaming) ──────────
 
-	loadModel = (...args: unknown[]) => this.callMethod<ModelHandle>("loadModel", args);
+	loadModel = (...args: unknown[]) => this.callMethod<unknown>("loadModel", args);
+	// Instance signature in engine.ts:1132 is (data, name, wasmUrl?, options?)
+	// returning { handle, inference }. The proxy mirrors that exactly.
 	loadModelFromBuffer = (
-		buf: ArrayBuffer,
-		modelId: string,
-		opts: unknown,
-		wasmUrl: string,
-		loadOpts?: unknown,
-	) =>
-		this.callMethod<ModelHandle>(
+		data: ArrayBuffer,
+		name: string,
+		wasmUrl?: string,
+		options?: unknown,
+	): Promise<{ handle: ModelHandle; inference: unknown }> =>
+		this.callMethod<{ handle: ModelHandle; inference: unknown }>(
 			"loadModelFromBuffer",
-			[buf, modelId, opts, wasmUrl, loadOpts],
-			[buf],
+			[data, name, wasmUrl, options],
+			[data],
 		);
 	unloadModel = (id: string) => this.callMethod<void>("unloadModel", [id]);
 	embed = (modelId: string, text: string) =>
