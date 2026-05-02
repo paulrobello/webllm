@@ -4,116 +4,116 @@
     {
       "npcId": "goblin_1",
       "tick": 1,
-      "prefillMs": 14449.299999952316,
-      "wallMs": 15822.900000095367,
+      "prefillMs": 14395.099999904633,
+      "wallMs": 15761.400000095367,
       "output": "\nOkay, let's break this down. The goblin_1 is a raider from Bonewood during the Skullsplit cycle. His tactics involve restraint"
     },
     {
       "npcId": "wolf_2",
       "tick": 1,
-      "prefillMs": 14090.900000095367,
-      "wallMs": 15465.199999809265,
-      "output": "\nOkay, let's break this down. The NPC is wolf_2, a hunter in Frostmoor during Longwinter. The observation is that there"
+      "prefillMs": 14174,
+      "wallMs": 15546.600000143051,
+      "output": "\nOkay, let's see. The scenario is that wolf_2 is a hunter in Frostmoor during Longwinter. The wolf spots a wounded rabbit"
     },
     {
       "npcId": "merchant_3",
       "tick": 1,
-      "prefillMs": 13636.299999952316,
-      "wallMs": 14992.200000047684,
-      "output": "\nOkay, let's break this down. The NPC is merchant_3, a trader from Sunhold in the Goldspring era. The key aspects of"
+      "prefillMs": 13579.299999952316,
+      "wallMs": 14944.200000047684,
+      "output": "\nOkay, let's break this down. The scenario is that merchant_3 is a trader in Sunhold during the Goldspring cycle. The player hero"
     },
     {
       "npcId": "guard_4",
       "tick": 1,
-      "prefillMs": 13748.900000095367,
-      "wallMs": 15123,
+      "prefillMs": 13687.099999904633,
+      "wallMs": 15057.400000095367,
       "output": "\nOkay, let's break this down. The scenario is that guard_4, a sentinel in Ivormere during the Stoneward cycle, sees a"
     },
     {
       "npcId": "goblin_1",
       "tick": 2,
-      "prefillMs": 1057.0999999046326,
-      "wallMs": 2428.699999809265,
-      "output": "\nOkay, let's see. The user provided a scenario where the NPC is goblin_1, a raider from Bonewood during the Skullsplit"
+      "prefillMs": 15592.400000095367,
+      "wallMs": 16945.5,
+      "output": "\nOkay, let's see. The goblin_1 is facing the hero who's now at distance 4 and has drawn a sword. The g"
     },
     {
       "npcId": "wolf_2",
       "tick": 2,
-      "prefillMs": 14691.200000047684,
-      "wallMs": 16057.799999952316,
-      "output": "\nOkay, let's see. The scenario is that wolf_2 is a hunter in Frostmoor during Longwinter. The previous observation was that a"
+      "prefillMs": 14972.900000095367,
+      "wallMs": 16373.400000095367,
+      "output": "\nOkay, let's break this down. Wolf_2 is a hunter in Frostmoor, following the Longwinter cycle's tactics. The first observation"
     },
     {
       "npcId": "merchant_3",
       "tick": 2,
-      "prefillMs": 14468.900000095367,
-      "wallMs": 15829.799999952316,
-      "output": "\nAlright, let's see. The user is asking for the tool name that merchant_3 should use in this scenario. Let me recall the context.\n\n"
+      "prefillMs": 15454.399999856949,
+      "wallMs": 16873,
+      "output": "\nOkay, let's see. The user is asking for the correct tool name that merchant_3 should use in this situation. Let me recall the context"
     },
     {
       "npcId": "guard_4",
       "tick": 2,
-      "prefillMs": 14487.700000047684,
-      "wallMs": 15853.5,
-      "output": "\nOkay, let's think through this. The guard is a sentinel trained in restraint and observation. The situation here is that a thief has drawn a dagger"
+      "prefillMs": 15735.600000143051,
+      "wallMs": 17144.099999904633,
+      "output": "\nOkay, let's think through this. The guard is facing a thief who has drawn a dagger and lunged towards the chest. From the previous interactions"
     }
   ],
   "patternB": [
     {
       "npcId": "goblin_1",
       "tick": 1,
-      "prefillMs": 41.09999990463257,
-      "wallMs": 15924.700000047684,
-      "output": "\nOkay, let's break this down. The goblin is a raider from Bonewood during the Skullsplit cycle. His tactics involve restraint,"
+      "prefillMs": 46.40000009536743,
+      "wallMs": 16036.799999952316,
+      "output": "\nOkay, let's break this down. The goblin_1 is a raider from Bonewood during the Skullsplit cycle. His tactics involve"
     },
     {
       "npcId": "wolf_2",
       "tick": 1,
-      "prefillMs": 41.40000009536743,
-      "wallMs": 15180,
-      "output": "\nOkay, let's break this down. The scenario is wolf_2, a hunter in Frostmoor during Longwinter. The wolf spots a"
+      "prefillMs": 43.80000019073486,
+      "wallMs": 15167.699999809265,
+      "output": "\nOkay, let's see. The scenario is that wolf_2 is a hunter in the Frostmoor during Longwinter. The observation is that"
     },
     {
       "npcId": "merchant_3",
       "tick": 1,
       "prefillMs": 44.5,
-      "wallMs": 15035.299999952316,
-      "output": "\nOkay, let's break this down. The scenario is that merchant_3 is a trader in Sunhold during the Goldspring cycle. The player"
+      "wallMs": 15095.099999904633,
+      "output": "\nOkay, let's see. The scenario is that merchant_3 is a trader in Sunhold during the Goldspring cycle. The player hero is"
     },
     {
       "npcId": "guard_4",
       "tick": 1,
-      "prefillMs": 45.799999952316284,
-      "wallMs": 15158.199999809265,
-      "output": "\nOkay, let's break this down. The guard_4 is a sentinel in Ivormere during the Stoneward cycle. His training emphasizes restraint"
+      "prefillMs": 45.59999990463257,
+      "wallMs": 15041.799999952316,
+      "output": "\nOkay, let's break this down. The scenario is that guard_4, a sentinel in Ivormere during the Stoneward cycle, sees"
     },
     {
       "npcId": "goblin_1",
       "tick": 2,
-      "prefillMs": 46.200000047683716,
-      "wallMs": 2763.899999856949,
-      "output": "\nOkay, let's think about this. The goblin is a raider with specific tactics. He prefers to survive below 30% vitality"
+      "prefillMs": 43.80000019073486,
+      "wallMs": 2809,
+      "output": "\nOkay, let's think about this. The goblin_1 is a raider with specific tactics. He prefers survival below 30%"
     },
     {
       "npcId": "wolf_2",
       "tick": 2,
-      "prefillMs": 46.200000047683716,
-      "wallMs": 2702.2000000476837,
-      "output": "\nOkay, let's see. The wolf_2 is a hunter in Frostmoor, and the current observation is that the rabbit fled into bushes"
+      "prefillMs": 45.59999990463257,
+      "wallMs": 2710.0999999046326,
+      "output": "\nOkay, let's break this down. Wolf_2 is a hunter in Frostmoor during Longwinter. The observation is that the rabbit fled"
     },
     {
       "npcId": "merchant_3",
       "tick": 2,
-      "prefillMs": 43.09999990463257,
-      "wallMs": 2665.0999999046326,
-      "output": "\nOkay, let's think through this. The merchant_3 is a trader with a specific set of behaviors. The key here is that the hero"
+      "prefillMs": 45.39999985694885,
+      "wallMs": 2718.7999999523163,
+      "output": "\nOkay, let me try to figure this out. The user is providing a scenario where merchant_3, a trader NPC, is interacting with a"
     },
     {
       "npcId": "guard_4",
       "tick": 2,
-      "prefillMs": 45.59999990463257,
-      "wallMs": 2673.600000143051,
-      "output": "\nOkay, so the guard_4 is facing a thief who has drawn a dagger and lunged toward the chest. Let me think about the tools"
+      "prefillMs": 41.799999952316284,
+      "wallMs": 2691.800000190735,
+      "output": "\nOkay, let's see. The guard_4 is a sentinel in Ivormere during the Stoneward cycle. His role is to observe and"
     }
   ]
 }

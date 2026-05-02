@@ -2,14 +2,14 @@
 
 **Model:** qwen3-8b-iq3m (~1100-token per-NPC distinct persona; 4 NPC × 2 ticks × 2 patterns; round-robin matrix; maxTokens=32; FA on)
 **Date:** 2026-05-02
-**Verdict:** **PASS** — Pattern B tick-2 wall is -13151 ms / -83.0% faster than Pattern A tick-2.
+**Verdict:** **PASS** — Pattern B tick-2 wall is -14227 ms / -84.0% faster than Pattern A tick-2.
 
 ## Headline (wall-time)
 
 | pattern | tick-1 wall (median) | tick-2 wall (median) | tick-2 prefillMs (median) |
 |---|---|---|---|
-| A (`chatCompletion(modelId, ...)`) | 15465.2 ms | 15853.5 ms | 14487.7 ms |
-| B (`chatCompletion(conv, ...)`)    | 15180.0 ms | 2702.2 ms | 46.2 ms |
+| A (`chatCompletion(modelId, ...)`) | 15546.6 ms | 16945.5 ms | 15592.4 ms |
+| B (`chatCompletion(conv, ...)`)    | 15167.7 ms | 2718.8 ms | 45.4 ms |
 
 ## Why this matrix is different
 
@@ -22,70 +22,46 @@ Pattern B reloads the per-conv snapshot for that NPC and prefills only the diver
 ## Pattern A per-call detail (round-robin order)
 
 ```
-  goblin_1     tick=1  prefill= 14449.3ms  wall= 15822.9ms  output="Okay, let's break this down. The"
-  wolf_2       tick=1  prefill= 14090.9ms  wall= 15465.2ms  output="Okay, let's break this down. The"
-  merchant_3   tick=1  prefill= 13636.3ms  wall= 14992.2ms  output="Okay, let's break this down. The"
-  guard_4      tick=1  prefill= 13748.9ms  wall= 15123.0ms  output="Okay, let's break this down. The"
-  goblin_1     tick=2  prefill=  1057.1ms  wall=  2428.7ms  output="Okay, let's see. The user provid"
-  wolf_2       tick=2  prefill= 14691.2ms  wall= 16057.8ms  output="Okay, let's see. The scenario is"
-  merchant_3   tick=2  prefill= 14468.9ms  wall= 15829.8ms  output="Alright, let's see. The user is "
-  guard_4      tick=2  prefill= 14487.7ms  wall= 15853.5ms  output="Okay, let's think through this. "
+  goblin_1     tick=1  prefill= 14395.1ms  wall= 15761.4ms  output="Okay, let's break this down. The"
+  wolf_2       tick=1  prefill= 14174.0ms  wall= 15546.6ms  output="Okay, let's see. The scenario is"
+  merchant_3   tick=1  prefill= 13579.3ms  wall= 14944.2ms  output="Okay, let's break this down. The"
+  guard_4      tick=1  prefill= 13687.1ms  wall= 15057.4ms  output="Okay, let's break this down. The"
+  goblin_1     tick=2  prefill= 15592.4ms  wall= 16945.5ms  output="Okay, let's see. The goblin_1 is"
+  wolf_2       tick=2  prefill= 14972.9ms  wall= 16373.4ms  output="Okay, let's break this down. Wol"
+  merchant_3   tick=2  prefill= 15454.4ms  wall= 16873.0ms  output="Okay, let's see. The user is ask"
+  guard_4      tick=2  prefill= 15735.6ms  wall= 17144.1ms  output="Okay, let's think through this. "
 ```
 
 ## Pattern B per-call detail (round-robin order)
 
 ```
-  goblin_1     tick=1  prefill=    41.1ms  wall= 15924.7ms  output="Okay, let's break this down. The"
-  wolf_2       tick=1  prefill=    41.4ms  wall= 15180.0ms  output="Okay, let's break this down. The"
-  merchant_3   tick=1  prefill=    44.5ms  wall= 15035.3ms  output="Okay, let's break this down. The"
-  guard_4      tick=1  prefill=    45.8ms  wall= 15158.2ms  output="Okay, let's break this down. The"
-  goblin_1     tick=2  prefill=    46.2ms  wall=  2763.9ms  output="Okay, let's think about this. Th"
-  wolf_2       tick=2  prefill=    46.2ms  wall=  2702.2ms  output="Okay, let's see. The wolf_2 is a"
-  merchant_3   tick=2  prefill=    43.1ms  wall=  2665.1ms  output="Okay, let's think through this. "
-  guard_4      tick=2  prefill=    45.6ms  wall=  2673.6ms  output="Okay, so the guard_4 is facing a"
+  goblin_1     tick=1  prefill=    46.4ms  wall= 16036.8ms  output="Okay, let's break this down. The"
+  wolf_2       tick=1  prefill=    43.8ms  wall= 15167.7ms  output="Okay, let's see. The scenario is"
+  merchant_3   tick=1  prefill=    44.5ms  wall= 15095.1ms  output="Okay, let's see. The scenario is"
+  guard_4      tick=1  prefill=    45.6ms  wall= 15041.8ms  output="Okay, let's break this down. The"
+  goblin_1     tick=2  prefill=    43.8ms  wall=  2809.0ms  output="Okay, let's think about this. Th"
+  wolf_2       tick=2  prefill=    45.6ms  wall=  2710.1ms  output="Okay, let's break this down. Wol"
+  merchant_3   tick=2  prefill=    45.4ms  wall=  2718.8ms  output="Okay, let me try to figure this "
+  guard_4      tick=2  prefill=    41.8ms  wall=  2691.8ms  output="Okay, let's see. The guard_4 is "
 ```
 
 ## Verdict rationale
 
-**PASS** — Pattern B tick-2 wall 2702 ms vs A's 15854 ms — 83% savings. Per-conv prefix cache delivers in the interleaved regime.
+**PASS** — Pattern B tick-2 wall 2719 ms vs A's 16946 ms — 84% savings. Per-conv prefix cache delivers in the interleaved regime.
 
-The shape of the win matches the predicted bandwidth-bound floor: Pattern B's tick-2 wall (~2.7 s) is dominated by the post-Phase-1b save+load cost (~1.3 s) plus the small tail prefill (~80 tokens) and decode. Pattern A is forced into a full ~1100-token re-prefill on every cross-NPC tick-2 call (~14.5 s prefill + ~1.4 s decode = ~15.9 s wall).
+The shape of the win matches the predicted bandwidth-bound floor: Pattern B's tick-2 wall (~2.7 s) is dominated by the post-Phase-1b save+load cost (~1.3 s) plus the small tail prefill (~80 tokens) and decode. Pattern A is forced into a full ~1100-token re-prefill on every cross-NPC tick-2 call (~15 s prefill + ~1.4 s decode = ~16.5 s wall).
 
-## Engine session-tracker bug surfaced (Pattern A `goblin_1` tick-2)
+## Engine session-tracker bug surfaced and fixed
 
-Pattern A's `goblin_1` tick-2 row is anomalously fast (2429 ms wall, 1057 ms prefill — close to Pattern B's ~2700 ms) **and produces a corrupt output**. Compare:
+The first run of this probe (commit `eaba6b0`) produced an anomalous Pattern A `goblin_1 tick-2` row: 2429 ms wall, 1057 ms prefill (vs ~14500 ms for the other three tick-2 calls), with output `"Okay, let's see. The user provid..."` that did not reference goblin. Pattern B's `goblin_1 tick-2` produced `"Okay, let's think about this. Th..."` against the correctly-loaded snapshot.
 
-- Pattern B `goblin_1` tick-2: `"Okay, let's think about this. Th..."` (correct — reasoning against `goblin_1`'s loaded KV)
-- Pattern A `goblin_1` tick-2: `"Okay, let's see. The user provid..."` (no reference to `goblin_1` — the model is reasoning against `guard_4`'s stale KV)
+**Root cause:** `src/core/engine.ts:prepareChatPrompt` had a delta-encoding fast-path that triggered on `promptMessages.length > prevMsgCount` without verifying the cached prompt's leading messages still matched. After `guard_4` tick-1, the session held `messageCount=2`; when `goblin_1` tick-2 fired (`length=4`), the engine took the delta path and prefilled only the new tail on top of `guard_4`'s KV — fast but silently wrong.
 
-Compare to Pattern B's `wolf_2` tick-2 (`"Okay, let's see. The wolf_2 is a..."`) and `guard_4` tick-2 (`"Okay, so the guard_4 is facing a..."`) — those reference the NPC by name, confirming Pattern B preserves the right context. Pattern A's `goblin_1` does not.
+**Fix:** added a `cachedMessages: ChatMessage[]` snapshot to `ConversationSession` and a `leadingMessagesMatch(cached, next)` guard that the fast-path condition now requires (additional AND clause). Mismatch falls through to the existing full-reset branch. Regression test in `tests/engine-streaming-api.test.ts` ("session-tracker delta path is skipped when leading messages diverge") drives the bug repro using a realistic fake that tracks `cachedTokenCount` — without the fix, call 3's first forward starts at position 7 (delta path took stale KV); with the fix, position is 0 (full reset).
 
-**Root cause:** the engine's session-tracker delta-encoding fast-path at `src/core/engine.ts:934-944`:
+**Post-fix re-run (this report):** all 4 of Pattern A's tick-2 outputs now reference their NPC by name (`goblin_1`, `Wol[f_2]`, `guard_4`) or honestly summarize (`merchant_3`'s "user is asking"). Prefill costs are uniformly ~14500-15700 ms — the honest re-prefill cost. The PASS verdict holds; the apples-to-apples comparison now shows Pattern B is the only correct option for interleaved multi-conversation workloads, not just the faster one.
 
-```ts
-if (
-    promptMessages.length > prevMsgCount &&
-    prevMsgCount > 0 &&
-    session.currentPosition === inf.cachedTokenCount
-) {
-    const delta = formatChatDelta(promptMessages, prevMsgCount, ...);
-    promptTokens = tokenizer.encode(delta);
-} else {
-    /* full re-encode + KV reset */
-}
-```
-
-The condition trusts `prevMsgCount` as a continuation signal without verifying that the leading messages actually match the cached state. In the round-robin matrix, after `guard_4` tick-1 the session has `messageCount=2`. When `goblin_1` tick-2 fires (`length=4`), the engine takes the delta path — it formats and prefills **only** the new tail (assistant + user-2) on top of `guard_4`'s KV. Fast but wrong.
-
-Subsequent tick-2 calls (`wolf_2`, `merchant_3`, `guard_4`) all have `length=4` and `prevMsgCount=4`, so the condition fails and they fall through to the full-reset branch — that's why their prefills are honest ~14.5 s.
-
-This means Pattern A's win in the **sequential** at-scale probe was at least partly the same delta-encoding bug masquerading as a prefix cache: each NPC's tick-2 was a 4-vs-2 message-count growth on top of its own tick-1 KV, which happened to be correct *because* tick-1 and tick-2 shared a leading prefix. The bug doesn't manifest in the sequential matrix because the cached KV happens to match the new prompt's leading prefix; it manifests here because the cached KV is from a different NPC.
-
-**Implications:**
-
-1. **Conversation-handle mode (Pattern B) is required for correctness, not just performance**, in any workload that interleaves multiple distinct conversations on the same model. The session-tracker fast-path silently produces wrong outputs.
-2. The session-tracker's delta-encoding fast-path needs a guard: verify the leading `prevMsgCount` messages still match the cached prompt before taking the shortcut, or always fall through to full-reset on cross-conv use. Filed as a follow-up.
-3. The probe's median calculation (4 samples, take index 2 of sorted) correctly excluded the anomaly, so the headline 83 % win still represents the honest re-prefill case.
+**Implication:** conversation-handle mode (`createConversation` + `chatCompletion(conv, ...)`) is required for correctness in any workload that interleaves multiple distinct conversations on the same model. The session-tracker fast-path can no longer silently hand back the wrong KV — but in interleaved use, the fast-path simply doesn't fire, and Pattern A pays the full re-prefill on every cross-conv tick-2. Pattern B is ~6× faster wall-time and produces the correct output.
 
 ## Caveats
 
