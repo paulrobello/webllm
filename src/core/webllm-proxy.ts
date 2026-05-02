@@ -92,8 +92,6 @@ export class WebLLMProxy {
 
 	// ────────── public WebLLM surface (non-streaming) ──────────
 
-	loadModel = (...args: unknown[]) =>
-		this.callMethod<unknown>("loadModel", args);
 	// Instance signature in engine.ts:1132 is (data, name, wasmUrl?, options?)
 	// returning { handle, inference }. The proxy mirrors that exactly.
 	loadModelFromBuffer = (

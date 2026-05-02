@@ -119,4 +119,27 @@ describe("WebLLMProxy — non-streaming", () => {
 		expect(terminated).toBe(true);
 		await expect(proxy.embed("m1", "x")).rejects.toThrow(/dispose/i);
 	});
+
+	test("in-flight calls reject when dispose is called mid-flight", async () => {
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		// Slow engine: embed never resolves while we kick off dispose.
+		const engine = {
+			embed(): Promise<Float32Array> {
+				return new Promise(() => {
+					/* never resolves */
+				});
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: hostPost,
+			receive: hostReceive,
+		});
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const inFlight = proxy.embed("m1", "x");
+		// Don't await; race a dispose against the never-resolving embed.
+		await proxy.dispose();
+		await expect(inFlight).rejects.toThrow(/dispose/i);
+	});
 });
