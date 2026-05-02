@@ -1253,20 +1253,25 @@ Daily cadence check (item 1) still required at session start.
       Surfaced an engine session-tracker bug as a side finding —
       see below.
 
-    **Engine session-tracker bug (correctness, surfaced 2026-05-02
-    by interleaved probe):** the delta-encoding fast-path at
-    `src/core/engine.ts:934-944` trusts `promptMessages.length >
-    prevMsgCount` as a continuation signal without verifying the
-    leading `prevMsgCount` messages still match the cached prompt.
-    In interleaved multi-conversation use (cross-NPC tick-2 on
-    Pattern A), this produces a silently corrupt output — the model
-    reasons against the wrong NPC's KV with the new tail appended.
-    Pattern B (conv-handle path) is unaffected and is therefore
-    **required for correctness**, not just performance, in
-    interleaved workloads. Filed as task #694; fix options: snapshot
-    cached prompt tokens and verify leading-prefix, fall through to
-    full-reset on cross-conv use, or require a conv handle for
-    interleaved workloads.
+    **Engine session-tracker bug (correctness) — FIXED 2026-05-02
+    in commit `c8d1530`.** The delta-encoding fast-path at
+    `src/core/engine.ts:prepareChatPrompt` trusted
+    `promptMessages.length > prevMsgCount` as a continuation signal
+    without verifying the leading `prevMsgCount` messages still
+    matched the cached prompt; in interleaved multi-conversation use
+    (cross-NPC tick-2 on Pattern A), it silently reused another
+    NPC's KV with the new tail appended. Fix snapshots leading
+    messages (`cachedMessages: ChatMessage[]`) on the
+    `ConversationSession` and adds a `leadingMessagesMatch` guard to
+    the fast-path condition; mismatch falls through to the existing
+    full-reset branch. Regression test:
+    `tests/engine-streaming-api.test.ts` ("session-tracker delta
+    path is skipped when leading messages diverge"). Post-fix
+    re-run of the interleaved probe (commit `752421c`) confirmed
+    all Pattern A tick-2 outputs now reference their NPC and pay
+    the honest ~15 s re-prefill — Pattern B's win held at 84%.
+    Implication: conv-handle mode is now required for **correctness**
+    in interleaved workloads, not just performance.
     - **At-scale validation probe — RAN 2026-05-01 (FAIL), RE-RAN
       2026-05-02 (FAIL, but +300 ms instead of +485 ms after Phase
       1a+1b).** Mechanism healthy at every prefix scale; the v1 cost
