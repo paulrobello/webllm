@@ -1181,6 +1181,9 @@ export class WebLLM {
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl: resolvedWasmUrl });
 
+		// `view` lives in the JS heap (not the WASM heap), so there is no
+		// staging pointer to free — pass `undefined`. `_buildInferenceAndRegister`
+		// owns failure-path teardown of the wasm module from here on.
 		return this._buildInferenceAndRegister(
 			parsed,
 			ggufCtx,
@@ -1188,6 +1191,7 @@ export class WebLLM {
 			wasm,
 			name,
 			options,
+			undefined,
 		);
 	}
 
@@ -1246,7 +1250,16 @@ export class WebLLM {
 		// state) and must `shutdown()` it before propagating. On the
 		// success path the registered model entry takes ownership of `wasm`
 		// — do NOT shutdown there. Hence try/catch (not try/finally).
+		//
+		// Staging-pointer ownership: once the staging ptr is handed to
+		// `_buildInferenceAndRegister`, that helper owns freeing it (both
+		// success path — between `loadWeights` and `initKVCache`, so the
+		// model staging buffer is freed before ~1 GB KV-cache allocation
+		// — and failure path inside the helper). The catch here only
+		// frees `ptr` if we threw BEFORE handing ownership to the helper
+		// (e.g., short read, parse failure, or malloc returning 0).
 		let ptr = 0;
+		let stagingOwnedByHelper = false;
 		try {
 			ptr = wasm.malloc(total);
 			if (!ptr) {
@@ -1280,27 +1293,27 @@ export class WebLLM {
 			const parsed = ModelLoader.parseModel(fullView);
 			const ggufCtx = GgufParser.parse(fullView) as GgufContext;
 
-			const result = this._buildInferenceAndRegister(
+			// Hand staging ownership to the helper: it frees `ptr` after
+			// `loadWeights` and BEFORE `initKVCache`, which keeps the
+			// transient WASM-heap footprint to max(model_bytes, KV_bytes)
+			// rather than (model_bytes + KV_bytes). Critical for 7B+ Q4
+			// models on the wasm64 16 GiB heap cap.
+			stagingOwnedByHelper = true;
+			return this._buildInferenceAndRegister(
 				parsed,
 				ggufCtx,
 				dataAt,
 				wasm,
 				name,
 				options,
+				ptr,
 			);
-			// Success path: weights have been uploaded into GPU buffers; the
-			// GGUF staging region is no longer needed. Free it so the KV
-			// cache + graph buffers don't share the heap with a redundant
-			// model-file-sized region. `wasm` itself is now owned by the
-			// registered model entry — do NOT shutdown.
-			wasm.free(ptr);
-			return result;
 		} catch (e) {
-			// Partial-failure path: free the staging allocation if we got
-			// that far, then tear down the WebGPU device + pipeline state
-			// `wasm.init()` constructed. Without this, every failed load
-			// leaks a WebGPU device.
-			if (ptr) {
+			// Partial-failure path: free the staging allocation if it
+			// hasn't been handed to the helper yet, then tear down the
+			// WebGPU device + pipeline state `wasm.init()` constructed.
+			// Without this, every failed load leaks a WebGPU device.
+			if (ptr && !stagingOwnedByHelper) {
 				try {
 					wasm.free(ptr);
 				} catch {
@@ -1325,6 +1338,20 @@ export class WebLLM {
 	 * buffer that is independent of the WASM heap) or a callback
 	 * `(offset, len) => Uint8Array` (when the GGUF lives in the WASM
 	 * heap and weight uploads must re-derive views post-grow).
+	 *
+	 * **Staging-pointer ownership.** When `stagingPtr` is supplied (the
+	 * `loadModelFromUrl` path, where the GGUF was streamed into a WASM-
+	 * heap region via `wasm.malloc(total)`), this helper takes ownership
+	 * of freeing it. The free is sequenced AFTER `loadWeights` (weights
+	 * are now resident in GPU buffers; the WASM-heap copy is no longer
+	 * needed) and BEFORE `initKVCache` (which `ctxCreate`s ~1 GB of KV +
+	 * scratch tensors). Without this ordering, the transient WASM-heap
+	 * footprint is `model_bytes + KV_bytes` simultaneously, which on
+	 * 7B Q4 models exceeds the wasm64 16 GiB cap (minus browser/WebGPU
+	 * overhead) and aborts inside `ctx_create` — see regression note in
+	 * CLAUDE.md. On any throw inside this helper the staging is freed
+	 * via the catch path before re-throwing, so callers never need to
+	 * free `stagingPtr` themselves once handed in.
 	 */
 	private _buildInferenceAndRegister(
 		parsed: ParsedModel,
@@ -1333,56 +1360,85 @@ export class WebLLM {
 		wasm: GgmlWasm,
 		name: string,
 		options?: Partial<ModelLoadOptions>,
+		stagingPtr?: number,
 	): {
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
 	} {
-		const arch = parsed.hyperparams.architecture;
-		const isEncoder = isEncoderArchitecture(arch);
-		const isCausalEmbedder = isCausalEmbedderArchitecture(arch);
-		let inference: ModelInference | EncoderInference | CausalLMEmbedder;
-		if (isEncoder) {
-			const enc = new EncoderInference(wasm, parsed.hyperparams);
-			enc.loadWeights(ggufCtx, dataSrc);
-			inference = enc;
-		} else if (isCausalEmbedder) {
-			const cembed = new CausalLMEmbedder(wasm, parsed.hyperparams);
-			cembed.loadWeights(ggufCtx, dataSrc);
-			inference = cembed;
-		} else {
-			const inf = new ModelInference(wasm, parsed.hyperparams);
-			inf.loadWeights(ggufCtx, dataSrc);
-			const requestedCtx = options?.contextLength;
-			const ctxLen =
-				typeof requestedCtx === "number" && requestedCtx > 0
-					? Math.min(requestedCtx, parsed.kvCacheConfig.maxContextLength)
-					: parsed.kvCacheConfig.maxContextLength;
-			inf.initKVCache(ctxLen);
-			inference = inf;
-		}
+		const freeStaging = (): void => {
+			if (!stagingPtr) return;
+			try {
+				wasm.free(stagingPtr);
+			} catch {
+				// ignore; on the success path this is best-effort cleanup,
+				// on the failure path the caller's `wasm.shutdown()` releases
+				// all heap state anyway.
+			}
+			stagingPtr = 0;
+		};
 
-		const handle = this.registerModelHandle(name, {
-			priority: 0,
-			...options,
-		});
-		const entry = this._modelManager.get(handle.id);
-		if (entry) {
-			entry.hyperparams = parsed.hyperparams;
-			entry.tokenizer = new Tokenizer(parsed.tokenizerConfig);
-			entry.kvCache = new KVCache(parsed.kvCacheConfig);
-			entry.loaded = true;
-		}
+		try {
+			const arch = parsed.hyperparams.architecture;
+			const isEncoder = isEncoderArchitecture(arch);
+			const isCausalEmbedder = isCausalEmbedderArchitecture(arch);
+			let inference: ModelInference | EncoderInference | CausalLMEmbedder;
+			if (isEncoder) {
+				const enc = new EncoderInference(wasm, parsed.hyperparams);
+				enc.loadWeights(ggufCtx, dataSrc);
+				freeStaging();
+				inference = enc;
+			} else if (isCausalEmbedder) {
+				const cembed = new CausalLMEmbedder(wasm, parsed.hyperparams);
+				cembed.loadWeights(ggufCtx, dataSrc);
+				freeStaging();
+				inference = cembed;
+			} else {
+				const inf = new ModelInference(wasm, parsed.hyperparams);
+				inf.loadWeights(ggufCtx, dataSrc);
+				// Free staging BEFORE initKVCache so the model-file-sized
+				// region doesn't share the WASM heap with the ~1 GB KV cache
+				// + scratch buffers ctx_create allocates.
+				freeStaging();
+				const requestedCtx = options?.contextLength;
+				const ctxLen =
+					typeof requestedCtx === "number" && requestedCtx > 0
+						? Math.min(requestedCtx, parsed.kvCacheConfig.maxContextLength)
+						: parsed.kvCacheConfig.maxContextLength;
+				inf.initKVCache(ctxLen);
+				inference = inf;
+			}
 
-		this.wasmModules.set(handle.id, wasm);
-		if (inference instanceof EncoderInference) {
-			this.encoderEngines.set(handle.id, inference);
-		} else if (inference instanceof CausalLMEmbedder) {
-			this.causalEmbedderEngines.set(handle.id, inference);
-		} else {
-			this.inferenceEngines.set(handle.id, inference);
-		}
+			const handle = this.registerModelHandle(name, {
+				priority: 0,
+				...options,
+			});
+			const entry = this._modelManager.get(handle.id);
+			if (entry) {
+				entry.hyperparams = parsed.hyperparams;
+				entry.tokenizer = new Tokenizer(parsed.tokenizerConfig);
+				entry.kvCache = new KVCache(parsed.kvCacheConfig);
+				entry.loaded = true;
+			}
 
-		return { handle, inference };
+			this.wasmModules.set(handle.id, wasm);
+			if (inference instanceof EncoderInference) {
+				this.encoderEngines.set(handle.id, inference);
+			} else if (inference instanceof CausalLMEmbedder) {
+				this.causalEmbedderEngines.set(handle.id, inference);
+			} else {
+				this.inferenceEngines.set(handle.id, inference);
+			}
+
+			return { handle, inference };
+		} catch (e) {
+			// Failure path inside the helper: free staging if we hadn't yet
+			// (e.g., a throw during `loadWeights` or earlier — `freeStaging`
+			// is idempotent because it nulls `stagingPtr` after freeing).
+			// The caller is responsible for tearing down `wasm` itself
+			// (shutdown / WebGPU device); we only own the staging ptr.
+			freeStaging();
+			throw e;
+		}
 	}
 
 	/**
