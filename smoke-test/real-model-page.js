@@ -417,11 +417,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// downstream UI (subtitle, KV-cache log, tokenizer construction
 		// for sanity tests), we still parse the GGUF metadata main-side —
 		// but only via a bounded Range request for the prefix that
-		// contains all metadata + tensor descriptors. 64 MB comfortably
-		// holds the header for any model in the canonical sweep (the
-		// wasm32 buffer is sized for safety, not by measured header
-		// extent). This avoids the V8 per-allocation cap that bit
-		// `new ArrayBuffer(total)` for >3.5 GB models.
+		// contains all metadata + tensor descriptors. 16 MB holds the
+		// header for any model in the canonical sweep (measured
+		// 2026-05-03: max `dataOffset` across the canonical 6 is 7.7 MB
+		// on llama-3.1-8b-instruct-iq3m; tinyllama-1.1b is 1.7 MB,
+		// qwen3-8B is 5.8 MB). 16 MB is ~2× headroom over the measured
+		// max and 4× smaller than the previous 64 MB constant. This
+		// avoids the V8 per-allocation cap that bit `new ArrayBuffer(total)`
+		// for >3.5 GB models.
 		//
 		// TODO(loadModelFromUrl-bypass-prefix-parse): retire this
 		// constant + the bounded Range request below in favor of either
@@ -433,16 +436,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		//       accessors so the smoke page never needs to parse main-
 		//       side at all.
 		// Either fix removes the "guess a prefix size" failure mode
-		// entirely. Why this constant exists today:
-		//   - skips the 4 GB main-thread JS-heap ArrayBuffer that V8's
-		//     per-allocation cap rejects for >3.5 GB models;
-		//   - 64 MB is generous headroom on the canonical sweep —
-		//     qwen3-8B's metadata + tensor descriptors live well under
-		//     10 MB.
-		// Until (a) or (b) lands, the runtime fallback below
+		// entirely. Until (a) or (b) lands, the runtime fallback below
 		// (try parse → on RangeError, double the prefix up to 256 MB)
-		// guards against a future model whose header outgrows 64 MB.
-		const HEADER_PREFIX_BYTES = 64 * 1024 * 1024;
+		// guards against a future model whose header outgrows 16 MB.
+		const HEADER_PREFIX_BYTES = 16 * 1024 * 1024;
 		// Hard cap on the doubling fallback — 256 MB is still small
 		// vs. the V8 ArrayBuffer cap (~3.5 GB) but big enough that any
 		// model whose metadata exceeds it really does need a smarter
