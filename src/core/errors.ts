@@ -28,8 +28,12 @@ export type WebLLMErrorCode =
 /** Base class for all errors thrown by the public WebLLM API. */
 export class WebLLMError extends Error {
 	readonly code: WebLLMErrorCode;
-	constructor(message: string, code: WebLLMErrorCode) {
-		super(message);
+	constructor(
+		message: string,
+		code: WebLLMErrorCode,
+		options?: ErrorOptions,
+	) {
+		super(message, options);
 		this.name = "WebLLMError";
 		this.code = code;
 	}
@@ -246,12 +250,14 @@ export type PersistenceUnavailableReason =
 
 export class PersistenceUnavailableError extends WebLLMError {
 	readonly reason: PersistenceUnavailableReason;
-	readonly cause: unknown;
 	constructor(reason: PersistenceUnavailableReason, cause?: unknown) {
-		super(`persistence unavailable: ${reason}`, "PERSISTENCE_UNAVAILABLE");
+		super(
+			`persistence unavailable: ${reason}`,
+			"PERSISTENCE_UNAVAILABLE",
+			cause !== undefined ? { cause } : undefined,
+		);
 		this.name = "PersistenceUnavailableError";
 		this.reason = reason;
-		this.cause = cause;
 	}
 }
 
@@ -271,11 +277,9 @@ export type PersistenceIOReason = "io-failure" | "transaction-aborted";
 
 export class PersistenceIOError extends WebLLMError {
 	readonly reason: PersistenceIOReason;
-	readonly cause: unknown;
 	constructor(reason: PersistenceIOReason, cause: unknown) {
-		super(`persistence IO error: ${reason}`, "PERSISTENCE_IO");
+		super(`persistence IO error: ${reason}`, "PERSISTENCE_IO", { cause });
 		this.name = "PersistenceIOError";
 		this.reason = reason;
-		this.cause = cause;
 	}
 }
