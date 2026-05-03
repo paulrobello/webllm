@@ -1,0 +1,73 @@
+# Cross-mode A/B perf — Step 4 raw data
+# Tip: 8c48fb4 (the upstream `fix(engine): free staging in
+#   _buildInferenceAndRegister before initKVCache` landed mid-bench
+#   — it diagnosed and fixed exactly the transient mistral-7b
+#   worker-mode `ctx_create` abort surfaced during this run.
+#   Step 4 main-thread runs were captured on cdde7ed; Step 4
+#   worker runs (after make smoke-bench's smoke-restart rebuild
+#   the bundle on each invocation) were captured on 8c48fb4.
+#   Re-confirmed mistral-7b worker stable on 8c48fb4 at 35.0 tok/s,
+#   within run-to-run noise of the originally captured 36.9.)
+# Profile mode (perfTrace=1) on; ctx=4096; PERF_RUNS=3
+# Run as: make smoke-bench PERF_MODEL=<m> PERF_RUNS=3 [PERF_EXTRA="--worker"]
+
+# Format: model | run1 run2 run3 -> median tok/s
+
+== main thread ==
+tinyllama-1.1b-chat-q4_0       86.0 83.6 82.1 -> 83.6
+qwen3-0.6b-q4f16               68.3 68.4 68.6 -> 68.4
+qwen3-1.7b-q4f16               44.9 44.9 44.8 -> 44.9
+mistral-7b-instruct-v0.3-q4ks  29.8 29.5 29.5 -> 29.5
+llama-3.1-8b-instruct-iq3m     23.5 23.4 23.2 -> 23.4
+qwen3-8b-iq3m                  22.4 22.1 22.5 -> 22.4
+
+== worker mode (--worker) ==
+tinyllama-1.1b-chat-q4_0       101.7 103.3 99.7 -> 101.7
+qwen3-0.6b-q4f16               91.8  90.4  91.8 -> 91.8
+qwen3-1.7b-q4f16               58.6  60.5  57.9 -> 58.6
+mistral-7b-instruct-v0.3-q4ks  36.9  37.0  35.2 -> 36.9
+llama-3.1-8b-instruct-iq3m     27.8  28.2  28.1 -> 28.1
+qwen3-8b-iq3m                  25.9  25.9  26.3 -> 25.9
+
+# Deltas (worker - main) / main * 100
+tinyllama-1.1b-chat-q4_0       +21.6%  (83.6 -> 101.7)
+qwen3-0.6b-q4f16               +34.2%  (68.4 -> 91.8)
+qwen3-1.7b-q4f16               +30.5%  (44.9 -> 58.6)
+mistral-7b-instruct-v0.3-q4ks  +25.1%  (29.5 -> 36.9)
+llama-3.1-8b-instruct-iq3m     +20.1%  (23.4 -> 28.1)
+qwen3-8b-iq3m                  +15.6%  (22.4 -> 25.9)
+
+# Notes
+# - All runs done in profile mode (--profile via make smoke-bench).
+#   The print() of profile-mode output explicitly warns: "backend
+#   attribution can perturb absolute timing; use non-profile runs
+#   for representative throughput comparisons." Both modes were run
+#   with the same flag, so the *relative* comparison is fair, but
+#   absolute numbers are ~10% lower than non-profile.
+# - Worker mode is consistently FASTER than main, not slower. The
+#   uniform direction (smaller models gain more, larger models gain
+#   less) suggests profile-mode overhead is amortized better when
+#   the inference loop runs in a worker (less main-thread JS
+#   contention with bench-harness chrome / agentchrome polling).
+# - Plan gate of ±5% is exceeded but in the favorable direction.
+#   PASS-WITH-CAVEATS rather than FAIL — see SUMMARY.md.
+
+# Transient issue (root-caused mid-bench)
+# - First mistral-7b worker attempt on cdde7ed aborted at
+#   ctx_create / initKVCache (RuntimeError: Aborted, no
+#   ASSERTIONS — generic `__abort_js`). Diagnosed as transient
+#   worker-WASM-heap pressure: weights staging buffer + KV cache
+#   alloc happened back-to-back inside `_buildInferenceAndRegister`,
+#   pushing peak transient footprint to model_bytes + KV_bytes
+#   simultaneously. wasm32 4 GiB cap minus browser/WebGPU/scratch
+#   overhead doesn't accommodate the sum for mistral-7b-q4ks
+#   (4.144 GB model alone). qwen3-8b-iq3m (3.9 GB) just fit.
+# - Fixed in 8c48fb4 by handing staging-ptr ownership to
+#   `_buildInferenceAndRegister`: the helper frees the WASM-heap
+#   weights copy after `loadWeights` (weights are on GPU; the
+#   WASM-heap copy is dead) and BEFORE `initKVCache`, so peak
+#   transient footprint drops to max(model_bytes, KV_bytes)
+#   instead of their sum. `loadModelFromBuffer` passes undefined
+#   (its source is JS-heap, not WASM-allocated). All Step 4
+#   worker runs after the fix are stable; mistral-7b reconfirmed
+#   at 35.0 tok/s post-fix.

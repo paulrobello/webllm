@@ -1,0 +1,70 @@
+{
+  "modelId": "snowflake-arctic-embed-m-q0f32-b4",
+  "mode": "single",
+  "fixture": "short",
+  "traces": [
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 0,
+      "wallMs": 20
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 1,
+      "wallMs": 21.59999990463257
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 2,
+      "wallMs": 20.799999952316284
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 3,
+      "wallMs": 21.90000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 4,
+      "wallMs": 21.90000009536743
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 5,
+      "wallMs": 21.59999990463257
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 6,
+      "wallMs": 21.200000047683716
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 7,
+      "wallMs": 20
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 8,
+      "wallMs": 22.100000143051147
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 9,
+      "wallMs": 21.699999809265137
+    }
+  ],
+  "p50WallMs": 21.59999990463257,
+  "p90WallMs": 22.100000143051147,
+  "meanWallMs": 21.279999995231627
+}

@@ -1,0 +1,58 @@
+{
+  "model": "qwen3-8b-iq3m",
+  "mode": "single",
+  "callCount": 1,
+  "decodeTokens": 21,
+  "prefillMs": 647.9000000953674,
+  "decodeMs": 842.4999997615814,
+  "tokensPerSec": 24.925816030792614,
+  "frameStats": {
+    "baseline": {
+      "n": 360,
+      "mean": 8.33,
+      "median": 8.3,
+      "p95": 9,
+      "max": 9.4,
+      "drops60": 0,
+      "drops30": 0,
+      "drops50": 0
+    },
+    "prefill": {
+      "n": 77,
+      "mean": 8.34,
+      "median": 8.3,
+      "p95": 9.2,
+      "max": 9.3,
+      "drops60": 0,
+      "drops30": 0,
+      "drops50": 0
+    },
+    "decode": {
+      "n": 101,
+      "mean": 8.33,
+      "median": 8.3,
+      "p95": 9.1,
+      "max": 9.4,
+      "drops60": 0,
+      "drops30": 0,
+      "drops50": 0
+    },
+    "post": {
+      "n": 121,
+      "mean": 8.33,
+      "median": 8.3,
+      "p95": 9.1,
+      "max": 9.3,
+      "drops60": 0,
+      "drops30": 0,
+      "drops50": 0
+    }
+  },
+  "verdict": "clean",
+  "sceneInfo": {
+    "kind": "cube",
+    "triangles": 12
+  },
+  "sample": "Why don't skeletons fight each other?  \
+Because they don’t have the *guts*. 😄"
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "prompt": "What is the capital of France?",
+    "mode": "main",
+    "assistantText": "The capital of France is **Paris**.",
+    "tokensGenerated": 9
+  },
+  {
+    "prompt": "What is the capital of France?",
+    "mode": "worker",
+    "assistantText": "The capital of France is **Paris**.",
+    "tokensGenerated": 9
+  },
+  {
+    "prompt": "List the first three prime numbers.",
+    "mode": "main",
+    "assistantText": "The first three prime numbers are:\n\n1. **2**  \n2. **3**  \n3. **5**  \n\nThese are the smallest prime numbers in",
+    "tokensGenerated": 32
+  },
+  {
+    "prompt": "List the first three prime numbers.",
+    "mode": "worker",
+    "assistantText": "The first three prime numbers are:\n\n1. **2**  \n2. **3**  \n3. **5**  \n\nThese are the smallest prime numbers in",
+    "tokensGenerated": 32
+  },
+  {
+    "prompt": "What is 7 plus 5?",
+    "mode": "main",
+    "assistantText": "7 plus 5 equals **12**.",
+    "tokensGenerated": 10
+  },
+  {
+    "prompt": "What is 7 plus 5?",
+    "mode": "worker",
+    "assistantText": "7 plus 5 equals **12**.",
+    "tokensGenerated": 10
+  },
+  {
+    "prompt": "Name three primary colors.",
+    "mode": "main",
+    "assistantText": "Three primary colors are **red, blue, and yellow**.",
+    "tokensGenerated": 13
+  },
+  {
+    "prompt": "Name three primary colors.",
+    "mode": "worker",
+    "assistantText": "Three primary colors are **red, blue, and yellow**.",
+    "tokensGenerated": 13
+  },
+  {
+    "prompt": "What sound does a dog make?",
+    "mode": "main",
+    "assistantText": "A dog makes a variety of sounds depending on its age, breed, and the context in which it is speaking. Some common sounds include:\n\n- **Barks",
+    "tokensGenerated": 32
+  },
+  {
+    "prompt": "What sound does a dog make?",
+    "mode": "worker",
+    "assistantText": "A dog makes a variety of sounds depending on its age, breed, and the context in which it is speaking. Some common sounds include:\n\n- **Barks",
+    "tokensGenerated": 32
+  }
+]
