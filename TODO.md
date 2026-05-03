@@ -1133,70 +1133,36 @@ Daily cadence check (item 1) still required at session start.
      load-bearing path forward. Closure report
      [`eval/reports/probe-9d-2026-05-01/SUMMARY.md`](eval/reports/probe-9d-2026-05-01/SUMMARY.md).
 
-10. **Dual-mode deployment (main-thread + worker) — queued 2026-05-01.**
-    Goal: the same `WebLLM.init` / `loadModel` / `chatCompletion`
-    API runs identically in main-thread and Worker contexts.
-    Application code chooses per deployment. Triggered by the NPC
-    scenario (agent + Three.js coexistence) where moving the
-    structural decode hitch off the render loop is load-bearing
-    once tick rates exceed ~1Hz.
+10. **Dual-mode deployment (main-thread + worker) — CLOSED 2026-05-02
+    (this phase archived to `TODO_ARCHIVE.md`).** `WebLLM.init({ worker:
+    true })` ships; same TS surface in both modes (verified by surface-
+    mirror sentinel). Frame-probe under worker is **8.3 ms median, 0
+    drops** on both 0.6b and 8B models (gate <15 ms; pre-A1 was 41–50 ms
+    median). Cross-mode A/B perf shows worker mode **+15.6% to +34.2%
+    faster** than main mode across the canonical 6 (counterintuitive
+    — see SUMMARY for hypothesis). Token-identical greedy A/B: **5/5
+    byte-identical**. Embedder perf measured for arctic / qwen3-hyb /
+    qwen3-8b in worker mode; formal cosine parity comparison filed as
+    follow-up. Closure report
+    [`eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md`](eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md).
+    Final fix `8c48fb4` (free staging in `_buildInferenceAndRegister`
+    before `initKVCache`) gates ≥7B-Q4 worker loads.
 
-    **Gate: PASSED 2026-05-01.** Probe 9d measured 5.5× decode_max
-    reduction (main 49.8 ms median → worker 9.1 ms median) with
-    the hitch fully absorbed from the main-thread render-loop
-    perspective. Dual-mode work is now justified by data.
+    **Architectural levers landed:** A1 chunk-coalescing (16 ms / 8
+    tokens) at worker-host; A2 worker-mode load via
+    `loadModelFromBuffer`; Path A `loadModelFromUrl` for ≥3.5 GB
+    models (worker streams directly into WASM heap, bypasses V8
+    ArrayBuffer cap); staging-ptr ownership in
+    `_buildInferenceAndRegister` so peak transient WASM-heap footprint
+    is `max(model_bytes, KV_bytes)` not their sum.
 
-    Scope (sketched, not committed):
-    - Engine init path that detects `typeof importScripts !== "undefined"`
-      (worker context) and loads the WASM accordingly. Worker variant
-      uses a `DedicatedWorker` boot script that constructs `GgmlWasm`,
-      `ModelInference`, and the engine handle entirely off-main-thread.
-    - Main-thread façade: `WebLLM.initInWorker(opts)` returns an
-      object with the same `chatCompletion` / `embed` surface, marshaling
-      calls via `postMessage` and yielding `AsyncIterable<ChunkEvent>`
-      that drains a worker-side stream. Public chat / tool-call
-      surface from `engine.ts` should not need to change — only its
-      construction path.
-    - Resource transfer: tokenized prompts marshal as `Int32Array`
-      (transferable). Generated chunks marshal as `{text, tokenIds,
-      done, finishReason}` JSON. KV-cache + WebGPU resources stay
-      worker-resident — no cross-thread WebGPU sharing required for
-      the agent use case (LLM emits tool calls, main thread executes
-      world-state + Three.js — one-way data flow).
-    - Smoke parity: new `?worker=1` page-level flag on `real-model.html`
-      that boots the engine in worker mode; `[7/8]` chat regression
-      runs identically. `?frameProbe=1` continues to mount the
-      WebGL2/Three.js cube on main and proves the hitch absence.
-    - Bench parity: `eval/bench.ts` and `eval/perf.ts` gain a
-      `--worker` flag that flips the same construction path. Decode
-      tok/s should match main-thread within ±5% (postMessage hop
-      adds ≤1ms/token, lost in noise at 25-100 tok/s).
-    - Embedder parity: `engine.embed` paths (encoder, causal-LM
-      embedder, bucket D self-embed) all run in worker. `embed-perf`
-      bench runs `--worker` mode to validate.
-
-    **Out of scope for the dual-mode commit:** SharedArrayBuffer
-    weight sharing across multiple workers (project is
-    single-model-active per CLAUDE.md); cross-worker WebGPU
-    resource handoff (no current consumer); `SharedWorker`
-    multi-tab inference (no consumer).
-
-    **Risk register:**
-    - ASYNCIFY in worker context: emscripten supports it; should
-      work identically. Probe with the existing 1-token forward to
-      confirm before committing engine plumbing.
-    - WebGPU device limits: `navigator.gpu.requestAdapter()` works
-      in workers since Chrome 113+. No device-feature regressions
-      expected, but the `[diagnoseAlloc]` probe should be re-run
-      from the worker side to confirm `maxStorageBufferBindingSize`
-      etc. match main-thread.
-    - Catalog and asset loaders: any `fetch` paths (`./models/*.gguf`,
-      `./scenes/*.glb` for the frame-probe) need to resolve from the
-      worker's `self.location` correctly. Smoke server is fine —
-      same-origin paths just work.
-
-    Brainstorm/spec/plan via `superpowers:writing-plans` after
-    9d closes.
+    **Follow-ups (none P0):** non-profile A/B sweep to publish a clean
+    end-user win number; formal cosine parity for worker-vs-main
+    embedders; CI-level agentchrome integration test for `?worker=1`;
+    `--worker` flag on `eval/causal-embedder-parity.ts` and
+    `eval/browser-eval.ts`; smoke-page header-prefix architectural
+    cleanup (two-pass parse or engine-side metadata accessors); drafter
+    migration to `loadModelFromUrl` if a future drafter exceeds 3.5 GB.
 
 11. **Prefix cache via per-conversation KV snapshots — CLOSED
     2026-05-02 (this phase archived).** Mechanism shipped + validated

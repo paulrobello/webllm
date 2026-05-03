@@ -4639,3 +4639,151 @@ not just performance.
 | Interleaved (1100-token per-NPC distinct) | 15854 ms | 2702 ms | **+83%** (Pattern B wins) |
 | Fork first-tick spawn (1325-token shared) | 8757 ms | 2436 ms | **+72% per NPC, 17.2 s at N=4** |
 
+
+---
+
+### Dual-mode deployment (main-thread + worker) — CLOSED 2026-05-02
+
+Closed 2026-05-02 — full TS surface ships behind `WebLLM.init({ worker: true })`;
+public API identical between main-thread and DedicatedWorker contexts. Closure
+report at
+[`eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md`](eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md).
+Spec/plan at
+[`docs/superpowers/specs/2026-05-02-dual-mode-worker-deployment-design.md`](docs/superpowers/specs/2026-05-02-dual-mode-worker-deployment-design.md)
+and
+[`docs/superpowers/plans/2026-05-02-dual-mode-worker-deployment.md`](docs/superpowers/plans/2026-05-02-dual-mode-worker-deployment.md).
+
+**Headline metrics (vs main-thread, profile-mode, 3-run median):**
+
+| Model | main tok/s | worker tok/s | Δ% |
+|---|---:|---:|---:|
+| tinyllama-1.1b-chat-q4_0 | 83.6 | 101.7 | +21.6% |
+| qwen3-0.6b-q4f16 | 68.4 | 91.8 | +34.2% |
+| qwen3-1.7b-q4f16 | 44.9 | 58.6 | +30.5% |
+| mistral-7b-instruct-v0.3-q4ks | 29.5 | 36.9 | +25.1% |
+| llama-3.1-8b-instruct-iq3m | 23.4 | 28.1 | +20.1% |
+| qwen3-8b-iq3m | 22.4 | 25.9 | +15.6% |
+
+Frame-probe coexistence: **8.3 ms median, 0 drops** (gate <15 ms).
+Token-identical greedy A/B: **5/5 byte-identical**.
+
+**Original scope sketch** (from queue 2026-05-01, before brainstorm/spec/plan):
+
+Goal: the same `WebLLM.init` / `loadModel` / `chatCompletion` API runs identically
+in main-thread and Worker contexts. Application code chooses per deployment.
+Triggered by the NPC scenario (agent + Three.js coexistence) where moving the
+structural decode hitch off the render loop is load-bearing once tick rates
+exceed ~1Hz.
+
+**Gate: PASSED 2026-05-01.** Probe 9d measured 5.5× decode_max reduction (main
+49.8 ms median → worker 9.1 ms median) with the hitch fully absorbed from the
+main-thread render-loop perspective. Dual-mode work was justified by data.
+
+Scope (sketched, not committed at queue time):
+- Engine init path that detects `typeof importScripts !== "undefined"` (worker
+  context) and loads the WASM accordingly. Worker variant uses a
+  `DedicatedWorker` boot script that constructs `GgmlWasm`, `ModelInference`,
+  and the engine handle entirely off-main-thread.
+- Main-thread façade with same `chatCompletion` / `embed` surface, marshaling
+  calls via `postMessage` and yielding `AsyncIterable<ChunkEvent>` that drains
+  a worker-side stream.
+- Resource transfer: tokenized prompts marshal as `Int32Array` (transferable).
+  Generated chunks marshal as `{text, tokenIds, done, finishReason}` JSON.
+  KV-cache + WebGPU resources stay worker-resident — no cross-thread WebGPU
+  sharing required for the agent use case.
+- Smoke parity: `?worker=1` page-level flag on `real-model.html` that boots
+  the engine in worker mode; `[7/8]` chat regression runs identically.
+  `?frameProbe=1` mounts the WebGL2/Three.js cube on main and proves the
+  hitch absence.
+- Bench parity: `eval/bench.ts` and `eval/perf.ts` gain a `--worker` flag.
+- Embedder parity: `engine.embed` paths (encoder, causal-LM embedder, bucket
+  D self-embed) all run in worker. `embed-perf` bench `--worker` mode.
+
+**Out of scope (and remained out of scope):** SharedArrayBuffer weight sharing
+across multiple workers (project is single-model-active per CLAUDE.md);
+cross-worker WebGPU resource handoff (no current consumer); `SharedWorker`
+multi-tab inference (no consumer).
+
+### What actually shipped
+
+Implementation followed a 10-task plan executed via subagent-driven-development.
+Tasks 1–9 landed cleanly per plan; Task 10 (validation gate) surfaced two real
+architectural issues that required mid-execution fixes before closure:
+
+1. **A1 chunk-coalescing at worker-host** (commit `6c42d1d`): per-chunk
+   `postMessage` from the worker stream loop defeated probe-9d's hitch fix.
+   Frame-probe pre-A1 was 41–50 ms median (vs probe-9d's 9.1 ms reference).
+   Fix: accumulate `GenerationStreamChunk` values; flush every 8 tokens or
+   16 ms (whichever first). Restored 8.3 ms median frame-probe.
+
+2. **A2 smoke-page worker-mode load via `loadModelFromBuffer`** (commit
+   `6f49e1c`): the `adoptPreloadedModel` flow used by main-thread mode cannot
+   cross the worker boundary because `inference` carries non-transferable
+   WASM memory views. Smoke-page worker-mode path switched to fetch + transfer
+   buffer + `loadModelFromBuffer`. `a45a60c` strips the non-cloneable
+   `inference` field from the result before postMessage to avoid `DataCloneError`.
+
+3. **Path A `loadModelFromUrl`** (commits `926a4fd` + `c732a8b` + `0322ab9` +
+   polish `54ea723` + `bbe553f` + `cdde7ed`): models ≥~3.5 GB OOM at the
+   smoke-page's `new ArrayBuffer(total)` site (V8 per-allocation cap on JS
+   heap). Fix: new public method `loadModelFromUrl` that the worker calls
+   directly — worker fetches via `fetch()`, allocates `wasm.malloc(total)`,
+   streams chunks into the WASM heap. Smoke page in worker mode uses this
+   for the main model (drafter still uses `loadModelFromBuffer` with a
+   3.5 GB content-length guardrail). Smoke-page main-thread parsing uses a
+   64 MB header-prefix range-fetch (with doubling fallback to 256 MB) to
+   drive UI / tokenizer / ctx-clamp without holding the full GGUF in JS heap.
+
+4. **Staging-ptr ownership in `_buildInferenceAndRegister`** (commit `8c48fb4`):
+   mistral-7b-q4ks (4.144 GB) aborted at `ctx_create`. Helper called
+   `initKVCache` (which `ctx_create`s ~1 GB KV + scratch) before the caller's
+   `wasm.free(stagingPtr)` ran on the success path, putting peak transient
+   footprint at `model_bytes + KV_bytes` simultaneously. Mistral exceeds the
+   wasm64 16 GiB cap minus browser/WebGPU overhead; qwen3-8b at 3.9 GB just
+   fit. Fix: helper takes ownership of `stagingPtr`, frees it after
+   `loadWeights` (weights are on GPU; WASM-heap copy is dead) and BEFORE
+   `initKVCache`. Peak transient footprint drops to `max(model_bytes, KV_bytes)`.
+
+### Implementation commits (chronological, all on `main`)
+
+- `bf1633d` `feat(worker): add ?worker / --worker flags to smoke and bench harnesses`
+- `75456d4` `docs(test): clarify mode-default comment in live-db test`
+- `a42fee4` `feat(perf): plumb PERF_EXTRA through smoke-bench target`
+- `6c42d1d` `feat(worker): coalesce stream chunks at worker-host (16 ms / 8 tokens)` — A1
+- `a013415` `feat(probe): add frame-probe sampling to asyncify-in-worker probe page`
+- `8d6ad28` `refactor(worker): fold A1 review nits`
+- `6f49e1c` `fix(smoke): A2 — route worker mode through loadModelFromBuffer` — A2
+- `a45a60c` `fix(worker): sanitize loadModelFromBuffer result before postMessage`
+- `926a4fd` `feat(engine): add loadModelFromUrl with WASM-heap streaming` — Path A
+- `c732a8b` `feat(proxy): expose loadModelFromUrl on WebLLMProxy`
+- `0322ab9` `feat(smoke): switch worker-mode load to loadModelFromUrl`
+- `54ea723` `fix(engine): unwind wasm on loadModelFromUrl partial failure` (Path A polish)
+- `bbe553f` `feat(smoke): header-prefix fallback + TODO documentation`
+- `cdde7ed` `fix(smoke): drafter content-length guardrail in worker mode`
+- `8c48fb4` `fix(engine): free staging in _buildInferenceAndRegister before initKVCache` — final fix
+
+(Plus Tasks 1–8 commits — the plan tasks for the original TS surface, error codec,
+worker host, proxy, surface mirror sentinel, async-ify conversation methods,
+`WebLLM.init({worker:true})` wire, and bundle re-entry. See plan for SHAs.)
+
+### Lessons / follow-ups (all low-priority)
+
+1. Worker mode is **+15–34% FASTER** than main mode in profile-mode bench.
+   Hypothesis: profile-mode amortization + reduced main-thread JS contention.
+   Worth re-measuring in non-profile mode to publish a clean end-user win.
+2. Task 9 wired `?worker=1` but didn't catch broken smoke page end-to-end
+   because unit tests use a stub channel. Add a CI-level agentchrome
+   integration test driving `?worker=1` and asserting `[7/8]` PASS.
+3. Per-binding 4 GiB / 16 GiB caps stack with model + KV + scratch in WASM
+   heap. Generalizes: any code path holding the full model in WASM heap while
+   also calling KV-cache allocation hits the cap on 7B+ Q4 models.
+4. Smoke-page header-prefix workaround is a stopgap. Architectural fix is
+   either two-pass parse (4 KB sentinel → exact `dataOffset` → second range-
+   fetch) or engine-side metadata accessors so the smoke page never parses
+   main-side.
+5. Formal worker-vs-main embedder cosine parity not captured this cycle.
+   Architecturally there's no source of divergence (same code, same WebGPU
+   device, same upload), but a formal cos ≥0.999 comparison would seal it.
+6. `eval/causal-embedder-parity.ts` and `eval/browser-eval.ts` lack `--worker`
+   flag — adding it is mechanical and would let accuracy-pass A/B runs
+   validate worker mode on the 36-prompt eval suite.
