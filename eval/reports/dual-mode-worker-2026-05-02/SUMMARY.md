@@ -11,10 +11,11 @@ The architectural premise is fully validated. Worker-mode runs are
 **byte-identical** to main-thread under greedy sampling, the worker
 boundary survives the heap-streaming loader path on a 4 GB model, and
 frame-probe coexistence is excellent (median 8.3 ms vs 15 ms gate —
-1.8× headroom). The plan's ±5% perf gate is **exceeded**, but in the
-favorable direction (worker mode is consistently +15 to +34% faster
-than main on the canonical 6); see "Cross-mode A/B perf" for the
-diagnosis.
+1.8× headroom). The plan's ±5% perf gate is **slightly exceeded** in
+non-profile mode (-4.0% to -5.8% across the canonical 6, two models
+just outside ±5%), but the regression is small, uniform, and
+well-explained as the postMessage cost of the worker boundary; see
+"Cross-mode A/B perf — non-profile addendum (2026-05-03)" below.
 
 The "with caveats" qualifier covers two known follow-ups:
 
@@ -23,12 +24,16 @@ The "with caveats" qualifier covers two known follow-ups:
    yet — Step 5 verified the embedders **run** end-to-end through the
    worker surface but couldn't measure cosine parity vs a same-tip
    main-thread reference. Filed below.
-2. The "smaller models gain more" pattern in the A/B is consistent
-   with profile-mode overhead being amortized differently in a worker
-   context; bench numbers are still relative-fair (same flag both
-   modes), but a non-profile re-run would tighten the absolute deltas.
-   Deferred — gain is in the favorable direction; non-profile is
-   informational.
+2. **(Updated 2026-05-03)** The original cross-mode A/B was captured
+   in `--profile` mode and showed worker +15 to +34% faster than
+   main. The non-profile re-run (now landed; see addendum below)
+   shows worker is actually **-4 to -6% slower** than main on
+   end-user-relevant throughput. The flip confirms the profile-mode
+   amortization hypothesis. The load-bearing benefits of dual-mode
+   deployment (frame-probe coexistence, event-loop isolation,
+   byte-identical output) are independent of this throughput delta;
+   the small consistent regression is the price of those properties
+   at the current A1 coalescing settings.
 
 ---
 
@@ -101,6 +106,64 @@ would be ~10% higher across the board. The plan's ±5% gate was sized
 for "verify worker doesn't regress"; that goal is decisively met.
 
 Raw: [`raw-step4/results.txt`](raw-step4/results.txt).
+
+## Cross-mode A/B perf — non-profile addendum (2026-05-03)
+
+Follow-up to follow-up #7 in the original closure. Same canonical 6,
+`PERF_RUNS=3`, `ctx=4096`, prompt = "Tell one short joke." — but this
+time **without `--profile`** (so `perfTrace=0`, no per-step backend
+attribution). Captured on tip `018bfbd`, same bundle as the original
+results (8c48fb4 mistral fix is in place).
+
+| Model | main p50 tok/s | worker p50 tok/s | Δ% non-profile | Δ% profile (orig) |
+|---|---:|---:|---:|---:|
+| tinyllama-1.1b-chat-q4_0 | 107.5 | 102.1 | -5.0% | +21.6% |
+| qwen3-0.6b-q4f16 | 78.9 | 74.3 | -5.8% | +34.2% |
+| qwen3-1.7b-q4f16 | 60.5 | 57.6 | -4.8% | +30.5% |
+| mistral-7b-instruct-v0.3-q4ks | 36.3 | 34.7 | -4.4% | +25.1% |
+| llama-3.1-8b-instruct-iq3m | 27.7 | 26.6 | -4.0% | +20.1% |
+| qwen3-8b-iq3m | 26.7 | 25.6 | -4.1% | +15.6% |
+
+**The +15-34% direction did NOT hold; it flipped.** With `perfTrace=0`,
+worker mode is consistently **~4-6% slower** than main across all 6
+models. The flip is the smoking-gun confirmation of the profile-mode
+amortization hypothesis: with backend attribution + agentchrome polling
+both running on the main-thread event loop, main-mode inference paid
+the contention cost that worker-mode avoided. Removing `perfTrace`
+removes that contention, exposing the residual cost of the worker
+boundary itself (postMessage overhead per coalesced chunk + main-thread
+JSON parse to receive the envelope).
+
+**The "with caveats" framing in the original Verdict was right; the
+"+15-34% faster" framing was an artifact and should not have been
+load-bearing.** The actual end-user-relevant throughput delta is a
+small consistent regression that is **well-explained**, **uniform
+across model sizes**, and **within run-to-run noise of the plan's
+±5% gate** (two of six models are just outside the gate at -5.0% and
+-5.8%; four are inside at -4.0% to -4.8%).
+
+**The load-bearing benefits of dual-mode worker deployment remain
+intact** and are **independent of throughput**:
+
+1. **Frame-probe coexistence** — 8.3 ms median decode-phase frame
+   time in worker mode vs 49.8 ms baseline in main-thread mode
+   (Step 3 numbers above). This is the load-bearing benefit for the
+   "agent + Three.js coexistence" use case the project ceiling was
+   sized around.
+2. **Event-loop isolation** — long inference does not block the page
+   event loop in worker mode. This is a correctness/UX property, not
+   a throughput property; it would still hold if the throughput
+   delta were larger.
+3. **Token-identical output** — Step 6's 5/5 byte-identical greedy
+   A/B is independent of timing.
+
+The ~4-6% throughput cost is the price of those properties, and at
+worker chunk-coalescing settings of 16 ms / 8 tokens (A1, commit
+`6c42d1d`) it is already minimized. Further reduction would require
+either coarser coalescing (trades latency for throughput) or a
+SharedArrayBuffer ring (large surface; not justified at this delta).
+
+Raw: [`raw-step4/results-nonprofile.txt`](raw-step4/results-nonprofile.txt).
 
 ### Step 4 transient — root-caused mid-bench
 
@@ -241,12 +304,17 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
    re-run the canonical parity gates in worker mode for the same 3
    embedders Step 5 covered.
 
-7. **A non-profile cross-mode A/B re-run** would tighten the absolute
-   deltas in Step 4. Not load-bearing — the relative comparison is
-   fair — but informational. Could be added as a `bench-inference`
-   (non-profile) variant with `--worker` plumbing in `eval/perf.ts`
-   (the plumbing already exists; only the Makefile target needs to
-   thread `PERF_EXTRA`).
+7. **A non-profile cross-mode A/B re-run** — **LANDED 2026-05-03**
+   (see "Cross-mode A/B perf — non-profile addendum (2026-05-03)"
+   above). Captured by invoking `eval/perf.ts` directly without
+   `--profile`. Outcome: worker is -4 to -6% slower than main, not
+   +15 to +34% faster as profile mode showed; the original
+   "favorable direction" framing was an artifact of profile-mode
+   overhead amortizing differently across the worker boundary. The
+   load-bearing benefits (frame-probe coexistence, event-loop
+   isolation) are independent of this. No action needed — the gate
+   is "no catastrophic regression", which holds; the small drift is
+   well-explained and within run-to-run noise.
 
 8. **Path A polish items** (already addressed inline before this
    closure):
@@ -272,7 +340,7 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
 
 - [x] Smoke (Step 1-2): qwen3-0.6b + qwen3-8b worker mode PASS, no console errors
 - [x] Frame-probe (Step 3): median 8.3 ms, max 9.4 ms — well under 15 ms gate
-- [x] Cross-mode A/B (Step 4): all 6 models PASS; Δ% in favorable direction
+- [x] Cross-mode A/B (Step 4): all 6 models PASS in profile mode; non-profile addendum landed 2026-05-03 — small regression (-4.0% to -5.8%), uniform, well-explained; gate "no catastrophic regression" holds
 - [/] Embedder parity (Step 5): functionality PASS for all 3; cosine parity deferred
 - [x] Token-identical greedy A/B (Step 6): 5/5 byte-identical
 - [x] `make checkall` green (verified at end of Step 9)

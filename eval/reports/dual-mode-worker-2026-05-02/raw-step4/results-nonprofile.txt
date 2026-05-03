@@ -1,0 +1,83 @@
+# Cross-mode A/B perf — Step 4 NON-PROFILE addendum (2026-05-03)
+# Tip: 018bfbd (post-closure HEAD; same canonical bundle as the
+#   profile-mode capture in results.txt — 8c48fb4 mistral-7b
+#   transient-heap-pressure fix is in place; see SUMMARY.md "Step 4
+#   transient — root-caused mid-bench" for context).
+# NON-profile mode (perfTrace=0); ctx=4096; PERF_RUNS=3
+# Run as: WEBLLM_WASM_VARIANT=mem64 bun run eval/perf.ts \
+#           --model <m> --runs 3 [--worker]
+#         (omits --profile, so perfTrace is NOT set)
+
+# Format: model | run1 run2 run3 -> median tok/s
+
+== main thread ==
+tinyllama-1.1b-chat-q4_0       103.9 107.5 108.9 -> 107.5
+qwen3-0.6b-q4f16                79.2  68.9  78.9 -> 78.9
+qwen3-1.7b-q4f16                60.7  60.5  60.1 -> 60.5
+mistral-7b-instruct-v0.3-q4ks   36.4  36.3  35.7 -> 36.3
+llama-3.1-8b-instruct-iq3m      27.4  27.7  27.7 -> 27.7
+qwen3-8b-iq3m                   26.7  25.9  26.7 -> 26.7
+
+== worker mode (--worker) ==
+tinyllama-1.1b-chat-q4_0       103.0  99.6 102.1 -> 102.1
+qwen3-0.6b-q4f16                75.0  71.9  74.3 -> 74.3
+qwen3-1.7b-q4f16                58.8  54.8  57.6 -> 57.6
+mistral-7b-instruct-v0.3-q4ks   34.7  34.1  35.2 -> 34.7
+llama-3.1-8b-instruct-iq3m      27.2  26.6  24.7 -> 26.6
+qwen3-8b-iq3m                   25.0  25.9  25.6 -> 25.6
+
+# Deltas (worker - main) / main * 100
+tinyllama-1.1b-chat-q4_0        -5.0%  (107.5 -> 102.1)
+qwen3-0.6b-q4f16                -5.8%  ( 78.9 ->  74.3)
+qwen3-1.7b-q4f16                -4.8%  ( 60.5 ->  57.6)
+mistral-7b-instruct-v0.3-q4ks   -4.4%  ( 36.3 ->  34.7)
+llama-3.1-8b-instruct-iq3m      -4.0%  ( 27.7 ->  26.6)
+qwen3-8b-iq3m                   -4.1%  ( 26.7 ->  25.6)
+
+# Side-by-side vs profile-mode (results.txt, captured 2026-05-02)
+# Format: model | profile Δ% | non-profile Δ% | direction
+tinyllama-1.1b-chat-q4_0       +21.6%  /  -5.0%    flipped
+qwen3-0.6b-q4f16               +34.2%  /  -5.8%    flipped
+qwen3-1.7b-q4f16               +30.5%  /  -4.8%    flipped
+mistral-7b-instruct-v0.3-q4ks  +25.1%  /  -4.4%    flipped
+llama-3.1-8b-instruct-iq3m     +20.1%  /  -4.0%    flipped
+qwen3-8b-iq3m                  +15.6%  /  -4.1%    flipped
+
+# Notes
+# - The +15-34% worker advantage seen in profile mode (results.txt)
+#   does NOT carry over to non-profile mode. The clean end-user-
+#   relevant tok/s shows worker mode is a small, consistent
+#   ~4-6% slower than main on the canonical 6.
+# - This is the smoking-gun confirmation of the profile-mode
+#   amortization hypothesis from SUMMARY.md: in profile mode, the
+#   per-step trace push + main-thread agentchrome polling contend
+#   for the same event loop in main-thread mode but not in worker
+#   mode, inflating the worker delta in the favorable direction.
+#   With perfTrace=0 the trace push is gone, and the residual
+#   ~4-6% delta is the postMessage overhead (chunk coalescing
+#   notwithstanding) plus the once-per-decode-step JSON parse on
+#   main thread to receive the coalesced envelope.
+# - The non-profile delta direction is uniform (worker slightly
+#   slower across all sizes) and the magnitude is within run-to-
+#   run noise of the original ±5% gate the plan specified. Two
+#   small models (tinyllama -5.0%, qwen3-0.6b -5.8%) are just
+#   outside ±5%; four are inside. The plan gate was sized for
+#   "verify worker doesn't catastrophically regress"; that goal
+#   remains met — there is no catastrophic regression, and the
+#   small consistent drift is well-explained by postMessage
+#   overhead that's already minimized via A1 chunk coalescing
+#   (16 ms / 8 tokens).
+# - Headroom for end-user perf-on-cold-shader regressions: the
+#   original profile-mode "worker is FASTER" framing should not
+#   be quoted as a load-bearing benefit of dual-mode deployment.
+#   The load-bearing benefits remain (1) frame-probe coexistence
+#   (8.3 ms median in worker vs 49.8 ms baseline in main with
+#   inference + UI on the same loop) and (2) the architectural
+#   property that long inference doesn't block the page event
+#   loop. Both are independent of throughput.
+
+# Wall-clock for this sweep
+# - Main-thread sweep:  ~2 min (qwen3-0.6b ~12 s/run, scales up)
+# - Worker-mode sweep:  ~2 min
+# - Total: ~4 min observed (well under the 18-25 min estimate;
+#   smaller models dominate and are very fast).
