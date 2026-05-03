@@ -4503,6 +4503,114 @@ gate tiers by `defaultQuant`:
 
 ---
 
+## Frame-probe coexistence + NPC scenario sizing probes (closed 2026-05-01; archived from TODO.md)
+
+Originally TODO.md items 8 + 9. The frame-probe baseline established
+the agent + Three.js coexistence-cost picture; the four NPC sizing
+probes (9a-9d) measured every architecture lever the user-stated NPC
+deployment scenario depended on. All five closed in a single session
+2026-05-01. Downstream decisions consumed: 9a → item 11 (prefix cache,
+shipped 2026-05-02); 9b → "sequential is canonical agent-tick pattern";
+9c → "do not bake warmup into engine init"; 9d → item 10 (dual-mode
+worker, shipped 2026-05-02).
+
+### 8. Frame-probe coexistence baseline — CLOSED 2026-05-01
+
+First-class `?frameProbe=1` mode landed on the smoke page
+(`smoke-test/frame-probe.js` + `real-model-page.js` integration;
+`?scene=<url>` for GLTF stress, `?frameProbeCalls=N` for hitch-
+distribution mode). Multi-call probe on `qwen3-8b-iq3m` confirmed:
+
+- Render loop median 8.3ms (120Hz baseline) holds across baseline,
+  prefill, decode, post — main-thread async path is sufficient
+  for the agent + Three.js coexistence case at typical scene
+  cost (~3K tri Mountain_01 fixture).
+- Decode tok/s held at 24.7-25.0 across 5 sequential calls
+  (within 1% of the trivial-cube baseline).
+- **Per-call decode hitch is DETERMINISTIC** — every call has
+  exactly one ~42-58ms drop in decode (median 49.3ms across 5
+  calls; aggregate `>50ms` rate 2/481 frames). Pattern classifier
+  "DETERMINISTIC (every call hitches in a narrow band)". Hypothesis:
+  prefill→decode shape transition lands in the first 1-2 decode
+  rAF frames.
+- At 3.8M-tri stress scene: GPU contention dominates (24fps
+  baseline, decode tok/s collapses 25 → 2.8). Main-thread async
+  is fine; physical GPU is the bottleneck. Worker doesn't help
+  this case (shared VRAM + single physical GPU).
+
+**Probe-first preferred-path doctrine** (per CLAUDE.md
+"Probe-first is the default"): every architecture decision below
+gates on a measurement first. Don't pre-commit to a Worker
+migration, prefix-cache implementation, or NPC tick-rate
+target until the matching probe lands. The deterministic hitch
+finding is what triggered probes 9c (hitch-warmup) and 9d/10
+(worker migration).
+
+### 9a. Prefill-prefix-cache decomposition probe — CLOSED 2026-05-01, PASS
+
+Three NPC-shaped fixtures × 3 runs on `qwen3-8b-iq3m` (post-§27 tip
+`e29753286`). Marginal token costs: **a = 12.31 ms / prefix-token**,
+**b = 14.11 ms / tail-token** (b/a = 1.15 — prefill essentially
+linear in total tokens, small attention-quadratic premium for
+tail-position tokens). Projected at canonical NPC prompt
+P=400/T=40: prefill ≈ 5488 ms, **prefix's share = 89.7%**. Verdict
+robust to worst-case b=a substitution (prefix is 91% of total tokens
+at that ratio). Closure report
+[`eval/reports/probe-9a-2026-05-01/SUMMARY.md`](eval/reports/probe-9a-2026-05-01/SUMMARY.md).
+
+**Downstream decision:** KV-cache-per-conversation-on-shared-weights
+multiplexing is now load-bearing (was "deferred" per CLAUDE.md). At
+5.5 s prefill per tick, a freshly-prefilled-from-scratch approach
+blows the 1-tick-per-second budget by 5.5×; prefix caching collapses
+it to ~0.6 s tail-only. Spec was queued behind 9b/9c/9d closure;
+implementation shipped as item 11 (prefix cache, closed 2026-05-02).
+
+Harness extension shipped: smoke `[7/8]` result line now carries
+`tokensIn=N`; new probe runner at
+`eval/probes/probe-9a-prefill-prefix.ts` and 3 fixtures in
+`eval/fixtures/long-prompts.ts`.
+
+### 9b. Batched-prompt vs sequential probe — CLOSED 2026-05-01, PARTIAL
+
+N=4 NPCs on `qwen3-8b-iq3m`. Quality 100% / 100% (4/4 each, ratio
+1.00 ≥ 0.70 ✅), wall ratio 0.72 (> 0.40 ❌ — batched 4010 ms vs
+sequential 5553 ms). The JSON-wrapper decode overhead (48 vs 7
+tokens) ate the projected ≥60% wall savings. **Decision:**
+sequential remains the canonical agent-tick pattern, hard-dependent
+on prefix caching (probe 9a). With prefix caching projected
+~150 ms/tick (≥6 Hz budget). Batched would re-win at N≥16-20 or
+with constrained JSON decoding. Closure report
+[`eval/reports/probe-9b-2026-05-01/SUMMARY.md`](eval/reports/probe-9b-2026-05-01/SUMMARY.md).
+
+### 9c. Hitch-warmup probe — CLOSED 2026-05-01, FAIL
+
+Same-page-load A/B with `?frameProbeWarmup=1` toggle on
+`qwen3-8b-iq3m`. Per-call decode_max (control vs warmup):
+41.7 / 41.7 / 41.7 / 41.6 / 50.0 vs 41.6 / 41.6 / 58.3 / 42.1 / 40.8.
+Warmup does NOT reduce call-0 decode_max; the hitch persists *every*
+call regardless. **Decision:** do NOT bake warmup into engine init —
+hitch is per-call structural overhead, not first-call shape JIT.
+Closure report
+[`eval/reports/probe-9c-2026-05-01/SUMMARY.md`](eval/reports/probe-9c-2026-05-01/SUMMARY.md).
+
+### 9d. Worker-prototype hitch probe — CLOSED 2026-05-01, PASS (5.5× hitch reduction)
+
+Spike at `smoke-test/probe-9d.html` + `smoke-test/probe-9d-worker.js`
+drives a Worker-resident `WebLLM.loadModelFromBuffer` engine on
+`qwen3-0.6b-q4f16` (smaller model used for spike tractability — 7B+
+needs the smoke page's heap-streaming loader inside the worker).
+Same-day same-model main-thread control vs worker decode_max:
+main 41.0/33.6/58.3/49.8/58.2 (med 49.8) vs worker
+9.1/9.4/9.0/9.1/9.2 (med 9.1) — **5.5× reduction**, hitch fully
+absorbed. Public API fix shipped: `loadModelFromBuffer` now honors
+`options.contextLength` (was previously hard-coded to GGUF max,
+OOMing 32 K-context KV in the worker memory budget). **Decision:**
+item 10 (dual-mode worker) is the load-bearing path forward (shipped
+2026-05-02). Closure report
+[`eval/reports/probe-9d-2026-05-01/SUMMARY.md`](eval/reports/probe-9d-2026-05-01/SUMMARY.md).
+
+---
+
 ## Prefix cache via per-conversation KV snapshots (closed 2026-05-02; archived from TODO.md)
 
 Originally TODO.md item 11. End-to-end mechanism, batch-transfer
