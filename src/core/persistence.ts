@@ -6,9 +6,6 @@
  * primitives. Spec: 2026-05-03-prefix-cache-persistence-design.md.
  */
 
-import type { TokenizerConfig } from "../inference/tokenizer.js";
-import { CorruptBlobError, IncompatibleConversationError } from "./errors.js";
-
 export const KV_PERSISTENCE_SCHEMA_VERSION = 1;
 // "WLKV" — magic bytes that mark a persisted-conversation blob.
 export const KV_PERSISTENCE_MAGIC = new Uint8Array([0x57, 0x4c, 0x4b, 0x56]);
@@ -39,10 +36,8 @@ export interface PersistedConversationHeader {
  * tokenizer config. Used to fingerprint vocab pinning so blobs from a
  * subtly-different tokenizer (same arch, retrained) refuse to import.
  */
-export async function computeTokenizerHash(
-	cfg: TokenizerConfig,
-): Promise<string> {
-	const canonical = stableStringify(cfg as unknown);
+export async function computeTokenizerHash(cfg: unknown): Promise<string> {
+	const canonical = stableStringify(cfg);
 	const bytes = new TextEncoder().encode(canonical);
 	const digest = await crypto.subtle.digest("SHA-256", bytes);
 	return Array.from(new Uint8Array(digest))
@@ -62,7 +57,3 @@ function stableStringify(v: unknown): string {
 		.join(",");
 	return `{${entries}}`;
 }
-
-// Forward-positioned imports — consumed by encode/decode in subsequent tasks.
-void CorruptBlobError;
-void IncompatibleConversationError;
