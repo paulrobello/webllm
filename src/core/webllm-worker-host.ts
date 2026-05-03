@@ -75,7 +75,20 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 				throw new Error(`unknown engine method: ${msg.name}`);
 			}
 			const value = await fn.apply(opts.engine, msg.args);
-			opts.postMessage({ type: "method-result", id: msg.id, value });
+			// `loadModelFromBuffer` returns `{ handle, inference }`. The
+			// `inference` half is a real `ModelInference` / `EncoderInference`
+			// / `CausalLMEmbedder` instance — closures + GPU-resource handles
+			// that postMessage's structured clone can't serialize. Strip it
+			// here; main-thread consumers only need `handle.id` to drive the
+			// engine via subsequent RPCs.
+			const sanitized =
+				msg.name === "loadModelFromBuffer" &&
+				value &&
+				typeof value === "object" &&
+				"handle" in (value as object)
+					? { handle: (value as { handle: unknown }).handle }
+					: value;
+			opts.postMessage({ type: "method-result", id: msg.id, value: sanitized });
 		} catch (e) {
 			opts.postMessage({
 				type: "method-error",
