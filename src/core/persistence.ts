@@ -46,13 +46,40 @@ export async function computeTokenizerHash(cfg: unknown): Promise<string> {
 }
 
 function stableStringify(v: unknown): string {
-	if (v === null || typeof v !== "object") return JSON.stringify(v);
+	if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
 	if (Array.isArray(v)) {
 		return `[${v.map(stableStringify).join(",")}]`;
+	}
+	if (v instanceof Map) {
+		// Sort by stringified key for canonical order. Map keys can be any
+		// type, but the production caller (TokenizerConfig.bpeRanks /
+		// addedTokens) uses string keys. We coerce + sort to handle both.
+		const entries = [...v.entries()].sort((a, b) => {
+			const ka = String(a[0]);
+			const kb = String(b[0]);
+			return ka < kb ? -1 : ka > kb ? 1 : 0;
+		});
+		const inner = entries
+			.map(([k, val]) => `${stableStringify(k)}:${stableStringify(val)}`)
+			.join(",");
+		return `{__map__:[${inner}]}`;
+	}
+	if (v instanceof Uint8Array) {
+		// Length-prefixed CSV of bytes — canonical order is the array's own
+		// order (positional, not sorted). Length prefix prevents collisions
+		// between a 0-byte array and a missing field.
+		return `{__u8__:${v.byteLength},${Array.from(v).join(",")}}`;
+	}
+	if (ArrayBuffer.isView(v)) {
+		// Other typed arrays (Int32Array, Float32Array, etc.) — fall back to
+		// the same byte-CSV form against the underlying buffer view.
+		const u8 = new Uint8Array((v as ArrayBufferView).buffer);
+		return `{__u8__:${u8.byteLength},${Array.from(u8).join(",")}}`;
 	}
 	const obj = v as Record<string, unknown>;
 	const keys = Object.keys(obj).sort();
 	const entries = keys
+		.filter((k) => obj[k] !== undefined) // match JSON.stringify: drop undefined-valued keys
 		.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
 		.join(",");
 	return `{${entries}}`;

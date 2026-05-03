@@ -53,4 +53,64 @@ describe("computeTokenizerHash", () => {
 			await computeTokenizerHash(changed),
 		);
 	});
+
+	test("Map-valued field: hash differs when Map contents differ", async () => {
+		const baseWithMap = {
+			type: "BPE" as const,
+			bpeRanks: new Map([
+				["h e", 1],
+				["l l", 2],
+			]),
+		};
+		const changedMap = {
+			type: "BPE" as const,
+			bpeRanks: new Map([
+				["h e", 1],
+				["l l", 99], // different rank
+			]),
+		};
+		expect(await computeTokenizerHash(baseWithMap)).not.toBe(
+			await computeTokenizerHash(changedMap),
+		);
+	});
+
+	test("Map-valued field: insertion-order-permuted Map yields identical hash", async () => {
+		const a = {
+			bpeRanks: new Map([
+				["a", 1],
+				["b", 2],
+				["c", 3],
+			]),
+		};
+		const b = {
+			bpeRanks: new Map([
+				["c", 3],
+				["a", 1],
+				["b", 2],
+			]),
+		};
+		expect(await computeTokenizerHash(a)).toBe(await computeTokenizerHash(b));
+	});
+
+	test("Uint8Array field: hash differs when bytes differ", async () => {
+		const a = { precompiledCharsmap: new Uint8Array([1, 2, 3, 4]) };
+		const b = { precompiledCharsmap: new Uint8Array([1, 2, 3, 5]) };
+		expect(await computeTokenizerHash(a)).not.toBe(
+			await computeTokenizerHash(b),
+		);
+	});
+
+	test("undefined-valued keys are dropped (matches JSON.stringify semantics)", async () => {
+		const withUndef = { a: 1, b: undefined };
+		const withoutB = { a: 1 };
+		expect(await computeTokenizerHash(withUndef)).toBe(
+			await computeTokenizerHash(withoutB),
+		);
+	});
+
+	test("nested-object key permutation also yields identical hash", async () => {
+		const a = { outer: { x: 1, y: 2, nested: { p: "a", q: "b" } } };
+		const b = { outer: { nested: { q: "b", p: "a" }, y: 2, x: 1 } };
+		expect(await computeTokenizerHash(a)).toBe(await computeTokenizerHash(b));
+	});
 });
