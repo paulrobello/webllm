@@ -21,7 +21,7 @@
  * `instruction_prefix` and only document-mode fixtures.
  *
  * Usage:
- *   bun eval/causal-embedder-parity.ts <modelId> <ref-file> [--gate 0.999]
+ *   bun eval/causal-embedder-parity.ts <modelId> <ref-file> [--gate 0.999] [--worker]
  *
  * Diagnostic ladder (if a row fails):
  *   1. All 10 rows fail uniformly (<0.5)         -> Signature C: prefix not applied
@@ -59,6 +59,7 @@ const MAGNITUDE_TOLERANCE = 1e-3;
 
 const args = process.argv.slice(2);
 let gateOverride: number | null = null;
+let useWorker = false;
 const positional: string[] = [];
 for (let i = 0; i < args.length; i++) {
 	if (args[i] === "--gate" && i + 1 < args.length) {
@@ -69,6 +70,8 @@ for (let i = 0; i < args.length; i++) {
 		}
 		gateOverride = parsed;
 		i++;
+	} else if (args[i] === "--worker") {
+		useWorker = true;
 	} else {
 		positional.push(args[i]);
 	}
@@ -76,7 +79,7 @@ for (let i = 0; i < args.length; i++) {
 const [modelId, refPath] = positional;
 if (!modelId || !refPath) {
 	console.error(
-		"Usage: bun eval/causal-embedder-parity.ts <modelId> <ref-file> [--gate 0.999]",
+		"Usage: bun eval/causal-embedder-parity.ts <modelId> <ref-file> [--gate 0.999] [--worker]",
 	);
 	process.exit(2);
 }
@@ -218,8 +221,10 @@ const url = buildSmokeTestUrl(modelId, model.contextLength, {
 		...(model.embeddingPooling === "mean"
 			? { embeddingPooling: "mean" }
 			: {}),
+		...(useWorker ? { worker: "1" } : {}),
 	},
 });
+console.log(`Mode: ${useWorker ? "worker" : "main"}`);
 console.log(`Navigating to ${url}`);
 agentchrome(port, tab, ["navigate", url]);
 

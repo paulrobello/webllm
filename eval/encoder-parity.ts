@@ -6,7 +6,7 @@
  * Pass gate: cosine >= 0.999 on every row.
  *
  * Run:
- *   bun eval/encoder-parity.ts <modelId> <ref-file>
+ *   bun eval/encoder-parity.ts <modelId> <ref-file> [--worker]
  *
  * Requires:
  *   - smoke server up (`make smoke-serve`)
@@ -24,9 +24,21 @@ import { getModelById } from "./models.js";
 
 const COSINE_GATE = 0.999;
 
-const [, , modelId, refPath] = process.argv;
+const argv = process.argv.slice(2);
+let useWorker = false;
+const positional: string[] = [];
+for (const a of argv) {
+	if (a === "--worker") {
+		useWorker = true;
+	} else {
+		positional.push(a);
+	}
+}
+const [modelId, refPath] = positional;
 if (!modelId || !refPath) {
-	console.error("Usage: bun eval/encoder-parity.ts <modelId> <ref-file>");
+	console.error(
+		"Usage: bun eval/encoder-parity.ts <modelId> <ref-file> [--worker]",
+	);
 	process.exit(2);
 }
 
@@ -90,8 +102,10 @@ const url = buildSmokeTestUrl(modelId, model.contextLength, {
 		embedFixture: "short",
 		embedReps: "1",
 		v: `${Date.now()}`,
+		...(useWorker ? { worker: 1 } : {}),
 	},
 });
+console.log(`Mode: ${useWorker ? "worker" : "main"}`);
 console.log(`Navigating to ${url}`);
 agentchrome(port, tab, ["navigate", url]);
 

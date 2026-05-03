@@ -91,6 +91,7 @@ function main(): void {
 			"timeout-ms": { type: "string" },
 			port: { type: "string" },
 			tab: { type: "string" },
+			worker: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -213,6 +214,7 @@ function main(): void {
 		tab: values.tab,
 		timeoutMs,
 		extraProfileParams: profile ? profileToUrlParams(profile) : {},
+		worker: values.worker ?? false,
 	}).catch((err) => {
 		console.error(`Fatal: ${err instanceof Error ? err.message : String(err)}`);
 		process.exit(1);
@@ -231,6 +233,7 @@ async function run(
 		tab?: string;
 		timeoutMs: number;
 		extraProfileParams: Record<string, string | number>;
+		worker: boolean;
 	},
 ): Promise<void> {
 	await ensureSmokeServerReachable();
@@ -262,6 +265,7 @@ async function run(
 	};
 	if (opts.profileName) extraParams.profile = opts.profileName;
 	if (opts.thinking) extraParams.thinking = 1;
+	if (opts.worker) extraParams.worker = 1;
 
 	const url = buildSmokeTestUrl(model.id, opts.contextLength, {
 		page,
@@ -367,6 +371,7 @@ Options:
       --timeout-ms <num>      Overall timeout (default: ${DEFAULT_TIMEOUT_MS})
       --port <cdp-port>       agentchrome CDP port
       --tab <tab-id>          Specific Chrome tab id
+      --worker                Run engine inside a DedicatedWorker via WebLLMProxy
   -h, --help                  Show this help
 
 Examples:
