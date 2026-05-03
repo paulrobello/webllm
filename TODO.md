@@ -1088,8 +1088,24 @@ Daily cadence check (item 1) still required at session start.
       against real harness usage and the API has stabilized.
     - **#4 Concurrent in-flight per conversation** — queued.
       Requires KV cloning at concurrency request time. Defer.
-    - **#5 Persistence across reloads** — queued. IndexedDB-backed
-      snapshot store with app opt-in. Defer until a consumer asks.
+    - **#5 Persistence across reloads — CLOSED 2026-05-03 (consumer
+      ask honored).** Two-tier design: engine primitives
+      `exportConversation(conv)` / `importConversation(modelId, blob,
+      options?)` ship in core; `IndexedDBConversationStore` ships
+      behind the `@paulrobello/webllm/persistence` subpath (apps
+      wanting OPFS / server sync / encrypted-at-rest implement their
+      own store against the same Uint8Array contract). Five new
+      error classes (`IncompatibleConversationError` /
+      `CorruptBlobError` / `PersistenceUnavailableError` /
+      `PersistenceQuotaError` / `PersistenceIOError`); model-
+      fingerprint + tokenizer-hash gate refuses cross-quant or
+      cross-tokenizer loads; integer `schemaVersion` (no migrations
+      yet); per-method transfer-allowlist on the worker bridge
+      (`exportConversation` returns are transferred, not copied).
+      Spec
+      [`docs/superpowers/specs/2026-05-03-prefix-cache-persistence-design.md`](docs/superpowers/specs/2026-05-03-prefix-cache-persistence-design.md);
+      plan
+      [`docs/superpowers/plans/2026-05-03-prefix-cache-persistence.md`](docs/superpowers/plans/2026-05-03-prefix-cache-persistence.md).
     - **#6 Worker migration (item 10) — CLOSED 2026-05-03 (probe
       outcome (a): wiring already correct).** `WebLLMProxy` already
       mirrors all four conv methods (surface-sentinel-enforced);
