@@ -171,6 +171,14 @@ export interface ModelHyperparams {
 	normEpsilon: number;
 	expertCount: number;
 	expertUsedCount: number;
+	/**
+	 * Canonical quantization name derived from GGUF `general.file_type`
+	 * (e.g., `"F16"`, `"Q4_K_M"`, `"IQ3_M"`). Defaults to `"unknown"` when
+	 * the metadata key is absent or carries an unmapped enum value. Used by
+	 * the persistence fingerprint to refuse loading a KV blob captured
+	 * against a different quant of the same architecture.
+	 */
+	quantType: string;
 	/** Pooling strategy for `embed()`. CLS/MEAN for BERT-family encoders; LAST-TOKEN for causal-LM-derived embedders (e.g., Qwen3-Embedding). */
 	poolingType?: "cls" | "mean" | "last-token";
 	/**

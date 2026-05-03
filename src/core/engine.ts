@@ -1133,7 +1133,7 @@ export class WebLLM {
 			nHead: pipeline.parsed.hyperparams.headCount,
 			nHeadKV: pipeline.parsed.hyperparams.headCountKv,
 			ropeBase: pipeline.parsed.hyperparams.ropeFreqBase ?? 10_000,
-			quantType: "unknown",
+			quantType: pipeline.parsed.hyperparams.quantType,
 			tokenizerHash: entry.tokenizerHash,
 		};
 		entry.loaded = true;
@@ -1447,7 +1447,7 @@ export class WebLLM {
 					nHead: parsed.hyperparams.headCount,
 					nHeadKV: parsed.hyperparams.headCountKv,
 					ropeBase: parsed.hyperparams.ropeFreqBase ?? 10_000,
-					quantType: "unknown",
+					quantType: parsed.hyperparams.quantType,
 					tokenizerHash: entry.tokenizerHash,
 				};
 				entry.loaded = true;

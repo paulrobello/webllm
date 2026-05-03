@@ -119,6 +119,7 @@ describe("EncoderInference construction", () => {
 			normEpsilon: 1e-12,
 			expertCount: 0,
 			expertUsedCount: 0,
+			quantType: "F16",
 		};
 	}
 	test("rejects causal LM hyperparams", () => {
@@ -247,6 +248,7 @@ function makeBertHp(layerCount: number): ModelHyperparams {
 		normEpsilon: 1e-12,
 		expertCount: 0,
 		expertUsedCount: 0,
+		quantType: "F16",
 		poolingType: "cls",
 		causalAttention: false,
 	};
@@ -476,6 +478,7 @@ describe("EncoderInference.makeTensorOptional", () => {
 			normEpsilon: 1e-12,
 			expertCount: 0,
 			expertUsedCount: 0,
+			quantType: "F16",
 		});
 		const empty = new Map();
 		const result = (
@@ -541,6 +544,7 @@ describe("EncoderInference.loadWeights arch dispatch", () => {
 			normEpsilon: 1e-12,
 			expertCount: 0,
 			expertUsedCount: 0,
+			quantType: "F16",
 			poolingType: "mean",
 			causalAttention: false,
 			...(arch === "jina-bert-v2" ? { alibiMaxBias: 8.0 } : {}),
@@ -686,6 +690,7 @@ describe("EncoderInference.buildGraph arch dispatch", () => {
 			normEpsilon: 1e-12,
 			expertCount: 0,
 			expertUsedCount: 0,
+			quantType: "F16",
 			poolingType: "mean",
 			causalAttention: false,
 			...(arch === "jina-bert-v2" ? { alibiMaxBias: 8.0 } : {}),

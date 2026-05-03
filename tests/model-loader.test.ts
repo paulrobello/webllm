@@ -115,7 +115,7 @@ function writeKvIntArray(
  * Build a minimal GGUF buffer with all metadata keys required by ModelLoader.
  * Includes architecture hyperparams and tokenizer config fields.
  */
-function buildModelLoaderGguf(): Uint8Array {
+function buildModelLoaderGguf(opts?: { fileType?: number }): Uint8Array {
 	const headerSize = 24;
 	const arch = "llama";
 
@@ -200,6 +200,13 @@ function buildModelLoaderGguf(): Uint8Array {
 				value: 1,
 			},
 		];
+	if (opts?.fileType !== undefined) {
+		kvEntries.push({
+			key: "general.file_type",
+			type: GgufValueType.UINT32,
+			value: opts.fileType,
+		});
+	}
 
 	// Calculate buffer size
 	// Header: 24 bytes
@@ -304,6 +311,34 @@ describe("ModelLoader", () => {
 		expect(parsed.hyperparams.normEpsilon).toBeCloseTo(1e-5);
 	});
 
+	test("quantType defaults to 'unknown' when general.file_type is absent", () => {
+		const buf = buildModelLoaderGguf();
+		const parsed = ModelLoader.parseModel(buf);
+		expect(parsed.hyperparams.quantType).toBe("unknown");
+	});
+
+	test("quantType maps GGUF general.file_type enum to canonical name", () => {
+		// 15 = MOSTLY_Q4_K_M; 1 = MOSTLY_F16; 27 = MOSTLY_IQ3_M.
+		expect(
+			ModelLoader.parseModel(buildModelLoaderGguf({ fileType: 15 })).hyperparams
+				.quantType,
+		).toBe("Q4_K_M");
+		expect(
+			ModelLoader.parseModel(buildModelLoaderGguf({ fileType: 1 })).hyperparams
+				.quantType,
+		).toBe("F16");
+		expect(
+			ModelLoader.parseModel(buildModelLoaderGguf({ fileType: 27 })).hyperparams
+				.quantType,
+		).toBe("IQ3_M");
+	});
+
+	test("quantType is 'unknown' for unmapped enum values", () => {
+		const buf = buildModelLoaderGguf({ fileType: 999 });
+		const parsed = ModelLoader.parseModel(buf);
+		expect(parsed.hyperparams.quantType).toBe("unknown");
+	});
+
 	test("builds tokenizer config from GGUF metadata", () => {
 		const buf = buildModelLoaderGguf();
 		const parsed = ModelLoader.parseModel(buf);
@@ -351,6 +386,7 @@ describe("ModelArchitecture union", () => {
 			normEpsilon: 1e-12,
 			expertCount: 0,
 			expertUsedCount: 0,
+			quantType: "F16",
 			poolingType: "cls",
 			causalAttention: false,
 		};

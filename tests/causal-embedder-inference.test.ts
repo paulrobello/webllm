@@ -51,6 +51,7 @@ describe("CausalLMEmbedder construction", () => {
 			normEpsilon: 1e-6,
 			expertCount: 0,
 			expertUsedCount: 0,
+			quantType: "F16",
 			poolingType: "last-token",
 		};
 	}
