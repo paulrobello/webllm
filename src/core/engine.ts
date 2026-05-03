@@ -55,7 +55,7 @@ import {
 } from "./errors.js";
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
-import { computeTokenizerHash } from "./persistence.js";
+import { computeTokenizerHash, type ModelFingerprint } from "./persistence.js";
 import { PipelineCache } from "./pipeline-cache.js";
 import { resolveSamplingParams } from "./sampling-profiles.js";
 import { Scheduler } from "./scheduler.js";
@@ -144,6 +144,27 @@ function isWorkerContext(): boolean {
 		typeof g.DedicatedWorkerGlobalScope !== "undefined" &&
 		g instanceof g.DedicatedWorkerGlobalScope
 	);
+}
+
+// Project-side `ModelHyperparams` field names diverge from the persistence
+// wire format (vocabularySize -> vocabSize, embeddingLength -> nEmbd, etc.).
+// `ModelLoader.extractHyperparams` already defaults `ropeFreqBase` to 10_000
+// when the GGUF metadata key is absent, so the typed value is always concrete.
+function buildModelFingerprint(
+	hp: ModelHyperparams,
+	tokenizerHash: string,
+): ModelFingerprint {
+	return {
+		architecture: hp.architecture,
+		vocabSize: hp.vocabularySize,
+		nEmbd: hp.embeddingLength,
+		nLayer: hp.layerCount,
+		nHead: hp.headCount,
+		nHeadKV: hp.headCountKv,
+		ropeBase: hp.ropeFreqBase,
+		quantType: hp.quantType,
+		tokenizerHash,
+	};
 }
 
 export class WebLLM {
@@ -1125,17 +1146,10 @@ export class WebLLM {
 		entry.tokenizerHash = await computeTokenizerHash(
 			pipeline.parsed.tokenizerConfig,
 		);
-		entry.fingerprint = {
-			architecture: String(pipeline.parsed.hyperparams.architecture),
-			vocabSize: pipeline.parsed.hyperparams.vocabularySize,
-			nEmbd: pipeline.parsed.hyperparams.embeddingLength,
-			nLayer: pipeline.parsed.hyperparams.layerCount,
-			nHead: pipeline.parsed.hyperparams.headCount,
-			nHeadKV: pipeline.parsed.hyperparams.headCountKv,
-			ropeBase: pipeline.parsed.hyperparams.ropeFreqBase ?? 10_000,
-			quantType: pipeline.parsed.hyperparams.quantType,
-			tokenizerHash: entry.tokenizerHash,
-		};
+		entry.fingerprint = buildModelFingerprint(
+			pipeline.parsed.hyperparams,
+			entry.tokenizerHash,
+		);
 		entry.loaded = true;
 		if (options?.embeddingCapable !== undefined) {
 			entry.embeddingCapable = options.embeddingCapable;
@@ -1439,17 +1453,10 @@ export class WebLLM {
 				entry.tokenizerHash = await computeTokenizerHash(
 					parsed.tokenizerConfig,
 				);
-				entry.fingerprint = {
-					architecture: String(parsed.hyperparams.architecture),
-					vocabSize: parsed.hyperparams.vocabularySize,
-					nEmbd: parsed.hyperparams.embeddingLength,
-					nLayer: parsed.hyperparams.layerCount,
-					nHead: parsed.hyperparams.headCount,
-					nHeadKV: parsed.hyperparams.headCountKv,
-					ropeBase: parsed.hyperparams.ropeFreqBase ?? 10_000,
-					quantType: parsed.hyperparams.quantType,
-					tokenizerHash: entry.tokenizerHash,
-				};
+				entry.fingerprint = buildModelFingerprint(
+					parsed.hyperparams,
+					entry.tokenizerHash,
+				);
 				entry.loaded = true;
 			}
 
