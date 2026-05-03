@@ -42,7 +42,16 @@ export type ProxyToWorker =
 
 export type WorkerToProxy =
 	| { type: "init-done"; id: RequestId }
-	| { type: "method-result"; id: RequestId; value: unknown }
+	| {
+			type: "method-result";
+			id: RequestId;
+			value: unknown;
+			// Informational — the actual transferables go in the second arg
+			// to `postMessage`. Listed here so the host can ferry the array
+			// alongside the message (e.g. for tests that buffer messages
+			// before forwarding) without losing transfer semantics.
+			transfer?: Transferable[];
+	  }
 	| { type: "method-error"; id: RequestId; error: SerializedError }
 	| {
 			// Single-chunk variant — defensive escape hatch with zero current
