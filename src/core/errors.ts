@@ -18,7 +18,12 @@ export type WebLLMErrorCode =
 	| "CONVERSATION_NOT_POPULATED"
 	| "CONVERSATION_POOL_FULL"
 	| "CONVERSATION_CONTEXT_OVERFLOW"
-	| "CONVERSATION_BUSY";
+	| "CONVERSATION_BUSY"
+	| "INCOMPATIBLE_CONVERSATION"
+	| "CORRUPT_BLOB"
+	| "PERSISTENCE_UNAVAILABLE"
+	| "PERSISTENCE_QUOTA"
+	| "PERSISTENCE_IO";
 
 /** Base class for all errors thrown by the public WebLLM API. */
 export class WebLLMError extends Error {
@@ -192,5 +197,85 @@ export class ConversationBusyError extends WebLLMError {
 		);
 		this.name = "ConversationBusyError";
 		this.conversationId = conversationId;
+	}
+}
+
+export type IncompatibleConversationReason =
+	| "schema-mismatch"
+	| "fingerprint-mismatch"
+	| "tokenizer-mismatch";
+
+export class IncompatibleConversationError extends WebLLMError {
+	readonly reason: IncompatibleConversationReason;
+	readonly details: Record<string, unknown>;
+	constructor(
+		reason: IncompatibleConversationReason,
+		details: Record<string, unknown>,
+	) {
+		super(
+			`incompatible persisted conversation: ${reason}`,
+			"INCOMPATIBLE_CONVERSATION",
+		);
+		this.name = "IncompatibleConversationError";
+		this.reason = reason;
+		this.details = details;
+	}
+}
+
+export type CorruptBlobReason =
+	| "bad-magic"
+	| "bad-header-len"
+	| "bad-header-json"
+	| "byte-size-mismatch";
+
+export class CorruptBlobError extends WebLLMError {
+	readonly reason: CorruptBlobReason;
+	readonly details: Record<string, unknown>;
+	constructor(reason: CorruptBlobReason, details: Record<string, unknown>) {
+		super(`corrupt persisted-conversation blob: ${reason}`, "CORRUPT_BLOB");
+		this.name = "CorruptBlobError";
+		this.reason = reason;
+		this.details = details;
+	}
+}
+
+export type PersistenceUnavailableReason =
+	| "indexeddb-missing"
+	| "indexeddb-blocked"
+	| "open-failed";
+
+export class PersistenceUnavailableError extends WebLLMError {
+	readonly reason: PersistenceUnavailableReason;
+	readonly cause: unknown;
+	constructor(reason: PersistenceUnavailableReason, cause?: unknown) {
+		super(`persistence unavailable: ${reason}`, "PERSISTENCE_UNAVAILABLE");
+		this.name = "PersistenceUnavailableError";
+		this.reason = reason;
+		this.cause = cause;
+	}
+}
+
+export class PersistenceQuotaError extends WebLLMError {
+	readonly attemptedBytes: number;
+	constructor(attemptedBytes: number) {
+		super(
+			`persistence quota exceeded (attempted ${attemptedBytes} bytes)`,
+			"PERSISTENCE_QUOTA",
+		);
+		this.name = "PersistenceQuotaError";
+		this.attemptedBytes = attemptedBytes;
+	}
+}
+
+export type PersistenceIOReason = "io-failure" | "transaction-aborted";
+
+export class PersistenceIOError extends WebLLMError {
+	readonly reason: PersistenceIOReason;
+	readonly cause: unknown;
+	constructor(reason: PersistenceIOReason, cause: unknown) {
+		super(`persistence IO error: ${reason}`, "PERSISTENCE_IO");
+		this.name = "PersistenceIOError";
+		this.reason = reason;
+		this.cause = cause;
 	}
 }
