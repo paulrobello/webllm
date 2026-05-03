@@ -1181,21 +1181,153 @@ export class WebLLM {
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl: resolvedWasmUrl });
 
+		return this._buildInferenceAndRegister(
+			parsed,
+			ggufCtx,
+			view,
+			wasm,
+			name,
+			options,
+		);
+	}
+
+	/**
+	 * Load a GGUF model by URL, streaming bytes directly into the WASM heap.
+	 *
+	 * The main-thread / worker-thread mirror of {@link loadModelFromBuffer}
+	 * for the case where the caller does not already hold the full GGUF as
+	 * an ArrayBuffer. Streaming into the WASM heap (instead of through a
+	 * JS-heap intermediary `ArrayBuffer`) avoids V8's per-allocation cap,
+	 * which trips for models larger than ~3.5 GB. This is the canonical
+	 * worker-mode load path for 7B+ models.
+	 *
+	 * Steps:
+	 *   1. Fetch the URL; require `content-length` so the WASM heap can be
+	 *      sized up-front (no realloc on the hot path).
+	 *   2. Init `GgmlWasm` with the binary picked from the model size
+	 *      (wasm32 ≤ 3.5 GiB; wasm64 above) unless `wasmUrl` overrides.
+	 *   3. `wasm.malloc(total)` reserves the GGUF region; chunks are
+	 *      streamed via `wasm.heapU8.set(value, ptr + received)`.
+	 *   4. Parse + build inference + upload weights using the callback
+	 *      form of `loadWeights` so weight uploads survive any heap-grow
+	 *      events triggered by per-chunk scratch mallocs inside ggml.
+	 *   5. Free the GGUF heap region after weights have been uploaded to
+	 *      GPU buffers — same pattern as the smoke-test main-thread path.
+	 */
+	async loadModelFromUrl(
+		url: string,
+		name: string,
+		wasmUrl?: string,
+		options?: Partial<ModelLoadOptions>,
+	): Promise<{
+		handle: ModelHandle;
+		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+	}> {
+		const resp = await fetch(url);
+		if (!resp.ok) {
+			throw new Error(`loadModelFromUrl: HTTP ${resp.status} fetching ${url}`);
+		}
+		const total = Number(resp.headers.get("content-length") || 0);
+		if (!total || total <= 0) {
+			throw new Error(
+				`loadModelFromUrl: missing content-length on ${url}; streaming into the WASM heap requires it`,
+			);
+		}
+		if (!resp.body) {
+			throw new Error(`loadModelFromUrl: response body unavailable for ${url}`);
+		}
+
+		const resolvedWasmUrl = pickWasmUrl(total, wasmUrl);
+		const wasm = new GgmlWasm();
+		await wasm.init({ wasmUrl: resolvedWasmUrl });
+
+		const ptr = wasm.malloc(total);
+		if (!ptr) {
+			throw new Error(
+				`loadModelFromUrl: wasm.malloc(${total}) returned null for ${url}`,
+			);
+		}
+
+		try {
+			const reader = resp.body.getReader();
+			let received = 0;
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				// Re-fetch heapU8 each chunk: malloc above and any future
+				// heap growth detach prior buffer references; the getter
+				// returns the current view.
+				wasm.heapU8.set(value, ptr + received);
+				received += value.length;
+			}
+			if (received !== total) {
+				throw new Error(
+					`loadModelFromUrl: short read from ${url}: expected ${total} bytes, got ${received}`,
+				);
+			}
+
+			// Callback form keeps weight uploads safe across any heap-grow
+			// events triggered by per-chunk scratch mallocs inside ggml.
+			const dataAt = (off: number, len: number): Uint8Array =>
+				new Uint8Array(wasm.heapU8.buffer, ptr + off, len);
+			const fullView = dataAt(0, total);
+			const parsed = ModelLoader.parseModel(fullView);
+			const ggufCtx = GgufParser.parse(fullView) as GgufContext;
+
+			return this._buildInferenceAndRegister(
+				parsed,
+				ggufCtx,
+				dataAt,
+				wasm,
+				name,
+				options,
+			);
+		} finally {
+			// The weights have been uploaded into GPU buffers (or the load
+			// failed before that point); either way the GGUF staging region
+			// is no longer needed. Free it immediately so the KV cache and
+			// graph buffers don't have to share the heap with a redundant
+			// model-file-sized region.
+			wasm.free(ptr);
+		}
+	}
+
+	/**
+	 * Shared post-parse path used by both `loadModelFromBuffer` and
+	 * `loadModelFromUrl`. Builds the architecture-appropriate inference
+	 * pipeline, uploads weights, registers the handle on the engine.
+	 *
+	 * `dataSrc` may be a Uint8Array (when the GGUF lives in a JS-heap
+	 * buffer that is independent of the WASM heap) or a callback
+	 * `(offset, len) => Uint8Array` (when the GGUF lives in the WASM
+	 * heap and weight uploads must re-derive views post-grow).
+	 */
+	private _buildInferenceAndRegister(
+		parsed: ParsedModel,
+		ggufCtx: GgufContext,
+		dataSrc: Uint8Array | ((offset: number, len: number) => Uint8Array),
+		wasm: GgmlWasm,
+		name: string,
+		options?: Partial<ModelLoadOptions>,
+	): {
+		handle: ModelHandle;
+		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+	} {
 		const arch = parsed.hyperparams.architecture;
 		const isEncoder = isEncoderArchitecture(arch);
 		const isCausalEmbedder = isCausalEmbedderArchitecture(arch);
 		let inference: ModelInference | EncoderInference | CausalLMEmbedder;
 		if (isEncoder) {
 			const enc = new EncoderInference(wasm, parsed.hyperparams);
-			enc.loadWeights(ggufCtx, view);
+			enc.loadWeights(ggufCtx, dataSrc);
 			inference = enc;
 		} else if (isCausalEmbedder) {
 			const cembed = new CausalLMEmbedder(wasm, parsed.hyperparams);
-			cembed.loadWeights(ggufCtx, view);
+			cembed.loadWeights(ggufCtx, dataSrc);
 			inference = cembed;
 		} else {
 			const inf = new ModelInference(wasm, parsed.hyperparams);
-			inf.loadWeights(ggufCtx, view);
+			inf.loadWeights(ggufCtx, dataSrc);
 			const requestedCtx = options?.contextLength;
 			const ctxLen =
 				typeof requestedCtx === "number" && requestedCtx > 0
