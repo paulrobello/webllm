@@ -4503,6 +4503,70 @@ gate tiers by `defaultQuant`:
 
 ---
 
+## Bucket D Phi-3.5-mini extension — §28 NEGATIVE (closed 2026-04-30; archived from TODO.md)
+
+Originally TODO.md item 7. Probed `phi-3.5-mini-q4km` as a second-
+architecture bucket D candidate (after qwen3-8b-iq3m shipped). Outcome:
+**§28 NEGATIVE result** — parity passed but distinguishability failed.
+Demoted: `embeddingCapable: false` on the row. No follow-on cycle
+queued.
+
+Closure report:
+[`eval/reports/bucket-d-phi3-parity-2026-04-30/SUMMARY.md`](eval/reports/bucket-d-phi3-parity-2026-04-30/SUMMARY.md).
+Plan:
+[`docs/superpowers/plans/2026-04-30-embedding-bucket-d-phi3.md`](docs/superpowers/plans/2026-04-30-embedding-bucket-d-phi3.md).
+
+### Headline numbers
+
+- **Parity 10/10 PASS** at `cos >= 0.91` (new `q4km` gate tier
+  alongside `iq3m` 0.90).
+- **Distinguishability mean-margin gate FAILS** under both pooling
+  modes — last-token: −0.006, mean-pool: −0.027 (paraphrase cosines
+  *lower* than unrelated cosines, i.e. the model produces
+  indiscriminate sentence vectors).
+
+### Keeper infrastructure shipped
+
+Cycle landed reusable scaffolding even though the model itself was
+demoted:
+
+- **`embeddingPooling` per-model field** (`last-token` / `mean`) —
+  enables future bucket D candidates to declare pooling at registration
+  rather than hard-coding the path.
+- **16+16 cross-domain pair harness** — 16 paraphrase + 16 unrelated
+  pairs across multiple domains, replacing the original 4-pair sanity
+  check that was statistically meaningless.
+- **Mean-margin gate** `mean(P) − mean(U) ≥ 0.05` is now the load-
+  bearing distinguishability gate. Strict-min `min(P) > max(U)` moved
+  to informational — even bucket D flagship qwen3-8b-iq3m fails strict
+  on this set (+0.084 mean-margin), so strict was too tight.
+- **qwen3-8b-iq3m revalidated** under the new gate as part of the
+  cycle.
+
+### Lessons codified
+
+1. **4-pair distinguishability is statistically meaningless** —
+   noise dominates a sample that small.
+2. **Strict `min(P) > max(U)` is too tight** even for the bucket D
+   flagship.
+3. **Parity gate alone is insufficient** — a model can pass row-by-row
+   vs ref and still produce indiscriminate sentence vectors. Always
+   pair parity with distinguishability before promoting an embedder.
+4. **Mean-pool is not a free anisotropy fix in quantized builds** —
+   Q-noise compounds across N positions; mean-pool didn't rescue
+   Phi-3.5 either.
+5. **Bucket D viability is per-model, not per-architecture** — Phi-3.5
+   fails, Qwen3-8B passes; can't generalize across architectures
+   without per-model verification.
+
+### Retire-path
+
+Phi-3.5-mini bucket D resurrection would require trying a higher-
+precision quant (Q5_K_M / Q6_K / f16) and rerunning the harness. See
+closure report retire-path for details. No queued follow-on.
+
+---
+
 ## Frame-probe coexistence + NPC scenario sizing probes (closed 2026-05-01; archived from TODO.md)
 
 Originally TODO.md items 8 + 9. The frame-probe baseline established

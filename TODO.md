@@ -1009,35 +1009,18 @@ Daily cadence check (item 1) still required at session start.
    cycles) archived to `TODO_ARCHIVE.md` under "Embedding bucket D
    (closed 2026-04-30)".
 
-7. **Bucket D Phi-3.5-mini extension — §28 NEGATIVE RESULT 2026-04-30.**
-   `phi-3.5-mini-q4km` was probed as a second-architecture bucket D
-   candidate. Parity 10/10 PASS at `cos >= 0.91` (new `q4km` gate tier
-   alongside `iq3m` 0.90), but **distinguishability mean-margin gate
-   FAILS** under both pooling modes — last-token: −0.006, mean-pool:
-   −0.027 (paraphrase cosines lower than unrelated cosines). Demoted:
-   `embeddingCapable: false` on the row, with an inline retire-path
-   note. Cycle ships keeper infrastructure: `embeddingPooling`
-   per-model field (last-token / mean), 16+16 cross-domain pair
-   harness, mean-margin gate `mean(P) − mean(U) ≥ 0.05` (strict-min
-   moved to informational — even qwen3-8b-iq3m fails strict on this
-   set, +0.084 mean-margin). qwen3-8b-iq3m revalidated under the new
-   gate. Closure report
+7. **Bucket D Phi-3.5-mini extension — §28 NEGATIVE 2026-04-30.**
+   Parity 10/10 PASS at `cos >= 0.91`, but distinguishability mean-
+   margin gate **FAILS** both pooling modes (last-token −0.006,
+   mean-pool −0.027 — paraphrase cosines lower than unrelated).
+   Demoted (`embeddingCapable: false`); no follow-on cycle queued.
+   Cycle keeper infra: `embeddingPooling` field, 16+16 cross-domain
+   pair harness, mean-margin gate `mean(P) − mean(U) ≥ 0.05`. Closure
+   report
    [`eval/reports/bucket-d-phi3-parity-2026-04-30/SUMMARY.md`](eval/reports/bucket-d-phi3-parity-2026-04-30/SUMMARY.md);
-   plan
-   [`docs/superpowers/plans/2026-04-30-embedding-bucket-d-phi3.md`](docs/superpowers/plans/2026-04-30-embedding-bucket-d-phi3.md).
-
-   Lessons codified: (1) 4-pair distinguishability is statistically
-   meaningless; (2) strict `min(P) > max(U)` is too tight even for
-   the bucket D flagship; (3) parity gate alone is insufficient — a
-   model can pass row-by-row vs ref and still produce indiscriminate
-   sentence vectors; (4) mean-pool is not a free anisotropy fix in
-   quantized builds (Q-noise compounds across N positions); (5)
-   bucket D viability is per-model, not per-architecture — Phi-3.5
-   fails, Qwen3-8B passes.
-
-   No follow-on cycle queued. Phi-3.5-mini bucket D resurrection
-   would require trying a higher-precision quant (Q5_K_M / Q6_K /
-   f16) and rerunning the harness; see closure report retire-path.
+   full block (5 codified lessons, retire-path) archived to
+   [`TODO_ARCHIVE.md` § "Bucket D Phi-3.5-mini extension — §28
+   NEGATIVE"](TODO_ARCHIVE.md).
 
 8. **Frame-probe coexistence baseline — CLOSED 2026-05-01.** `?frameProbe=1`
    mode shipped on the smoke page; multi-call probe on `qwen3-8b-iq3m`
