@@ -360,16 +360,29 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// JS-heap `new Uint8Array(N)` caps at ~2 GiB on Chrome and fails
 		// for >2 GiB GGUFs (4B Q4 ≈ 2.27 GiB). A `Uint8Array` *view* over
 		// the WASM-backed ArrayBuffer can exceed 2 GiB.
+		//
+		// Worker mode (`?worker=1`): the main thread has no WASM heap —
+		// the engine's worker side calls `wasm.init()` internally inside
+		// `loadModelFromBuffer`. We still log a [1/8] PASS line so the
+		// page shell shows step continuity; the actual init happens at
+		// [6/8] when the buffer is transferred.
 		log("running", "[1/8] Initializing WebGPU backend...");
-		let wasm;
-		try {
-			wasm = new GgmlWasm();
-			wasmInstance = wasm;
-			await wasm.init({ wasmUrl: `./${wasmVariant}${assetSuffix}` });
-			log("pass", "[1/8] WebGPU backend initialized");
-		} catch (e) {
-			log("fail", `[1/8] WebGPU init failed: ${e.message}\n${e.stack || ""}`);
-			return;
+		let wasm = null;
+		if (useWorker) {
+			log("pass", "[1/8] WebGPU backend init delegated to worker");
+		} else {
+			try {
+				wasm = new GgmlWasm();
+				wasmInstance = wasm;
+				await wasm.init({ wasmUrl: `./${wasmVariant}${assetSuffix}` });
+				log("pass", "[1/8] WebGPU backend initialized");
+			} catch (e) {
+				log(
+					"fail",
+					`[1/8] WebGPU init failed: ${e.message}\n${e.stack || ""}`,
+				);
+				return;
+			}
 		}
 
 		if (diagnoseAlloc && navigator.gpu) {
@@ -393,12 +406,24 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 
 		log("running", "[2/8] Fetching model...");
 		progressEl.style.display = "block";
-		// Saved (ptr, length) is the source of truth: WASM memory growth
-		// during ctxCreate / backendAllocCtxTensors detaches any prior
-		// Uint8Array view, so views must be re-derived from the live
-		// `wasm.heapU8.buffer` at each use via the dataAt callback below.
+		// Main-thread mode: stream into the WASM heap so we never hold a
+		// full JS-heap copy of the GGUF (the wasm32 build's `Uint8Array`
+		// max length and the JS heap's >2 GiB awkwardness both bite for
+		// 7B+ models).
+		//
+		// Worker mode: no main-side WASM heap exists yet. We fetch into a
+		// JS-heap ArrayBuffer with the same progress UX, then transfer it
+		// (zero-copy) to the worker at [6/8] via `loadModelFromBuffer`.
+		// The 6-model canonical sweep tops out at ~3.7 GB (qwen3-8b-iq3m)
+		// — comfortably under the V8 ArrayBuffer cap (~4 GiB on 64-bit
+		// Chrome). For >4 GiB models a worker-side heap-streaming loader
+		// would be needed; that's filed as a follow-up TODO under "16 GB
+		// worker-mode peak-memory hardening" in `TODO.md`.
 		let modelPtr = 0;
 		let modelByteLength = 0;
+		// Worker-mode JS-heap GGUF buffer. Transferred (detached) at [6/8]
+		// when `loadModelFromBuffer` runs; `null` otherwise.
+		let modelBuffer = null;
 		const fetchStart = performance.now();
 		try {
 			const resp = await fetch(modelUrl);
@@ -409,19 +434,29 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					"missing content-length on model response; streaming into WASM heap requires it",
 				);
 			}
-			modelPtr = wasm.malloc(total);
-			if (!modelPtr) throw new Error(`wasm malloc(${total}) returned null`);
 			modelByteLength = total;
 			const reader = resp.body.getReader();
 			let received = 0;
+			let workerHeapView = null;
+			if (useWorker) {
+				modelBuffer = new ArrayBuffer(total);
+				workerHeapView = new Uint8Array(modelBuffer);
+			} else {
+				modelPtr = wasm.malloc(total);
+				if (!modelPtr) throw new Error(`wasm malloc(${total}) returned null`);
+			}
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				// Re-fetch heapU8 each chunk: malloc above and any future
-				// growth invalidate prior buffer references. Module.HEAPU8
-				// is re-bound by Emscripten on grow; the getter returns
-				// the current view.
-				wasm.heapU8.set(value, modelPtr + received);
+				if (useWorker) {
+					workerHeapView.set(value, received);
+				} else {
+					// Re-fetch heapU8 each chunk: malloc above and any future
+					// growth invalidate prior buffer references. Module.HEAPU8
+					// is re-bound by Emscripten on grow; the getter returns
+					// the current view.
+					wasm.heapU8.set(value, modelPtr + received);
+				}
 				received += value.length;
 				setProgress((received / total) * 30);
 			}
@@ -440,11 +475,13 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			return;
 		}
 
-		// Build the model-region accessor. Re-derives a fresh sub-view of
-		// HEAPU8 on every call so callers can't accidentally hold a
-		// stale reference across a memory-grow event.
-		const modelDataAt = (off, len) =>
-			new Uint8Array(wasm.heapU8.buffer, modelPtr + off, len);
+		// Main-thread `modelDataAt`: re-derives a fresh sub-view of HEAPU8
+		// on every call so callers can't accidentally hold a stale reference
+		// across a memory-grow event. In worker mode no WASM heap exists;
+		// callers parse from `modelBuffer` directly via a Uint8Array view.
+		const modelDataAt = useWorker
+			? (off, len) => new Uint8Array(modelBuffer, off, len)
+			: (off, len) => new Uint8Array(wasm.heapU8.buffer, modelPtr + off, len);
 
 		log("running", "[3/8] Parsing GGUF...");
 		let ggufCtx;
@@ -467,7 +504,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			);
 		} catch (e) {
 			log("fail", `[3/8] Parse failed: ${e.message}\n${e.stack || ""}`);
-			wasm.free(modelPtr);
+			if (!useWorker && modelPtr) wasm.free(modelPtr);
 			return;
 		}
 
@@ -489,7 +526,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					`thinking flag (or use the "switch off" link above) and reload.`,
 			);
 			setProgress(0);
-			wasm.free(modelPtr);
+			if (!useWorker && modelPtr) wasm.free(modelPtr);
 			return;
 		}
 
@@ -524,71 +561,99 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// than loading the arctic-embed-s reference encoder.
 		const isBucketDEmbedPerf = embeddingCapable && embedPerfMode !== null;
 
-		log("running", "[4/8] Loading weights into GPU...");
-		let loadFailed = false;
-		try {
-			setProgress(35);
-			if (isEncoderModel) {
-				inference = new EncoderInference(wasm, parsed.hyperparams);
-			} else if (isCausalEmbedderModel) {
-				inference = new CausalLMEmbedder(wasm, parsed.hyperparams);
-			} else {
-				inference = new ModelInference(wasm, parsed.hyperparams, {
-					flashAttn: flashAttnEnabled,
-					prefillTileSize: prefillTileOverride,
-				});
-				if (profileMode) {
-					inference.traceEnabled = true;
-					window.__decodeTraces = [];
-				}
-				const resolvedTile = inference.prefillTileSize;
-				if (resolvedTile > 0) {
-					const tilePill = document.createElement("span");
-					tilePill.className = "mode-pill on";
-					tilePill.textContent = `tile: ${resolvedTile}`;
-					modeBar.appendChild(tilePill);
-				}
-			}
-			const t1 = performance.now();
-			inference.loadWeights(ggufCtx, modelDataAt);
-			const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
-			log("pass", `[4/8] Weights loaded in ${weightTime}s`);
+		// Worker mode: weights upload + KV-cache init both happen worker-
+		// side inside `loadModelFromBuffer` at [6/8]. We log [4/8] and
+		// [5/8] PASS lines here to preserve step continuity for the page
+		// shell and any downstream log-scraping; the actual GPU work runs
+		// once the buffer is transferred.
+		if (useWorker) {
+			log("pass", "[4/8] Weights upload delegated to worker");
 			setProgress(80);
-		} catch (e) {
-			loadFailed = true;
-			log("fail", `[4/8] Load failed: ${e.message}\n${e.stack || ""}`);
-		} finally {
-			// Weights are uploaded to GPU buffers; the staging copy in
-			// the WASM heap is no longer needed. Freeing immediately
-			// reclaims ~model-file-size of WASM memory before the KV
-			// cache and graph buffers get allocated.
-			wasm.free(modelPtr);
-			modelPtr = 0;
-		}
-		if (loadFailed) return;
-
-		if (isEmbedderModel) {
 			log(
 				"pass",
-				`[5/8] KV cache: skipped (embedder model — no autoregressive cache)`,
+				`[5/8] KV cache: delegated to worker (ctx=${
+					requestedContextLength > 0
+						? Math.min(
+								parsed.kvCacheConfig.maxContextLength,
+								requestedContextLength,
+							)
+						: parsed.kvCacheConfig.maxContextLength
+				})`,
 			);
 			setProgress(85);
 		} else {
-			log("running", "[5/8] Initializing KV cache...");
+			log("running", "[4/8] Loading weights into GPU...");
+			let loadFailed = false;
 			try {
-				const kvContextLength =
-					requestedContextLength > 0
-						? Math.min(parsed.kvCacheConfig.maxContextLength, requestedContextLength)
-						: parsed.kvCacheConfig.maxContextLength;
-				await inference.initKVCache(kvContextLength);
+				setProgress(35);
+				if (isEncoderModel) {
+					inference = new EncoderInference(wasm, parsed.hyperparams);
+				} else if (isCausalEmbedderModel) {
+					inference = new CausalLMEmbedder(wasm, parsed.hyperparams);
+				} else {
+					inference = new ModelInference(wasm, parsed.hyperparams, {
+						flashAttn: flashAttnEnabled,
+						prefillTileSize: prefillTileOverride,
+					});
+					if (profileMode) {
+						inference.traceEnabled = true;
+						window.__decodeTraces = [];
+					}
+					const resolvedTile = inference.prefillTileSize;
+					if (resolvedTile > 0) {
+						const tilePill = document.createElement("span");
+						tilePill.className = "mode-pill on";
+						tilePill.textContent = `tile: ${resolvedTile}`;
+						modeBar.appendChild(tilePill);
+					}
+				}
+				const t1 = performance.now();
+				inference.loadWeights(ggufCtx, modelDataAt);
+				const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
+				log("pass", `[4/8] Weights loaded in ${weightTime}s`);
+				setProgress(80);
+			} catch (e) {
+				loadFailed = true;
+				log("fail", `[4/8] Load failed: ${e.message}\n${e.stack || ""}`);
+			} finally {
+				// Weights are uploaded to GPU buffers; the staging copy in
+				// the WASM heap is no longer needed. Freeing immediately
+				// reclaims ~model-file-size of WASM memory before the KV
+				// cache and graph buffers get allocated.
+				wasm.free(modelPtr);
+				modelPtr = 0;
+			}
+			if (loadFailed) return;
+
+			if (isEmbedderModel) {
 				log(
 					"pass",
-					`[5/8] KV cache: ${kvContextLength} slots x ${parsed.hyperparams.layerCount} layers`,
+					`[5/8] KV cache: skipped (embedder model — no autoregressive cache)`,
 				);
 				setProgress(85);
-			} catch (e) {
-				log("fail", `[5/8] KV cache failed: ${e.message}\n${e.stack || ""}`);
-				return;
+			} else {
+				log("running", "[5/8] Initializing KV cache...");
+				try {
+					const kvContextLength =
+						requestedContextLength > 0
+							? Math.min(
+									parsed.kvCacheConfig.maxContextLength,
+									requestedContextLength,
+								)
+							: parsed.kvCacheConfig.maxContextLength;
+					await inference.initKVCache(kvContextLength);
+					log(
+						"pass",
+						`[5/8] KV cache: ${kvContextLength} slots x ${parsed.hyperparams.layerCount} layers`,
+					);
+					setProgress(85);
+				} catch (e) {
+					log(
+						"fail",
+						`[5/8] KV cache failed: ${e.message}\n${e.stack || ""}`,
+					);
+					return;
+				}
 			}
 		}
 
@@ -608,10 +673,24 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			return;
 		}
 
-		// Build the WebLLM engine and adopt the already-loaded inference
-		// pipeline. Routes [7/8], the interactive chat box, and bench mode
-		// through `engine.chatCompletion` / `engine.embed` so the smoke
-		// page exercises the same decode path public consumers do.
+		// Build the WebLLM engine.
+		//
+		// Main-thread mode: adopt the already-built `inference` pipeline
+		// via `adoptPreloadedModel` so the engine reuses the same WASM /
+		// inference / parsed instances we constructed above.
+		//
+		// Worker mode: `smokeEngine` is a `WebLLMProxy` whose worker side
+		// can't see main-thread `inference` / `wasm` instances (those
+		// hold thread-local WASM heap views and WebGPU resources that
+		// are non-transferable across postMessage). Instead, transfer
+		// the JS-heap GGUF buffer (zero-copy via the `[buf]` Transferable
+		// list inside the proxy) and let the worker re-parse + build
+		// inference itself via `loadModelFromBuffer`. The buffer is
+		// detached on the main thread after this call — `modelBuffer` is
+		// nulled to make the ownership transfer explicit. Both paths
+		// route subsequent `chatCompletion` / `embed` / conversation API
+		// calls through the same `smokeEngine` surface, so [7/8], the
+		// chat input, and bench mode are mode-agnostic.
 		try {
 			if (!navigator.gpu) {
 				throw new Error("navigator.gpu unavailable; smoke test needs WebGPU");
@@ -625,11 +704,38 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				// re-entry into the same bundle. Public surface is unchanged.
 				worker: useWorker,
 			});
-			const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
-				modelId,
-				{ wasm: wasmInstance, inference, parsed },
-				{ embeddingCapable, embeddingPooling },
-			);
+			let smokeEngineHandle;
+			if (useWorker) {
+				const ctxLen =
+					requestedContextLength > 0
+						? Math.min(
+								parsed.kvCacheConfig.maxContextLength,
+								requestedContextLength,
+							)
+						: parsed.kvCacheConfig.maxContextLength;
+				const result = await smokeEngine.loadModelFromBuffer(
+					modelBuffer,
+					modelId,
+					`./${wasmVariant}${assetSuffix}`,
+					{
+						priority: 0,
+						contextLength: ctxLen,
+						embeddingCapable,
+						embeddingPooling,
+					},
+				);
+				// The proxy's Transferable list contained `modelBuffer`, so
+				// it's now detached. Drop the reference so we can't
+				// accidentally read from a zero-byte ArrayBuffer.
+				modelBuffer = null;
+				smokeEngineHandle = result.handle;
+			} else {
+				smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
+					modelId,
+					{ wasm: wasmInstance, inference, parsed },
+					{ embeddingCapable, embeddingPooling },
+				);
+			}
 			smokeEngineHandleId = smokeEngineHandle.id;
 			// Expose for external harnesses (e.g. eval/encoder-parity.ts):
 			// the parity harness drives engine.embed via agentchrome js-exec.
@@ -649,99 +755,150 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// target + drafter would let one model's malloc invalidate the
 		// other's HEAPU8 view), construct a `ModelInference`, and adopt
 		// it under a second handle id on the same engine.
+		//
+		// Worker mode mirrors the target's [6/8] path: fetch into a JS-
+		// heap ArrayBuffer, transfer to the worker via `loadModelFromBuffer`,
+		// and let the worker re-parse + build inference. The drafter ends
+		// up registered on the same in-worker engine instance as the
+		// target, so `CompletionConfig.drafter` resolution is unchanged.
 		if (drafterId) {
 			log("running", `[drafter] Loading ${drafterId}...`);
 			const drafterUrl = `./models/${drafterId}.gguf${assetSuffix}`;
-			let drafterPtr = 0;
-			let drafterByteLength = 0;
-			let drafterWasm = null;
-			try {
-				drafterWasm = new GgmlWasm();
-				await drafterWasm.init({ wasmUrl: `./${wasmVariant}${assetSuffix}` });
-				const drafterResp = await fetch(drafterUrl);
-				if (!drafterResp.ok) {
-					throw new Error(`HTTP ${drafterResp.status} fetching ${drafterUrl}`);
-				}
-				const drafterTotal = Number(
-					drafterResp.headers.get("content-length") || 0,
-				);
-				if (drafterTotal <= 0) {
-					throw new Error(
-						"missing content-length on drafter response; streaming into WASM heap requires it",
+			if (useWorker) {
+				try {
+					const drafterResp = await fetch(drafterUrl);
+					if (!drafterResp.ok) {
+						throw new Error(`HTTP ${drafterResp.status} fetching ${drafterUrl}`);
+					}
+					const drafterBuf = await drafterResp.arrayBuffer();
+					// Peek at metadata main-side just for the ctx-length log
+					// line; the worker does the load-bearing parse itself.
+					const drafterParsed = ModelLoader.parseModel(
+						new Uint8Array(drafterBuf),
 					);
-				}
-				drafterPtr = drafterWasm.malloc(drafterTotal);
-				if (!drafterPtr) {
-					throw new Error(`drafter wasm malloc(${drafterTotal}) returned null`);
-				}
-				drafterByteLength = drafterTotal;
-				const drafterReader = drafterResp.body.getReader();
-				let drafterReceived = 0;
-				while (true) {
-					const { done, value } = await drafterReader.read();
-					if (done) break;
-					// Re-derive heapU8 each chunk — same memory-grow rationale
-					// as the target fetch above.
-					drafterWasm.heapU8.set(value, drafterPtr + drafterReceived);
-					drafterReceived += value.length;
-				}
-				if (drafterReceived !== drafterTotal) {
-					throw new Error(
-						`drafter short read: expected ${drafterTotal} bytes, got ${drafterReceived}`,
+					const drafterCtxLen =
+						requestedContextLength > 0
+							? Math.min(
+									drafterParsed.kvCacheConfig.maxContextLength,
+									requestedContextLength,
+								)
+							: drafterParsed.kvCacheConfig.maxContextLength;
+					const drafterResult = await smokeEngine.loadModelFromBuffer(
+						drafterBuf,
+						drafterId,
+						`./${wasmVariant}${assetSuffix}`,
+						{ priority: 0, contextLength: drafterCtxLen },
 					);
-				}
-				const drafterDataAt = (off, len) =>
-					new Uint8Array(
-						drafterWasm.heapU8.buffer,
-						drafterPtr + off,
-						len,
+					drafterHandleId = drafterResult.handle.id;
+					log(
+						"pass",
+						`[drafter] ${drafterId} loaded (ctx=${drafterCtxLen}, draftLength=${drafterDraftLength ?? "default"})`,
 					);
-				const drafterFullView = drafterDataAt(0, drafterByteLength);
-				const drafterGgufCtx = GgufParser.parse(drafterFullView);
-				const drafterParsed = ModelLoader.parseModel(drafterFullView);
-				const drafterInference = new ModelInference(
-					drafterWasm,
-					drafterParsed.hyperparams,
-					{ prefillTileSize: prefillTileOverride },
-				);
-				drafterInference.loadWeights(drafterGgufCtx, drafterDataAt);
-				const drafterCtxLen =
-					requestedContextLength > 0
-						? Math.min(
-								drafterParsed.kvCacheConfig.maxContextLength,
-								requestedContextLength,
-							)
-						: drafterParsed.kvCacheConfig.maxContextLength;
-				await drafterInference.initKVCache(drafterCtxLen);
-				// Free the staging copy now that weights are on the GPU —
-				// same reasoning as the target free at [4/8].
-				drafterWasm.free(drafterPtr);
-				drafterPtr = 0;
-				// `loadModel` (called inside `adoptPreloadedModel`) mints a
-				// synthetic handle id; that's the key under which the drafter
-				// gets registered in `inferenceEngines`. The user-facing
-				// drafter name is just a registry hint — pass `handle.id`
-				// (not `drafterId`) into `CompletionConfig.drafter` below.
-				const drafterHandle = await smokeEngine.adoptPreloadedModel(
-					drafterId,
-					{
-						wasm: drafterWasm,
-						inference: drafterInference,
-						parsed: drafterParsed,
-					},
-				);
-				drafterHandleId = drafterHandle.id;
-				log(
-					"pass",
-					`[drafter] ${drafterId} loaded (ctx=${drafterCtxLen}, draftLength=${drafterDraftLength ?? "default"})`,
-				);
-			} catch (e) {
-				if (drafterPtr && drafterWasm) drafterWasm.free(drafterPtr);
-				log(
-					"fail",
-					`[drafter] Load failed: ${e.message}\n${e.stack || ""}`,
-				);
-				return;
+				} catch (e) {
+					log(
+						"fail",
+						`[drafter] Load failed: ${e.message}\n${e.stack || ""}`,
+					);
+					return;
+				}
+			} else {
+				let drafterPtr = 0;
+				let drafterByteLength = 0;
+				let drafterWasm = null;
+				try {
+					drafterWasm = new GgmlWasm();
+					await drafterWasm.init({
+						wasmUrl: `./${wasmVariant}${assetSuffix}`,
+					});
+					const drafterResp = await fetch(drafterUrl);
+					if (!drafterResp.ok) {
+						throw new Error(
+							`HTTP ${drafterResp.status} fetching ${drafterUrl}`,
+						);
+					}
+					const drafterTotal = Number(
+						drafterResp.headers.get("content-length") || 0,
+					);
+					if (drafterTotal <= 0) {
+						throw new Error(
+							"missing content-length on drafter response; streaming into WASM heap requires it",
+						);
+					}
+					drafterPtr = drafterWasm.malloc(drafterTotal);
+					if (!drafterPtr) {
+						throw new Error(
+							`drafter wasm malloc(${drafterTotal}) returned null`,
+						);
+					}
+					drafterByteLength = drafterTotal;
+					const drafterReader = drafterResp.body.getReader();
+					let drafterReceived = 0;
+					while (true) {
+						const { done, value } = await drafterReader.read();
+						if (done) break;
+						// Re-derive heapU8 each chunk — same memory-grow rationale
+						// as the target fetch above.
+						drafterWasm.heapU8.set(value, drafterPtr + drafterReceived);
+						drafterReceived += value.length;
+					}
+					if (drafterReceived !== drafterTotal) {
+						throw new Error(
+							`drafter short read: expected ${drafterTotal} bytes, got ${drafterReceived}`,
+						);
+					}
+					const drafterDataAt = (off, len) =>
+						new Uint8Array(
+							drafterWasm.heapU8.buffer,
+							drafterPtr + off,
+							len,
+						);
+					const drafterFullView = drafterDataAt(0, drafterByteLength);
+					const drafterGgufCtx = GgufParser.parse(drafterFullView);
+					const drafterParsed = ModelLoader.parseModel(drafterFullView);
+					const drafterInference = new ModelInference(
+						drafterWasm,
+						drafterParsed.hyperparams,
+						{ prefillTileSize: prefillTileOverride },
+					);
+					drafterInference.loadWeights(drafterGgufCtx, drafterDataAt);
+					const drafterCtxLen =
+						requestedContextLength > 0
+							? Math.min(
+									drafterParsed.kvCacheConfig.maxContextLength,
+									requestedContextLength,
+								)
+							: drafterParsed.kvCacheConfig.maxContextLength;
+					await drafterInference.initKVCache(drafterCtxLen);
+					// Free the staging copy now that weights are on the GPU —
+					// same reasoning as the target free at [4/8].
+					drafterWasm.free(drafterPtr);
+					drafterPtr = 0;
+					// `loadModel` (called inside `adoptPreloadedModel`) mints a
+					// synthetic handle id; that's the key under which the drafter
+					// gets registered in `inferenceEngines`. The user-facing
+					// drafter name is just a registry hint — pass `handle.id`
+					// (not `drafterId`) into `CompletionConfig.drafter` below.
+					const drafterHandle = await smokeEngine.adoptPreloadedModel(
+						drafterId,
+						{
+							wasm: drafterWasm,
+							inference: drafterInference,
+							parsed: drafterParsed,
+						},
+					);
+					drafterHandleId = drafterHandle.id;
+					log(
+						"pass",
+						`[drafter] ${drafterId} loaded (ctx=${drafterCtxLen}, draftLength=${drafterDraftLength ?? "default"})`,
+					);
+				} catch (e) {
+					if (drafterPtr && drafterWasm) drafterWasm.free(drafterPtr);
+					log(
+						"fail",
+						`[drafter] Load failed: ${e.message}\n${e.stack || ""}`,
+					);
+					return;
+				}
 			}
 		}
 
@@ -2178,9 +2335,17 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				return;
 			}
 			try {
-				if (!wasmInstance || !inference || !parsedModel) {
+				// Worker mode: `wasmInstance` and `inference` live worker-side
+				// and are null on the main thread — only `parsedModel` (parsed
+				// from the GGUF before transfer at [6/8]) is required here.
+				if (!parsedModel) {
 					throw new Error(
-						"bench mode reached after [7/8] but wasm/inference/parsed are unset — did the smoke steps fail silently?",
+						"bench mode reached after [7/8] but parsed metadata is unset — did the smoke steps fail silently?",
+					);
+				}
+				if (!useWorker && (!wasmInstance || !inference)) {
+					throw new Error(
+						"bench mode (main-thread) reached but wasm/inference are unset — did the smoke steps fail silently?",
 					);
 				}
 				const { runBenchMode } = await import(
