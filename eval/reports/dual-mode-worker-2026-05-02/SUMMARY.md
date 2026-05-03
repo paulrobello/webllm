@@ -370,6 +370,17 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
    - WASM cleanup on partial failure (`54ea723`)
    - smoke-page UX clarification on Path A loader
 
+9. **Header-prefix right-sized 64 MB → 16 MB — LANDED 2026-05-03**
+   (`d16e7a8`). Empirical measurement of canonical 6 GGUF
+   `dataOffset` showed max 7.7 MB (llama-3.1-8b); old 64 MB constant
+   was 8× overprovisioned. New 16 MB gives ~2× headroom over measured
+   max while keeping the doubling fallback (up to 256 MB) as
+   defensive escape hatch. Validated: qwen3-8b worker-mode smoke
+   loads cleanly in one fetch (`16.8 MB of 3896.6 MB total`, no
+   doubling fired). The deeper architectural fix paths (two-pass
+   parse OR engine-side metadata accessors) remain filed in the
+   smoke-page TODO comment for future work.
+
 ## Canonical commit SHAs
 
 - Spec / plan force-add (`docs/superpowers/`): per project convention
