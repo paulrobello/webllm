@@ -47,6 +47,7 @@ import {
 import {
 	ConversationBusyError,
 	ConversationContextOverflowError,
+	ConversationNotPopulatedError,
 	EncoderRequiredError,
 	InferenceEngineMissingError,
 	ModelNotFoundError,
@@ -55,7 +56,12 @@ import {
 } from "./errors.js";
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
-import { computeTokenizerHash, type ModelFingerprint } from "./persistence.js";
+import {
+	computeTokenizerHash,
+	encodePersistedConversation,
+	KV_PERSISTENCE_SCHEMA_VERSION,
+	type ModelFingerprint,
+} from "./persistence.js";
 import { PipelineCache } from "./pipeline-cache.js";
 import { resolveSamplingParams } from "./sampling-profiles.js";
 import { Scheduler } from "./scheduler.js";
@@ -593,6 +599,32 @@ export class WebLLM {
 	 */
 	async forkConversation(src: ConversationHandle): Promise<ConversationHandle> {
 		return this.conversationPool.fork(src);
+	}
+
+	async exportConversation(conv: ConversationHandle): Promise<Uint8Array> {
+		this.conversationPool.assertExists(conv);
+		const release = this.conversationPool.tryAcquireLock(conv);
+		if (!release) throw new ConversationBusyError(conv.id);
+		try {
+			const snap = this.conversationPool.get(conv);
+			if (!snap) throw new ConversationNotPopulatedError(conv.id);
+			const entry = this._modelManager.get(snap.modelHandleId);
+			if (!entry) throw new ModelNotFoundError(snap.modelHandleId);
+			if (!entry.fingerprint) {
+				throw new InferenceEngineMissingError(snap.modelHandleId);
+			}
+			const header = {
+				schemaVersion: KV_PERSISTENCE_SCHEMA_VERSION as 1,
+				fingerprint: entry.fingerprint,
+				conversationOptions: this.conversationPool.options(conv),
+				tokenIds: snap.tokenIds,
+				byteSize: snap.byteSize,
+				savedAtMs: Date.now(),
+			};
+			return encodePersistedConversation(header, snap.kvBytes);
+		} finally {
+			release();
+		}
 	}
 
 	/**
