@@ -22,6 +22,10 @@ export interface SerializedError {
 	liveConversationIds?: string[];
 	requestedTokens?: number;
 	maxContextTokens?: number;
+	reason?: string;
+	details?: Record<string, unknown>;
+	attemptedBytes?: number;
+	cause?: { message: string; name?: string };
 }
 
 export type ProxyToWorker =

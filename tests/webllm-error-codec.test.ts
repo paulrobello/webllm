@@ -5,10 +5,15 @@ import {
 	ConversationNotFoundError,
 	ConversationNotPopulatedError,
 	ConversationPoolFullError,
+	CorruptBlobError,
 	EncoderRequiredError,
+	IncompatibleConversationError,
 	InferenceEngineMissingError,
 	ModelNotFoundError,
 	ModelNotLoadedError,
+	PersistenceIOError,
+	PersistenceQuotaError,
+	PersistenceUnavailableError,
 	SpeculativeDecodingReservedError,
 	WebLLMError,
 	type WebLLMErrorCode,
@@ -34,6 +39,15 @@ const FACTORIES: Record<WebLLMErrorCode, () => WebLLMError> = {
 	CONVERSATION_CONTEXT_OVERFLOW: () =>
 		new ConversationContextOverflowError("c1", 5000, 4096),
 	CONVERSATION_BUSY: () => new ConversationBusyError("c1"),
+	INCOMPATIBLE_CONVERSATION: () =>
+		new IncompatibleConversationError("schema-mismatch", { got: 99, want: 1 }),
+	CORRUPT_BLOB: () =>
+		new CorruptBlobError("bad-magic", { firstFour: [0, 0, 0, 0] }),
+	PERSISTENCE_UNAVAILABLE: () =>
+		new PersistenceUnavailableError("indexeddb-missing"),
+	PERSISTENCE_QUOTA: () => new PersistenceQuotaError(123_456_789),
+	PERSISTENCE_IO: () =>
+		new PersistenceIOError("io-failure", new Error("disk full")),
 };
 
 describe("webllm-error-codec — mirror-drift sentinel", () => {
@@ -49,6 +63,11 @@ describe("webllm-error-codec — mirror-drift sentinel", () => {
 			"CONVERSATION_POOL_FULL",
 			"CONVERSATION_CONTEXT_OVERFLOW",
 			"CONVERSATION_BUSY",
+			"INCOMPATIBLE_CONVERSATION",
+			"CORRUPT_BLOB",
+			"PERSISTENCE_UNAVAILABLE",
+			"PERSISTENCE_QUOTA",
+			"PERSISTENCE_IO",
 		];
 		for (const c of codes) {
 			expect(FACTORIES[c]).toBeDefined();
@@ -99,6 +118,61 @@ describe("webllm-error-codec — mirror-drift sentinel", () => {
 			JSON.parse(JSON.stringify(serializeError(e))),
 		) as EncoderRequiredError;
 		expect(r.architecture).toBe("qwen3");
+	});
+
+	test("IncompatibleConversationError preserves reason + details", () => {
+		const err = new IncompatibleConversationError("fingerprint-mismatch", {
+			field: "nLayer",
+			got: 28,
+			want: 32,
+		});
+		const round = reconstructError(serializeError(err));
+		expect(round).toBeInstanceOf(IncompatibleConversationError);
+		const ic = round as IncompatibleConversationError;
+		expect(ic.reason).toBe("fingerprint-mismatch");
+		expect(ic.details).toEqual({ field: "nLayer", got: 28, want: 32 });
+	});
+
+	test("CorruptBlobError preserves reason + details", () => {
+		const err = new CorruptBlobError("byte-size-mismatch", {
+			got: 99,
+			want: 100,
+		});
+		const round = reconstructError(serializeError(err));
+		expect(round).toBeInstanceOf(CorruptBlobError);
+		const cb = round as CorruptBlobError;
+		expect(cb.reason).toBe("byte-size-mismatch");
+		expect(cb.details).toEqual({ got: 99, want: 100 });
+	});
+
+	test("PersistenceQuotaError preserves attemptedBytes", () => {
+		const err = new PersistenceQuotaError(987_654_321);
+		const round = reconstructError(serializeError(err));
+		expect(round).toBeInstanceOf(PersistenceQuotaError);
+		expect((round as PersistenceQuotaError).attemptedBytes).toBe(987_654_321);
+	});
+
+	test("PersistenceUnavailableError preserves reason", () => {
+		const err = new PersistenceUnavailableError("indexeddb-blocked");
+		const round = reconstructError(serializeError(err));
+		expect(round).toBeInstanceOf(PersistenceUnavailableError);
+		expect((round as PersistenceUnavailableError).reason).toBe(
+			"indexeddb-blocked",
+		);
+	});
+
+	test("PersistenceIOError preserves reason + cause message", () => {
+		const err = new PersistenceIOError(
+			"transaction-aborted",
+			new Error("abort"),
+		);
+		const round = reconstructError(serializeError(err));
+		expect(round).toBeInstanceOf(PersistenceIOError);
+		const io = round as PersistenceIOError;
+		expect(io.reason).toBe("transaction-aborted");
+		// After codec round-trip, cause is the structured-clone shape {message, name?},
+		// not the original Error instance.
+		expect((io.cause as { message: string }).message).toBe("abort");
 	});
 
 	test("non-WebLLMError throws round-trip as plain Error with GENERIC code", () => {

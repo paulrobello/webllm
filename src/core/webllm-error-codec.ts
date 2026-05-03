@@ -9,21 +9,40 @@
  * subclass requires updating both this codec and the test factory.
  */
 
+import type {
+	CorruptBlobReason,
+	IncompatibleConversationReason,
+	PersistenceIOReason,
+	PersistenceUnavailableReason,
+} from "./errors.js";
 import {
 	ConversationBusyError,
 	ConversationContextOverflowError,
 	ConversationNotFoundError,
 	ConversationNotPopulatedError,
 	ConversationPoolFullError,
+	CorruptBlobError,
 	EncoderRequiredError,
+	IncompatibleConversationError,
 	InferenceEngineMissingError,
 	ModelNotFoundError,
 	ModelNotLoadedError,
+	PersistenceIOError,
+	PersistenceQuotaError,
+	PersistenceUnavailableError,
 	SpeculativeDecodingReservedError,
 	WebLLMError,
 	type WebLLMErrorCode,
 } from "./errors.js";
 import type { SerializedError } from "./worker-bridge.js";
+
+function serializeCause(
+	c: unknown,
+): { message: string; name?: string } | undefined {
+	if (c instanceof Error) return { message: c.message, name: c.name };
+	if (typeof c === "string") return { message: c };
+	return undefined;
+}
 
 export function serializeError(e: unknown): SerializedError {
 	if (e instanceof WebLLMError) {
@@ -50,6 +69,21 @@ export function serializeError(e: unknown): SerializedError {
 			out.maxContextTokens = e.maxContextTokens;
 		} else if (e instanceof ConversationBusyError)
 			out.conversationId = e.conversationId;
+		else if (e instanceof IncompatibleConversationError) {
+			out.reason = e.reason;
+			out.details = e.details;
+		} else if (e instanceof CorruptBlobError) {
+			out.reason = e.reason;
+			out.details = e.details;
+		} else if (e instanceof PersistenceUnavailableError) {
+			out.reason = e.reason;
+			if (e.cause !== undefined) out.cause = serializeCause(e.cause);
+		} else if (e instanceof PersistenceQuotaError) {
+			out.attemptedBytes = e.attemptedBytes;
+		} else if (e instanceof PersistenceIOError) {
+			out.reason = e.reason;
+			out.cause = serializeCause(e.cause);
+		}
 		// SpeculativeDecodingReservedError carries no extra fields.
 		return out;
 	}
@@ -101,6 +135,40 @@ export function reconstructError(s: SerializedError): WebLLMError | Error {
 			);
 		case "CONVERSATION_BUSY":
 			return attachStack(new ConversationBusyError(s.conversationId ?? ""), s);
+		case "INCOMPATIBLE_CONVERSATION":
+			return attachStack(
+				new IncompatibleConversationError(
+					(s.reason ?? "schema-mismatch") as IncompatibleConversationReason,
+					s.details ?? {},
+				),
+				s,
+			);
+		case "CORRUPT_BLOB":
+			return attachStack(
+				new CorruptBlobError(
+					(s.reason ?? "bad-magic") as CorruptBlobReason,
+					s.details ?? {},
+				),
+				s,
+			);
+		case "PERSISTENCE_UNAVAILABLE":
+			return attachStack(
+				new PersistenceUnavailableError(
+					(s.reason ?? "indexeddb-missing") as PersistenceUnavailableReason,
+					s.cause,
+				),
+				s,
+			);
+		case "PERSISTENCE_QUOTA":
+			return attachStack(new PersistenceQuotaError(s.attemptedBytes ?? 0), s);
+		case "PERSISTENCE_IO":
+			return attachStack(
+				new PersistenceIOError(
+					(s.reason ?? "io-failure") as PersistenceIOReason,
+					s.cause,
+				),
+				s,
+			);
 		case "DISPOSED": {
 			const e = new WebLLMError(
 				s.message,
