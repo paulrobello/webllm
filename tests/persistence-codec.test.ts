@@ -213,10 +213,19 @@ describe("decodePersistedConversation — failure modes", () => {
 
 	test("throws CorruptBlobError(bad-header-len) on overflowing headerLen", () => {
 		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
-		new DataView(blob.buffer).setUint32(4, blob.byteLength * 2, true);
+		new DataView(blob.buffer, blob.byteOffset, blob.byteLength).setUint32(
+			4,
+			blob.byteLength * 2,
+			true,
+		);
 		expect(() => decodePersistedConversation(blob, SAMPLE_FINGERPRINT)).toThrow(
 			CorruptBlobError,
 		);
+		try {
+			decodePersistedConversation(blob, SAMPLE_FINGERPRINT);
+		} catch (e) {
+			expect((e as CorruptBlobError).reason).toBe("bad-header-len");
+		}
 	});
 
 	test("throws CorruptBlobError(bad-header-json) on broken JSON", () => {
@@ -305,6 +314,25 @@ describe("decodePersistedConversation — failure modes", () => {
 			expect((e as IncompatibleConversationError).details).toMatchObject({
 				field: "architecture",
 			});
+		}
+	});
+
+	test("throws CorruptBlobError(bad-magic) on blob shorter than 8 bytes (early-length guard)", () => {
+		// Even fewer bytes than the 8-byte magic+headerLen prefix; the early
+		// length guard at persistence.ts:131-133 fires before any byte
+		// comparison. Without this test, a refactor that fold the guard into
+		// the for-loop or changes its reason to "bad-header-len" would slip
+		// through.
+		const tiny = new Uint8Array([0x57, 0x4c, 0x4b]); // 3 bytes
+		expect(() => decodePersistedConversation(tiny, SAMPLE_FINGERPRINT)).toThrow(
+			CorruptBlobError,
+		);
+		try {
+			decodePersistedConversation(tiny, SAMPLE_FINGERPRINT);
+		} catch (e) {
+			const cb = e as CorruptBlobError;
+			expect(cb.reason).toBe("bad-magic");
+			expect(cb.details).toEqual({ byteLength: 3 });
 		}
 	});
 });
