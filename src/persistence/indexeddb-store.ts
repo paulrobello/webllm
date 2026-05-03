@@ -44,7 +44,10 @@ export class IndexedDBConversationStore {
 			try {
 				req = indexedDB.open(this.dbName, 1);
 			} catch (e) {
-				reject(new PersistenceUnavailableError("indexeddb-blocked", e));
+				// Synchronous throw on open() is a hard "open failed" signal;
+				// "indexeddb-blocked" is reserved for the async upgrade-blocked
+				// case (req.onblocked below).
+				reject(new PersistenceUnavailableError("open-failed", e));
 				return;
 			}
 			req.onupgradeneeded = () => {
