@@ -1133,36 +1133,16 @@ Daily cadence check (item 1) still required at session start.
      load-bearing path forward. Closure report
      [`eval/reports/probe-9d-2026-05-01/SUMMARY.md`](eval/reports/probe-9d-2026-05-01/SUMMARY.md).
 
-10. **Dual-mode deployment (main-thread + worker) — CLOSED 2026-05-02
-    (this phase archived to `TODO_ARCHIVE.md`).** `WebLLM.init({ worker:
-    true })` ships; same TS surface in both modes (verified by surface-
-    mirror sentinel). Frame-probe under worker is **8.3 ms median, 0
-    drops** on both 0.6b and 8B models (gate <15 ms; pre-A1 was 41–50 ms
-    median). Cross-mode A/B perf shows worker mode **+15.6% to +34.2%
-    faster** than main mode across the canonical 6 (counterintuitive
-    — see SUMMARY for hypothesis). Token-identical greedy A/B: **5/5
-    byte-identical**. Embedder perf measured for arctic / qwen3-hyb /
-    qwen3-8b in worker mode; formal cosine parity comparison filed as
-    follow-up. Closure report
-    [`eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md`](eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md).
-    Final fix `8c48fb4` (free staging in `_buildInferenceAndRegister`
-    before `initKVCache`) gates ≥7B-Q4 worker loads.
-
-    **Architectural levers landed:** A1 chunk-coalescing (16 ms / 8
-    tokens) at worker-host; A2 worker-mode load via
-    `loadModelFromBuffer`; Path A `loadModelFromUrl` for ≥3.5 GB
-    models (worker streams directly into WASM heap, bypasses V8
-    ArrayBuffer cap); staging-ptr ownership in
-    `_buildInferenceAndRegister` so peak transient WASM-heap footprint
-    is `max(model_bytes, KV_bytes)` not their sum.
-
-    **Follow-ups (none P0):** non-profile A/B sweep to publish a clean
-    end-user win number; formal cosine parity for worker-vs-main
-    embedders; CI-level agentchrome integration test for `?worker=1`;
-    `--worker` flag on `eval/causal-embedder-parity.ts` and
-    `eval/browser-eval.ts`; smoke-page header-prefix architectural
-    cleanup (two-pass parse or engine-side metadata accessors); drafter
-    migration to `loadModelFromUrl` if a future drafter exceeds 3.5 GB.
+10. **Dual-mode deployment (main-thread + worker) — CLOSED 2026-05-02.**
+    `WebLLM.init({ worker: true })` ships; same TS surface both modes;
+    worker frame-probe **8.3 ms median, 0 drops** (gate <15 ms);
+    cross-mode A/B perf **+15.6% to +34.2% faster** in worker; greedy
+    token-identical 5/5. Closure report
+    [`eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md`](eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md);
+    full block (architectural levers A1/A2/Path-A/staging-ptr,
+    commit ledger, 6 low-priority follow-ups) archived to
+    [`TODO_ARCHIVE.md` § "Dual-mode deployment (main-thread + worker)
+    — CLOSED 2026-05-02"](TODO_ARCHIVE.md).
 
 11. **Prefix cache via per-conversation KV snapshots — CLOSED
     2026-05-02 (this phase archived).** Mechanism shipped + validated
