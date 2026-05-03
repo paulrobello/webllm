@@ -23,13 +23,23 @@ export interface WorkerHostOptions {
 	/** Engine instance to dispatch RPCs against. */
 	// biome-ignore lint/suspicious/noExplicitAny: reflect-dispatch by name
 	engine: any;
-	/** Send a message to the proxy (main thread). */
-	postMessage(m: WorkerToProxy): void;
+	/**
+	 * Send a message to the proxy. Optional second arg lists Transferables
+	 * that should be moved (not copied) across the boundary.
+	 */
+	postMessage(m: WorkerToProxy, transfer?: Transferable[]): void;
 	/** Subscribe to incoming proxy messages. */
 	receive(handler: (m: ProxyToWorker) => void): void;
 	/** Optional logger (default: silent). */
 	log?(level: "info" | "warn" | "error", message: string): void;
 }
+
+/**
+ * Method names whose `Uint8Array` return value should be transferred
+ * (not structured-cloned) across the worker→proxy boundary. Avoids deep-
+ * copying multi-hundred-MB KV blobs (`exportConversation`).
+ */
+const TRANSFERS_BUFFER_ON_RETURN = new Set(["exportConversation"]);
 
 export interface WorkerHostHandle {
 	/** Stop receiving messages. Does not stop in-flight streams. */
@@ -96,7 +106,17 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 							metadata: (value as { metadata?: unknown }).metadata,
 						}
 					: value;
-			opts.postMessage({ type: "method-result", id: msg.id, value: sanitized });
+			let transfer: Transferable[] | undefined;
+			if (
+				TRANSFERS_BUFFER_ON_RETURN.has(msg.name) &&
+				sanitized instanceof Uint8Array
+			) {
+				transfer = [sanitized.buffer as ArrayBuffer];
+			}
+			opts.postMessage(
+				{ type: "method-result", id: msg.id, value: sanitized, transfer },
+				transfer,
+			);
 		} catch (e) {
 			opts.postMessage({
 				type: "method-error",

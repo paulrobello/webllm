@@ -3,6 +3,7 @@ import { ModelNotFoundError } from "../src/core/errors.js";
 import { startWorkerHost } from "../src/core/webllm-worker-host.js";
 import type {
 	ProxyToWorker,
+	RequestId,
 	WorkerToProxy,
 } from "../src/core/worker-bridge.js";
 
@@ -381,6 +382,68 @@ describe("webllm-worker-host", () => {
 		expect(allChunks.map((c) => c.tokenId)).toEqual([1, 2]);
 		const lastType = channel.proxyInbox[channel.proxyInbox.length - 1]?.type;
 		expect(lastType).toBe("stream-error");
+	});
+
+	test("exportConversation result is transferred (envelope.transfer populated)", async () => {
+		const sentMessages: Array<{
+			msg: WorkerToProxy;
+			transfer?: Transferable[];
+		}> = [];
+		const handlers = { receive: null as ((m: ProxyToWorker) => void) | null };
+		const engine = {
+			async exportConversation() {
+				return new Uint8Array([1, 2, 3, 4, 5]);
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: (msg, transfer) => sentMessages.push({ msg, transfer }),
+			receive: (h) => {
+				handlers.receive = h;
+			},
+		});
+		handlers.receive?.({
+			type: "method-call",
+			id: 1 as RequestId,
+			name: "exportConversation",
+			args: [{ id: "c1", modelHandleId: "m1" }],
+		});
+		await new Promise((r) => setTimeout(r, 0));
+		const result = sentMessages.find((e) => e.msg.type === "method-result");
+		expect(result).toBeDefined();
+		expect(result?.transfer?.length).toBe(1);
+		expect(result?.transfer?.[0]).toBeInstanceOf(ArrayBuffer);
+	});
+
+	test("non-allowlisted method does NOT populate transfer list", async () => {
+		const sentMessages: Array<{
+			msg: WorkerToProxy;
+			transfer?: Transferable[];
+		}> = [];
+		const handlers = { receive: null as ((m: ProxyToWorker) => void) | null };
+		const engine = {
+			async embed() {
+				return new Float32Array([1, 2, 3]);
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: (msg, transfer) => sentMessages.push({ msg, transfer }),
+			receive: (h) => {
+				handlers.receive = h;
+			},
+		});
+		handlers.receive?.({
+			type: "method-call",
+			id: 1 as RequestId,
+			name: "embed",
+			args: ["m1", "hi"],
+		});
+		await new Promise((r) => setTimeout(r, 0));
+		const result = sentMessages.find((e) => e.msg.type === "method-result");
+		expect(result?.transfer).toBeUndefined();
 	});
 
 	test("unknown method returns method-error with GENERIC code", async () => {
