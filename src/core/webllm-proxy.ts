@@ -178,6 +178,18 @@ export class WebLLMProxy {
 		this.callMethod<void>("disposeConversation", [conv]);
 	forkConversation = (src: ConversationHandle): Promise<ConversationHandle> =>
 		this.callMethod<ConversationHandle>("forkConversation", [src]);
+	exportConversation = (conv: ConversationHandle): Promise<Uint8Array> =>
+		this.callMethod<Uint8Array>("exportConversation", [conv]);
+	importConversation = (
+		modelHandleId: string,
+		blob: Uint8Array,
+		options?: ConversationOptions,
+	): Promise<ConversationHandle> =>
+		this.callMethod<ConversationHandle>(
+			"importConversation",
+			[modelHandleId, blob, options],
+			[blob.buffer as ArrayBuffer],
+		);
 
 	async dispose(): Promise<void> {
 		if (this.disposed) return;

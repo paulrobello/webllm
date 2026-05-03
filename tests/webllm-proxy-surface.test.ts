@@ -18,6 +18,8 @@ const PROXIED_METHODS: ReadonlyArray<keyof WebLLMProxy & string> = [
 	"createConversation",
 	"disposeConversation",
 	"forkConversation",
+	"exportConversation",
+	"importConversation",
 	"dispose",
 ];
 
