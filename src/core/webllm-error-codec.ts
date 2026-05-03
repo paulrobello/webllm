@@ -77,7 +77,7 @@ export function serializeError(e: unknown): SerializedError {
 			out.details = e.details;
 		} else if (e instanceof PersistenceUnavailableError) {
 			out.reason = e.reason;
-			if (e.cause !== undefined) out.cause = serializeCause(e.cause);
+			out.cause = serializeCause(e.cause);
 		} else if (e instanceof PersistenceQuotaError) {
 			out.attemptedBytes = e.attemptedBytes;
 		} else if (e instanceof PersistenceIOError) {
