@@ -1090,9 +1090,20 @@ Daily cadence check (item 1) still required at session start.
       Requires KV cloning at concurrency request time. Defer.
     - **#5 Persistence across reloads** — queued. IndexedDB-backed
       snapshot store with app opt-in. Defer until a consumer asks.
-    - **#6 Worker migration (item 10)** — queued. Pool needs to
-      live worker-side once dual-mode ships. Defer until item 10
-      starts.
+    - **#6 Worker migration (item 10) — CLOSED 2026-05-03 (probe
+      outcome (a): wiring already correct).** `WebLLMProxy` already
+      mirrors all four conv methods (surface-sentinel-enforced);
+      worker host reflect-dispatches them; `ConversationHandle` is
+      plain data and structured-clones cleanly; `ConversationPool`
+      lives engine-side so dual-mode `init({worker:true})` puts it
+      worker-resident automatically. Gap was test coverage, not
+      behavior. Lifecycle regression test added in
+      `tests/webllm-proxy-integration.test.ts` (`describe("WebLLMProxy
+      — conversation lifecycle")`) exercising create → chatCompletion(
+      conv) → fork → chatCompletion(forked) → dispose → typed-error
+      on disposed handle, all through the in-process worker channel.
+      Real-Worker boot remains covered by the dual-mode browser smoke
+      (`real-model.html?worker=1`).
 
 ---
 
