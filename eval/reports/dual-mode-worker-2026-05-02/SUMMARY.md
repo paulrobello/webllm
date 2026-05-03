@@ -25,7 +25,7 @@ The "with caveats" qualifier covers two known follow-ups:
    worker surface but couldn't measure cosine parity vs a same-tip
    main-thread reference. Filed below.~~ **Resolved 2026-05-03**:
    `--worker` plumbing landed in commit `75f8326`; formal worker-vs-
-   main cosine parity sweep completed in commit `<followup-1-sha>`.
+   main cosine parity sweep completed in commit `64bfb44`.
    All three embedders (arctic-embed encoder, qwen3-embedding-0.6b-hyb
    causal-LM, qwen3-8b-iq3m bucket D self-embed) returned bit-identical
    vectors — cos = 1.000000 across all fixtures. See "Embedder cosine
@@ -346,7 +346,7 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
    embedders Step 5 covered.~~ **RESOLVED 2026-05-03.** `--worker`
    plumbing landed in commit `75f8326` (also covers `eval/browser-eval.ts`
    for completeness). Formal cosine parity sweep landed in commit
-   `<followup-1-sha>`: all three embedders bit-identical between
+   `64bfb44`: all three embedders bit-identical between
    worker and main modes (cos = 1.000000 across all fixtures), exactly
    matching the architectural prediction. See the "Embedder cosine
    parity — formal addendum (2026-05-03)" section above.
