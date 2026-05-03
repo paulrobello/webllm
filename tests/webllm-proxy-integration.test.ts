@@ -335,3 +335,102 @@ describe("WebLLMProxy — streaming", () => {
 		await expect(consume()).rejects.toBeInstanceOf(ModelNotFoundError);
 	});
 });
+
+// Probe #6 (worker-mode + ConversationPool integration): the surface
+// sentinel proves the proxy mirrors all four conversation methods, but
+// no test previously round-tripped a `ConversationHandle` through
+// structured clone *and* exercised the conv-overload of `chatCompletion`.
+// The lifecycle test below drives:
+//   create → chatCompletion(conv) → fork → chatCompletion(forked) → dispose
+// against a fake engine that owns a real `ConversationPool`. If the
+// handle's `id` / `modelHandleId` survives postMessage and reflect-
+// dispatch finds all four engine methods, this test passes; if either
+// link is broken, it fails with a localizable error.
+describe("WebLLMProxy — conversation lifecycle", () => {
+	test("create → chatCompletion(conv) → fork → chatCompletion(fork) → dispose round-trips through the proxy", async () => {
+		const { ConversationPool } = await import(
+			"../src/core/conversation-pool.js"
+		);
+		const { ConversationNotFoundError } = await import("../src/core/errors.js");
+		const pool = new ConversationPool({ maxConversations: 4 });
+		const seenConvIds: string[] = [];
+
+		const engine = {
+			async createConversation(modelHandleId: string) {
+				return pool.create(modelHandleId);
+			},
+			async forkConversation(
+				src: import("../src/core/conversation-pool.js").ConversationHandle,
+			) {
+				return pool.fork(src);
+			},
+			async disposeConversation(
+				conv: import("../src/core/conversation-pool.js").ConversationHandle,
+			) {
+				pool.dispose(conv);
+			},
+			async *chatCompletion(
+				first:
+					| string
+					| import("../src/core/conversation-pool.js").ConversationHandle,
+				_msgs: unknown[],
+			) {
+				if (typeof first === "string") {
+					throw new Error("test only exercises conv-handle overload");
+				}
+				pool.assertExists(first);
+				seenConvIds.push(first.id);
+				// Seed a snapshot so subsequent forkConversation succeeds.
+				pool.set(first, {
+					conversationId: first.id,
+					modelHandleId: first.modelHandleId,
+					tokenIds: [1, 2, 3],
+					kvBytes: new Uint8Array(8),
+					byteSize: 8,
+					lastAccessMs: Date.now(),
+				});
+				yield { text: "x", tokenId: 1, done: false };
+				yield { text: "", done: true, stats: { decodeTokensPerSec: 1 } };
+			},
+			async dispose() {},
+		};
+
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({ engine, postMessage: hostPost, receive: hostReceive });
+		const proxy = await WebLLMProxy.fromWorker(worker);
+
+		const conv1 = await proxy.createConversation("m1");
+		expect(conv1).toEqual({ id: "conv_1", modelHandleId: "m1" });
+
+		for await (const _c of proxy.chatCompletion(conv1, [
+			{ role: "user", content: "hi" },
+		])) {
+			/* drain */
+		}
+
+		const conv2 = await proxy.forkConversation(conv1);
+		expect(conv2).toEqual({ id: "conv_2", modelHandleId: "m1" });
+
+		for await (const _c of proxy.chatCompletion(conv2, [
+			{ role: "user", content: "hi" },
+		])) {
+			/* drain */
+		}
+
+		expect(seenConvIds).toEqual(["conv_1", "conv_2"]);
+
+		await proxy.disposeConversation(conv1);
+		// Disposed handle: chatCompletion(conv1, ...) should now reject with
+		// ConversationNotFoundError, surfacing through the typed-error codec.
+		const drainDisposed = async () => {
+			for await (const _c of proxy.chatCompletion(conv1, [
+				{ role: "user", content: "hi" },
+			])) {
+				/* drain */
+			}
+		};
+		await expect(drainDisposed()).rejects.toBeInstanceOf(
+			ConversationNotFoundError,
+		);
+	});
+});
