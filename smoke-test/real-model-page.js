@@ -411,88 +411,64 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// max length and the JS heap's >2 GiB awkwardness both bite for
 		// 7B+ models).
 		//
-		// Worker mode: the worker has its own WASM heap; we hand it the URL
-		// and let it stream the bytes into its own heap via
-		// `engine.loadModelFromUrl` at [6/8]. To preserve the existing
-		// downstream UI (subtitle, KV-cache log, tokenizer construction
-		// for sanity tests), we still parse the GGUF metadata main-side —
-		// but only via a bounded Range request for the prefix that
-		// contains all metadata + tensor descriptors. 16 MB holds the
-		// header for any model in the canonical sweep (measured
-		// 2026-05-03: max `dataOffset` across the canonical 6 is 7.7 MB
-		// on llama-3.1-8b-instruct-iq3m; tinyllama-1.1b is 1.7 MB,
-		// qwen3-8B is 5.8 MB). 16 MB is ~2× headroom over the measured
-		// max and 4× smaller than the previous 64 MB constant. This
-		// avoids the V8 per-allocation cap that bit `new ArrayBuffer(total)`
-		// for >3.5 GB models.
-		//
-		// TODO(loadModelFromUrl-bypass-prefix-parse): retire this
-		// constant + the bounded Range request below in favor of either
-		//   (a) a two-pass parse — fetch a tiny 4 KB header sentinel,
-		//       read `dataOffset` from the GGUF header proper, then
-		//       Range-fetch exactly that many bytes; or
-		//   (b) move all metadata-dependent UI logic (subtitle copy,
-		//       KV-cache log, tokenizer construction) into engine-side
-		//       accessors so the smoke page never needs to parse main-
-		//       side at all.
-		// Either fix removes the "guess a prefix size" failure mode
-		// entirely. Until (a) or (b) lands, the runtime fallback below
-		// (try parse → on RangeError, double the prefix up to 256 MB)
-		// guards against a future model whose header outgrows 16 MB.
-		const HEADER_PREFIX_BYTES = 16 * 1024 * 1024;
-		// Hard cap on the doubling fallback — 256 MB is still small
-		// vs. the V8 ArrayBuffer cap (~3.5 GB) but big enough that any
-		// model whose metadata exceeds it really does need a smarter
-		// approach (option (a) above) rather than another doubling.
-		const HEADER_PREFIX_MAX_BYTES = 256 * 1024 * 1024;
+		// Worker mode: the worker fetches the GGUF directly into its own
+		// WASM heap via `engine.loadModelFromUrl`. The engine returns the
+		// parsed metadata (hyperparams, tokenizerConfig, kvCacheConfig)
+		// alongside the model handle, so the smoke page no longer parses
+		// GGUF main-side at all. We do the WebLLM.init + loadModelFromUrl
+		// at [2/8] in worker mode so subsequent steps can populate `parsed`
+		// from `result.metadata` and reuse all downstream metadata-driven
+		// logic (subtitle, KV-cache log, modelSupportsThinking gate, ctx
+		// clamp, tokenizer construction, chat-template branching) without
+		// branching on mode.
 		let modelPtr = 0;
 		let modelByteLength = 0;
-		// Worker-mode header-only buffer. Holds the GGUF prefix used for
-		// main-thread parsing only; the full model is fetched worker-side
-		// at [6/8] via `engine.loadModelFromUrl`. `null` in main-thread mode.
-		let workerHeaderBuffer = null;
 		const fetchStart = performance.now();
 		try {
 			if (useWorker) {
-				// HEAD-equivalent: a tiny Range request whose response
-				// content-range tells us the file's true byte length.
-				// Range responses include `Content-Range: bytes A-B/TOTAL`.
-				const headResp = await fetch(modelUrl, {
-					headers: { Range: "bytes=0-0" },
+				if (!navigator.gpu) {
+					throw new Error("navigator.gpu unavailable; smoke test needs WebGPU");
+				}
+				const ctxLenForLoad =
+					requestedContextLength > 0 ? requestedContextLength : 0;
+				log(
+					"running",
+					`[2/8] Worker fetching model from ${modelUrl} (streaming into worker WASM heap)...`,
+				);
+				smokeEngine = await WebLLM.init({
+					memoryBudget: 2_000_000_000,
+					maxConversations: 8,
+					worker: true,
 				});
-				if (!headResp.ok && headResp.status !== 206) {
-					throw new Error(`HTTP ${headResp.status} on size probe`);
-				}
-				const cr = headResp.headers.get("content-range");
-				if (!cr) {
-					throw new Error(
-						"server does not support Range requests; worker mode requires Range",
-					);
-				}
-				const m = /\/(\d+)\s*$/.exec(cr);
-				if (!m) {
-					throw new Error(`malformed content-range: ${cr}`);
-				}
-				modelByteLength = Number(m[1]);
-				// Drain the 1-byte body so the connection can be reused.
-				await headResp.arrayBuffer();
-
-				// Now fetch the bounded header prefix for main-thread parse.
-				const prefixEnd =
-					Math.min(HEADER_PREFIX_BYTES, modelByteLength) - 1;
-				const prefixResp = await fetch(modelUrl, {
-					headers: { Range: `bytes=0-${prefixEnd}` },
-				});
-				if (!prefixResp.ok && prefixResp.status !== 206) {
-					throw new Error(`HTTP ${prefixResp.status} fetching header prefix`);
-				}
-				const prefixBuf = await prefixResp.arrayBuffer();
-				workerHeaderBuffer = prefixBuf;
+				const result = await smokeEngine.loadModelFromUrl(
+					modelUrl,
+					modelId,
+					`./${wasmVariant}${assetSuffix}`,
+					{
+						priority: 0,
+						// `loadModelFromUrl` clamps to maxContextLength internally
+						// when contextLength > 0; passing 0 leaves the engine to
+						// pick the GGUF default. We don't yet know the GGUF max
+						// from the main side (that's the whole point of this
+						// refactor — no main-side parse), so pass through the
+						// requested value as-is.
+						...(ctxLenForLoad > 0
+							? { contextLength: ctxLenForLoad }
+							: {}),
+						embeddingCapable,
+						embeddingPooling,
+					},
+				);
+				parsedModel = result.metadata;
+				smokeEngineHandleId = result.handle.id;
+				modelByteLength = 0; // unknown without main-side fetch; not used in worker mode
+				window.engine = smokeEngine;
+				window.handleId = smokeEngineHandleId;
 				log(
 					"pass",
-					`[2/8] Header fetched: ${(prefixBuf.byteLength / 1e6).toFixed(1)} MB of ${(modelByteLength / 1e6).toFixed(1)} MB total in ${((performance.now() - fetchStart) / 1000).toFixed(1)}s (full model streams into worker heap at [6/8])`,
+					`[2/8] Worker model load complete in ${((performance.now() - fetchStart) / 1000).toFixed(1)}s`,
 				);
-				setProgress(15);
+				setProgress(40);
 			} else {
 				const resp = await fetch(modelUrl);
 				if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -529,120 +505,34 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				);
 			}
 		} catch (e) {
-			log("fail", `[2/8] Fetch failed: ${e.message}`);
+			log("fail", `[2/8] Fetch failed: ${e.message}\n${e.stack || ""}`);
 			if (modelPtr) wasm.free(modelPtr);
 			return;
 		}
 
 		// Main-thread `modelDataAt`: re-derives a fresh sub-view of HEAPU8
 		// on every call so callers can't accidentally hold a stale reference
-		// across a memory-grow event. In worker mode the prefix lives in a
-		// JS-heap ArrayBuffer (header-only); the parse only ever asks for
-		// offsets inside the GGUF header, so a bounded view is sufficient.
+		// across a memory-grow event. Worker mode never needs `modelDataAt`
+		// — the worker side parsed the GGUF and uploaded weights itself.
 		const modelDataAt = useWorker
-			? (off, len) => new Uint8Array(workerHeaderBuffer, off, len)
+			? null
 			: (off, len) => new Uint8Array(wasm.heapU8.buffer, modelPtr + off, len);
 
 		log("running", "[3/8] Parsing GGUF...");
 		let ggufCtx;
 		let parsed;
-		// Worker-mode runtime fallback: if the 64 MB prefix isn't enough
-		// to cover the GGUF header (metadata + tensor descriptors), the
-		// parser will throw a RangeError on a DataView read past the
-		// prefix end. Catch that, double the prefix (up to a 256 MB cap),
-		// re-fetch, and retry. This guards against future models whose
-		// metadata grows beyond the canonical-sweep envelope.
-		const parsePrefix = () => {
-			const parseViewLength = useWorker
-				? Math.min(modelByteLength, workerHeaderBuffer.byteLength)
-				: modelByteLength;
-			const fullView = modelDataAt(0, parseViewLength);
-			return {
-				ggufCtx: GgufParser.parse(fullView),
-				parsed: ModelLoader.parseModel(fullView),
-			};
-		};
 		try {
-			let parseResult;
-			try {
-				parseResult = parsePrefix();
-			} catch (parseErr) {
-				if (!useWorker) throw parseErr;
-				// Detect the "buffer too small" indicator: DataView reads
-				// throw RangeError when the offset is past the buffer end.
-				// We also retry on any error if the current prefix is not
-				// already at the cap — being conservative with retry is
-				// fine since the doubling caps at 256 MB.
-				const looksLikeOverflow =
-					parseErr instanceof RangeError ||
-					/out of bounds|outside the bounds|byteLength/i.test(
-						String(parseErr?.message || ""),
-					);
-				let currentPrefix = workerHeaderBuffer.byteLength;
-				if (!looksLikeOverflow || currentPrefix >= modelByteLength) {
-					// Real parse error (bad magic, bad version, etc.) — propagate.
-					throw parseErr;
-				}
-				while (
-					currentPrefix < HEADER_PREFIX_MAX_BYTES &&
-					currentPrefix < modelByteLength
-				) {
-					const nextPrefix = Math.min(
-						HEADER_PREFIX_MAX_BYTES,
-						modelByteLength,
-						currentPrefix * 2,
-					);
-					log(
-						"running",
-						`[3/8] Header prefix (${(currentPrefix / 1e6).toFixed(1)} MB) too small; re-fetching ${(nextPrefix / 1e6).toFixed(1)} MB...`,
-					);
-					const retryResp = await fetch(modelUrl, {
-						headers: { Range: `bytes=0-${nextPrefix - 1}` },
-					});
-					if (!retryResp.ok && retryResp.status !== 206) {
-						throw new Error(
-							`HTTP ${retryResp.status} re-fetching extended header prefix`,
-						);
-					}
-					workerHeaderBuffer = await retryResp.arrayBuffer();
-					currentPrefix = workerHeaderBuffer.byteLength;
-					try {
-						parseResult = parsePrefix();
-						break; // success
-					} catch (retryErr) {
-						const stillOverflow =
-							retryErr instanceof RangeError ||
-							/out of bounds|outside the bounds|byteLength/i.test(
-								String(retryErr?.message || ""),
-							);
-						if (!stillOverflow) throw retryErr;
-						if (
-							currentPrefix >= HEADER_PREFIX_MAX_BYTES ||
-							currentPrefix >= modelByteLength
-						) {
-							throw new Error(
-								`GGUF header parse failed even at ${(currentPrefix / 1e6).toFixed(1)} MB prefix ` +
-									`(cap ${(HEADER_PREFIX_MAX_BYTES / 1e6).toFixed(0)} MB). ` +
-									`The model's metadata + tensor descriptors exceed the worker-mode ` +
-									`prefix cap. Recommendation: load this model in main-thread mode ` +
-									`(?worker=0) until the smoke page learns to two-pass parse based ` +
-									`on the GGUF header's exact dataOffset. Last error: ${retryErr.message}`,
-							);
-						}
-						// loop and double again
-					}
-				}
-				if (!parseResult) {
-					throw new Error(
-						`GGUF header parse failed: prefix doubling exhausted at ${(currentPrefix / 1e6).toFixed(1)} MB ` +
-							`(cap ${(HEADER_PREFIX_MAX_BYTES / 1e6).toFixed(0)} MB). ` +
-							`Use main-thread mode (?worker=0) for this model.`,
-					);
-				}
+			if (useWorker) {
+				// Worker mode: the engine's `loadModelFromUrl` at [2/8]
+				// returned the parsed metadata directly. No main-side parse.
+				parsed = parsedModel;
+				ggufCtx = null;
+			} else {
+				const fullView = modelDataAt(0, modelByteLength);
+				ggufCtx = GgufParser.parse(fullView);
+				parsed = ModelLoader.parseModel(fullView);
+				parsedModel = parsed;
 			}
-			ggufCtx = parseResult.ggufCtx;
-			parsed = parseResult.parsed;
-			parsedModel = parsed;
 			const hp = parsed.hyperparams;
 			const subtitleContextLength =
 				requestedContextLength > 0
@@ -713,11 +603,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// than loading the arctic-embed-s reference encoder.
 		const isBucketDEmbedPerf = embeddingCapable && embedPerfMode !== null;
 
-		// Worker mode: weights upload + KV-cache init both happen worker-
-		// side inside `loadModelFromBuffer` at [6/8]. We log [4/8] and
+		// Worker mode: weights upload + KV-cache init already happened
+		// inside `engine.loadModelFromUrl` at [2/8]. We log [4/8] and
 		// [5/8] PASS lines here to preserve step continuity for the page
-		// shell and any downstream log-scraping; the actual GPU work runs
-		// once the buffer is transferred.
+		// shell and any downstream log-scraping.
 		if (useWorker) {
 			log("pass", "[4/8] Weights upload delegated to worker");
 			setProgress(80);
@@ -831,80 +720,42 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// via `adoptPreloadedModel` so the engine reuses the same WASM /
 		// inference / parsed instances we constructed above.
 		//
-		// Worker mode: `smokeEngine` is a `WebLLMProxy` whose worker side
-		// can't see main-thread `inference` / `wasm` instances (those
-		// hold thread-local WASM heap views and WebGPU resources that
-		// are non-transferable across postMessage). Hand the worker the
-		// model URL via `engine.loadModelFromUrl`; the worker fetches +
-		// streams bytes directly into its own WASM heap, sidestepping the
-		// V8 per-allocation cap that bit `new ArrayBuffer(total)` for
-		// >3.5 GB models. Both paths route subsequent `chatCompletion` /
-		// `embed` / conversation API calls through the same `smokeEngine`
-		// surface, so [7/8], the chat input, and bench mode are
-		// mode-agnostic.
-		try {
-			if (!navigator.gpu) {
-				throw new Error("navigator.gpu unavailable; smoke test needs WebGPU");
-			}
-			smokeEngine = await WebLLM.init({
-				memoryBudget: 2_000_000_000,
-				// Default is 4; the prefix-cache-fork probe runs 1 base
-				// + 4 forks = 5 concurrent conversations.
-				maxConversations: 8,
-				// `?worker=1` routes through `WebLLMProxy` → DedicatedWorker
-				// re-entry into the same bundle. Public surface is unchanged.
-				worker: useWorker,
-			});
-			let smokeEngineHandle;
-			if (useWorker) {
-				const ctxLen =
-					requestedContextLength > 0
-						? Math.min(
-								parsed.kvCacheConfig.maxContextLength,
-								requestedContextLength,
-							)
-						: parsed.kvCacheConfig.maxContextLength;
-				log(
-					"running",
-					`[6/8] Worker fetching model from ${modelUrl} (streaming into worker WASM heap)...`,
-				);
-				const workerLoadStart = performance.now();
-				const result = await smokeEngine.loadModelFromUrl(
-					modelUrl,
-					modelId,
-					`./${wasmVariant}${assetSuffix}`,
-					{
-						priority: 0,
-						contextLength: ctxLen,
-						embeddingCapable,
-						embeddingPooling,
-					},
-				);
-				log(
-					"pass",
-					`[6/8] Worker model load complete in ${((performance.now() - workerLoadStart) / 1000).toFixed(1)}s`,
-				);
-				// Header-only buffer is no longer needed.
-				workerHeaderBuffer = null;
-				smokeEngineHandle = result.handle;
-			} else {
-				smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
+		// Worker mode: the engine + model were already constructed at
+		// [2/8] (engine returns parsed metadata as part of the load
+		// result, so the smoke page never parses GGUF main-side). Skip
+		// this block; `smokeEngine` / `smokeEngineHandleId` / `window.engine`
+		// are already set.
+		if (!useWorker) {
+			try {
+				if (!navigator.gpu) {
+					throw new Error(
+						"navigator.gpu unavailable; smoke test needs WebGPU",
+					);
+				}
+				smokeEngine = await WebLLM.init({
+					memoryBudget: 2_000_000_000,
+					// Default is 4; the prefix-cache-fork probe runs 1 base
+					// + 4 forks = 5 concurrent conversations.
+					maxConversations: 8,
+					worker: false,
+				});
+				const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
 					modelId,
 					{ wasm: wasmInstance, inference, parsed },
 					{ embeddingCapable, embeddingPooling },
 				);
+				smokeEngineHandleId = smokeEngineHandle.id;
+				// Expose for external harnesses (e.g. eval/encoder-parity.ts):
+				// the parity harness drives engine.embed via agentchrome js-exec.
+				window.engine = smokeEngine;
+				window.handleId = smokeEngineHandleId;
+			} catch (e) {
+				log(
+					"fail",
+					`[6/8] Engine construction failed: ${e.message}\n${e.stack || ""}`,
+				);
+				return;
 			}
-			smokeEngineHandleId = smokeEngineHandle.id;
-			// Expose for external harnesses (e.g. eval/encoder-parity.ts):
-			// the parity harness drives engine.embed via agentchrome js-exec.
-			window.engine = smokeEngine;
-			window.handleId = smokeEngineHandleId;
-		} catch (e) {
-			log(
-				"fail",
-				`[6/8] Engine construction failed: ${e.message}\n${e.stack || ""}`,
-			);
-			return;
 		}
 
 		// Optional drafter for speculative decoding. Mirrors the target's
