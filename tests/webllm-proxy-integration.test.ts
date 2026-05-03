@@ -434,3 +434,95 @@ describe("WebLLMProxy — conversation lifecycle", () => {
 		);
 	});
 });
+
+describe("WebLLMProxy — persistence", () => {
+	test("exportConversation round-trips a Uint8Array (magic preserved)", async () => {
+		const KV_PERSISTENCE_MAGIC = new Uint8Array([0x57, 0x4c, 0x4b, 0x56]);
+		const sampleBlob = new Uint8Array([
+			...KV_PERSISTENCE_MAGIC,
+			...Array(200).fill(0),
+		]);
+		const engine = {
+			async exportConversation(_conv: unknown) {
+				return sampleBlob;
+			},
+			async dispose() {},
+		};
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({ engine, postMessage: hostPost, receive: hostReceive });
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const result = await proxy.exportConversation({
+			id: "c1",
+			modelHandleId: "m1",
+		});
+		expect(result).toBeInstanceOf(Uint8Array);
+		expect(result.slice(0, 4)).toEqual(KV_PERSISTENCE_MAGIC);
+	});
+
+	test("importConversation round-trips and returns the worker's handle", async () => {
+		const seenBlobLen: number[] = [];
+		const engine = {
+			async importConversation(modelId: string, blob: Uint8Array) {
+				seenBlobLen.push(blob.byteLength);
+				return { id: `c-imp-${modelId}`, modelHandleId: modelId };
+			},
+			async dispose() {},
+		};
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({ engine, postMessage: hostPost, receive: hostReceive });
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const blob = new Uint8Array([0x57, 0x4c, 0x4b, 0x56, 0, 0, 0, 0]);
+		const conv = await proxy.importConversation("m1", blob);
+		expect(conv).toEqual({ id: "c-imp-m1", modelHandleId: "m1" });
+		expect(seenBlobLen).toEqual([8]);
+	});
+
+	test("CorruptBlobError thrown worker-side is reconstructed main-side as instanceof", async () => {
+		const { CorruptBlobError } = await import("../src/core/errors.js");
+		const engine = {
+			async importConversation() {
+				throw new CorruptBlobError("bad-magic", {
+					firstFour: [0xff, 0xff, 0xff, 0xff],
+				});
+			},
+			async dispose() {},
+		};
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({ engine, postMessage: hostPost, receive: hostReceive });
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		await expect(
+			proxy.importConversation("m1", new Uint8Array([0])),
+		).rejects.toBeInstanceOf(CorruptBlobError);
+	});
+
+	test("IncompatibleConversationError preserves reason + details across boundary", async () => {
+		const { IncompatibleConversationError } = await import(
+			"../src/core/errors.js"
+		);
+		const engine = {
+			async importConversation() {
+				throw new IncompatibleConversationError("fingerprint-mismatch", {
+					field: "nLayer",
+					got: 28,
+					want: 32,
+				});
+			},
+			async dispose() {},
+		};
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({ engine, postMessage: hostPost, receive: hostReceive });
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		try {
+			await proxy.importConversation("m1", new Uint8Array(8));
+			throw new Error("should have thrown");
+		} catch (e) {
+			expect(e).toBeInstanceOf(IncompatibleConversationError);
+			expect(
+				(e as InstanceType<typeof IncompatibleConversationError>).reason,
+			).toBe("fingerprint-mismatch");
+			expect(
+				(e as InstanceType<typeof IncompatibleConversationError>).details,
+			).toEqual({ field: "nLayer", got: 28, want: 32 });
+		}
+	});
+});
