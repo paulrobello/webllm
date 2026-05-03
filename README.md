@@ -13,6 +13,8 @@ frame-budget-aware execution for interactive applications.
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [API Overview](#api-overview)
+- [Embeddings](#embeddings)
+- [Conversation persistence](#conversation-persistence)
 - [Development](#development)
 - [Evaluation & Live Dashboard](#evaluation--live-dashboard)
 - [License](#license)
@@ -194,6 +196,55 @@ registration entry in `eval/models.ts`. Only models that have passed the parity
 gate (≥ 0.90 cosine similarity against a dedicated embedder on the canonical
 benchmark suite) are eligible. See
 `eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md` for the current list.
+
+## Conversation persistence
+
+Conversations and their KV state evaporate on page reload. Apps that
+want to preserve conversation state across reloads use the
+`exportConversation` / `importConversation` engine primitives plus the
+optional `IndexedDBConversationStore` helper.
+
+```ts
+import { WebLLM } from "@paulrobello/webllm";
+import { IndexedDBConversationStore } from "@paulrobello/webllm/persistence";
+
+const webllm = await WebLLM.init({ memoryBudget: 8 * 1024 ** 3, worker: true });
+const { handle: model } = await webllm.loadModelFromUrl(url, "qwen3-8b");
+const store = new IndexedDBConversationStore("my-app-conversations");
+
+let conv;
+const blob = await store.get("user-42-session");
+try {
+  conv = blob
+    ? await webllm.importConversation(model.id, blob)
+    : await webllm.createConversation(model.id);
+} catch (e) {
+  // IncompatibleConversationError or CorruptBlobError → discard, restart
+  await store.delete("user-42-session");
+  conv = await webllm.createConversation(model.id);
+}
+
+// Per turn, after chatCompletion settles:
+const fresh = await webllm.exportConversation(conv);
+await store.put("user-42-session", fresh);
+```
+
+Apps that need OPFS, server-side sync, or encrypted-at-rest implement
+their own store against the same `Uint8Array` contract — the engine
+primitives don't depend on any specific storage backend.
+
+The wire format is `magic[4] + uint32 LE headerLen + JSON header + raw kvBytes`
+with magic bytes `WLKV`. The header carries an integer `schemaVersion`,
+a `ModelFingerprint` (architecture, vocab, layer/head shape, RoPE base,
+quantization, tokenizer hash), the conversation options, the token-ID
+prefix, the KV byte size, and a save timestamp. `importConversation`
+refuses any blob whose fingerprint doesn't match the loaded model and
+throws `IncompatibleConversationError` (with a `reason` distinguishing
+schema/fingerprint/tokenizer mismatch). Corrupt bytes throw
+`CorruptBlobError`. Quota errors from the IndexedDB helper surface as
+`PersistenceQuotaError`. See
+[`docs/superpowers/specs/2026-05-03-prefix-cache-persistence-design.md`](docs/superpowers/specs/2026-05-03-prefix-cache-persistence-design.md)
+for the full taxonomy and worker-mode marshaling details.
 
 ## Development
 
