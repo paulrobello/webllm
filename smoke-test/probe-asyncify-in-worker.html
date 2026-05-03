@@ -1,9 +1,11 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>ASYNCIFY in worker probe</title>
 <style>body{font:12px monospace;background:#0d1117;color:#c9d1d9;padding:16px}
-.pass{color:#3fb950}.fail{color:#f85149}.info{color:#79c0ff}</style></head>
+.pass{color:#3fb950}.fail{color:#f85149}.info{color:#79c0ff}.metric{color:#d29922}</style></head>
 <body><div id="log"></div>
 <script type="module">
+import { startFrameProbe, summarizeFrameProbe, formatFrameProbeReport } from "./frame-probe.js";
+
 const log = (cls, msg) => {
 	const d = document.createElement("div");
 	d.className = cls;
@@ -11,15 +13,55 @@ const log = (cls, msg) => {
 	document.getElementById("log").appendChild(d);
 	console.log(`[${cls}]`, msg);
 };
+
+// Start a page-level rAF sampler immediately so it captures a baseline
+// window before the worker kicks off its chat. The sampler keeps
+// running across init, prefill, and decode; we segment post-hoc using
+// the timeline events the worker posts back.
+log("info", "starting page-level frame-probe (rAF cube)…");
+const probe = await startFrameProbe();
+
 log("info", "booting worker…");
 const w = new Worker("./probe-asyncify-in-worker-worker.js", { type: "module" });
+
+let tChatStart = 0;
+let tChatEnd = 0;
+let tFirstToken = 0;
+
 w.addEventListener("message", (e) => {
+	if (e.data.type === "phase") {
+		if (e.data.phase === "chat-start") tChatStart = e.data.t;
+		else if (e.data.phase === "first-token") tFirstToken = e.data.t;
+		else if (e.data.phase === "chat-end") tChatEnd = e.data.t;
+		return;
+	}
 	if (e.data.type === "done") {
 		log("pass", `init=${e.data.tInitMs.toFixed(0)}ms gen=${e.data.tGenMs.toFixed(0)}ms tokens=${e.data.nTokens}`);
 		log("info", `output: ${JSON.stringify(e.data.text)}`);
 		log("info", `tokenIds: ${JSON.stringify(e.data.tokenIds)}`);
 		log("pass", `[7/8] Generated ${e.data.nTokens} tokens in ${(e.data.tGenMs/1000).toFixed(1)}s (finish=stop, tokensIn=0)`);
-	} else {
+
+		// Stop the rAF sampler and segment by the worker's timeline.
+		// summarizeFrameProbe expects {tStart, prefillMs, tEnd} — the page
+		// has all three from the phase events.
+		const tl = e.data.timeline;
+		const summary = summarizeFrameProbe({
+			samples: probe.samples,
+			tStart: tl.tStart,
+			prefillMs: tl.prefillMs,
+			tEnd: tl.tEnd,
+		});
+		probe.stop();
+
+		const lines = formatFrameProbeReport(summary);
+		for (const line of lines) log("info", line);
+
+		// Headline gate metric: decode median.
+		const decodeMedian = summary.decode?.median ?? -1;
+		const decodeP95 = summary.decode?.p95 ?? -1;
+		const cls = decodeMedian < 15 ? "pass" : "fail";
+		log(cls, `GATE: decode_median=${decodeMedian}ms decode_p95=${decodeP95}ms (gate <15ms median)`);
+	} else if (e.data.type === "error") {
 		log("fail", e.data.message);
 		if (e.data.stack) log("fail", e.data.stack);
 	}
