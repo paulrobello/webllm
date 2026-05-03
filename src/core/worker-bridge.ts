@@ -41,12 +41,13 @@ export type WorkerToProxy =
 	| { type: "method-result"; id: RequestId; value: unknown }
 	| { type: "method-error"; id: RequestId; error: SerializedError }
 	| {
-			// Single-chunk variant — retained for backwards compatibility with
-			// any external/test code constructing one-off chunk envelopes.
-			// Production worker host now coalesces via `stream-chunks` (plural)
-			// to reduce postMessage traffic during decode (one event per
-			// 16 ms / 8 tokens instead of one per token). The proxy handles
-			// both transparently.
+			// Single-chunk variant — defensive escape hatch with zero current
+			// emitters. The production worker host always coalesces via
+			// `stream-chunks` (plural) to reduce postMessage traffic during
+			// decode (one event per 16 ms / 8 tokens instead of one per token).
+			// The proxy still handles `stream-chunk` so a future host (custom
+			// dispatcher, test harness, alternate transport) can emit it
+			// without proxy-side changes.
 			type: "stream-chunk";
 			streamId: StreamId;
 			chunk: GenerationStreamChunk;

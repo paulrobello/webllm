@@ -116,13 +116,14 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 		// dropped. The cancel still aborts the engine iterator promptly.
 		const BATCH_MAX_CHUNKS = 8;
 		const BATCH_MAX_MS = 16;
-		const buffer: GenerationStreamChunk[] = [];
+		const pendingChunks: GenerationStreamChunk[] = [];
 		let lastFlushAt = performance.now();
 		const flush = (): void => {
-			if (buffer.length === 0) return;
+			if (pendingChunks.length === 0) return;
 			// Move-out then clear: the array we post is detached from the
-			// worker-side buffer, so the next coalescing window starts empty.
-			const chunks = buffer.splice(0, buffer.length);
+			// worker-side pending buffer, so the next coalescing window starts
+			// empty.
+			const chunks = pendingChunks.splice(0, pendingChunks.length);
 			opts.postMessage({
 				type: "stream-chunks",
 				streamId: msg.streamId,
@@ -138,10 +139,10 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 			const iter = fn.apply(opts.engine, args) as AsyncIterable<unknown>;
 			for await (const chunk of iter) {
 				if (ac.signal.aborted) break;
-				buffer.push(chunk as GenerationStreamChunk);
+				pendingChunks.push(chunk as GenerationStreamChunk);
 				const now = performance.now();
 				if (
-					buffer.length >= BATCH_MAX_CHUNKS ||
+					pendingChunks.length >= BATCH_MAX_CHUNKS ||
 					now - lastFlushAt >= BATCH_MAX_MS
 				) {
 					flush();

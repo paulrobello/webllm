@@ -250,6 +250,67 @@ describe("webllm-worker-host", () => {
 		expect(lastType).toBe("stream-done");
 	});
 
+	test("stream-start flushes via time-cap when chunks are spaced apart", async () => {
+		// Yields spaced 20 ms apart (> BATCH_MAX_MS=16) must NOT all coalesce
+		// into a single big batch. The flush check runs after each push, so
+		// the time-cap fires when chunk N+1 lands more than 16 ms after the
+		// last flush — flushing chunks 1..N. With 8 yields spaced 20 ms apart,
+		// every chunk after the first crosses the time boundary, so we
+		// expect roughly one batch per chunk (modulo the trailing tail flush
+		// at stream-done). The size-cap (8 chunks) never fires here.
+		//
+		// Defends against a regression where the time-cap branch is silently
+		// lost (e.g. an `else` accidentally swallowing the size+time
+		// disjunction) — under that bug all 8 chunks would coalesce into a
+		// single batch via the trailing tail flush.
+		const { channel, postToProxy } = makeChannel();
+		const engine = {
+			async *chatCompletion(_modelId: string, _msgs: unknown[]) {
+				for (let i = 0; i < 8; i++) {
+					yield { text: String(i), tokenId: i, done: false };
+					await new Promise((r) => setTimeout(r, 20));
+				}
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: postToProxy,
+			receive(handler) {
+				channel.postToHost = (m) => handler(m);
+			},
+		});
+		channel.postToHost({
+			type: "stream-start",
+			streamId: 99,
+			name: "chatCompletion",
+			args: ["m1", [{ role: "user", content: "go" }], {}],
+		});
+		// Total minimum wall is ~160 ms across 8 yields; leave generous
+		// headroom so the trailing flush + stream-done land before assertion.
+		await new Promise((r) => setTimeout(r, 400));
+
+		const batches = channel.proxyInbox.filter(
+			(m) => m.type === "stream-chunks",
+		) as Array<Extract<WorkerToProxy, { type: "stream-chunks" }>>;
+		const totalChunks = batches.reduce((n, b) => n + b.chunks.length, 0);
+		expect(totalChunks).toBe(8);
+		// Time-cap test: spaced yields must NOT coalesce into one batch.
+		// Under a working time-cap path we expect ~8 batches (one per yield);
+		// under regression with a broken time-cap we'd see exactly 1 batch.
+		// Use a generous floor (>= 4) to absorb scheduler jitter without
+		// allowing the regression mode (1 batch) to slip through.
+		expect(batches.length).toBeGreaterThanOrEqual(4);
+		// Order must still be preserved across batches.
+		const allChunks = batches.flatMap((b) => b.chunks);
+		expect(allChunks.map((c) => c.tokenId)).toEqual(
+			Array.from({ length: 8 }, (_, i) => i),
+		);
+		// stream-done after all batches.
+		const lastType = channel.proxyInbox[channel.proxyInbox.length - 1]?.type;
+		expect(lastType).toBe("stream-done");
+	});
+
 	test("stream-start flushes residual buffer before stream-done", async () => {
 		// 5 chunks yielded — fewer than BATCH_MAX_CHUNKS=8. Without a final
 		// flush, no `stream-chunks` would be posted at all. Verify the trailing
