@@ -28,11 +28,7 @@ export type WebLLMErrorCode =
 /** Base class for all errors thrown by the public WebLLM API. */
 export class WebLLMError extends Error {
 	readonly code: WebLLMErrorCode;
-	constructor(
-		message: string,
-		code: WebLLMErrorCode,
-		options?: ErrorOptions,
-	) {
+	constructor(message: string, code: WebLLMErrorCode, options?: ErrorOptions) {
 		super(message, options);
 		this.name = "WebLLMError";
 		this.code = code;
