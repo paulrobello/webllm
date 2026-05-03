@@ -12,7 +12,11 @@ import type {
 	ConversationHandle,
 	ConversationOptions,
 } from "./conversation-pool.js";
-import type { ModelHandle, WebLLMConfig } from "./types.js";
+import type {
+	LoadedModelMetadata,
+	ModelHandle,
+	WebLLMConfig,
+} from "./types.js";
 import { reconstructError } from "./webllm-error-codec.js";
 import {
 	makeRequestId,
@@ -108,18 +112,25 @@ export class WebLLMProxy {
 	// ────────── public WebLLM surface (non-streaming) ──────────
 
 	// Instance signature in engine.ts:1132 is (data, name, wasmUrl?, options?)
-	// returning { handle, inference }. The proxy mirrors that exactly.
+	// returning { handle, inference, metadata }. The worker host sanitizer
+	// strips the non-cloneable `inference` field before reply; `metadata`
+	// is pure data (hyperparams + tokenizerConfig + kvCacheConfig) and
+	// survives postMessage's structured clone.
 	loadModelFromBuffer = (
 		data: ArrayBuffer,
 		name: string,
 		wasmUrl?: string,
 		options?: unknown,
-	): Promise<{ handle: ModelHandle; inference: unknown }> =>
-		this.callMethod<{ handle: ModelHandle; inference: unknown }>(
-			"loadModelFromBuffer",
-			[data, name, wasmUrl, options],
-			[data],
-		);
+	): Promise<{
+		handle: ModelHandle;
+		inference: unknown;
+		metadata: LoadedModelMetadata;
+	}> =>
+		this.callMethod<{
+			handle: ModelHandle;
+			inference: unknown;
+			metadata: LoadedModelMetadata;
+		}>("loadModelFromBuffer", [data, name, wasmUrl, options], [data]);
 	// `url` and `name` are cheap strings; no Transferables needed. The
 	// worker fetches + streams into its own WASM heap so >3.5 GB models
 	// don't have to land in a main-thread JS-heap ArrayBuffer first.
@@ -128,11 +139,16 @@ export class WebLLMProxy {
 		name: string,
 		wasmUrl?: string,
 		options?: unknown,
-	): Promise<{ handle: ModelHandle; inference: unknown }> =>
-		this.callMethod<{ handle: ModelHandle; inference: unknown }>(
-			"loadModelFromUrl",
-			[url, name, wasmUrl, options],
-		);
+	): Promise<{
+		handle: ModelHandle;
+		inference: unknown;
+		metadata: LoadedModelMetadata;
+	}> =>
+		this.callMethod<{
+			handle: ModelHandle;
+			inference: unknown;
+			metadata: LoadedModelMetadata;
+		}>("loadModelFromUrl", [url, name, wasmUrl, options]);
 	unloadModel = (id: string) => this.callMethod<void>("unloadModel", [id]);
 	embed = (modelId: string, text: string) =>
 		this.callMethod<Float32Array>("embed", [modelId, text]);

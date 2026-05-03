@@ -126,6 +126,25 @@ export interface ModelMetadata {
 	ropeScale: number;
 }
 
+/**
+ * Serializable subset of the parsed GGUF model returned alongside the
+ * model handle by `loadModelFromBuffer` / `loadModelFromUrl`. Contains
+ * the same three fields as `ParsedModel` (the loader-internal type),
+ * shaped to be plain data so it can cross the worker boundary via
+ * `postMessage`'s structured clone.
+ *
+ * Lets the worker-mode caller obtain the parsed metadata from the engine
+ * itself (which has to parse GGUF anyway to build inference) rather than
+ * doing a separate main-side parse against a bounded header-prefix Range
+ * fetch — the architectural fix that retired the smoke page's HEAD-Range
+ * + main-side `GgufParser.parse()` two-step.
+ */
+export interface LoadedModelMetadata {
+	hyperparams: ModelHyperparams;
+	tokenizerConfig: import("../inference/tokenizer.js").TokenizerConfig;
+	kvCacheConfig: import("../models/kv-cache.js").KVCacheConfig;
+}
+
 /** Generic event handler callback. */
 export type EventHandler<T = void> = (event: T) => void;
 

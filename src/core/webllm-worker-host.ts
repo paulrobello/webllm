@@ -76,12 +76,14 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 			}
 			const value = await fn.apply(opts.engine, msg.args);
 			// `loadModelFromBuffer` and `loadModelFromUrl` both return
-			// `{ handle, inference }`. The `inference` half is a real
-			// `ModelInference` / `EncoderInference` / `CausalLMEmbedder`
+			// `{ handle, inference, metadata }`. The `inference` half is a
+			// real `ModelInference` / `EncoderInference` / `CausalLMEmbedder`
 			// instance — closures + GPU-resource handles that
 			// postMessage's structured clone can't serialize. Strip it
-			// here; main-thread consumers only need `handle.id` to drive
-			// the engine via subsequent RPCs.
+			// here; the main-thread caller drives the engine via `handle.id`
+			// for subsequent RPCs and gets the parsed GGUF metadata
+			// (hyperparams, tokenizerConfig, kvCacheConfig) via `metadata`,
+			// which is pure data and clones cleanly.
 			const stripsInference =
 				msg.name === "loadModelFromBuffer" || msg.name === "loadModelFromUrl";
 			const sanitized =
@@ -89,7 +91,10 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 				value &&
 				typeof value === "object" &&
 				"handle" in (value as object)
-					? { handle: (value as { handle: unknown }).handle }
+					? {
+							handle: (value as { handle: unknown }).handle,
+							metadata: (value as { metadata?: unknown }).metadata,
+						}
 					: value;
 			opts.postMessage({ type: "method-result", id: msg.id, value: sanitized });
 		} catch (e) {

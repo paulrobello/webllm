@@ -60,6 +60,7 @@ export { Scheduler } from "./core/scheduler.js";
 export type {
 	EventHandler,
 	GgmlType,
+	LoadedModelMetadata,
 	MemoryPressureEvent,
 	ModelArchitecture,
 	ModelEntry,

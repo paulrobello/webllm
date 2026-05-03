@@ -62,6 +62,7 @@ import {
 	type EventHandler,
 	isCausalEmbedderArchitecture,
 	isEncoderArchitecture,
+	type LoadedModelMetadata,
 	type ModelEntry,
 	type ModelHandle,
 	type ModelHyperparams,
@@ -1172,6 +1173,7 @@ export class WebLLM {
 	): Promise<{
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		metadata: LoadedModelMetadata;
 	}> {
 		const view = data instanceof Uint8Array ? data : new Uint8Array(data);
 		const parsed = ModelLoader.parseModel(view);
@@ -1226,6 +1228,7 @@ export class WebLLM {
 	): Promise<{
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		metadata: LoadedModelMetadata;
 	}> {
 		const resp = await fetch(url);
 		if (!resp.ok) {
@@ -1364,6 +1367,7 @@ export class WebLLM {
 	): {
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		metadata: LoadedModelMetadata;
 	} {
 		const freeStaging = (): void => {
 			if (!stagingPtr) return;
@@ -1429,7 +1433,16 @@ export class WebLLM {
 				this.inferenceEngines.set(handle.id, inference);
 			}
 
-			return { handle, inference };
+			// `parsed` is the loader-internal `ParsedModel`; its three fields
+			// (hyperparams, tokenizerConfig, kvCacheConfig) are exactly the
+			// public `LoadedModelMetadata` shape and are pure data — safe to
+			// hand to a worker-mode caller across the postMessage boundary.
+			const metadata: LoadedModelMetadata = {
+				hyperparams: parsed.hyperparams,
+				tokenizerConfig: parsed.tokenizerConfig,
+				kvCacheConfig: parsed.kvCacheConfig,
+			};
+			return { handle, inference, metadata };
 		} catch (e) {
 			// Failure path inside the helper: free staging if we hadn't yet
 			// (e.g., a throw during `loadWeights` or earlier — `freeStaging`
@@ -1457,15 +1470,16 @@ export class WebLLM {
 		handle: ModelHandle;
 		engine: WebLLM;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		metadata: LoadedModelMetadata;
 	}> {
 		const engine = await WebLLM.init(config);
-		const { handle, inference } = await engine.loadModelFromBuffer(
+		const { handle, inference, metadata } = await engine.loadModelFromBuffer(
 			data,
 			name,
 			wasmUrl,
 			options,
 		);
-		return { handle, engine, inference };
+		return { handle, engine, inference, metadata };
 	}
 
 	get config(): WebLLMConfig {

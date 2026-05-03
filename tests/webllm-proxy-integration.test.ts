@@ -89,12 +89,21 @@ describe("WebLLMProxy — non-streaming", () => {
 		);
 	});
 
-	test("loadModelFromUrl round-trip strips inference and returns handle", async () => {
+	test("loadModelFromUrl round-trip strips inference and returns handle + metadata", async () => {
 		const { worker, hostPost, hostReceive } = makeInProcessChannel();
 		// The worker host strips the non-cloneable `inference` field from
-		// the return value of loadModelFromBuffer / loadModelFromUrl. The
-		// fake engine here returns both fields; the proxy should see only
-		// `handle`.
+		// the return value of loadModelFromBuffer / loadModelFromUrl, but
+		// preserves `metadata` (pure data — hyperparams, tokenizerConfig,
+		// kvCacheConfig). The fake engine here returns all three; the
+		// proxy should see `handle` + `metadata` and not `inference`.
+		// Stand-in for `LoadedModelMetadata` — the test only cares that the
+		// nested object survives postMessage's structured clone end-to-end,
+		// not that it's a fully-populated `ModelHyperparams` shape.
+		const fakeMetadata = {
+			hyperparams: { architecture: "qwen3", layerCount: 28 },
+			tokenizerConfig: { vocabSize: 151936 },
+			kvCacheConfig: { maxContextLength: 4096 },
+		} as const;
 		const engine = {
 			async loadModelFromUrl(
 				_url: string,
@@ -107,6 +116,7 @@ describe("WebLLMProxy — non-streaming", () => {
 					// Plain object stand-in for ModelInference — would be a
 					// non-cloneable class instance in the real path.
 					inference: { __nonCloneable: () => {} },
+					metadata: fakeMetadata,
 				};
 			},
 			async dispose() {},
@@ -126,6 +136,8 @@ describe("WebLLMProxy — non-streaming", () => {
 		// resulting object lacks the field rather than carrying an empty
 		// placeholder.
 		expect("inference" in result).toBe(false);
+		// metadata is preserved end-to-end.
+		expect(result.metadata as unknown).toEqual(fakeMetadata);
 	});
 
 	test("createConversation returns the worker's handle", async () => {
