@@ -422,7 +422,32 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// wasm32 buffer is sized for safety, not by measured header
 		// extent). This avoids the V8 per-allocation cap that bit
 		// `new ArrayBuffer(total)` for >3.5 GB models.
+		//
+		// TODO(loadModelFromUrl-bypass-prefix-parse): retire this
+		// constant + the bounded Range request below in favor of either
+		//   (a) a two-pass parse — fetch a tiny 4 KB header sentinel,
+		//       read `dataOffset` from the GGUF header proper, then
+		//       Range-fetch exactly that many bytes; or
+		//   (b) move all metadata-dependent UI logic (subtitle copy,
+		//       KV-cache log, tokenizer construction) into engine-side
+		//       accessors so the smoke page never needs to parse main-
+		//       side at all.
+		// Either fix removes the "guess a prefix size" failure mode
+		// entirely. Why this constant exists today:
+		//   - skips the 4 GB main-thread JS-heap ArrayBuffer that V8's
+		//     per-allocation cap rejects for >3.5 GB models;
+		//   - 64 MB is generous headroom on the canonical sweep —
+		//     qwen3-8B's metadata + tensor descriptors live well under
+		//     10 MB.
+		// Until (a) or (b) lands, the runtime fallback below
+		// (try parse → on RangeError, double the prefix up to 256 MB)
+		// guards against a future model whose header outgrows 64 MB.
 		const HEADER_PREFIX_BYTES = 64 * 1024 * 1024;
+		// Hard cap on the doubling fallback — 256 MB is still small
+		// vs. the V8 ArrayBuffer cap (~3.5 GB) but big enough that any
+		// model whose metadata exceeds it really does need a smarter
+		// approach (option (a) above) rather than another doubling.
+		const HEADER_PREFIX_MAX_BYTES = 256 * 1024 * 1024;
 		let modelPtr = 0;
 		let modelByteLength = 0;
 		// Worker-mode header-only buffer. Holds the GGUF prefix used for
@@ -524,19 +549,102 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		log("running", "[3/8] Parsing GGUF...");
 		let ggufCtx;
 		let parsed;
-		try {
-			// In worker mode, the JS-heap buffer holds only the header
-			// prefix (HEADER_PREFIX_BYTES); cap the view length so
-			// `new Uint8Array(buf, 0, len)` doesn't exceed the buffer.
-			// The parser only reads up to `dataOffset` (metadata + tensor
-			// descriptors), which is well under 64 MB for every model in
-			// the canonical sweep.
+		// Worker-mode runtime fallback: if the 64 MB prefix isn't enough
+		// to cover the GGUF header (metadata + tensor descriptors), the
+		// parser will throw a RangeError on a DataView read past the
+		// prefix end. Catch that, double the prefix (up to a 256 MB cap),
+		// re-fetch, and retry. This guards against future models whose
+		// metadata grows beyond the canonical-sweep envelope.
+		const parsePrefix = () => {
 			const parseViewLength = useWorker
 				? Math.min(modelByteLength, workerHeaderBuffer.byteLength)
 				: modelByteLength;
 			const fullView = modelDataAt(0, parseViewLength);
-			ggufCtx = GgufParser.parse(fullView);
-			parsed = ModelLoader.parseModel(fullView);
+			return {
+				ggufCtx: GgufParser.parse(fullView),
+				parsed: ModelLoader.parseModel(fullView),
+			};
+		};
+		try {
+			let parseResult;
+			try {
+				parseResult = parsePrefix();
+			} catch (parseErr) {
+				if (!useWorker) throw parseErr;
+				// Detect the "buffer too small" indicator: DataView reads
+				// throw RangeError when the offset is past the buffer end.
+				// We also retry on any error if the current prefix is not
+				// already at the cap — being conservative with retry is
+				// fine since the doubling caps at 256 MB.
+				const looksLikeOverflow =
+					parseErr instanceof RangeError ||
+					/out of bounds|outside the bounds|byteLength/i.test(
+						String(parseErr?.message || ""),
+					);
+				let currentPrefix = workerHeaderBuffer.byteLength;
+				if (!looksLikeOverflow || currentPrefix >= modelByteLength) {
+					// Real parse error (bad magic, bad version, etc.) — propagate.
+					throw parseErr;
+				}
+				while (
+					currentPrefix < HEADER_PREFIX_MAX_BYTES &&
+					currentPrefix < modelByteLength
+				) {
+					const nextPrefix = Math.min(
+						HEADER_PREFIX_MAX_BYTES,
+						modelByteLength,
+						currentPrefix * 2,
+					);
+					log(
+						"running",
+						`[3/8] Header prefix (${(currentPrefix / 1e6).toFixed(1)} MB) too small; re-fetching ${(nextPrefix / 1e6).toFixed(1)} MB...`,
+					);
+					const retryResp = await fetch(modelUrl, {
+						headers: { Range: `bytes=0-${nextPrefix - 1}` },
+					});
+					if (!retryResp.ok && retryResp.status !== 206) {
+						throw new Error(
+							`HTTP ${retryResp.status} re-fetching extended header prefix`,
+						);
+					}
+					workerHeaderBuffer = await retryResp.arrayBuffer();
+					currentPrefix = workerHeaderBuffer.byteLength;
+					try {
+						parseResult = parsePrefix();
+						break; // success
+					} catch (retryErr) {
+						const stillOverflow =
+							retryErr instanceof RangeError ||
+							/out of bounds|outside the bounds|byteLength/i.test(
+								String(retryErr?.message || ""),
+							);
+						if (!stillOverflow) throw retryErr;
+						if (
+							currentPrefix >= HEADER_PREFIX_MAX_BYTES ||
+							currentPrefix >= modelByteLength
+						) {
+							throw new Error(
+								`GGUF header parse failed even at ${(currentPrefix / 1e6).toFixed(1)} MB prefix ` +
+									`(cap ${(HEADER_PREFIX_MAX_BYTES / 1e6).toFixed(0)} MB). ` +
+									`The model's metadata + tensor descriptors exceed the worker-mode ` +
+									`prefix cap. Recommendation: load this model in main-thread mode ` +
+									`(?worker=0) until the smoke page learns to two-pass parse based ` +
+									`on the GGUF header's exact dataOffset. Last error: ${retryErr.message}`,
+							);
+						}
+						// loop and double again
+					}
+				}
+				if (!parseResult) {
+					throw new Error(
+						`GGUF header parse failed: prefix doubling exhausted at ${(currentPrefix / 1e6).toFixed(1)} MB ` +
+							`(cap ${(HEADER_PREFIX_MAX_BYTES / 1e6).toFixed(0)} MB). ` +
+							`Use main-thread mode (?worker=0) for this model.`,
+					);
+				}
+			}
+			ggufCtx = parseResult.ggufCtx;
+			parsed = parseResult.parsed;
 			parsedModel = parsed;
 			const hp = parsed.hyperparams;
 			const subtitleContextLength =
