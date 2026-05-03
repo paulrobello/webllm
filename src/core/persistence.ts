@@ -84,3 +84,19 @@ function stableStringify(v: unknown): string {
 		.join(",");
 	return `{${entries}}`;
 }
+
+export function encodePersistedConversation(
+	header: PersistedConversationHeader,
+	kvBytes: Uint8Array,
+): Uint8Array {
+	const headerJson = JSON.stringify(header);
+	const headerBytes = new TextEncoder().encode(headerJson);
+	const out = new Uint8Array(
+		4 + 4 + headerBytes.byteLength + kvBytes.byteLength,
+	);
+	out.set(KV_PERSISTENCE_MAGIC, 0);
+	new DataView(out.buffer).setUint32(4, headerBytes.byteLength, /* LE */ true);
+	out.set(headerBytes, 8);
+	out.set(kvBytes, 8 + headerBytes.byteLength);
+	return out;
+}

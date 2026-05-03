@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { computeTokenizerHash } from "../src/core/persistence.js";
+import {
+	computeTokenizerHash,
+	encodePersistedConversation,
+	KV_PERSISTENCE_MAGIC,
+	KV_PERSISTENCE_SCHEMA_VERSION,
+	type PersistedConversationHeader,
+} from "../src/core/persistence.js";
 
 describe("computeTokenizerHash", () => {
 	const baseConfig = {
@@ -112,5 +118,64 @@ describe("computeTokenizerHash", () => {
 		const a = { outer: { x: 1, y: 2, nested: { p: "a", q: "b" } } };
 		const b = { outer: { nested: { q: "b", p: "a" }, y: 2, x: 1 } };
 		expect(await computeTokenizerHash(a)).toBe(await computeTokenizerHash(b));
+	});
+});
+
+const SAMPLE_FINGERPRINT = {
+	architecture: "qwen3",
+	vocabSize: 151_936,
+	nEmbd: 4096,
+	nLayer: 28,
+	nHead: 32,
+	nHeadKV: 8,
+	ropeBase: 10_000,
+	quantType: "Q4_K_M",
+	tokenizerHash: "a".repeat(64),
+};
+
+const SAMPLE_HEADER: PersistedConversationHeader = {
+	schemaVersion: 1,
+	fingerprint: SAMPLE_FINGERPRINT,
+	conversationOptions: { maxContextTokens: 4096 },
+	tokenIds: [1, 2, 3, 4, 5],
+	byteSize: 16,
+	savedAtMs: 1_700_000_000_000,
+};
+
+const SAMPLE_KV = new Uint8Array([
+	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+	0x1d, 0x1e, 0x1f,
+]);
+
+describe("encodePersistedConversation", () => {
+	test("layout: magic + uint32 LE headerLen + header JSON + kvBytes", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+
+		// Magic.
+		expect(blob.slice(0, 4)).toEqual(KV_PERSISTENCE_MAGIC);
+
+		// headerLen (uint32 LE).
+		const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+		const headerLen = dv.getUint32(4, /* littleEndian */ true);
+		expect(headerLen).toBeGreaterThan(0);
+
+		// Header JSON parses.
+		const headerJson = new TextDecoder().decode(
+			blob.subarray(8, 8 + headerLen),
+		);
+		const header = JSON.parse(headerJson);
+		expect(header.schemaVersion).toBe(KV_PERSISTENCE_SCHEMA_VERSION);
+		expect(header.fingerprint).toEqual(SAMPLE_FINGERPRINT);
+		expect(header.tokenIds).toEqual([1, 2, 3, 4, 5]);
+
+		// KV bytes.
+		expect(blob.subarray(8 + headerLen)).toEqual(SAMPLE_KV);
+		expect(blob.byteLength).toBe(8 + headerLen + SAMPLE_KV.byteLength);
+	});
+
+	test("two encodes of identical input produce byte-identical blobs", () => {
+		const a = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		const b = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		expect(a).toEqual(b);
 	});
 });
