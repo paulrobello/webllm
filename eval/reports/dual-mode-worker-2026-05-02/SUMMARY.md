@@ -19,11 +19,17 @@ well-explained as the postMessage cost of the worker boundary; see
 
 The "with caveats" qualifier covers two known follow-ups:
 
-1. The encoder/causal-embedder *parity* harnesses (`eval/encoder-parity.ts`,
+1. ~~The encoder/causal-embedder *parity* harnesses (`eval/encoder-parity.ts`,
    `eval/causal-embedder-parity.ts`) don't have `--worker` plumbing
    yet — Step 5 verified the embedders **run** end-to-end through the
    worker surface but couldn't measure cosine parity vs a same-tip
-   main-thread reference. Filed below.
+   main-thread reference. Filed below.~~ **Resolved 2026-05-03**:
+   `--worker` plumbing landed in commit `75f8326`; formal worker-vs-
+   main cosine parity sweep completed in commit `<followup-1-sha>`.
+   All three embedders (arctic-embed encoder, qwen3-embedding-0.6b-hyb
+   causal-LM, qwen3-8b-iq3m bucket D self-embed) returned bit-identical
+   vectors — cos = 1.000000 across all fixtures. See "Embedder cosine
+   parity — formal addendum (2026-05-03)" below.
 2. **(Updated 2026-05-03)** The original cross-mode A/B was captured
    in `--profile` mode and showed worker +15 to +34% faster than
    main. The non-profile re-run (now landed; see addendum below)
@@ -215,6 +221,41 @@ measured here.
 
 Raw: `embed-step5-arctic/`, `embed-step5-qwen3-hyb/`, `embed-step5-qwen3-8b/`.
 
+## Embedder cosine parity — formal addendum (2026-05-03)
+
+Follow-up to Step 5's "partial coverage" note above. With `--worker`
+plumbing now landed in `eval/encoder-parity.ts`, `eval/causal-embedder-parity.ts`,
+and `eval/browser-eval.ts` (commit `75f8326`), a formal worker-vs-main
+cosine parity sweep was run on all three embedder targets. Driver:
+`embed-parity-formal/sweep.ts` — captures vectors first in main mode,
+then in worker mode, for the same fixtures, then computes pairwise
+cosine. Architectural expectation: cos = 1.0 exactly (same code, same
+WebGPU device, same upload, same weights — no source of divergence).
+
+| Embedder | Worker cos vs main (min) | Mean | Gate | Pass? |
+|---|---:|---:|---:|:-:|
+| snowflake-arctic-embed-m-q0f32-b4 | 1.000000 | 1.000000 | ≥0.999 | PASS |
+| qwen3-embedding-0.6b-hyb | 1.000000 | 1.000000 | ≥0.995 | PASS |
+| qwen3-8b-iq3m self-embed | 1.000000 | 1.000000 | ≥0.90 | PASS |
+
+**All three embedders are bit-identical between worker and main modes,
+not merely cosine-equivalent.** Spot-check on `arctic-embed` row 0:
+0/768 elements differed; `maxAbsDiff = 0`. The architectural prediction
+holds exactly — the worker boundary is a pure transport layer for the
+embed path, with no numerical perturbation.
+
+This formally closes follow-up #6: cosine parity is now measured in
+worker mode for all three embedder classes (encoder, bucket C causal-
+LM, bucket D self-embed) and meets every gate the plan called out
+(encoder ≥0.999, hyb ≥0.995, bucket-D ≥0.90). The Step 6 byte-identical
+greedy A/B already implied this would hold (forward pass is identical
+when sampler state is identical); the formal sweep confirms it directly
+on the embed surface.
+
+Raw vectors + per-model summaries: [`embed-parity-formal/`](embed-parity-formal/)
+(`snowflake-arctic-embed-m-q0f32-b4.json`, `qwen3-embedding-0.6b-hyb.json`,
+`qwen3-8b-iq3m.json`, `summary.json`, `sweep.log`).
+
 ## Cross-mode token-identical A/B (Step 6) — **PASS**
 
 5-prompt sanity subset, `qwen3-0.6b-q4f16`, greedy
@@ -296,13 +337,19 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
 
 ### C. Filed follow-ups
 
-6. **`eval/encoder-parity.ts` + `eval/causal-embedder-parity.ts` need
+6. ~~**`eval/encoder-parity.ts` + `eval/causal-embedder-parity.ts` need
    `--worker` plumbing** (flagged by Task 9 implementer; not yet filed
    as a TODO). Pattern is identical to `eval/embed-perf.ts`'s one-line
    `...(opts.worker ? { worker: 1 } : {})` addition in the
    `extraParams` block. Recommend a follow-up cycle to add this and
    re-run the canonical parity gates in worker mode for the same 3
-   embedders Step 5 covered.
+   embedders Step 5 covered.~~ **RESOLVED 2026-05-03.** `--worker`
+   plumbing landed in commit `75f8326` (also covers `eval/browser-eval.ts`
+   for completeness). Formal cosine parity sweep landed in commit
+   `<followup-1-sha>`: all three embedders bit-identical between
+   worker and main modes (cos = 1.000000 across all fixtures), exactly
+   matching the architectural prediction. See the "Embedder cosine
+   parity — formal addendum (2026-05-03)" section above.
 
 7. **A non-profile cross-mode A/B re-run** — **LANDED 2026-05-03**
    (see "Cross-mode A/B perf — non-profile addendum (2026-05-03)"
@@ -341,7 +388,7 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
 - [x] Smoke (Step 1-2): qwen3-0.6b + qwen3-8b worker mode PASS, no console errors
 - [x] Frame-probe (Step 3): median 8.3 ms, max 9.4 ms — well under 15 ms gate
 - [x] Cross-mode A/B (Step 4): all 6 models PASS in profile mode; non-profile addendum landed 2026-05-03 — small regression (-4.0% to -5.8%), uniform, well-explained; gate "no catastrophic regression" holds
-- [/] Embedder parity (Step 5): functionality PASS for all 3; cosine parity deferred
+- [x] Embedder parity (Step 5): functionality PASS for all 3; **cosine parity formally measured 2026-05-03 — all three bit-identical (cos = 1.000000), well above each gate (≥0.999 / ≥0.995 / ≥0.90).**
 - [x] Token-identical greedy A/B (Step 6): 5/5 byte-identical
 - [x] `make checkall` green (verified at end of Step 9)
 

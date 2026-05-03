@@ -1,0 +1,61 @@
+
+=== snowflake-arctic-embed-m-q0f32-b4 (gate >= 0.999) ===
+  navigating (main): http://localhost:8031/real-model.html?model=snowflake-arctic-embed-m-q0f32-b4&ctx=512&v=1777786560645&ingest=off
+  loaded snowflake-arctic-embed-m-q0f32-b4 (main)
+    row 0: dim=768
+    row 1: dim=768
+    row 2: dim=768
+    row 3: dim=768
+    row 4: dim=768
+  navigating (worker): http://localhost:8031/real-model.html?model=snowflake-arctic-embed-m-q0f32-b4&ctx=512&v=1777786562595&ingest=off&worker=1
+  loaded snowflake-arctic-embed-m-q0f32-b4 (worker)
+    row 0: dim=768
+    row 1: dim=768
+    row 2: dim=768
+    row 3: dim=768
+    row 4: dim=768
+  cosines: 1.000000, 1.000000, 1.000000, 1.000000, 1.000000
+  min=1.000000 mean=1.000000 PASS
+
+=== qwen3-embedding-0.6b-hyb (gate >= 0.995) ===
+  navigating (main): http://localhost:8031/real-model.html?model=qwen3-embedding-0.6b-hyb&ctx=32768&v=1777786564551&ingest=off
+  loaded qwen3-embedding-0.6b-hyb (main)
+    row 0: dim=1024
+    row 1: dim=1024
+    row 2: dim=1024
+    row 3: dim=1024
+    row 4: dim=1024
+  navigating (worker): http://localhost:8031/real-model.html?model=qwen3-embedding-0.6b-hyb&ctx=32768&v=1777786566689&ingest=off&worker=1
+  loaded qwen3-embedding-0.6b-hyb (worker)
+    row 0: dim=1024
+    row 1: dim=1024
+    row 2: dim=1024
+    row 3: dim=1024
+    row 4: dim=1024
+  cosines: 1.000000, 1.000000, 1.000000, 1.000000, 1.000000
+  min=1.000000 mean=1.000000 PASS
+
+=== qwen3-8b-iq3m (gate >= 0.9) ===
+  navigating (main): http://localhost:8031/real-model.html?model=qwen3-8b-iq3m&ctx=4096&v=1777786569893&ingest=off&embeddingCapable=1
+  loaded qwen3-8b-iq3m (main)
+    row 0: dim=4096
+    row 1: dim=4096
+    row 2: dim=4096
+    row 3: dim=4096
+    row 4: dim=4096
+  navigating (worker): http://localhost:8031/real-model.html?model=qwen3-8b-iq3m&ctx=4096&v=1777786577302&ingest=off&embeddingCapable=1&worker=1
+  loaded qwen3-8b-iq3m (worker)
+    row 0: dim=4096
+    row 1: dim=4096
+    row 2: dim=4096
+    row 3: dim=4096
+    row 4: dim=4096
+  cosines: 1.000000, 1.000000, 1.000000, 1.000000, 1.000000
+  min=1.000000 mean=1.000000 PASS
+
+=== Final ===
+| Model | min cos | mean cos | gate | PASS? |
+|---|---:|---:|---:|:-:|
+| snowflake-arctic-embed-m-q0f32-b4 | 1.000000 | 1.000000 | 0.999 | PASS |
+| qwen3-embedding-0.6b-hyb | 1.000000 | 1.000000 | 0.995 | PASS |
+| qwen3-8b-iq3m | 1.000000 | 1.000000 | 0.9 | PASS |

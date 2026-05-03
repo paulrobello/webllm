@@ -1,0 +1,47 @@
+[
+  {
+    "modelId": "snowflake-arctic-embed-m-q0f32-b4",
+    "gate": 0.999,
+    "dim": 768,
+    "cosines": [
+      1.0000000000000002,
+      1.0000000000000002,
+      1.0000000000000002,
+      1.0000000000000002,
+      1
+    ],
+    "minCos": 1,
+    "meanCos": 1.0000000000000002,
+    "pass": true
+  },
+  {
+    "modelId": "qwen3-embedding-0.6b-hyb",
+    "gate": 0.995,
+    "dim": 1024,
+    "cosines": [
+      1,
+      1,
+      1.0000000000000002,
+      1.0000000000000002,
+      1
+    ],
+    "minCos": 1,
+    "meanCos": 1,
+    "pass": true
+  },
+  {
+    "modelId": "qwen3-8b-iq3m",
+    "gate": 0.9,
+    "dim": 4096,
+    "cosines": [
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "minCos": 1,
+    "meanCos": 1,
+    "pass": true
+  }
+]
