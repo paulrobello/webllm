@@ -6,6 +6,8 @@
  * primitives. Spec: 2026-05-03-prefix-cache-persistence-design.md.
  */
 
+import { CorruptBlobError, IncompatibleConversationError } from "./errors.js";
+
 export const KV_PERSISTENCE_SCHEMA_VERSION = 1;
 // "WLKV" — magic bytes that mark a persisted-conversation blob.
 export const KV_PERSISTENCE_MAGIC = new Uint8Array([0x57, 0x4c, 0x4b, 0x56]);
@@ -85,6 +87,16 @@ function stableStringify(v: unknown): string {
 	return `{${entries}}`;
 }
 
+/**
+ * Build the wire-format blob for a persisted conversation.
+ *
+ * The header is serialized via `JSON.stringify`. Callers should
+ * construct `header` with stable key order — the production caller in
+ * `engine.ts:exportConversation` constructs an object literal with a
+ * fixed key sequence, so V8/JSC preserves it (per ES2015 own-keys
+ * ordering). For two different callers to produce byte-identical
+ * blobs, both must build their headers identically.
+ */
 export function encodePersistedConversation(
 	header: PersistedConversationHeader,
 	kvBytes: Uint8Array,
@@ -99,4 +111,107 @@ export function encodePersistedConversation(
 	out.set(headerBytes, 8);
 	out.set(kvBytes, 8 + headerBytes.byteLength);
 	return out;
+}
+
+/**
+ * Parse and validate a persisted-conversation blob. Throws
+ * `CorruptBlobError` for malformed bytes (bad magic, header overflow,
+ * JSON parse failure, byte-size mismatch) and
+ * `IncompatibleConversationError` for valid-but-wrong blobs (schema
+ * version, fingerprint, or tokenizer hash diverge from the loaded
+ * model). On success returns `{header, kvBytes}` — `kvBytes` is a
+ * fresh copy decoupled from the input blob's underlying buffer (so
+ * caller-side detach of the input doesn't poison the snapshot).
+ */
+export function decodePersistedConversation(
+	blob: Uint8Array,
+	expectedFingerprint: ModelFingerprint,
+): { header: PersistedConversationHeader; kvBytes: Uint8Array } {
+	// 1. Magic.
+	if (blob.byteLength < 8) {
+		throw new CorruptBlobError("bad-magic", { byteLength: blob.byteLength });
+	}
+	for (let i = 0; i < 4; i++) {
+		if (blob[i] !== KV_PERSISTENCE_MAGIC[i]) {
+			throw new CorruptBlobError("bad-magic", {
+				firstFour: Array.from(blob.subarray(0, 4)),
+			});
+		}
+	}
+	// 2. headerLen.
+	const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+	const headerLen = dv.getUint32(4, /* LE */ true);
+	if (8 + headerLen > blob.byteLength) {
+		throw new CorruptBlobError("bad-header-len", {
+			headerLen,
+			blobLength: blob.byteLength,
+		});
+	}
+	// 3. Header JSON.
+	let header: PersistedConversationHeader;
+	try {
+		const json = new TextDecoder().decode(blob.subarray(8, 8 + headerLen));
+		header = JSON.parse(json) as PersistedConversationHeader;
+	} catch (e) {
+		throw new CorruptBlobError("bad-header-json", {
+			cause: e instanceof Error ? e.message : String(e),
+		});
+	}
+	// 4. Schema version.
+	if (header.schemaVersion !== KV_PERSISTENCE_SCHEMA_VERSION) {
+		throw new IncompatibleConversationError("schema-mismatch", {
+			got: header.schemaVersion,
+			want: KV_PERSISTENCE_SCHEMA_VERSION,
+		});
+	}
+	// 5. Fingerprint (with tokenizer separated to give the more-specific
+	//    "tokenizer-mismatch" reason on tokenizer-only divergence).
+	validateFingerprint(header.fingerprint, expectedFingerprint);
+	// 6. byteSize sanity.
+	const kvBytes = blob.subarray(8 + headerLen);
+	if (kvBytes.byteLength !== header.byteSize) {
+		throw new CorruptBlobError("byte-size-mismatch", {
+			got: kvBytes.byteLength,
+			want: header.byteSize,
+		});
+	}
+	// Return a fresh copy of kvBytes — decouples from the caller's blob
+	// underlying buffer so a transferable detach upstream doesn't poison
+	// the snapshot the engine stashes in its conversation pool.
+	return { header, kvBytes: new Uint8Array(kvBytes) };
+}
+
+function validateFingerprint(
+	got: ModelFingerprint,
+	want: ModelFingerprint,
+): void {
+	// Check non-tokenizer fields first in deterministic order; only after
+	// those match do we check tokenizerHash, so a tokenizer-only mismatch
+	// surfaces as the more-specific "tokenizer-mismatch" reason rather
+	// than the generic "fingerprint-mismatch" with field=tokenizerHash.
+	const fields: Array<keyof ModelFingerprint> = [
+		"architecture",
+		"vocabSize",
+		"nEmbd",
+		"nLayer",
+		"nHead",
+		"nHeadKV",
+		"ropeBase",
+		"quantType",
+	];
+	for (const f of fields) {
+		if (got[f] !== want[f]) {
+			throw new IncompatibleConversationError("fingerprint-mismatch", {
+				field: f,
+				got: got[f],
+				want: want[f],
+			});
+		}
+	}
+	if (got.tokenizerHash !== want.tokenizerHash) {
+		throw new IncompatibleConversationError("tokenizer-mismatch", {
+			got: got.tokenizerHash,
+			want: want.tokenizerHash,
+		});
+	}
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	computeTokenizerHash,
+	decodePersistedConversation,
 	encodePersistedConversation,
 	KV_PERSISTENCE_MAGIC,
 	KV_PERSISTENCE_SCHEMA_VERSION,
@@ -177,5 +178,17 @@ describe("encodePersistedConversation", () => {
 		const a = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
 		const b = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
 		expect(a).toEqual(b);
+	});
+});
+
+describe("decodePersistedConversation — happy path", () => {
+	test("round-trip preserves header + kvBytes byte-equal", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		const { header, kvBytes } = decodePersistedConversation(
+			blob,
+			SAMPLE_FINGERPRINT,
+		);
+		expect(header).toEqual(SAMPLE_HEADER);
+		expect(kvBytes).toEqual(SAMPLE_KV);
 	});
 });
