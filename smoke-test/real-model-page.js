@@ -411,64 +411,101 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// max length and the JS heap's >2 GiB awkwardness both bite for
 		// 7B+ models).
 		//
-		// Worker mode: no main-side WASM heap exists yet. We fetch into a
-		// JS-heap ArrayBuffer with the same progress UX, then transfer it
-		// (zero-copy) to the worker at [6/8] via `loadModelFromBuffer`.
-		// The 6-model canonical sweep tops out at ~3.7 GB (qwen3-8b-iq3m)
-		// — comfortably under the V8 ArrayBuffer cap (~4 GiB on 64-bit
-		// Chrome). For >4 GiB models a worker-side heap-streaming loader
-		// would be needed; that's filed as a follow-up TODO under "16 GB
-		// worker-mode peak-memory hardening" in `TODO.md`.
+		// Worker mode: the worker has its own WASM heap; we hand it the URL
+		// and let it stream the bytes into its own heap via
+		// `engine.loadModelFromUrl` at [6/8]. To preserve the existing
+		// downstream UI (subtitle, KV-cache log, tokenizer construction
+		// for sanity tests), we still parse the GGUF metadata main-side —
+		// but only via a bounded Range request for the prefix that
+		// contains all metadata + tensor descriptors. 64 MB comfortably
+		// holds the header for any model in the canonical sweep (the
+		// wasm32 buffer is sized for safety, not by measured header
+		// extent). This avoids the V8 per-allocation cap that bit
+		// `new ArrayBuffer(total)` for >3.5 GB models.
+		const HEADER_PREFIX_BYTES = 64 * 1024 * 1024;
 		let modelPtr = 0;
 		let modelByteLength = 0;
-		// Worker-mode JS-heap GGUF buffer. Transferred (detached) at [6/8]
-		// when `loadModelFromBuffer` runs; `null` otherwise.
-		let modelBuffer = null;
+		// Worker-mode header-only buffer. Holds the GGUF prefix used for
+		// main-thread parsing only; the full model is fetched worker-side
+		// at [6/8] via `engine.loadModelFromUrl`. `null` in main-thread mode.
+		let workerHeaderBuffer = null;
 		const fetchStart = performance.now();
 		try {
-			const resp = await fetch(modelUrl);
-			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-			const total = Number(resp.headers.get("content-length") || 0);
-			if (total <= 0) {
-				throw new Error(
-					"missing content-length on model response; streaming into WASM heap requires it",
-				);
-			}
-			modelByteLength = total;
-			const reader = resp.body.getReader();
-			let received = 0;
-			let workerHeapView = null;
 			if (useWorker) {
-				modelBuffer = new ArrayBuffer(total);
-				workerHeapView = new Uint8Array(modelBuffer);
+				// HEAD-equivalent: a tiny Range request whose response
+				// content-range tells us the file's true byte length.
+				// Range responses include `Content-Range: bytes A-B/TOTAL`.
+				const headResp = await fetch(modelUrl, {
+					headers: { Range: "bytes=0-0" },
+				});
+				if (!headResp.ok && headResp.status !== 206) {
+					throw new Error(`HTTP ${headResp.status} on size probe`);
+				}
+				const cr = headResp.headers.get("content-range");
+				if (!cr) {
+					throw new Error(
+						"server does not support Range requests; worker mode requires Range",
+					);
+				}
+				const m = /\/(\d+)\s*$/.exec(cr);
+				if (!m) {
+					throw new Error(`malformed content-range: ${cr}`);
+				}
+				modelByteLength = Number(m[1]);
+				// Drain the 1-byte body so the connection can be reused.
+				await headResp.arrayBuffer();
+
+				// Now fetch the bounded header prefix for main-thread parse.
+				const prefixEnd =
+					Math.min(HEADER_PREFIX_BYTES, modelByteLength) - 1;
+				const prefixResp = await fetch(modelUrl, {
+					headers: { Range: `bytes=0-${prefixEnd}` },
+				});
+				if (!prefixResp.ok && prefixResp.status !== 206) {
+					throw new Error(`HTTP ${prefixResp.status} fetching header prefix`);
+				}
+				const prefixBuf = await prefixResp.arrayBuffer();
+				workerHeaderBuffer = prefixBuf;
+				log(
+					"pass",
+					`[2/8] Header fetched: ${(prefixBuf.byteLength / 1e6).toFixed(1)} MB of ${(modelByteLength / 1e6).toFixed(1)} MB total in ${((performance.now() - fetchStart) / 1000).toFixed(1)}s (full model streams into worker heap at [6/8])`,
+				);
+				setProgress(15);
 			} else {
+				const resp = await fetch(modelUrl);
+				if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+				const total = Number(resp.headers.get("content-length") || 0);
+				if (total <= 0) {
+					throw new Error(
+						"missing content-length on model response; streaming into WASM heap requires it",
+					);
+				}
+				modelByteLength = total;
+				const reader = resp.body.getReader();
+				let received = 0;
 				modelPtr = wasm.malloc(total);
 				if (!modelPtr) throw new Error(`wasm malloc(${total}) returned null`);
-			}
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				if (useWorker) {
-					workerHeapView.set(value, received);
-				} else {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
 					// Re-fetch heapU8 each chunk: malloc above and any future
 					// growth invalidate prior buffer references. Module.HEAPU8
 					// is re-bound by Emscripten on grow; the getter returns
 					// the current view.
 					wasm.heapU8.set(value, modelPtr + received);
+					received += value.length;
+					setProgress((received / total) * 30);
 				}
-				received += value.length;
-				setProgress((received / total) * 30);
-			}
-			if (received !== total) {
-				throw new Error(
-					`short read: expected ${total} bytes, got ${received}`,
+				if (received !== total) {
+					throw new Error(
+						`short read: expected ${total} bytes, got ${received}`,
+					);
+				}
+				log(
+					"pass",
+					`[2/8] Model fetched: ${(received / 1e6).toFixed(1)} MB in ${((performance.now() - fetchStart) / 1000).toFixed(1)}s`,
 				);
 			}
-			log(
-				"pass",
-				`[2/8] Model fetched: ${(received / 1e6).toFixed(1)} MB in ${((performance.now() - fetchStart) / 1000).toFixed(1)}s`,
-			);
 		} catch (e) {
 			log("fail", `[2/8] Fetch failed: ${e.message}`);
 			if (modelPtr) wasm.free(modelPtr);
@@ -477,17 +514,27 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 
 		// Main-thread `modelDataAt`: re-derives a fresh sub-view of HEAPU8
 		// on every call so callers can't accidentally hold a stale reference
-		// across a memory-grow event. In worker mode no WASM heap exists;
-		// callers parse from `modelBuffer` directly via a Uint8Array view.
+		// across a memory-grow event. In worker mode the prefix lives in a
+		// JS-heap ArrayBuffer (header-only); the parse only ever asks for
+		// offsets inside the GGUF header, so a bounded view is sufficient.
 		const modelDataAt = useWorker
-			? (off, len) => new Uint8Array(modelBuffer, off, len)
+			? (off, len) => new Uint8Array(workerHeaderBuffer, off, len)
 			: (off, len) => new Uint8Array(wasm.heapU8.buffer, modelPtr + off, len);
 
 		log("running", "[3/8] Parsing GGUF...");
 		let ggufCtx;
 		let parsed;
 		try {
-			const fullView = modelDataAt(0, modelByteLength);
+			// In worker mode, the JS-heap buffer holds only the header
+			// prefix (HEADER_PREFIX_BYTES); cap the view length so
+			// `new Uint8Array(buf, 0, len)` doesn't exceed the buffer.
+			// The parser only reads up to `dataOffset` (metadata + tensor
+			// descriptors), which is well under 64 MB for every model in
+			// the canonical sweep.
+			const parseViewLength = useWorker
+				? Math.min(modelByteLength, workerHeaderBuffer.byteLength)
+				: modelByteLength;
+			const fullView = modelDataAt(0, parseViewLength);
 			ggufCtx = GgufParser.parse(fullView);
 			parsed = ModelLoader.parseModel(fullView);
 			parsedModel = parsed;
@@ -682,15 +729,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		// Worker mode: `smokeEngine` is a `WebLLMProxy` whose worker side
 		// can't see main-thread `inference` / `wasm` instances (those
 		// hold thread-local WASM heap views and WebGPU resources that
-		// are non-transferable across postMessage). Instead, transfer
-		// the JS-heap GGUF buffer (zero-copy via the `[buf]` Transferable
-		// list inside the proxy) and let the worker re-parse + build
-		// inference itself via `loadModelFromBuffer`. The buffer is
-		// detached on the main thread after this call — `modelBuffer` is
-		// nulled to make the ownership transfer explicit. Both paths
-		// route subsequent `chatCompletion` / `embed` / conversation API
-		// calls through the same `smokeEngine` surface, so [7/8], the
-		// chat input, and bench mode are mode-agnostic.
+		// are non-transferable across postMessage). Hand the worker the
+		// model URL via `engine.loadModelFromUrl`; the worker fetches +
+		// streams bytes directly into its own WASM heap, sidestepping the
+		// V8 per-allocation cap that bit `new ArrayBuffer(total)` for
+		// >3.5 GB models. Both paths route subsequent `chatCompletion` /
+		// `embed` / conversation API calls through the same `smokeEngine`
+		// surface, so [7/8], the chat input, and bench mode are
+		// mode-agnostic.
 		try {
 			if (!navigator.gpu) {
 				throw new Error("navigator.gpu unavailable; smoke test needs WebGPU");
@@ -713,8 +759,13 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 								requestedContextLength,
 							)
 						: parsed.kvCacheConfig.maxContextLength;
-				const result = await smokeEngine.loadModelFromBuffer(
-					modelBuffer,
+				log(
+					"running",
+					`[6/8] Worker fetching model from ${modelUrl} (streaming into worker WASM heap)...`,
+				);
+				const workerLoadStart = performance.now();
+				const result = await smokeEngine.loadModelFromUrl(
+					modelUrl,
 					modelId,
 					`./${wasmVariant}${assetSuffix}`,
 					{
@@ -724,10 +775,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						embeddingPooling,
 					},
 				);
-				// The proxy's Transferable list contained `modelBuffer`, so
-				// it's now detached. Drop the reference so we can't
-				// accidentally read from a zero-byte ArrayBuffer.
-				modelBuffer = null;
+				log(
+					"pass",
+					`[6/8] Worker model load complete in ${((performance.now() - workerLoadStart) / 1000).toFixed(1)}s`,
+				);
+				// Header-only buffer is no longer needed.
+				workerHeaderBuffer = null;
 				smokeEngineHandle = result.handle;
 			} else {
 				smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
