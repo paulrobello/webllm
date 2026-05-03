@@ -41,9 +41,24 @@ export type WorkerToProxy =
 	| { type: "method-result"; id: RequestId; value: unknown }
 	| { type: "method-error"; id: RequestId; error: SerializedError }
 	| {
+			// Single-chunk variant — retained for backwards compatibility with
+			// any external/test code constructing one-off chunk envelopes.
+			// Production worker host now coalesces via `stream-chunks` (plural)
+			// to reduce postMessage traffic during decode (one event per
+			// 16 ms / 8 tokens instead of one per token). The proxy handles
+			// both transparently.
 			type: "stream-chunk";
 			streamId: StreamId;
 			chunk: GenerationStreamChunk;
+	  }
+	| {
+			// Coalesced batch variant — produced by webllm-worker-host's
+			// stream loop. The proxy fans `chunks` back out to the consumer
+			// one-at-a-time so the public `AsyncIterableIterator` surface is
+			// unchanged.
+			type: "stream-chunks";
+			streamId: StreamId;
+			chunks: GenerationStreamChunk[];
 	  }
 	| { type: "stream-done"; streamId: StreamId; value?: unknown }
 	| { type: "stream-error"; streamId: StreamId; error: SerializedError }

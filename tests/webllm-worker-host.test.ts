@@ -112,7 +112,7 @@ describe("webllm-worker-host", () => {
 		}
 	});
 
-	test("stream-start drains async iterator into stream-chunk + stream-done", async () => {
+	test("stream-start drains async iterator into stream-chunks + stream-done", async () => {
 		const { channel, postToProxy } = makeChannel();
 		const engine = makeFakeEngine();
 		startWorkerHost({
@@ -130,13 +130,13 @@ describe("webllm-worker-host", () => {
 		});
 		// drain microtasks
 		for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+		// 3 chunks yielded back-to-back fit in one coalesced batch; the host
+		// then posts stream-done.
 		const types = channel.proxyInbox.map((m) => m.type);
-		expect(types).toEqual([
-			"stream-chunk",
-			"stream-chunk",
-			"stream-chunk",
-			"stream-done",
-		]);
+		expect(types).toEqual(["stream-chunks", "stream-done"]);
+		const batch = channel.proxyInbox[0];
+		if (batch.type !== "stream-chunks") throw new Error("expected batch");
+		expect(batch.chunks).toHaveLength(3);
 	});
 
 	test("stream-cancel posted immediately after stream-start aborts the stream (no race)", async () => {
@@ -180,15 +180,146 @@ describe("webllm-worker-host", () => {
 		// anywhere near 100 chunks.
 		for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
 
-		const chunkCount = channel.proxyInbox.filter(
-			(m) => m.type === "stream-chunk",
-		).length;
+		const chunkCount = channel.proxyInbox
+			.filter((m) => m.type === "stream-chunks")
+			.reduce(
+				(n, m) =>
+					n +
+					(m as Extract<WorkerToProxy, { type: "stream-chunks" }>).chunks
+						.length,
+				0,
+			);
 		const lastType = channel.proxyInbox[channel.proxyInbox.length - 1]?.type;
 		// Far less than 100 chunks if cancellation worked.
 		expect(chunkCount).toBeLessThan(20);
 		// The stream still terminates cleanly with stream-done (the host
 		// posts stream-done after the loop exits).
 		expect(lastType).toBe("stream-done");
+	});
+
+	test("stream-start coalesces chunks into stream-chunks batches (size-cap)", async () => {
+		// 16 chunks yielded back-to-back should land in 2 batches of 8 (the
+		// size-cap path), not 16 individual stream-chunk posts. All 16 chunk
+		// payloads must arrive at the proxy in original order.
+		const { channel, postToProxy } = makeChannel();
+		const engine = {
+			async *chatCompletion(_modelId: string, _msgs: unknown[]) {
+				for (let i = 0; i < 16; i++) {
+					yield { text: String(i), tokenId: i, done: false };
+				}
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: postToProxy,
+			receive(handler) {
+				channel.postToHost = (m) => handler(m);
+			},
+		});
+		channel.postToHost({
+			type: "stream-start",
+			streamId: 11,
+			name: "chatCompletion",
+			args: ["m1", [{ role: "user", content: "go" }], {}],
+		});
+		// Drain microtasks.
+		for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+
+		// No legacy singular stream-chunk posts.
+		const singletons = channel.proxyInbox.filter(
+			(m) => m.type === "stream-chunk",
+		);
+		expect(singletons).toHaveLength(0);
+
+		const batches = channel.proxyInbox.filter(
+			(m) => m.type === "stream-chunks",
+		) as Array<Extract<WorkerToProxy, { type: "stream-chunks" }>>;
+		// 16 chunks at cap=8 → at most 2 size-driven flushes (no extra final
+		// flush needed because the buffer is empty after the second flush).
+		expect(batches.length).toBeGreaterThanOrEqual(1);
+		expect(batches.length).toBeLessThanOrEqual(3);
+		// Total chunks across all batches must equal 16 in order.
+		const allChunks = batches.flatMap((b) => b.chunks);
+		expect(allChunks).toHaveLength(16);
+		expect(allChunks.map((c) => c.tokenId)).toEqual(
+			Array.from({ length: 16 }, (_, i) => i),
+		);
+		// stream-done arrives after all chunks.
+		const lastType = channel.proxyInbox[channel.proxyInbox.length - 1]?.type;
+		expect(lastType).toBe("stream-done");
+	});
+
+	test("stream-start flushes residual buffer before stream-done", async () => {
+		// 5 chunks yielded — fewer than BATCH_MAX_CHUNKS=8. Without a final
+		// flush, no `stream-chunks` would be posted at all. Verify the trailing
+		// flush before stream-done delivers them.
+		const { channel, postToProxy } = makeChannel();
+		const engine = {
+			async *chatCompletion(_modelId: string, _msgs: unknown[]) {
+				for (let i = 0; i < 5; i++) {
+					yield { text: String(i), tokenId: i, done: false };
+				}
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: postToProxy,
+			receive(handler) {
+				channel.postToHost = (m) => handler(m);
+			},
+		});
+		channel.postToHost({
+			type: "stream-start",
+			streamId: 12,
+			name: "chatCompletion",
+			args: ["m1", [], {}],
+		});
+		for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+
+		const batches = channel.proxyInbox.filter(
+			(m) => m.type === "stream-chunks",
+		) as Array<Extract<WorkerToProxy, { type: "stream-chunks" }>>;
+		expect(batches).toHaveLength(1);
+		expect(batches[0].chunks).toHaveLength(5);
+		expect(channel.proxyInbox[channel.proxyInbox.length - 1]?.type).toBe(
+			"stream-done",
+		);
+	});
+
+	test("stream-error path flushes pending chunks before posting the error", async () => {
+		const { channel, postToProxy } = makeChannel();
+		const engine = {
+			async *chatCompletion(_modelId: string, _msgs: unknown[]) {
+				yield { text: "a", tokenId: 1, done: false };
+				yield { text: "b", tokenId: 2, done: false };
+				throw new Error("boom");
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: postToProxy,
+			receive(handler) {
+				channel.postToHost = (m) => handler(m);
+			},
+		});
+		channel.postToHost({
+			type: "stream-start",
+			streamId: 13,
+			name: "chatCompletion",
+			args: ["m1", [], {}],
+		});
+		for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+
+		const batches = channel.proxyInbox.filter(
+			(m) => m.type === "stream-chunks",
+		) as Array<Extract<WorkerToProxy, { type: "stream-chunks" }>>;
+		const allChunks = batches.flatMap((b) => b.chunks);
+		expect(allChunks.map((c) => c.tokenId)).toEqual([1, 2]);
+		const lastType = channel.proxyInbox[channel.proxyInbox.length - 1]?.type;
+		expect(lastType).toBe("stream-error");
 	});
 
 	test("unknown method returns method-error with GENERIC code", async () => {

@@ -58,6 +58,14 @@ describe("worker-bridge", () => {
 				streamId: 3,
 				chunk: { text: "hi", tokenId: 42, done: false },
 			},
+			{
+				type: "stream-chunks",
+				streamId: 3,
+				chunks: [
+					{ text: "hi", tokenId: 42, done: false },
+					{ text: " there", tokenId: 43, done: false },
+				],
+			},
 			{ type: "stream-done", streamId: 3 },
 			{ type: "stream-error", streamId: 3, error: err },
 			{ type: "log", level: "info", message: "ok" },

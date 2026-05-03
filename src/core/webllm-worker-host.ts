@@ -101,6 +101,35 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 		} else {
 			args.push({ signal: ac.signal });
 		}
+		// Coalesce chunks to reduce main-thread postMessage traffic during
+		// decode. At ~25 tok/s on 8B, one postMessage per token lands ~25
+		// events/sec on the main thread and stomps the rAF cadence (probe-9d
+		// flagged this exact failure mode). We flush the buffer when EITHER
+		// `BATCH_MAX_CHUNKS` is reached OR `BATCH_MAX_MS` has elapsed since
+		// the last flush — whichever first. The proxy fans chunks back out
+		// one-at-a-time so the consumer-facing AsyncIterableIterator surface
+		// is unchanged.
+		//
+		// On stream-cancel: we flush whatever's already in the buffer before
+		// `stream-done` posts (the for-await break path), so chunks already
+		// produced by the engine reach the consumer rather than being silently
+		// dropped. The cancel still aborts the engine iterator promptly.
+		const BATCH_MAX_CHUNKS = 8;
+		const BATCH_MAX_MS = 16;
+		const buffer: GenerationStreamChunk[] = [];
+		let lastFlushAt = performance.now();
+		const flush = (): void => {
+			if (buffer.length === 0) return;
+			// Move-out then clear: the array we post is detached from the
+			// worker-side buffer, so the next coalescing window starts empty.
+			const chunks = buffer.splice(0, buffer.length);
+			opts.postMessage({
+				type: "stream-chunks",
+				streamId: msg.streamId,
+				chunks,
+			});
+			lastFlushAt = performance.now();
+		};
 		try {
 			const fn = opts.engine[msg.name];
 			if (typeof fn !== "function") {
@@ -109,14 +138,26 @@ export function startWorkerHost(opts: WorkerHostOptions): WorkerHostHandle {
 			const iter = fn.apply(opts.engine, args) as AsyncIterable<unknown>;
 			for await (const chunk of iter) {
 				if (ac.signal.aborted) break;
-				opts.postMessage({
-					type: "stream-chunk",
-					streamId: msg.streamId,
-					chunk: chunk as GenerationStreamChunk,
-				});
+				buffer.push(chunk as GenerationStreamChunk);
+				const now = performance.now();
+				if (
+					buffer.length >= BATCH_MAX_CHUNKS ||
+					now - lastFlushAt >= BATCH_MAX_MS
+				) {
+					flush();
+				}
 			}
+			flush();
 			opts.postMessage({ type: "stream-done", streamId: msg.streamId });
 		} catch (e) {
+			// Flush any in-flight chunks before the error surfaces so the
+			// consumer sees them in order rather than the error swallowing
+			// already-produced output.
+			try {
+				flush();
+			} catch {
+				// ignore — we're about to post the error anyway
+			}
 			opts.postMessage({
 				type: "stream-error",
 				streamId: msg.streamId,

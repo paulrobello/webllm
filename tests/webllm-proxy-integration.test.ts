@@ -204,6 +204,61 @@ describe("WebLLMProxy — streaming", () => {
 		expect(count).toBe(1);
 	});
 
+	test("stream-chunks round-trip: 5 chunks injected as single batch yield in order", async () => {
+		// Build the channel manually so we can capture the streamId from the
+		// host-bound stream-start message and inject a coalesced batch with
+		// the same id. We drive the proxy directly here (no host loop) to
+		// exercise the stream-chunks dispatch path in isolation.
+		const handlers: {
+			toProxy?: (e: { data: WorkerToProxy }) => void;
+		} = {};
+		let capturedStreamId: number | null = null;
+		const worker = {
+			postMessage(m: ProxyToWorker) {
+				if (m.type === "stream-start") capturedStreamId = m.streamId;
+			},
+			addEventListener(
+				event: "message" | "error" | "messageerror",
+				h: (e: { data: WorkerToProxy } | Event) => void,
+			) {
+				if (event === "message") {
+					handlers.toProxy = h as (e: { data: WorkerToProxy }) => void;
+				}
+			},
+			terminate() {},
+		};
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const iter = proxy.chatCompletion("m1", [{ role: "user", content: "hi" }]);
+		// Settle the microtask that posts stream-start to the worker.
+		await new Promise((r) => setTimeout(r, 0));
+		expect(capturedStreamId).not.toBeNull();
+		const sid = capturedStreamId as unknown as number;
+		const dispatch = handlers.toProxy;
+		if (!dispatch) throw new Error("proxy never registered message handler");
+
+		// Inject a single batch of 5 chunks via the message dispatcher.
+		dispatch({
+			data: {
+				type: "stream-chunks",
+				streamId: sid,
+				chunks: [
+					{ text: "a", tokenId: 1, done: false },
+					{ text: "b", tokenId: 2, done: false },
+					{ text: "c", tokenId: 3, done: false },
+					{ text: "d", tokenId: 4, done: false },
+					{ text: "e", tokenId: 5, done: false },
+				],
+			},
+		});
+		dispatch({ data: { type: "stream-done", streamId: sid } });
+
+		const collected: string[] = [];
+		for await (const c of iter) {
+			if (c.text) collected.push(c.text);
+		}
+		expect(collected).toEqual(["a", "b", "c", "d", "e"]);
+	});
+
 	test("chatCompletion propagates worker-side stream-error as typed error", async () => {
 		const { worker, hostPost, hostReceive } = makeInProcessChannel();
 		const { ModelNotFoundError } = await import("../src/core/errors.js");

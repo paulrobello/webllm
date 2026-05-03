@@ -244,6 +244,23 @@ export class WebLLMProxy {
 				}
 				return;
 			}
+			case "stream-chunks": {
+				// Coalesced batch from the worker-host. Fan chunks back out
+				// one-at-a-time so the public AsyncIterableIterator surface
+				// is unchanged. Order is preserved: waiters drain first
+				// (oldest-first), then the rest queue.
+				const s = this.streams.get(m.streamId);
+				if (!s) return;
+				for (const chunk of m.chunks) {
+					if (s.waiters.length > 0) {
+						const w = s.waiters.shift();
+						w?.resolve({ value: chunk, done: false });
+					} else {
+						s.queue.push(chunk);
+					}
+				}
+				return;
+			}
 			case "stream-done": {
 				const s = this.streams.get(m.streamId);
 				if (!s) return;
