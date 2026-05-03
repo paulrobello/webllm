@@ -931,6 +931,30 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					if (!drafterResp.ok) {
 						throw new Error(`HTTP ${drafterResp.status} fetching ${drafterUrl}`);
 					}
+					// Guardrail: `arrayBuffer()` materializes the full body in
+					// a JS-heap ArrayBuffer, which V8 caps at ~3.5 GB per
+					// allocation (the same bug Path A fixed for the main
+					// model by switching to `engine.loadModelFromUrl`).
+					// Drafters in the canonical sweep are <= 1 GB, well under
+					// the V8 cap. Retained `loadModelFromBuffer` here for the
+					// small ergonomic win of skipping the prefix-parse two-step
+					// the main model now needs. If a future >3.5 GB drafter is
+					// introduced, switch this branch to `loadModelFromUrl`
+					// (the engine support is already there). The check below
+					// fails fast with a clear message instead of letting the
+					// allocation throw an opaque RangeError.
+					const V8_ARRAY_BUFFER_CAP = 3.5 * 1024 * 1024 * 1024;
+					const drafterTotal = Number(
+						drafterResp.headers.get("content-length") || 0,
+					);
+					if (drafterTotal > V8_ARRAY_BUFFER_CAP) {
+						throw new Error(
+							`drafter ${drafterId} is ${(drafterTotal / 1e9).toFixed(1)} GB; ` +
+								`worker-mode drafter path uses arrayBuffer() which would trip ` +
+								`V8's ArrayBuffer cap. Switch the drafter to loadModelFromUrl ` +
+								`for drafters > 3.5 GB (TODO).`,
+						);
+					}
 					const drafterBuf = await drafterResp.arrayBuffer();
 					// Peek at metadata main-side just for the ctx-length log
 					// line; the worker does the load-bearing parse itself.
