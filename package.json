@@ -9,12 +9,16 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./persistence": {
+      "import": "./dist/persistence/indexeddb-store.js",
+      "types": "./dist/persistence/indexeddb-store.d.ts"
     }
   },
   "files": ["dist", "src"],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target browser --minify",
-    "dev": "bun build src/index.ts --outdir dist --target browser --watch",
+    "build": "bun build src/index.ts src/persistence/indexeddb-store.ts --outdir dist --target browser --minify --root src",
+    "dev": "bun build src/index.ts src/persistence/indexeddb-store.ts --outdir dist --target browser --watch --root src",
     "test": "bun test",
     "lint": "biome check src tests",
     "lint:fix": "biome check --fix src tests",
