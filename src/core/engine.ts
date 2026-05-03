@@ -55,6 +55,7 @@ import {
 } from "./errors.js";
 import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
+import { computeTokenizerHash } from "./persistence.js";
 import { PipelineCache } from "./pipeline-cache.js";
 import { resolveSamplingParams } from "./sampling-profiles.js";
 import { Scheduler } from "./scheduler.js";
@@ -1121,6 +1122,20 @@ export class WebLLM {
 		entry.hyperparams = pipeline.parsed.hyperparams;
 		entry.tokenizer = new Tokenizer(pipeline.parsed.tokenizerConfig);
 		entry.kvCache = new KVCache(pipeline.parsed.kvCacheConfig);
+		entry.tokenizerHash = await computeTokenizerHash(
+			pipeline.parsed.tokenizerConfig,
+		);
+		entry.fingerprint = {
+			architecture: String(pipeline.parsed.hyperparams.architecture),
+			vocabSize: pipeline.parsed.hyperparams.vocabularySize,
+			nEmbd: pipeline.parsed.hyperparams.embeddingLength,
+			nLayer: pipeline.parsed.hyperparams.layerCount,
+			nHead: pipeline.parsed.hyperparams.headCount,
+			nHeadKV: pipeline.parsed.hyperparams.headCountKv,
+			ropeBase: pipeline.parsed.hyperparams.ropeFreqBase ?? 10_000,
+			quantType: "unknown",
+			tokenizerHash: entry.tokenizerHash,
+		};
 		entry.loaded = true;
 		if (options?.embeddingCapable !== undefined) {
 			entry.embeddingCapable = options.embeddingCapable;
@@ -1356,7 +1371,7 @@ export class WebLLM {
 	 * via the catch path before re-throwing, so callers never need to
 	 * free `stagingPtr` themselves once handed in.
 	 */
-	private _buildInferenceAndRegister(
+	private async _buildInferenceAndRegister(
 		parsed: ParsedModel,
 		ggufCtx: GgufContext,
 		dataSrc: Uint8Array | ((offset: number, len: number) => Uint8Array),
@@ -1364,11 +1379,11 @@ export class WebLLM {
 		name: string,
 		options?: Partial<ModelLoadOptions>,
 		stagingPtr?: number,
-	): {
+	): Promise<{
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
-	} {
+	}> {
 		const freeStaging = (): void => {
 			if (!stagingPtr) return;
 			try {
@@ -1421,6 +1436,20 @@ export class WebLLM {
 				entry.hyperparams = parsed.hyperparams;
 				entry.tokenizer = new Tokenizer(parsed.tokenizerConfig);
 				entry.kvCache = new KVCache(parsed.kvCacheConfig);
+				entry.tokenizerHash = await computeTokenizerHash(
+					parsed.tokenizerConfig,
+				);
+				entry.fingerprint = {
+					architecture: String(parsed.hyperparams.architecture),
+					vocabSize: parsed.hyperparams.vocabularySize,
+					nEmbd: parsed.hyperparams.embeddingLength,
+					nLayer: parsed.hyperparams.layerCount,
+					nHead: parsed.hyperparams.headCount,
+					nHeadKV: parsed.hyperparams.headCountKv,
+					ropeBase: parsed.hyperparams.ropeFreqBase ?? 10_000,
+					quantType: "unknown",
+					tokenizerHash: entry.tokenizerHash,
+				};
 				entry.loaded = true;
 			}
 

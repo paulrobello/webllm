@@ -210,4 +210,8 @@ export interface ModelEntry {
 	activeSessions: number;
 	embeddingCapable?: boolean;
 	embeddingPooling?: "last-token" | "mean";
+	/** SHA-256 of canonical-key-sorted tokenizerConfig JSON; computed once at load. */
+	tokenizerHash?: string;
+	/** Cached fingerprint for persistence validation; computed once at load. */
+	fingerprint?: import("./persistence.js").ModelFingerprint;
 }
