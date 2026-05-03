@@ -89,6 +89,45 @@ describe("WebLLMProxy — non-streaming", () => {
 		);
 	});
 
+	test("loadModelFromUrl round-trip strips inference and returns handle", async () => {
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		// The worker host strips the non-cloneable `inference` field from
+		// the return value of loadModelFromBuffer / loadModelFromUrl. The
+		// fake engine here returns both fields; the proxy should see only
+		// `handle`.
+		const engine = {
+			async loadModelFromUrl(
+				_url: string,
+				name: string,
+				_wasmUrl?: string,
+				_options?: unknown,
+			) {
+				return {
+					handle: { id: `h-${name}` },
+					// Plain object stand-in for ModelInference — would be a
+					// non-cloneable class instance in the real path.
+					inference: { __nonCloneable: () => {} },
+				};
+			},
+			async dispose() {},
+		};
+		startWorkerHost({
+			engine,
+			postMessage: hostPost,
+			receive: hostReceive,
+		});
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const result = await proxy.loadModelFromUrl(
+			"https://example.test/model.gguf",
+			"qwen3-test",
+		);
+		expect(result.handle.id).toBe("h-qwen3-test");
+		// inference is stripped by the worker host's sanitizer; the
+		// resulting object lacks the field rather than carrying an empty
+		// placeholder.
+		expect("inference" in result).toBe(false);
+	});
+
 	test("createConversation returns the worker's handle", async () => {
 		const { worker, hostPost, hostReceive } = makeInProcessChannel();
 		startWorkerHost({

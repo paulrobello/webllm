@@ -120,6 +120,19 @@ export class WebLLMProxy {
 			[data, name, wasmUrl, options],
 			[data],
 		);
+	// `url` and `name` are cheap strings; no Transferables needed. The
+	// worker fetches + streams into its own WASM heap so >3.5 GB models
+	// don't have to land in a main-thread JS-heap ArrayBuffer first.
+	loadModelFromUrl = (
+		url: string,
+		name: string,
+		wasmUrl?: string,
+		options?: unknown,
+	): Promise<{ handle: ModelHandle; inference: unknown }> =>
+		this.callMethod<{ handle: ModelHandle; inference: unknown }>(
+			"loadModelFromUrl",
+			[url, name, wasmUrl, options],
+		);
 	unloadModel = (id: string) => this.callMethod<void>("unloadModel", [id]);
 	embed = (modelId: string, text: string) =>
 		this.callMethod<Float32Array>("embed", [modelId, text]);

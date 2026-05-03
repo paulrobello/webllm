@@ -9,6 +9,7 @@ import { WebLLMProxy } from "../src/core/webllm-proxy.js";
 // `chatCompletion` — keeps API parity for the smaller "drop-in" set.
 const PROXIED_METHODS: ReadonlyArray<keyof WebLLMProxy & string> = [
 	"loadModelFromBuffer",
+	"loadModelFromUrl",
 	"unloadModel",
 	"embed",
 	"chat",
