@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+	CorruptBlobError,
+	IncompatibleConversationError,
+} from "../src/core/errors.js";
+import {
 	computeTokenizerHash,
 	decodePersistedConversation,
 	encodePersistedConversation,
@@ -190,5 +194,117 @@ describe("decodePersistedConversation — happy path", () => {
 		);
 		expect(header).toEqual(SAMPLE_HEADER);
 		expect(kvBytes).toEqual(SAMPLE_KV);
+	});
+});
+
+describe("decodePersistedConversation — failure modes", () => {
+	test("throws CorruptBlobError(bad-magic) on wrong magic bytes", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		blob[0] = 0xff; // corrupt magic
+		expect(() => decodePersistedConversation(blob, SAMPLE_FINGERPRINT)).toThrow(
+			CorruptBlobError,
+		);
+		try {
+			decodePersistedConversation(blob, SAMPLE_FINGERPRINT);
+		} catch (e) {
+			expect((e as CorruptBlobError).reason).toBe("bad-magic");
+		}
+	});
+
+	test("throws CorruptBlobError(bad-header-len) on overflowing headerLen", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		new DataView(blob.buffer).setUint32(4, blob.byteLength * 2, true);
+		expect(() => decodePersistedConversation(blob, SAMPLE_FINGERPRINT)).toThrow(
+			CorruptBlobError,
+		);
+	});
+
+	test("throws CorruptBlobError(bad-header-json) on broken JSON", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		const dv = new DataView(blob.buffer);
+		const headerLen = dv.getUint32(4, true);
+		// Replace mid-header bytes with characters that produce invalid JSON.
+		blob[8 + 1] = 0x21; // '!'
+		blob[8 + headerLen - 1] = 0x21; // '!' — break trailing brace
+		expect(() => decodePersistedConversation(blob, SAMPLE_FINGERPRINT)).toThrow(
+			CorruptBlobError,
+		);
+		try {
+			decodePersistedConversation(blob, SAMPLE_FINGERPRINT);
+		} catch (e) {
+			expect((e as CorruptBlobError).reason).toBe("bad-header-json");
+		}
+	});
+
+	test("throws IncompatibleConversationError(schema-mismatch) on wrong schemaVersion", () => {
+		const wrong = { ...SAMPLE_HEADER, schemaVersion: 99 as 1 };
+		const blob = encodePersistedConversation(wrong, SAMPLE_KV);
+		expect(() => decodePersistedConversation(blob, SAMPLE_FINGERPRINT)).toThrow(
+			IncompatibleConversationError,
+		);
+		try {
+			decodePersistedConversation(blob, SAMPLE_FINGERPRINT);
+		} catch (e) {
+			const ic = e as IncompatibleConversationError;
+			expect(ic.reason).toBe("schema-mismatch");
+			expect(ic.details).toEqual({ got: 99, want: 1 });
+		}
+	});
+
+	test("throws IncompatibleConversationError(fingerprint-mismatch) reporting first differing field", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		const want = { ...SAMPLE_FINGERPRINT, nLayer: 32 };
+		try {
+			decodePersistedConversation(blob, want);
+			throw new Error("should have thrown");
+		} catch (e) {
+			expect(e).toBeInstanceOf(IncompatibleConversationError);
+			const ic = e as IncompatibleConversationError;
+			expect(ic.reason).toBe("fingerprint-mismatch");
+			expect(ic.details).toEqual({ field: "nLayer", got: 28, want: 32 });
+		}
+	});
+
+	test("throws IncompatibleConversationError(tokenizer-mismatch) when only tokenizer differs", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		const want = { ...SAMPLE_FINGERPRINT, tokenizerHash: "b".repeat(64) };
+		try {
+			decodePersistedConversation(blob, want);
+			throw new Error("should have thrown");
+		} catch (e) {
+			expect(e).toBeInstanceOf(IncompatibleConversationError);
+			expect((e as IncompatibleConversationError).reason).toBe(
+				"tokenizer-mismatch",
+			);
+		}
+	});
+
+	test("throws CorruptBlobError(byte-size-mismatch) when kvBytes length differs from header.byteSize", () => {
+		// Build a blob whose header.byteSize disagrees with actual trailing length.
+		const truncatedKv = SAMPLE_KV.slice(0, 8); // header still says byteSize=16
+		const blob = encodePersistedConversation(SAMPLE_HEADER, truncatedKv);
+		expect(() => decodePersistedConversation(blob, SAMPLE_FINGERPRINT)).toThrow(
+			CorruptBlobError,
+		);
+		try {
+			decodePersistedConversation(blob, SAMPLE_FINGERPRINT);
+		} catch (e) {
+			expect((e as CorruptBlobError).reason).toBe("byte-size-mismatch");
+		}
+	});
+
+	test("first differing field is the one reported (deterministic order: architecture before nLayer)", () => {
+		const blob = encodePersistedConversation(SAMPLE_HEADER, SAMPLE_KV);
+		// Differ on architecture AND nLayer; expect architecture to win
+		// because it's earlier in validateFingerprint's check order.
+		const want = { ...SAMPLE_FINGERPRINT, architecture: "llama", nLayer: 32 };
+		try {
+			decodePersistedConversation(blob, want);
+			throw new Error("should have thrown");
+		} catch (e) {
+			expect((e as IncompatibleConversationError).details).toMatchObject({
+				field: "architecture",
+			});
+		}
 	});
 });
