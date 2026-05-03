@@ -377,9 +377,20 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
    max while keeping the doubling fallback (up to 256 MB) as
    defensive escape hatch. Validated: qwen3-8b worker-mode smoke
    loads cleanly in one fetch (`16.8 MB of 3896.6 MB total`, no
-   doubling fired). The deeper architectural fix paths (two-pass
+   doubling fired). ~~The deeper architectural fix paths (two-pass
    parse OR engine-side metadata accessors) remain filed in the
-   smoke-page TODO comment for future work.
+   smoke-page TODO comment for future work.~~ **Deeper fix LANDED
+   2026-05-04** (option (b): engine-side metadata accessors).
+   Engine commits `53c0e86` (engine + proxy + worker host return
+   `LoadedModelMetadata` alongside the model handle) and `e058a6f`
+   (smoke page reads `result.metadata`, removes the HEAD-Range +
+   16 MB header-prefix fetch + main-side `GgufParser.parse()` +
+   doubling fallback entirely). Net -149 LOC removed from
+   `smoke-test/real-model-page.js`; the entire "guess a prefix size"
+   failure mode is retired. Validated: qwen3-0.6b worker (78.6
+   tok/s), qwen3-8b worker (25.2 tok/s), qwen3-8b worker frame-probe
+   (decode median 8.3 ms, max 9.1 ms — 1.6× headroom over 15 ms
+   gate); no console errors in any run. `make checkall` green.
 
 ## Canonical commit SHAs
 
@@ -393,6 +404,12 @@ Driver: [`step6-token-identical.ts`](step6-token-identical.ts).
 - Mistral-7b transient-heap-pressure fix (Step 4 follow-up): `8c48fb4`
 - Frame-probe sampling for worker probe: `a013415`
 - Smoke-bench `PERF_EXTRA` plumbing: `a42fee4`
+- Header-prefix right-size 64 MB → 16 MB (follow-up #9 phase 1): `d16e7a8`
+- Engine-side metadata accessors — `LoadedModelMetadata` returned from
+  `loadModelFromBuffer`/`loadModelFromUrl` (follow-up #9 deeper fix,
+  phase 1/2): `53c0e86`
+- Smoke page retires main-side GGUF parse (follow-up #9 deeper fix,
+  phase 2/2): `e058a6f`
 
 ## Acceptance
 
