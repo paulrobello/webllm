@@ -1339,11 +1339,22 @@ appetite remains; none are forced.
   log and skip. Cadence policy set 2026-04-29: run daily even when
   the surface has been quiet, since the cost is ~30s and a missed
   rebase costs much more than catching one promptly. Last clean
-  run: 2026-04-29 (4 cadence checks across 3 sessions; cumulative
-  7 upstream tags advanced, 0 in `ggml-webgpu/`).
-- **Test skip count.** Currently 11, all environmental:
+  run: **2026-05-03** (clean — `master` advanced past `e29753286`
+  to `e48034dfc` plus `b9012` tag landed, but no `ggml-webgpu/` or
+  `ggml/include/` commits since the 2026-05-01 §27 rebase).
+- **Test skip count.** Currently 33 (rebaselined 2026-05-03 after
+  prefix-cache mechanism + persistence ship), all environmental:
   - `pipeline-cache.test.ts` × 5 (`!indexedDBAvailable` — IndexedDB
     is a browser API, missing in Bun native)
+  - `persistence-indexeddb-store.test.ts` × 8 (`!indexedDBAvailable`,
+    Task 3.1 of prefix-cache persistence)
+  - `engine-conversation-persistence.test.ts` × 10 (`!HAS_WEBGPU ||
+    !existsSync(TINYLLAMA)`, Tasks 1.2 + 1.3 — 3 export tests + 3
+    import tests + 4 round-trip / fingerprint-mismatch / corrupt-magic
+    extensions)
+  - `kv-snapshot-roundtrip.test.ts` × 3 (`!HAS_WEBGPU`,
+    serializeKVCache / loadKVCache primitives from prefix-cache
+    mechanism)
   - `forward-verify-equivalence.test.ts` × 1 describe (`!HAS_WEBGPU
     || !existsSync(TINYLLAMA)`)
   - `prefill-tiling-equivalence.test.ts` × 1 describe (`!HAS_WEBGPU`)
@@ -1351,10 +1362,14 @@ appetite remains; none are forced.
     || !existsSync(TINYLLAMA)`)
   - `wordpiece-golden.test.ts` × 1 describe (`!fixturesPresent` —
     opt-in HF golden fixtures)
+  - residue × 3 across `causal-embedder-inference`,
+    `chat-template-special-tokens`, `model-inference-embed`
+    (per-test fixture-presence guards)
 
   These are correct safety guards, not bugs or side-branch leftovers.
-  Watch for *new* skips appearing — that might indicate an accidental
-  regression — but the current 11-count is a stable baseline.
+  Watch for *new* skips appearing beyond this 33-count baseline — that
+  might indicate an accidental regression. Browser-side smoke tests
+  cover the WebGPU + IndexedDB code paths that skip-pass here.
 - **Encoder parity reference vectors freshness.** `eval/reports/
   encoder-parity-2026-04-28/{jina,nomic}-ref.json` are pinned to
   whatever sentence-transformers / HF model versions resolved on
