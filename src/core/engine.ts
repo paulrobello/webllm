@@ -1241,14 +1241,20 @@ export class WebLLM {
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl: resolvedWasmUrl });
 
-		const ptr = wasm.malloc(total);
-		if (!ptr) {
-			throw new Error(
-				`loadModelFromUrl: wasm.malloc(${total}) returned null for ${url}`,
-			);
-		}
-
+		// Post-init cleanup: if any of malloc / fetch / parse / build fails,
+		// we own the `wasm` (it has constructed a WebGPU device + pipeline
+		// state) and must `shutdown()` it before propagating. On the
+		// success path the registered model entry takes ownership of `wasm`
+		// — do NOT shutdown there. Hence try/catch (not try/finally).
+		let ptr = 0;
 		try {
+			ptr = wasm.malloc(total);
+			if (!ptr) {
+				throw new Error(
+					`loadModelFromUrl: wasm.malloc(${total}) returned null for ${url}`,
+				);
+			}
+
 			const reader = resp.body.getReader();
 			let received = 0;
 			while (true) {
@@ -1274,7 +1280,7 @@ export class WebLLM {
 			const parsed = ModelLoader.parseModel(fullView);
 			const ggufCtx = GgufParser.parse(fullView) as GgufContext;
 
-			return this._buildInferenceAndRegister(
+			const result = this._buildInferenceAndRegister(
 				parsed,
 				ggufCtx,
 				dataAt,
@@ -1282,13 +1288,31 @@ export class WebLLM {
 				name,
 				options,
 			);
-		} finally {
-			// The weights have been uploaded into GPU buffers (or the load
-			// failed before that point); either way the GGUF staging region
-			// is no longer needed. Free it immediately so the KV cache and
-			// graph buffers don't have to share the heap with a redundant
-			// model-file-sized region.
+			// Success path: weights have been uploaded into GPU buffers; the
+			// GGUF staging region is no longer needed. Free it so the KV
+			// cache + graph buffers don't share the heap with a redundant
+			// model-file-sized region. `wasm` itself is now owned by the
+			// registered model entry — do NOT shutdown.
 			wasm.free(ptr);
+			return result;
+		} catch (e) {
+			// Partial-failure path: free the staging allocation if we got
+			// that far, then tear down the WebGPU device + pipeline state
+			// `wasm.init()` constructed. Without this, every failed load
+			// leaks a WebGPU device.
+			if (ptr) {
+				try {
+					wasm.free(ptr);
+				} catch {
+					// ignore; shutdown below releases all heap state anyway
+				}
+			}
+			try {
+				await wasm.shutdown();
+			} catch {
+				// ignore shutdown errors; we're already on the failure path
+			}
+			throw e;
 		}
 	}
 
