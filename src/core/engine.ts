@@ -58,6 +58,7 @@ import { MemoryPool } from "./memory-pool.js";
 import { ModelManager } from "./model-manager.js";
 import {
 	computeTokenizerHash,
+	decodePersistedConversation,
 	encodePersistedConversation,
 	KV_PERSISTENCE_SCHEMA_VERSION,
 	type ModelFingerprint,
@@ -625,6 +626,43 @@ export class WebLLM {
 		} finally {
 			release();
 		}
+	}
+
+	async importConversation(
+		modelHandleId: string,
+		blob: Uint8Array,
+		options?: ConversationOptions,
+	): Promise<ConversationHandle> {
+		const entry = this._modelManager.get(modelHandleId);
+		if (!entry) throw new ModelNotFoundError(modelHandleId);
+		if (!entry.loaded || !entry.tokenizer) {
+			throw new ModelNotLoadedError(modelHandleId);
+		}
+		const inf = this.inferenceEngines.get(modelHandleId);
+		if (!inf) throw new InferenceEngineMissingError(modelHandleId);
+		if (!inf.flashAttn) {
+			throw new Error(
+				`importConversation requires FA mode; "${modelHandleId}" is in manual mode.`,
+			);
+		}
+		if (!entry.fingerprint) {
+			throw new InferenceEngineMissingError(modelHandleId);
+		}
+		const { header, kvBytes } = decodePersistedConversation(
+			blob,
+			entry.fingerprint,
+		);
+		const opts = options ?? header.conversationOptions;
+		const conv = this.conversationPool.create(modelHandleId, opts);
+		this.conversationPool.set(conv, {
+			conversationId: conv.id,
+			modelHandleId,
+			tokenIds: header.tokenIds,
+			kvBytes,
+			byteSize: header.byteSize,
+			lastAccessMs: Date.now(),
+		});
+		return conv;
 	}
 
 	/**
