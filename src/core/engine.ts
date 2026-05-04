@@ -1344,6 +1344,7 @@ export class WebLLM {
 		name: string,
 		wasmUrl?: string,
 		options?: Partial<ModelLoadOptions>,
+		onProgress?: (received: number, total: number) => void,
 	): Promise<{
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
@@ -1400,6 +1401,7 @@ export class WebLLM {
 				// returns the current view.
 				wasm.heapU8.set(value, ptr + received);
 				received += value.length;
+				onProgress?.(received, total);
 			}
 			if (received !== total) {
 				throw new Error(

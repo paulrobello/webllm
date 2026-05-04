@@ -48,39 +48,26 @@ export function findModel(id) {
 }
 
 /**
- * Fetch the GGUF with byte progress, then hand the buffer to the
- * engine. Mirrors the smoke page's progress pattern so we drive a
- * live load card. Returns the engine + handle ready for chat.
+ * Stream the GGUF directly into the WASM heap with byte progress.
+ * Goes through `engine.loadModelFromUrl`, which avoids the V8 ~4 GiB
+ * ArrayBuffer cap that would trip on 7B+ Q4 / 8B IQ3_M models.
+ * Returns the engine handle + inference + metadata.
  *
- * @param {Object} model         A `BenchmarkModel` from `listChatModels()`.
- * @param {Object} engine        A constructed `WebLLM` instance.
+ * @param {Object} model A `BenchmarkModel` from `listChatModels()`.
+ * @param {Object} engine A constructed `WebLLM` instance.
  * @param {(pct:number, mb:number, totalMb:number)=>void} onProgress
  */
 export async function loadSelectedModel(model, engine, onProgress) {
   const url = ggufUrl(model);
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
-  const total = Number(resp.headers.get("content-length") || 0);
-  if (!total) throw new Error("missing content-length on model response");
-
-  const buf = new Uint8Array(total);
-  const reader = resp.body.getReader();
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf.set(value, received);
-    received += value.length;
-    onProgress(received / total, received / 1e6, total / 1e6);
-  }
-  if (received !== total) {
-    throw new Error(`short read: expected ${total} bytes, got ${received}`);
-  }
-
-  const result = await engine.loadModelFromBuffer(buf, model.id, undefined, {
-    flashAttn: true, // required for createConversation
-  });
-  return result;
+  return await engine.loadModelFromUrl(
+    url,
+    model.id,
+    undefined,
+    { flashAttn: true }, // required for createConversation
+    (received, total) => {
+      onProgress(received / total, received / 1e6, total / 1e6);
+    },
+  );
 }
 
 /**
