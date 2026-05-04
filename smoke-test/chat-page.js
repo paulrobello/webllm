@@ -4,6 +4,12 @@
 
 export async function runChatPage() {
   document.body.innerHTML = renderShell();
+  const { populateDropdown, findModel } = await import("./chat-models.js");
+  const modelSelect = document.getElementById("chat-model-select");
+  populateDropdown(modelSelect);
+
+  const lastModelId = localStorage.getItem("chat:lastModelId");
+  if (lastModelId && findModel(lastModelId)) modelSelect.value = lastModelId;
   console.log("[chat-page] shell mounted");
 }
 
