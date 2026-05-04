@@ -554,6 +554,26 @@ export class WebLLM {
 					// end-of-turn into a fabricated multi-turn dialogue with
 					// itself. See CLAUDE.md regression notes.
 					addChatStopToken(genConfig, tokenizer, config, "</s>");
+				} else if (tmpl === "chatml") {
+					// Non-Qwen ChatML models (Hermes-3, SmolLM2, etc.) — the
+					// full Qwen branch above is gated on `architecture` ===
+					// "qwen*" because it carries Qwen-specific think-mode and
+					// tool-call masking. Other chatml-trained models still
+					// need `<|im_end|>` registered so they stop at turn end
+					// rather than running into multi-turn self-dialogue.
+					// `<|endoftext|>` is *not* registered here: in some
+					// non-Qwen chatml vocabs (e.g. SmolLM2) it resolves to a
+					// low id that aliases the `<unk>`/pad slot, and
+					// registering id 0 as a stop would terminate generation
+					// on any unknown-token emission.
+					addChatStopToken(genConfig, tokenizer, config, "<|im_end|>");
+				} else if (tmpl === "gemma") {
+					// Gemma chat models terminate every turn with
+					// `<end_of_turn>`. The GGUF's declared EOS is `<eos>`
+					// (id 1), which the model rarely emits in chat — without
+					// explicit `<end_of_turn>` registration the model runs
+					// to maxTokens.
+					addChatStopToken(genConfig, tokenizer, config, "<end_of_turn>");
 				}
 			}
 		}
@@ -998,6 +1018,14 @@ export class WebLLM {
 					// Mistral / Llama-2 [INST] family: stop on `</s>` (see
 					// same-named block in chatCompletion).
 					addChatStopToken(genConfig, tokenizer, config, "</s>");
+				} else if (tmpl === "chatml") {
+					// Non-Qwen ChatML (Hermes-3, SmolLM2, etc.): stop on
+					// `<|im_end|>` (see same-named block in chatCompletion).
+					addChatStopToken(genConfig, tokenizer, config, "<|im_end|>");
+				} else if (tmpl === "gemma") {
+					// Gemma: stop on `<end_of_turn>` (see same-named block in
+					// chatCompletion).
+					addChatStopToken(genConfig, tokenizer, config, "<end_of_turn>");
 				}
 			}
 
