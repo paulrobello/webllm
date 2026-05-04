@@ -1,4 +1,6 @@
 import type {
+	BenchSessionCompletePayload,
+	BenchSessionStartedPayload,
 	EvalFailedPayload,
 	EvalStartedPayload,
 	EvalTaskCompletePayload,
@@ -25,6 +27,8 @@ type IngestKind =
 	| "eval_task_complete"
 	| "eval_complete"
 	| "eval_failed"
+	| "bench_session_started"
+	| "bench_session_complete"
 	| "reset";
 
 async function postIngest(
@@ -106,4 +110,18 @@ export async function publishEvalFailed(
 	payload: EvalFailedPayload,
 ): Promise<boolean> {
 	return postIngest(baseUrl, "eval_failed", payload);
+}
+
+export async function publishBenchSessionStarted(
+	baseUrl: string,
+	payload: BenchSessionStartedPayload,
+): Promise<boolean> {
+	return postIngest(baseUrl, "bench_session_started", payload);
+}
+
+export async function publishBenchSessionComplete(
+	baseUrl: string,
+	payload: BenchSessionCompletePayload,
+): Promise<boolean> {
+	return postIngest(baseUrl, "bench_session_complete", payload);
 }
