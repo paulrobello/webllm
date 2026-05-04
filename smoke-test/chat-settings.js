@@ -5,6 +5,7 @@ const ENGINE_FALLBACKS = { temperature: 1.0, topK: 0, topP: 1.0, repetitionPenal
 const QWEN_THINKING = { temperature: 0.6, topK: 20, topP: 0.95, repetitionPenalty: 1.05 };
 const QWEN_NON_THINKING = { temperature: 0.7, topK: 20, topP: 0.8, repetitionPenalty: 1.1 };
 const PHI3 = { temperature: 0, topK: 0, topP: 1, repetitionPenalty: 1.1 };
+const MISTRAL = { temperature: 0.7, topK: 0, topP: 0.95, repetitionPenalty: 1.0 };
 
 /**
  * Compute the default settings for a given model. Mirrors the engine's
@@ -18,6 +19,12 @@ export function defaultSettings(model, enableThinking) {
   }
   if (model.architecture === "phi3") {
     return { ...PHI3 };
+  }
+  // Mistral-Instruct family — registered with `architecture: "llama"` but
+  // its chat template is `[INST]…[/INST]` without `<<SYS>>`. Distinguish
+  // by family name (registry uses "Mistral" / "Mistral Nemo" etc.).
+  if (typeof model.family === "string" && /^mistral/i.test(model.family)) {
+    return { ...MISTRAL };
   }
   return { ...ENGINE_FALLBACKS };
 }
