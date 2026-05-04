@@ -7,11 +7,19 @@
  * prefix walk against the prior KV snapshot succeeds (KV reuse depends
  * on identical prompt tokens).
  */
-export async function createChatConversation(engine, model, systemPrompt) {
-  const handle = await engine.createConversation(model.id, {
+/**
+ * @param {object} engine
+ * @param {string} handleId Engine-assigned model handle id (NOT the
+ *   catalog `model.id`; the engine auto-generates handle ids in
+ *   `registerModelHandle`).
+ * @param {object} model    Catalog model record (for contextLength).
+ * @param {string} systemPrompt
+ */
+export async function createChatConversation(engine, handleId, model, systemPrompt) {
+  const handle = await engine.createConversation(handleId, {
     maxContextTokens: model.contextLength,
   });
-  return { handle, modelId: model.id, systemPrompt, messages: [] };
+  return { handle, modelId: model.id, handleId, systemPrompt, messages: [] };
 }
 
 export async function disposeChatConversation(engine, conv) {

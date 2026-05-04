@@ -28,9 +28,10 @@ import {
  * @property {(id: string) => Promise<{ success: boolean, error?: Error }>} loadModelById
  * @property {() => unknown} getEngine
  * @property {() => unknown} getLoadedModel
+ * @property {() => string | null} getLoadedHandleId
  * @property {(role: string, text: string) => HTMLElement} appendBubble
  * @property {(el: HTMLElement, text: string) => Promise<void>} renderAssistantInto
- * @property {(engine: unknown, model: unknown, systemPrompt: string) => Promise<unknown>} createChatConversation
+ * @property {(engine: unknown, handleId: string, model: unknown, systemPrompt: string) => Promise<unknown>} createChatConversation
  * @property {(conv: unknown) => void} setConv
  * @property {() => void} refreshContext
  */
@@ -76,19 +77,20 @@ export async function maybeOfferRestore(ctx) {
     }
     const engine = ctx.getEngine();
     const loadedModel = ctx.getLoadedModel();
+    const loadedHandleId = ctx.getLoadedHandleId();
     let conv;
     const blob = await loadBlob();
     if (blob) {
       try {
-        const handle = await engine.importConversation(meta.modelId, blob);
-        conv = { handle, modelId: meta.modelId, systemPrompt: meta.systemPrompt, messages: meta.messages.slice() };
+        const handle = await engine.importConversation(loadedHandleId, blob);
+        conv = { handle, modelId: meta.modelId, handleId: loadedHandleId, systemPrompt: meta.systemPrompt, messages: meta.messages.slice() };
       } catch (e) {
         console.warn("[chat-restore] importConversation failed; falling back to metadata-only restore:", e);
-        conv = await ctx.createChatConversation(engine, loadedModel, meta.systemPrompt);
+        conv = await ctx.createChatConversation(engine, loadedHandleId, loadedModel, meta.systemPrompt);
         conv.messages = meta.messages.slice();
       }
     } else {
-      conv = await ctx.createChatConversation(engine, loadedModel, meta.systemPrompt);
+      conv = await ctx.createChatConversation(engine, loadedHandleId, loadedModel, meta.systemPrompt);
       conv.messages = meta.messages.slice();
     }
     ctx.setConv(conv);

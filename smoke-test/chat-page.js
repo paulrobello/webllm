@@ -8,8 +8,15 @@ export async function runChatPage() {
   const modelSelect = document.getElementById("chat-model-select");
   populateDropdown(modelSelect);
 
+  // `?model=<id>` URL param wins over the localStorage memory and also
+  // auto-loads the model. Useful for sharing a deep-link or for
+  // debugging — drive the failing case directly without dropdown clicks.
+  const urlParams = new URLSearchParams(globalThis.location?.search ?? "");
+  const urlModelId = urlParams.get("model");
+  const autoLoadModelId = urlModelId && findModel(urlModelId) ? urlModelId : null;
   const lastModelId = localStorage.getItem("chat:lastModelId");
-  if (lastModelId && findModel(lastModelId)) modelSelect.value = lastModelId;
+  const preselectId = autoLoadModelId ?? (lastModelId && findModel(lastModelId) ? lastModelId : null);
+  if (preselectId) modelSelect.value = preselectId;
 
   const { WebLLM } = await import("./webllm-bundle.js");
   const { loadSelectedModel } = await import("./chat-models.js");
@@ -20,6 +27,12 @@ export async function runChatPage() {
   // State exposed to subsequent tasks via closure (Task 5+ will reference these).
   let engine = null;
   let loadedModel = null;
+  // The engine assigns its own auto-generated handle id at load time
+  // (see `WebLLM.registerModelHandle`); the catalog id from `model.id`
+  // is just a display label. `createConversation` keys off the engine
+  // handle id, so we keep the loaded handle here and pass `loadedHandleId`
+  // (not `loadedModel.id`) to all engine APIs.
+  let loadedHandleId = null;
 
   /**
    * Load the model with id `id`. Disposes any prior engine. Returns
@@ -34,6 +47,7 @@ export async function runChatPage() {
       try { await engine.shutdown?.(); } catch (_e) { /* tolerate */ }
       engine = null;
       loadedModel = null;
+      loadedHandleId = null;
       sendBtn.disabled = true;
     }
     loadCard.hidden = false;
@@ -43,15 +57,14 @@ export async function runChatPage() {
       engine = await WebLLM.init({
         memoryBudget: 2_000_000_000,
         maxConversations: 4,
-        // Worker mode keeps the WASM heap off the main thread so it
-        // doesn't compete with V8 / DOM / page JS for address space —
-        // required for 4B+ models to load without aborts on Chrome.
         worker: true,
       });
-      await loadSelectedModel(model, engine, (pct, mb, totalMb) => {
+      const loadResult = await loadSelectedModel(model, engine, (pct, mb, totalMb) => {
         loadCard.textContent = `Loading ${model.name}: ${(pct * 100).toFixed(0)}% (${mb.toFixed(1)} / ${totalMb.toFixed(1)} MB)`;
       });
       loadedModel = model;
+      loadedHandleId = loadResult?.handle?.id;
+      if (!loadedHandleId) throw new Error("loadSelectedModel returned no handle.id");
       localStorage.setItem("chat:lastModelId", model.id);
       if (model.vramMB > 5000) {
         loadCard.innerHTML = `Loaded ${model.name} (${model.defaultQuant}, ctx ${model.contextLength}) <span class="pill amber">heavy: ${model.vramMB} MB — tight on 16 GB tier with Three.js</span>`;
@@ -63,9 +76,11 @@ export async function runChatPage() {
       if (settingsApi) settingsApi.close();
       return { success: true };
     } catch (e) {
+      console.error("[chat-page] load failed:", e);
       loadCard.textContent = `Load failed: ${e.message}`;
       engine = null;
       loadedModel = null;
+      loadedHandleId = null;
       return { success: false, error: e };
     }
   }
@@ -126,7 +141,7 @@ export async function runChatPage() {
       const parts = [];
       if (c.systemPrompt) parts.push(c.systemPrompt);
       for (const m of c.messages) parts.push(m.content);
-      return engine.tokenize(loadedModel.id, parts.join("\n")).length;
+      return engine.tokenize(loadedHandleId, parts.join("\n")).length;
     } catch {
       // Fallback if tokenize isn't available (older bundle / model
       // not loaded yet): chars/4 is a reasonable order-of-magnitude
@@ -190,7 +205,7 @@ export async function runChatPage() {
 
   async function ensureConversation() {
     if (conv) return conv;
-    conv = await createChatConversation(engine, loadedModel, systemPromptEl.value);
+    conv = await createChatConversation(engine, loadedHandleId, loadedModel, systemPromptEl.value);
     return conv;
   }
 
@@ -320,6 +335,7 @@ export async function runChatPage() {
     loadModelById,
     getEngine: () => engine,
     getLoadedModel: () => loadedModel,
+    getLoadedHandleId: () => loadedHandleId,
     appendBubble,
     renderAssistantInto,
     createChatConversation,
@@ -327,6 +343,13 @@ export async function runChatPage() {
     refreshContext,
   });
   console.log("[chat-page] shell mounted");
+
+  // `?model=<id>` URL param auto-loads after the shell is fully wired,
+  // bypassing the restore card (URL intent overrides any prior session).
+  if (autoLoadModelId) {
+    console.log("[chat-page] auto-loading model from URL param:", autoLoadModelId);
+    await loadModelById(autoLoadModelId);
+  }
 }
 
 function renderShell() {

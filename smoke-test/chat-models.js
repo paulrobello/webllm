@@ -63,7 +63,17 @@ export async function loadSelectedModel(model, engine, onProgress) {
     url,
     model.id,
     undefined,
-    { flashAttn: true }, // required for createConversation
+    {
+      priority: 0,
+      flashAttn: true, // FA required for createConversation
+      // Clamp the KV cache to the chat-page-registered contextLength.
+      // Without this, the engine sizes the cache to the GGUF max (which
+      // for Qwen3 GGUFs is ~40960 with rope_scaling) — a single per-
+      // layer K tensor at head_dim=128, n_kv_heads=8, F16 then becomes
+      // 80 MiB and trips the `ggml-alloc.c:82` "not enough space in the
+      // buffer" assertion against `maxStorageBufferBindingSize`.
+      contextLength: model.contextLength,
+    },
     (received, total) => {
       onProgress(received / total, received / 1e6, total / 1e6);
     },
