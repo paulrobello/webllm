@@ -174,6 +174,17 @@ export async function runChatPage() {
   const clearBtn = document.getElementById("chat-clear");
   const systemPromptEl = document.getElementById("chat-system-prompt");
   const systemApplyBtn = document.getElementById("chat-system-apply");
+
+  // Restore + persist the system prompt independently of any saved
+  // conversation. Stored separately from `chat:current:meta` (which only
+  // exists while a conversation is active) so a user-typed prompt
+  // survives reloads and "Discard" / "Clear conversation" actions.
+  const SYSTEM_PROMPT_KEY = "chat:systemPrompt";
+  const savedSystemPrompt = localStorage.getItem(SYSTEM_PROMPT_KEY);
+  if (savedSystemPrompt !== null) systemPromptEl.value = savedSystemPrompt;
+  systemPromptEl.addEventListener("input", () => {
+    localStorage.setItem(SYSTEM_PROMPT_KEY, systemPromptEl.value);
+  });
   const exportBtn = document.getElementById("chat-export");
 
   async function exportTranscript() {
