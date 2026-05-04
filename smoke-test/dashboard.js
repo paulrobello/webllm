@@ -37,6 +37,11 @@ const state = {
 	// here automatically — no parallel update in this file. Populated once
 	// at page load (kickoff below); empty Map until the fetch resolves.
 	modelRegistry: new Map(),
+	// Active multi-model bench session (envelope from eval/bench.ts).
+	// `eval_started` events tagged with this sessionId roll up into the
+	// overall progress bar. Cleared on `bench_session_complete` or `reset`.
+	// Map<sessionId, { startedAt, totalModels, totalTasks?, modelIds, profileNames?, evalTemperature?, label?, evalIds: Set<evalId> }>
+	benchSessionsBySessionId: new Map(),
 };
 
 // ── persisted filter / sort state ─────────────────────────────────
@@ -129,6 +134,8 @@ function connect() {
 		"eval_task_complete",
 		"eval_complete",
 		"eval_failed",
+		"bench_session_started",
+		"bench_session_complete",
 		"reset",
 	];
 	for (const kind of kinds) {
@@ -197,6 +204,12 @@ function handleEvent(ev) {
 					completedTasks: 0,
 					passedTasks: 0,
 				});
+				if (evt.payload.sessionId) {
+					const session = state.benchSessionsBySessionId.get(
+						evt.payload.sessionId,
+					);
+					if (session) session.evalIds.add(evt.payload.evalId);
+				}
 				renderRunning();
 				renderEvals();
 				break;
@@ -231,6 +244,22 @@ function handleEvent(ev) {
 				renderRunning();
 				renderEvals();
 				break;
+			case "bench_session_started":
+				if (typeof evt.seq === "number") lastSeq = Math.max(lastSeq, evt.seq);
+				state.benchSessionsBySessionId.set(evt.payload.sessionId, {
+					...evt.payload,
+					evalIds: new Set(),
+				});
+				renderEvals();
+				break;
+			case "bench_session_complete":
+				if (typeof evt.seq === "number") lastSeq = Math.max(lastSeq, evt.seq);
+				// Drop the session from the active map. The dashboard's overall
+				// progress bar represents *active* runs; once a session ends, the
+				// per-model rollup in the existing eval table is the right view.
+				state.benchSessionsBySessionId.delete(evt.payload.sessionId);
+				renderEvals();
+				break;
 			case "reset":
 				if (typeof evt.seq === "number") lastSeq = Math.max(lastSeq, evt.seq);
 				state.runsByRunId.clear();
@@ -238,6 +267,7 @@ function handleEvent(ev) {
 				state.failedByRunId.clear();
 				state.evalsByEvalId.clear();
 				state.runningEvalsByEvalId.clear();
+				state.benchSessionsBySessionId.clear();
 				state.selected.clear();
 				state.renderedDimModels.clear();
 				state.evalSeries = [];
@@ -2483,6 +2513,96 @@ function renderCompareButton() {
 
 // ── evals ────────────────────────────────────────────────────────
 
+/**
+ * Multi-session is unusual but legal — pick the most recently started.
+ * Sessions arrive in arrival order; the dashboard never deletes a session
+ * out of order, so iterating the Map and taking the last entry is fine.
+ */
+function pickActiveSession() {
+	if (state.benchSessionsBySessionId.size === 0) return null;
+	let active = null;
+	for (const session of state.benchSessionsBySessionId.values()) active = session;
+	return active;
+}
+
+function renderBenchSessionProgress(session) {
+	const wrap = document.getElementById("bench-session-progress");
+	if (!wrap) return;
+	if (!session) {
+		wrap.hidden = true;
+		return;
+	}
+	wrap.hidden = false;
+
+	// Sum across every eval the session has spawned: completed evals from
+	// the historical map (full totalTasks each) + active running evals
+	// (their live completedTasks). Models that haven't started yet
+	// contribute their declared totalTasks once known via session.totalTasks
+	// or the inferred per-model totals; otherwise the bar shows fraction
+	// of started-models complete.
+	let completedTasks = 0;
+	let totalTasksFromEvals = 0;
+	let modelsCompleted = 0;
+	for (const evalId of session.evalIds) {
+		const completedEval = state.evalsByEvalId.get(evalId);
+		if (completedEval) {
+			completedTasks += completedEval.totalTasks ?? 0;
+			totalTasksFromEvals += completedEval.totalTasks ?? 0;
+			modelsCompleted++;
+			continue;
+		}
+		const running = state.runningEvalsByEvalId.get(evalId);
+		if (running) {
+			completedTasks += running.completedTasks ?? 0;
+			totalTasksFromEvals += running.totalTasks ?? 0;
+		}
+	}
+	// Prefer the session's pre-declared totalTasks if it shipped one — that
+	// includes models whose `eval_started` hasn't fired yet. Fall back to
+	// the sum across started evals when not declared.
+	const totalTasks =
+		typeof session.totalTasks === "number" && session.totalTasks > 0
+			? session.totalTasks
+			: totalTasksFromEvals;
+
+	const totalModels = session.totalModels ?? session.modelIds?.length ?? 0;
+	const pct =
+		totalTasks > 0
+			? Math.min(100, (completedTasks / totalTasks) * 100)
+			: totalModels > 0
+				? (modelsCompleted / totalModels) * 100
+				: 0;
+
+	const labelEl = document.getElementById("bench-session-label");
+	const fillEl = document.getElementById("bench-session-progress-fill");
+	const textEl = document.getElementById("bench-session-progress-text");
+	const progressEl = wrap.querySelector(".eval-progress");
+	const tempLabel =
+		typeof session.evalTemperature === "number"
+			? ` · temp ${session.evalTemperature}`
+			: "";
+	if (labelEl) {
+		labelEl.textContent = `bench session · ${modelsCompleted}/${totalModels} model${totalModels === 1 ? "" : "s"}${tempLabel}`;
+	}
+	if (fillEl) fillEl.style.width = `${pct.toFixed(1)}%`;
+	if (textEl) {
+		textEl.textContent =
+			totalTasks > 0
+				? `${completedTasks}/${totalTasks} tasks · ${pct.toFixed(0)}%`
+				: `${modelsCompleted}/${totalModels} models · ${pct.toFixed(0)}%`;
+	}
+	if (progressEl) {
+		progressEl.setAttribute(
+			"aria-valuemax",
+			String(totalTasks > 0 ? totalTasks : totalModels),
+		);
+		progressEl.setAttribute(
+			"aria-valuenow",
+			String(totalTasks > 0 ? completedTasks : modelsCompleted),
+		);
+	}
+}
+
 function renderEvals() {
 	const evals = Array.from(state.evalsByEvalId.values());
 	const running = Array.from(state.runningEvalsByEvalId.values());
@@ -2500,10 +2620,17 @@ function renderEvals() {
 	});
 	countEl.textContent = String(accuracyEvals.length);
 
-	if (running.length > 0) {
-		const r = running[0];
+	const activeSession = pickActiveSession();
+	renderBenchSessionProgress(activeSession);
+
+	if (running.length > 0 || activeSession) {
 		progressWrap.hidden = false;
-		progressLabel.textContent = `${r.modelId} · ${r.label ?? "all"} · ${r.completedTasks}/${r.totalTasks} tasks (${r.passedTasks} passing)`;
+		if (running.length > 0) {
+			const r = running[0];
+			progressLabel.textContent = `${r.modelId} · ${r.label ?? "all"} · ${r.completedTasks}/${r.totalTasks} tasks (${r.passedTasks} passing)`;
+		} else {
+			progressLabel.textContent = "";
+		}
 	} else {
 		progressWrap.hidden = true;
 	}

@@ -225,6 +225,24 @@ header h1 {
 	50% { opacity: 1; }
 }
 
+#bench-session-progress {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	align-items: stretch;
+	min-width: 240px;
+}
+
+#bench-session-progress .eval-progress {
+	flex: 1 1 auto;
+	height: 16px;
+}
+
+#bench-session-label {
+	font-size: 11px;
+	color: var(--muted);
+}
+
 /* ── bar chart ────────────────────────────────────── */
 
 .legend {

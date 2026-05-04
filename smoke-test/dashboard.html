@@ -32,6 +32,13 @@
   <div class="panel-head">
     <h2>Accuracy &amp; tool-calling <span id="eval-count" class="dim">0</span></h2>
     <div class="legend" id="eval-progress-wrap" hidden>
+      <div id="bench-session-progress" hidden>
+        <div id="bench-session-label" class="dim"></div>
+        <div class="eval-progress" role="progressbar" aria-valuemin="0">
+          <div class="eval-progress-fill" id="bench-session-progress-fill" style="width:0%"></div>
+          <div class="eval-progress-label" id="bench-session-progress-text"></div>
+        </div>
+      </div>
       <span id="eval-progress-label" class="dim"></span>
     </div>
   </div>
