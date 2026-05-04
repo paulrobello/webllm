@@ -65,6 +65,13 @@ export async function maybeOfferRestore(ctx) {
   document.getElementById("chat-restore-no").onclick = async () => {
     await clearCurrent();
     ctx.restoreCard.hidden = true;
+    // The page-mount auto-load was suppressed because a restore card
+    // was offered (resume would load the model itself). On Discard the
+    // user wants a fresh chat with the dropdown's preselected model —
+    // load it now so Send is enabled without an extra dropdown click.
+    if (!ctx.getEngine() && ctx.modelSelect.value) {
+      await ctx.loadModelById(ctx.modelSelect.value);
+    }
   };
   document.getElementById("chat-restore-yes").onclick = async () => {
     ctx.restoreCard.hidden = true;
