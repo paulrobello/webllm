@@ -52,6 +52,94 @@ export async function runChatPage() {
       loadedModel = null;
     }
   });
+
+  const { createChatConversation, disposeChatConversation, sendTurn } =
+    await import("./chat-conversation.js");
+
+  const transcript = document.getElementById("chat-transcript");
+  const input = document.getElementById("chat-input");
+  const stopBtn = document.getElementById("chat-stop");
+  const clearBtn = document.getElementById("chat-clear");
+  const systemPromptEl = document.getElementById("chat-system-prompt");
+  const systemApplyBtn = document.getElementById("chat-system-apply");
+
+  let conv = null;
+  let abortController = null;
+
+  async function ensureConversation() {
+    if (conv) return conv;
+    conv = await createChatConversation(engine, loadedModel, systemPromptEl.value);
+    return conv;
+  }
+
+  async function clearConversation() {
+    if (!conv) return;
+    await disposeChatConversation(engine, conv);
+    conv = null;
+    transcript.innerHTML = "";
+    clearBtn.disabled = true;
+  }
+
+  function appendBubble(role, text) {
+    const div = document.createElement("div");
+    div.className = `chat-msg ${role}`;
+    div.textContent = text;
+    transcript.appendChild(div);
+    transcript.scrollTop = transcript.scrollHeight;
+    return div;
+  }
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text || !engine || !loadedModel) return;
+    input.value = "";
+    appendBubble("user", text);
+    const assistantBubble = appendBubble("assistant", "");
+    await ensureConversation();
+
+    abortController = new AbortController();
+    stopBtn.hidden = false;
+    sendBtn.disabled = true;
+
+    await sendTurn({
+      engine,
+      conv,
+      userText: text,
+      config: {},
+      signal: abortController.signal,
+      onChunk: (_t, totalText) => { assistantBubble.textContent = totalText; },
+      onDone: (m) => {
+        if (m.stopped && m.text === "") {
+          assistantBubble.classList.add("stopped");
+          assistantBubble.textContent = "[stopped, no reply]";
+        }
+        console.log("[chat-page] turn done", m);
+      },
+      onError: (e) => {
+        assistantBubble.classList.add("error");
+        assistantBubble.textContent = `Error: ${e.message}`;
+      },
+    });
+
+    abortController = null;
+    stopBtn.hidden = true;
+    sendBtn.disabled = false;
+    clearBtn.disabled = false;
+  }
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void send();
+    }
+  });
+  sendBtn.addEventListener("click", () => void send());
+  stopBtn.addEventListener("click", () => abortController?.abort());
+  clearBtn.addEventListener("click", () => void clearConversation());
+  systemApplyBtn.addEventListener("click", async () => {
+    if (conv && conv.messages.length > 0 && !confirm("Discard current conversation?")) return;
+    await clearConversation();
+  });
   console.log("[chat-page] shell mounted");
 }
 
