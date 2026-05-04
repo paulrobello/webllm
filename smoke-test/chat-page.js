@@ -59,6 +59,46 @@ export async function runChatPage() {
     await import("./chat-conversation.js");
   const { renderAssistantInto } = await import("./chat-render.js");
   const { renderSettingsPanel } = await import("./chat-settings.js");
+  const {
+    applyContextBar, formatLastTurn, formatSession,
+    newSessionTotals, addTurn, renderSparkline,
+  } = await import("./chat-metrics.js");
+
+  const ctxBar = document.createElement("span");
+  ctxBar.className = "chat-bar";
+  const ctxBarInner = document.createElement("div");
+  ctxBar.appendChild(ctxBarInner);
+  const ctxPill = document.getElementById("chat-status-context");
+  ctxPill.prepend(ctxBar, " ");
+
+  const lastPill = document.getElementById("chat-status-last");
+  const sessionPill = document.getElementById("chat-status-session");
+  const sparklineEl = document.getElementById("chat-sparkline");
+  const sparklineCanvas = sparklineEl.querySelector("canvas");
+  const sparklineToggle = document.getElementById("chat-sparkline-toggle");
+  sparklineToggle.addEventListener("click", (e) => {
+    e.preventDefault();
+    sparklineEl.classList.toggle("open");
+    if (sparklineEl.classList.contains("open")) renderSparkline(sparklineCanvas, session.history);
+  });
+
+  let session = newSessionTotals();
+
+  function refreshContext() {
+    const used = conv ? estimateContextTokens(conv) : 0;
+    const max = loadedModel?.contextLength ?? 0;
+    applyContextBar(ctxBarInner, ctxPill, used, max);
+  }
+
+  function estimateContextTokens(c) {
+    // Without per-handle KV introspection in the public API, estimate from
+    // total chars / 4 — close enough for the bar; refined later if the
+    // engine surfaces a token-count getter.
+    let chars = (c.systemPrompt || "").length;
+    for (const m of c.messages) chars += m.content.length;
+    return Math.ceil(chars / 4);
+  }
+
   const settingsPanel = document.getElementById("chat-settings-panel");
   const settingsToggle = document.getElementById("chat-settings-toggle");
 
@@ -97,6 +137,10 @@ export async function runChatPage() {
     conv = null;
     transcript.innerHTML = "";
     clearBtn.disabled = true;
+    session = newSessionTotals();
+    lastPill.textContent = "last —";
+    sessionPill.textContent = "session —";
+    refreshContext();
   }
 
   function appendBubble(role, text) {
@@ -149,6 +193,11 @@ export async function runChatPage() {
           scheduleRender(m.text);
         }
         console.log("[chat-page] turn done", m);
+        addTurn(session, m);
+        lastPill.textContent = formatLastTurn(m);
+        sessionPill.textContent = formatSession(session);
+        refreshContext();
+        if (sparklineEl.classList.contains("open")) renderSparkline(sparklineCanvas, session.history);
       },
       onError: (e) => {
         assistantBubble.classList.add("error");
