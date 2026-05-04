@@ -114,6 +114,26 @@ function leadingMessagesMatch(
 }
 
 /**
+ * Append a chat-template-specific turn-end token to `genConfig.stopTokens`
+ * when the tokenizer recognises it. Used to fix architectures whose GGUF
+ * declares an EOS that the model rarely emits in chat (e.g. Phi-3.5
+ * declares `<|endoftext|>` but generates `<|end|>` to terminate turns).
+ */
+function addChatStopToken(
+	genConfig: InternalGenerationOptions,
+	tokenizer: Tokenizer,
+	config: CompletionConfig | undefined,
+	tokenText: string,
+): void {
+	const id = tokenizer.getId(tokenText);
+	if (id === undefined) return;
+	const existing = genConfig.stopTokens ?? config?.stopTokenIds ?? [];
+	const next = [...existing];
+	if (!next.includes(id)) next.push(id);
+	genConfig.stopTokens = next;
+}
+
+/**
  * Heap-margin threshold for routing between the wasm32 and wasm64 binaries.
  *
  * 3.5 GiB = 10% under the wasm32 4 GiB heap cap. Models at or below this
@@ -504,6 +524,16 @@ export class WebLLM {
 					genConfig.suppressWhitespaceOnlyAfterThinking = true;
 					genConfig.requireLeadingWhitespaceAfterThinking = true;
 				}
+			} else if (
+				String(entry.hyperparams.architecture) === "phi3" ||
+				detectChatTemplate(chatTemplate ?? "") === "phi3"
+			) {
+				// Phi-3 / Phi-3.5 emit `<|end|>` to terminate every assistant
+				// turn. The GGUF's declared EOS is `<|endoftext|>` (rarely
+				// produced in chat), so without this the model runs to
+				// maxTokens and the response wanders through training-data
+				// completions after the real reply ends.
+				addChatStopToken(genConfig, tokenizer, config, "<|end|>");
 			}
 		}
 
@@ -925,6 +955,14 @@ export class WebLLM {
 					genConfig.suppressWhitespaceOnlyAfterThinking = true;
 					genConfig.requireLeadingWhitespaceAfterThinking = true;
 				}
+			} else if (
+				String(entry.hyperparams.architecture) === "phi3" ||
+				detectChatTemplate(tokenizer.options.chatTemplate ?? "") === "phi3"
+			) {
+				// Phi-3 / Phi-3.5: stop on `<|end|>` (see same-named block in
+				// chatCompletion). Without this the conv path also wanders
+				// through training data after the real reply ends.
+				addChatStopToken(genConfig, tokenizer, config, "<|end|>");
 			}
 
 			// 10. Decode loop — drive generateTextStream with the last prompt
