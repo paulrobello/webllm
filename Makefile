@@ -3,6 +3,7 @@
         bench bench-perf bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full \
         smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench mem64-probe \
+        chat-open chat-run \
         dashboard-serve dashboard-stop dashboard-db-reset import-reports agentchrome-stop stop-all \
         run-all help
 
@@ -185,6 +186,17 @@ smoke-run: smoke-test ## Build, serve in background, open browser (Ctrl-C to sto
 	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
 	@bun run eval/smoke-serve.ts --port $(SMOKE_PORT) &
 	@sleep 1 && open http://localhost:$(SMOKE_PORT)/real-model.html
+	@echo "Press Ctrl-C to stop the server."
+	@wait
+
+chat-open: smoke-test ## Build + open chat page in default browser (assumes server already running)
+	open http://localhost:$(SMOKE_PORT)/chat.html
+
+chat-run: smoke-test ## Build, serve in background, open chat page (Ctrl-C to stop)
+	@echo "Serving chat page on http://localhost:$(SMOKE_PORT)/chat.html ..."
+	@lsof -ti:$(SMOKE_PORT) | xargs kill -9 2>/dev/null || true
+	@bun run eval/smoke-serve.ts --port $(SMOKE_PORT) &
+	@sleep 1 && open http://localhost:$(SMOKE_PORT)/chat.html
 	@echo "Press Ctrl-C to stop the server."
 	@wait
 

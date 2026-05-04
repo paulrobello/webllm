@@ -7,9 +7,17 @@ single-slot conversation persistence across reloads.
 ## Run
 
 ```bash
-make smoke-serve
+make chat-run
 ```
-Open `http://localhost:8031/chat.html` in Chrome.
+Builds the smoke-test bundle, starts the server in the background, and
+opens `http://localhost:8031/chat.html` in your default browser. Ctrl-C
+to stop.
+
+Other entry points:
+- `make chat-open` — opens the page (assumes a server is already running
+  via `make smoke-serve`).
+- `make smoke-serve` — starts the server in the foreground; navigate to
+  `http://localhost:8031/chat.html` manually.
 
 ## Manual smoke checklist
 

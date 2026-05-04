@@ -278,7 +278,8 @@ The smoke-test page accepts URL overrides for `thinking`, `ctx`, `max`,
 `smoke-test/chat.html` provides a focused multi-turn chat surface
 against the registered chat-model fleet, with live context / TTFT /
 decode metrics, a settings panel, and single-slot persistence across
-reloads. Run `make smoke-serve` and open
+reloads. Run `make chat-run` to build, serve, and open the page in
+your default browser; or `make smoke-serve` and navigate manually to
 `http://localhost:8031/chat.html`. See [`docs/CHAT_PAGE.md`](docs/CHAT_PAGE.md)
 for the manual smoke checklist.
 
