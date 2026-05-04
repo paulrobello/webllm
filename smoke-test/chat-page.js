@@ -55,6 +55,7 @@ export async function runChatPage() {
 
   const { createChatConversation, disposeChatConversation, sendTurn } =
     await import("./chat-conversation.js");
+  const { renderAssistantInto } = await import("./chat-render.js");
 
   const transcript = document.getElementById("chat-transcript");
   const input = document.getElementById("chat-input");
@@ -94,7 +95,21 @@ export async function runChatPage() {
     if (!text || !engine || !loadedModel) return;
     input.value = "";
     appendBubble("user", text);
-    const assistantBubble = appendBubble("assistant", "");
+    const assistantBubble = document.createElement("div");
+    assistantBubble.className = "chat-msg assistant";
+    transcript.appendChild(assistantBubble);
+    transcript.scrollTop = transcript.scrollHeight;
+
+    let renderQueued = false;
+    function scheduleRender(t) {
+      if (renderQueued) return;
+      renderQueued = true;
+      requestAnimationFrame(async () => {
+        renderQueued = false;
+        await renderAssistantInto(assistantBubble, t);
+        transcript.scrollTop = transcript.scrollHeight;
+      });
+    }
     await ensureConversation();
 
     abortController = new AbortController();
@@ -107,11 +122,13 @@ export async function runChatPage() {
       userText: text,
       config: {},
       signal: abortController.signal,
-      onChunk: (_t, totalText) => { assistantBubble.textContent = totalText; },
+      onChunk: (_t, totalText) => scheduleRender(totalText),
       onDone: (m) => {
         if (m.stopped && m.text === "") {
           assistantBubble.classList.add("stopped");
           assistantBubble.textContent = "[stopped, no reply]";
+        } else {
+          scheduleRender(m.text);
         }
         console.log("[chat-page] turn done", m);
       },

@@ -1,0 +1,3 @@
+- marked.min.js — marked@12 from jsdelivr (Mar 2024)
+- highlight.min.js — @highlightjs/cdn-assets@11
+- highlight-common.min.js — javascript pack from @highlightjs/cdn-assets@11
