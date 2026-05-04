@@ -57,21 +57,31 @@ describe("prefillTileSize ctor option", () => {
 });
 
 describe("prefillTileSize heuristic default", () => {
-	test("layerCount>=32 AND embeddingLength>=4096 → 128", () => {
-		const hp = {
-			...STUB_HP,
-			layerCount: 32,
-			embeddingLength: 4096,
-		} as ModelHyperparams;
-		const inf = new ModelInference(STUB_WASM, hp);
-		expect(inf.prefillTileSize).toBe(128);
+	test("layerCount>=32 → 128 regardless of embeddingLength", () => {
+		// Boundary at 32 layers (Mistral 7B / Llama-3.1-8B canonical).
+		const cases: Array<{ layerCount: number; embeddingLength: number }> = [
+			{ layerCount: 32, embeddingLength: 4096 }, // Mistral 7B / Llama-3.1-8B
+			{ layerCount: 36, embeddingLength: 2560 }, // qwen3-4b — was bypassed by the AND gate, hits §22 abort on tc-005
+			{ layerCount: 36, embeddingLength: 4096 }, // qwen3-8b
+			{ layerCount: 32, embeddingLength: 2048 }, // hypothetical 32-layer model with smaller emb — still high enough graph pressure
+		];
+		for (const overrides of cases) {
+			const hp = { ...STUB_HP, ...overrides } as ModelHyperparams;
+			const inf = new ModelInference(STUB_WASM, hp);
+			expect(inf.prefillTileSize).toBe(128);
+		}
 	});
 
-	test("either gate fails → 0", () => {
-		const cases: Array<Partial<ModelHyperparams>> = [
-			{ layerCount: 31, embeddingLength: 4096 }, // layer below
-			{ layerCount: 32, embeddingLength: 2048 }, // emb below
-			{ layerCount: 16, embeddingLength: 2048 }, // both below
+	test("layerCount<32 → 0 (no tiling needed)", () => {
+		// Sub-32-layer models stay below the graph allocator's per-tile
+		// budget at the seq lengths the bench exercises. Adding tiling
+		// overhead unnecessarily would just slow them down.
+		const cases: Array<{ layerCount: number; embeddingLength: number }> = [
+			{ layerCount: 28, embeddingLength: 2048 }, // qwen3-1.7b
+			{ layerCount: 28, embeddingLength: 2560 }, // qwen3-4b would have been here if it were 28 layers
+			{ layerCount: 22, embeddingLength: 2048 }, // tinyllama
+			{ layerCount: 16, embeddingLength: 2048 }, // smollm2-1.7b
+			{ layerCount: 31, embeddingLength: 4096 }, // hypothetical just-below boundary
 		];
 		for (const overrides of cases) {
 			const hp = { ...STUB_HP, ...overrides } as ModelHyperparams;

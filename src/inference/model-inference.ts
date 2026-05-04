@@ -128,13 +128,24 @@ export function getRopeModeForArchitecture(
 /**
  * Compute the default `prefillTileSize` for a model based on hyperparameters.
  *
- * Rule: `layerCount >= 32 AND embeddingLength >= 4096` → 128, else 0.
+ * Rule: `layerCount >= 32` → 128, else 0.
  *
- * Maps directly to the §22 abort signature observed in
+ * Maps to the §22 abort signature observed in
  * `eval/reports/prefill-tiling-2026-04-27/00-phase0-diagnostic.txt`:
- * "32 layers × seq=512 of F32 intermediates" exceeds the host-side ggml graph
- * allocator budget at `ggml-alloc.c:82`. Either gate alone keeps the per-tile
- * working set below the budget on every currently-registered model.
+ * "ggml_tallocr_alloc: not enough space in the buffer" at ggml-alloc.c:82
+ * during `backendAllocCtxTensors`. F32 intermediates scale with
+ * layers × seq × emb; layer count is the dominant predictor of per-tile
+ * graph allocator pressure, so the gate keys off layers alone.
+ *
+ * Originally an AND gate (`layerCount >= 32 AND embeddingLength >= 4096`),
+ * but qwen3-4B (36 layers × 2560 emb) reproducibly aborted on tc-005's
+ * 3-tool prompt despite being below the emb gate. The 36-layer count is
+ * exactly the §22 abort regime — at seq≈800 (tc-005's tool-heavy
+ * prefill) the F32 intermediates total 295 MB, larger than the
+ * Mistral-7B-at-seq-512 case the heuristic was originally tuned for.
+ * Dropping the emb gate keeps qwen3-4B inside the tiling envelope while
+ * still leaving sub-32-layer models (qwen3-1.7B, tinyllama, smollm2)
+ * untiled — they stay well within the graph budget.
  *
  * Override surface (ctor opt / `?prefillTile=` / `--prefill-tile`) wins
  * unconditionally — including the explicit-zero force-disable path.
@@ -142,7 +153,7 @@ export function getRopeModeForArchitecture(
  * Spec: `docs/superpowers/specs/2026-04-28-prefill-tile-heuristic-design.md`.
  */
 export function computeDefaultPrefillTileSize(hp: ModelHyperparams): number {
-	return hp.layerCount >= 32 && hp.embeddingLength >= 4096 ? 128 : 0;
+	return hp.layerCount >= 32 ? 128 : 0;
 }
 
 /**
