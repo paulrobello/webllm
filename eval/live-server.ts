@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
+	type BenchSessionCompletePayload,
+	type BenchSessionStartedPayload,
 	type EvalFailedPayload,
 	type EvalStartedPayload,
 	type EvalTaskCompletePayload,
@@ -242,6 +244,80 @@ function validateEvalStarted(body: unknown): EvalStartedPayload {
 		totalTasks: b.totalTasks,
 		dimensions: b.dimensions.map(String),
 		label: typeof b.label === "string" ? b.label : undefined,
+		sessionId:
+			typeof b.sessionId === "string" && b.sessionId.length > 0
+				? b.sessionId
+				: undefined,
+	};
+}
+
+function validateBenchSessionStarted(
+	body: unknown,
+): BenchSessionStartedPayload {
+	const b = body as Partial<BenchSessionStartedPayload> &
+		Record<string, unknown>;
+	if (!b || typeof b !== "object")
+		throw new Error("bench_session_started requires an object body");
+	if (typeof b.sessionId !== "string" || !b.sessionId.length)
+		throw new Error("bench_session_started.sessionId required");
+	if (typeof b.startedAt !== "string" || !b.startedAt.length)
+		throw new Error("bench_session_started.startedAt required");
+	if (typeof b.totalModels !== "number" || !Number.isFinite(b.totalModels))
+		throw new Error("bench_session_started.totalModels required");
+	if (!Array.isArray(b.modelIds))
+		throw new Error("bench_session_started.modelIds must be an array");
+	const evalTemperature =
+		typeof b.evalTemperature === "number" && Number.isFinite(b.evalTemperature)
+			? b.evalTemperature
+			: undefined;
+	const totalTasks =
+		typeof b.totalTasks === "number" && Number.isFinite(b.totalTasks)
+			? b.totalTasks
+			: undefined;
+	return {
+		sessionId: b.sessionId,
+		startedAt: b.startedAt,
+		totalModels: b.totalModels,
+		totalTasks,
+		modelIds: b.modelIds.map(String),
+		profileNames: Array.isArray(b.profileNames)
+			? b.profileNames.map(String)
+			: undefined,
+		evalTemperature,
+		label: typeof b.label === "string" ? b.label : undefined,
+	};
+}
+
+function validateBenchSessionComplete(
+	body: unknown,
+): BenchSessionCompletePayload {
+	const b = body as Partial<BenchSessionCompletePayload> &
+		Record<string, unknown>;
+	if (!b || typeof b !== "object")
+		throw new Error("bench_session_complete requires an object body");
+	if (typeof b.sessionId !== "string" || !b.sessionId.length)
+		throw new Error("bench_session_complete.sessionId required");
+	if (typeof b.completedAt !== "string" || !b.completedAt.length)
+		throw new Error("bench_session_complete.completedAt required");
+	for (const key of [
+		"totalModels",
+		"completedModels",
+		"failedModels",
+	] as const) {
+		if (typeof b[key] !== "number" || !Number.isFinite(b[key] as number))
+			throw new Error(`bench_session_complete.${key} required`);
+	}
+	const overall =
+		typeof b.overall === "number" && Number.isFinite(b.overall)
+			? b.overall
+			: undefined;
+	return {
+		sessionId: b.sessionId,
+		completedAt: b.completedAt,
+		totalModels: b.totalModels as number,
+		completedModels: b.completedModels as number,
+		failedModels: b.failedModels as number,
+		overall,
 	};
 }
 
@@ -543,6 +619,24 @@ export function createLiveServer(options: ServerOptions) {
 						broadcaster.broadcast(stamped);
 						return jsonResponse({ ok: true, seq: stamped.seq });
 					}
+					if (kind === "bench_session_started") {
+						const payload = validateBenchSessionStarted(body);
+						const stamped = store.stampEvent({
+							kind: "bench_session_started",
+							payload,
+						});
+						broadcaster.broadcast(stamped);
+						return jsonResponse({ ok: true, seq: stamped.seq });
+					}
+					if (kind === "bench_session_complete") {
+						const payload = validateBenchSessionComplete(body);
+						const stamped = store.stampEvent({
+							kind: "bench_session_complete",
+							payload,
+						});
+						broadcaster.broadcast(stamped);
+						return jsonResponse({ ok: true, seq: stamped.seq });
+					}
 					if (kind === "reset") {
 						const reason =
 							typeof (body as { reason?: unknown })?.reason === "string"
@@ -557,7 +651,7 @@ export function createLiveServer(options: ServerOptions) {
 					}
 					return errorResponse(
 						"unknown_kind",
-						`?kind= must be run_started | run_complete | run_failed | eval_started | eval_task_complete | eval_complete | eval_failed | reset (got ${kind ?? "none"})`,
+						`?kind= must be run_started | run_complete | run_failed | eval_started | eval_task_complete | eval_complete | eval_failed | bench_session_started | bench_session_complete | reset (got ${kind ?? "none"})`,
 						400,
 					);
 				} catch (err) {

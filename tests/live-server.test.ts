@@ -296,6 +296,82 @@ test("POST /ingest?kind=eval_started validates payload", async () => {
 	expect(err.code).toBe("bad_request");
 });
 
+test("POST /ingest?kind=eval_started accepts optional sessionId", async () => {
+	const good = await fetch(
+		`http://127.0.0.1:${PORT}/ingest?kind=eval_started`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				evalId: "e-session-1",
+				modelId: "qwen3-0.6b-q4f16",
+				totalTasks: 1,
+				dimensions: ["tool-calling"],
+				sessionId: "sess-abc",
+			}),
+		},
+	);
+	expect(good.ok).toBe(true);
+});
+
+test("POST /ingest?kind=bench_session_started round-trips", async () => {
+	const bad = await fetch(
+		`http://127.0.0.1:${PORT}/ingest?kind=bench_session_started`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ sessionId: "s1" }),
+		},
+	);
+	expect(bad.status).toBe(400);
+
+	const good = await fetch(
+		`http://127.0.0.1:${PORT}/ingest?kind=bench_session_started`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				sessionId: "sess-1",
+				startedAt: new Date().toISOString(),
+				totalModels: 3,
+				totalTasks: 108,
+				modelIds: ["a", "b", "c"],
+				profileNames: ["pa", "pb", "pc"],
+				evalTemperature: 0,
+			}),
+		},
+	);
+	expect(good.ok).toBe(true);
+});
+
+test("POST /ingest?kind=bench_session_complete validates payload", async () => {
+	const bad = await fetch(
+		`http://127.0.0.1:${PORT}/ingest?kind=bench_session_complete`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ sessionId: "s1" }),
+		},
+	);
+	expect(bad.status).toBe(400);
+
+	const good = await fetch(
+		`http://127.0.0.1:${PORT}/ingest?kind=bench_session_complete`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				sessionId: "sess-1",
+				completedAt: new Date().toISOString(),
+				totalModels: 3,
+				completedModels: 3,
+				failedModels: 0,
+			}),
+		},
+	);
+	expect(good.ok).toBe(true);
+});
+
 test("GET /models returns sorted registry with architecture + paramsB", async () => {
 	const res = await fetch(`http://127.0.0.1:${PORT}/models`);
 	expect(res.ok).toBe(true);

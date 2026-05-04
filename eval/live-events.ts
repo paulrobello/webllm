@@ -14,7 +14,7 @@ import {
 import type { SmokeRunRecord } from "./smoke-runs.ts";
 import type { EvalReport } from "./types.ts";
 
-export const LIVE_EVENT_SCHEMA_VERSION = 2;
+export const LIVE_EVENT_SCHEMA_VERSION = 3;
 
 export type LiveEventKind =
 	| "snapshot"
@@ -25,6 +25,8 @@ export type LiveEventKind =
 	| "eval_task_complete"
 	| "eval_complete"
 	| "eval_failed"
+	| "bench_session_started"
+	| "bench_session_complete"
 	| "reset";
 
 export interface LiveEventBase {
@@ -75,6 +77,53 @@ export interface EvalStartedPayload {
 	totalTasks: number;
 	dimensions: string[];
 	label?: string;
+	/**
+	 * Set when this eval is part of a multi-model bench session driven by
+	 * `eval/bench.ts`. Lets the dashboard aggregate per-model `eval_*`
+	 * events into an overall progress view across the whole session.
+	 */
+	sessionId?: string;
+}
+
+/**
+ * Bracket events for a multi-model bench session. `bench.ts` mints a
+ * sessionId once at the top of the loop, posts `bench_session_started`
+ * before any model runs, threads the sessionId into each per-model
+ * `eval_started`, and posts `bench_session_complete` when the loop exits
+ * (success or failure). The dashboard uses these to compute overall
+ * progress (model X of Y, task A of B) without having to guess where a
+ * session ends.
+ */
+export interface BenchSessionStartedPayload {
+	sessionId: string;
+	startedAt: string;
+	totalModels: number;
+	/**
+	 * Best-effort total task count across all models. The bench harness
+	 * doesn't always know this up front (it depends on per-model dimension
+	 * filtering), so leave undefined when uncertain — the dashboard then
+	 * falls back to summing `totalTasks` from each `eval_started`.
+	 */
+	totalTasks?: number;
+	modelIds: string[];
+	profileNames?: string[];
+	/**
+	 * Sampling temperature pinned for the accuracy pass. `0` denotes
+	 * greedy. Surfaced so the dashboard can tag the session and prevent
+	 * accidental cross-temperature comparisons in score-over-time charts.
+	 */
+	evalTemperature?: number;
+	label?: string;
+}
+
+export interface BenchSessionCompletePayload {
+	sessionId: string;
+	completedAt: string;
+	totalModels: number;
+	completedModels: number;
+	failedModels: number;
+	/** Optional aggregate summary; dashboard treats absence as "not reported". */
+	overall?: number;
 }
 
 export interface EvalTaskCompletePayload {
@@ -119,6 +168,16 @@ export interface LiveEvalFailedEvent extends LiveEventBase {
 	payload: EvalFailedPayload;
 }
 
+export interface LiveBenchSessionStartedEvent extends LiveEventBase {
+	kind: "bench_session_started";
+	payload: BenchSessionStartedPayload;
+}
+
+export interface LiveBenchSessionCompleteEvent extends LiveEventBase {
+	kind: "bench_session_complete";
+	payload: BenchSessionCompletePayload;
+}
+
 export interface LiveSnapshotEvent extends LiveEventBase {
 	kind: "snapshot";
 	payload: {
@@ -137,6 +196,8 @@ export type LiveEvent =
 	| LiveEvalTaskCompleteEvent
 	| LiveEvalCompleteEvent
 	| LiveEvalFailedEvent
+	| LiveBenchSessionStartedEvent
+	| LiveBenchSessionCompleteEvent
 	| LiveResetEvent
 	| LiveSnapshotEvent;
 
