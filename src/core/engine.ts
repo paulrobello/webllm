@@ -1496,7 +1496,9 @@ export class WebLLM {
 				freeStaging();
 				inference = cembed;
 			} else {
-				const inf = new ModelInference(wasm, parsed.hyperparams);
+				const inf = new ModelInference(wasm, parsed.hyperparams, {
+					flashAttn: !!options?.flashAttn,
+				});
 				inf.loadWeights(ggufCtx, dataSrc);
 				// Free staging BEFORE initKVCache so the model-file-sized
 				// region doesn't share the WASM heap with the ~1 GB KV cache

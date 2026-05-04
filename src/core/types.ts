@@ -21,6 +21,14 @@ export interface ModelLoadOptions {
 	gpuLayers?: number;
 	lightweight?: boolean;
 	/**
+	 * When true, the model is constructed in Flash-Attention KV layout
+	 * (F16 K+V, FA-ready V transpose). REQUIRED for `engine.createConversation`,
+	 * `engine.exportConversation` / `importConversation`, and the prefix-cache
+	 * persistence path. Default `false` (manual-attention mode — F16 K, F32 V,
+	 * compatible with the legacy `chatCompletion(modelId, ...)` path only).
+	 */
+	flashAttn?: boolean;
+	/**
 	 * When true, the model's hidden state (post-`output_norm`, last-token-pooled
 	 * and L2-normalized) is exposed for embedding via `engine.embed()`. Quality
 	 * trades 5-15% vs dedicated retrieval-tuned embedders; acceptable for in-domain
