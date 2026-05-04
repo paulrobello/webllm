@@ -25,9 +25,13 @@
 	--red-bg:        #fde7e7;
 	--red-bar:       #d9534f;
 
-	/* Type stacks */
-	--font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-	--font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+	/* Type stacks. Emoji fallbacks last so codepoints Qwen3 emits as
+	   actual emoji (e.g. 👋, 😊) hit a colour-emoji font instead of
+	   rendering as the OS missing-glyph box (◆ on macOS). */
+	--font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif,
+		"Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+	--font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace,
+		"Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 
 	/* Geometry */
 	--radius:    6px;
