@@ -163,12 +163,20 @@ export async function runChatPage() {
   }
 
   function estimateContextTokens(c) {
-    // Without per-handle KV introspection in the public API, estimate from
-    // total chars / 4 — close enough for the bar; refined later if the
-    // engine surfaces a token-count getter.
-    let chars = (c.systemPrompt || "").length;
-    for (const m of c.messages) chars += m.content.length;
-    return Math.ceil(chars / 4);
+    if (!engine || !loadedModel) return 0;
+    try {
+      const parts = [];
+      if (c.systemPrompt) parts.push(c.systemPrompt);
+      for (const m of c.messages) parts.push(m.content);
+      return engine.tokenize(loadedModel.id, parts.join("\n")).length;
+    } catch {
+      // Fallback if tokenize isn't available (older bundle / model
+      // not loaded yet): chars/4 is a reasonable order-of-magnitude
+      // estimate for the bar.
+      let chars = (c.systemPrompt || "").length;
+      for (const m of c.messages) chars += m.content.length;
+      return Math.ceil(chars / 4);
+    }
   }
 
   const settingsPanel = document.getElementById("chat-settings-panel");

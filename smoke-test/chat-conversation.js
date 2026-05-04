@@ -2,8 +2,10 @@
 
 /**
  * Create a fresh conversation handle bound to the currently loaded
- * model + system prompt. The system prompt is injected as the first
- * `system` message on every send call (the engine deduplicates).
+ * model + system prompt. The system prompt is re-sent as the first
+ * `system` message on every send so the engine's longest-shared-token-
+ * prefix walk against the prior KV snapshot succeeds (KV reuse depends
+ * on identical prompt tokens).
  */
 export async function createChatConversation(engine, model, systemPrompt) {
   const handle = await engine.createConversation(model.id, {
