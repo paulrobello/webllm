@@ -21,16 +21,14 @@ export async function runChatPage() {
   let engine = null;
   let loadedModel = null;
 
-  modelSelect.addEventListener("change", async () => {
-    if (conv && conv.messages.length > 0 && !confirm("Discard current conversation?")) {
-      // Revert the dropdown to the loaded model id (or empty if nothing loaded yet).
-      modelSelect.value = loadedModel?.id ?? "";
-      return;
-    }
-    const id = modelSelect.value;
-    if (!id) return;
+  /**
+   * Load the model with id `id`. Disposes any prior engine. Returns
+   * `{ success: true }` on success, `{ success: false, error }` on
+   * failure (the load card surfaces the error message either way).
+   */
+  async function loadModelById(id) {
     const model = findModel(id);
-    if (!model) return;
+    if (!model) return { success: false, error: new Error(`unknown model id: ${id}`) };
 
     if (engine) {
       try { await engine.shutdown?.(); } catch (_e) { /* tolerate */ }
@@ -59,12 +57,24 @@ export async function runChatPage() {
       }
       sendBtn.disabled = false;
       rebuildSettings();
-      if (settingsApi) settingsApi.close(); // collapsed by default
+      if (settingsApi) settingsApi.close();
+      return { success: true };
     } catch (e) {
       loadCard.textContent = `Load failed: ${e.message}`;
       engine = null;
       loadedModel = null;
+      return { success: false, error: e };
     }
+  }
+
+  modelSelect.addEventListener("change", async () => {
+    if (conv && conv.messages.length > 0 && !confirm("Discard current conversation?")) {
+      modelSelect.value = loadedModel?.id ?? "";
+      return;
+    }
+    const id = modelSelect.value;
+    if (!id) return;
+    await loadModelById(id);
   });
 
   const { createChatConversation, disposeChatConversation, sendTurn } =
@@ -75,66 +85,11 @@ export async function runChatPage() {
     applyContextBar, formatLastTurn, formatSession,
     newSessionTotals, addTurn, renderSparkline,
   } = await import("./chat-metrics.js");
-  const { saveCurrent, loadMetadata, loadBlob, clearCurrent, isCompatibleMeta, relativeTime } =
-    await import("./chat-persistence.js");
+  const { saveCurrent, clearCurrent } = await import("./chat-persistence.js");
   const { listChatModels } = await import("./chat-models.js");
+  const { maybeOfferRestore } = await import("./chat-restore.js");
 
   const restoreCard = document.getElementById("chat-restore-card");
-
-  async function maybeOfferRestore() {
-    const meta = loadMetadata();
-    if (!meta) return;
-    const known = new Set(listChatModels().map((m) => m.id));
-    if (!isCompatibleMeta(meta, known)) { await clearCurrent(); return; }
-    const model = findModel(meta.modelId);
-    restoreCard.hidden = false;
-    restoreCard.innerHTML = `
-      Resume conversation with <strong>${model.name}</strong>
-      (${meta.messages.length} turns, last active ${relativeTime(meta.savedAtMs)})?
-      <button id="chat-restore-yes" type="button">Resume</button>
-      <button id="chat-restore-no"  type="button">Discard</button>
-    `;
-    document.getElementById("chat-restore-no").onclick = async () => {
-      await clearCurrent();
-      restoreCard.hidden = true;
-    };
-    document.getElementById("chat-restore-yes").onclick = async () => {
-      restoreCard.hidden = true;
-      modelSelect.value = meta.modelId;
-      modelSelect.dispatchEvent(new Event("change"));
-      // Wait for load to complete by polling `engine` + `loadedModel`.
-      await new Promise((r) => {
-        const t = setInterval(() => { if (engine && loadedModel?.id === meta.modelId) { clearInterval(t); r(); } }, 100);
-      });
-      const blob = await loadBlob();
-      if (blob) {
-        try {
-          const handle = await engine.importConversation(meta.modelId, blob);
-          conv = { handle, modelId: meta.modelId, systemPrompt: meta.systemPrompt, messages: meta.messages.slice() };
-        } catch (e) {
-          console.warn("[chat-page] importConversation failed; falling back to metadata-only restore:", e);
-          conv = await createChatConversation(engine, loadedModel, meta.systemPrompt);
-          conv.messages = meta.messages.slice();
-        }
-      } else {
-        conv = await createChatConversation(engine, loadedModel, meta.systemPrompt);
-        conv.messages = meta.messages.slice();
-      }
-      systemPromptEl.value = meta.systemPrompt;
-      for (const msg of meta.messages) {
-        if (msg.role === "user") appendBubble("user", msg.content);
-        else if (msg.role === "assistant") {
-          const div = document.createElement("div");
-          div.className = "chat-msg assistant";
-          transcript.appendChild(div);
-          await renderAssistantInto(div, msg.content);
-        }
-      }
-      clearBtn.disabled = false;
-      exportBtn.disabled = false;
-      refreshContext();
-    };
-  }
 
   const ctxBar = document.createElement("span");
   ctxBar.className = "chat-bar";
@@ -350,7 +305,24 @@ export async function runChatPage() {
     if (conv && conv.messages.length > 0 && !confirm("Discard current conversation?")) return;
     await clearConversation();
   });
-  await maybeOfferRestore();
+  await maybeOfferRestore({
+    restoreCard,
+    modelSelect,
+    systemPromptEl,
+    transcript,
+    clearBtn,
+    exportBtn,
+    findModel,
+    listChatModels,
+    loadModelById,
+    getEngine: () => engine,
+    getLoadedModel: () => loadedModel,
+    appendBubble,
+    renderAssistantInto,
+    createChatConversation,
+    setConv: (c) => { conv = c; },
+    refreshContext,
+  });
   console.log("[chat-page] shell mounted");
 }
 

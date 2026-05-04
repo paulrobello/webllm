@@ -48,3 +48,10 @@ Open `http://localhost:8031/chat.html` in Chrome.
   entries are selectable.
 - Model load progress requires a `content-length` header on the GGUF
   response (matches `make smoke-serve` defaults).
+- **Stop button is inert during prefill.** `engine.chatCompletion`'s
+  AbortSignal is only honored once decode begins; the prefill
+  `forwardPass` runs to completion before the signal is checked.
+  On 7B+ models with long contexts this can be several seconds.
+  This is a WASM-side limitation in the underlying llama.cpp port —
+  the chat page surfaces the cancel button but cannot interrupt the
+  prefill from JavaScript.
