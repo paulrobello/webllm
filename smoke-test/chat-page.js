@@ -22,6 +22,11 @@ export async function runChatPage() {
   let loadedModel = null;
 
   modelSelect.addEventListener("change", async () => {
+    if (conv && conv.messages.length > 0 && !confirm("Discard current conversation?")) {
+      // Revert the dropdown to the loaded model id (or empty if nothing loaded yet).
+      modelSelect.value = loadedModel?.id ?? "";
+      return;
+    }
     const id = modelSelect.value;
     if (!id) return;
     const model = findModel(id);
@@ -37,8 +42,11 @@ export async function runChatPage() {
     loadCard.textContent = `Loading ${model.name}…`;
 
     try {
-      engine = new WebLLM({ baseAssetUrl: "./" });
-      await engine.init({});
+      engine = await WebLLM.init({
+        memoryBudget: 2_000_000_000,
+        maxConversations: 4,
+        worker: false,
+      });
       await loadSelectedModel(model, engine, (pct, mb, totalMb) => {
         loadCard.textContent = `Loading ${model.name}: ${(pct * 100).toFixed(0)}% (${mb.toFixed(1)} / ${totalMb.toFixed(1)} MB)`;
       });
