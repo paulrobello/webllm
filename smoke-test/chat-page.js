@@ -355,11 +355,23 @@ export async function runChatPage() {
   });
   console.log("[chat-page] shell mounted");
 
-  // `?model=<id>` URL param auto-loads after the shell is fully wired,
-  // bypassing the restore card (URL intent overrides any prior session).
+  // Auto-load priority:
+  //   1. `?model=<id>` URL param wins — explicit intent, even when a
+  //      saved conversation exists for a different model.
+  //   2. Otherwise, if no restore card was offered (no compatible saved
+  //      session) but localStorage remembers the last model, auto-load
+  //      it so the user can type and send immediately. Without this the
+  //      dropdown shows the right model but the engine isn't loaded and
+  //      the Send button stays disabled — a stuck-state UX bug.
+  //   3. If a restore card *was* offered, do nothing — user clicks
+  //      Resume (which loads the model) or Discard (and picks fresh).
+  const restoreOffered = !restoreCard.hidden;
   if (autoLoadModelId) {
     console.log("[chat-page] auto-loading model from URL param:", autoLoadModelId);
     await loadModelById(autoLoadModelId);
+  } else if (!restoreOffered && lastModelId && findModel(lastModelId)) {
+    console.log("[chat-page] auto-loading remembered last model:", lastModelId);
+    await loadModelById(lastModelId);
   }
 }
 
