@@ -8,7 +8,13 @@
  */
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
-import { LIVE_BENCH_URL_ENV, resolveLiveBenchUrl } from "./live-client.js";
+import {
+	LIVE_BENCH_URL_ENV,
+	publishBenchSessionComplete,
+	publishBenchSessionStarted,
+	resolveLiveBenchUrl,
+} from "./live-client.js";
+import { resolveProfileModel } from "./smoke-profiles.js";
 import {
 	getSmokeProfile,
 	getSmokeProfileSet,
@@ -16,6 +22,16 @@ import {
 	listSmokeProfileSets,
 	type SmokeProfile,
 } from "./smoke-profiles.js";
+
+/**
+ * Env vars threaded from the parent bench process to child harnesses
+ * (eval/browser-eval.ts, eval/cli.ts, eval/chat-smoke.ts) so per-model
+ * eval events can be tagged with the parent session and the per-task
+ * sampling temperature can be overridden uniformly across the whole
+ * accuracy pass.
+ */
+const BENCH_SESSION_ID_ENV = "WEBLLM_BENCH_SESSION_ID";
+const BENCH_EVAL_TEMP_ENV = "WEBLLM_BENCH_EVAL_TEMPERATURE";
 
 interface BenchCase {
 	profile: SmokeProfile;
@@ -39,7 +55,7 @@ function expandProfileArg(arg: string): string[] {
 	return Array.from(new Set(expanded));
 }
 
-function main(): void {
+async function main(): Promise<void> {
 	const { values } = parseArgs({
 		options: {
 			profiles: { type: "string", short: "p" },
@@ -50,6 +66,7 @@ function main(): void {
 			"list-profiles": { type: "boolean" },
 			"fail-fast": { type: "boolean" },
 			worker: { type: "boolean" },
+			"eval-temperature": { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -97,8 +114,53 @@ function main(): void {
 	});
 
 	const liveUrl = resolveLiveBenchUrl(values["live-bench-url"]);
-	const childEnv = { ...process.env };
+	const childEnv: Record<string, string> = { ...process.env } as Record<
+		string,
+		string
+	>;
 	if (liveUrl) childEnv[LIVE_BENCH_URL_ENV] = liveUrl;
+
+	// Pin the accuracy-pass sampling temperature unless the caller explicitly
+	// overrode it. Default 0 (greedy) — eliminates the per-task sampling
+	// variance that swung tinyllama 0.35 ↔ 0.23 across April runs. Children
+	// read this from env and override profile.temperature for tasks (speed
+	// pass keeps its profile-native temperature so tok/s headlines aren't
+	// affected). See also: docs/BENCHMARKS.md greedy-eval cutover.
+	const evalTemperatureRaw = values["eval-temperature"];
+	const evalTemperature =
+		evalTemperatureRaw !== undefined
+			? Number.parseFloat(evalTemperatureRaw)
+			: 0;
+	if (!Number.isFinite(evalTemperature) || evalTemperature < 0) {
+		console.error(
+			`Error: --eval-temperature must be a non-negative number (got "${evalTemperatureRaw}")`,
+		);
+		process.exit(1);
+	}
+	childEnv[BENCH_EVAL_TEMP_ENV] = String(evalTemperature);
+
+	const sessionId = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	childEnv[BENCH_SESSION_ID_ENV] = sessionId;
+
+	if (liveUrl) {
+		const modelIds = cases
+			.map((c) => {
+				const model = resolveProfileModel(c.profile);
+				return model?.id;
+			})
+			.filter((id): id is string => typeof id === "string");
+		await publishBenchSessionStarted(liveUrl, {
+			sessionId,
+			startedAt: new Date().toISOString(),
+			totalModels: cases.length,
+			modelIds,
+			profileNames: cases.map((c) => c.profile.name),
+			evalTemperature,
+		});
+		console.log(
+			`[bench] session ${sessionId} · ${cases.length} model(s) · eval temperature ${evalTemperature}`,
+		);
+	}
 
 	const results: Array<{ label: string; ok: boolean; phase: string }> = [];
 	const doSpeed = !values["skip-speed"];
@@ -170,6 +232,27 @@ function main(): void {
 	for (const r of results) {
 		console.log(`  [${r.ok ? "PASS" : "FAIL"}] ${r.label} · ${r.phase}`);
 	}
+
+	if (liveUrl) {
+		// Count models that have at least one passing phase. Per-phase failures
+		// (a speed pass that crashed but accuracy succeeded, or vice versa)
+		// still count toward the model's contribution to the session.
+		const modelLabels = new Set(cases.map((c) => c.profile.name));
+		const passedLabels = new Set(
+			results.filter((r) => r.ok).map((r) => r.label),
+		);
+		const completedModels = Array.from(modelLabels).filter((l) =>
+			passedLabels.has(l),
+		).length;
+		await publishBenchSessionComplete(liveUrl, {
+			sessionId,
+			completedAt: new Date().toISOString(),
+			totalModels: cases.length,
+			completedModels,
+			failedModels: cases.length - completedModels,
+		});
+	}
+
 	if (failed > 0) process.exit(1);
 }
 
@@ -199,6 +282,12 @@ Options:
       --list-profiles    List available profiles + profile sets
       --fail-fast        Stop on first failure
       --worker           Run engine inside a DedicatedWorker (speed pass only)
+      --eval-temperature <n>  Sampling temperature for the accuracy pass
+                              (default: 0 / greedy). Pre-2026-05 history was
+                              captured at the profile's native temperature
+                              (often 0.6); current canonical baselines are
+                              greedy. Override only when you specifically
+                              want temp-stratified scores.
   -h, --help             Show this help
 
 Examples:
@@ -209,5 +298,8 @@ Examples:
 }
 
 if (import.meta.main) {
-	main();
+	main().catch((err) => {
+		console.error(err instanceof Error ? err.stack ?? err.message : err);
+		process.exit(1);
+	});
 }
