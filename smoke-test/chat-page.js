@@ -43,7 +43,10 @@ export async function runChatPage() {
       engine = await WebLLM.init({
         memoryBudget: 2_000_000_000,
         maxConversations: 4,
-        worker: false,
+        // Worker mode keeps the WASM heap off the main thread so it
+        // doesn't compete with V8 / DOM / page JS for address space —
+        // required for 4B+ models to load without aborts on Chrome.
+        worker: true,
       });
       await loadSelectedModel(model, engine, (pct, mb, totalMb) => {
         loadCard.textContent = `Loading ${model.name}: ${(pct * 100).toFixed(0)}% (${mb.toFixed(1)} / ${totalMb.toFixed(1)} MB)`;
