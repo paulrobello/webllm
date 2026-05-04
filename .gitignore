@@ -45,6 +45,8 @@ docs/superpowers
 
 # Smoke test build artifacts
 smoke-test/webllm-bundle.js
+smoke-test/webllm-models.js
+smoke-test/webllm-persistence.js
 smoke-test/webllm-wasm.js
 smoke-test/webllm-wasm.wasm
 smoke-test/webllm-wasm-mem64.js
