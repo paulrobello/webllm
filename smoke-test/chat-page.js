@@ -46,6 +46,8 @@ export async function runChatPage() {
       localStorage.setItem("chat:lastModelId", model.id);
       loadCard.textContent = `Loaded ${model.name} (${model.defaultQuant}, ctx ${model.contextLength})`;
       sendBtn.disabled = false;
+      rebuildSettings();
+      if (settingsApi) settingsApi.close(); // collapsed by default
     } catch (e) {
       loadCard.textContent = `Load failed: ${e.message}`;
       engine = null;
@@ -56,6 +58,22 @@ export async function runChatPage() {
   const { createChatConversation, disposeChatConversation, sendTurn } =
     await import("./chat-conversation.js");
   const { renderAssistantInto } = await import("./chat-render.js");
+  const { renderSettingsPanel } = await import("./chat-settings.js");
+  const settingsPanel = document.getElementById("chat-settings-panel");
+  const settingsToggle = document.getElementById("chat-settings-toggle");
+
+  let settingsApi = null;
+
+  function rebuildSettings() {
+    if (!loadedModel) return;
+    settingsApi = renderSettingsPanel(settingsPanel, loadedModel, () => {/* live config; nothing to invalidate */});
+  }
+
+  settingsToggle.addEventListener("click", () => {
+    if (!settingsApi) { rebuildSettings(); return; }
+    if (settingsPanel.classList.contains("open")) settingsApi.close();
+    else { settingsPanel.classList.add("open"); settingsPanel.setAttribute("aria-hidden", "false"); }
+  });
 
   const transcript = document.getElementById("chat-transcript");
   const input = document.getElementById("chat-input");
@@ -120,7 +138,7 @@ export async function runChatPage() {
       engine,
       conv,
       userText: text,
-      config: {},
+      config: settingsApi?.getConfig() ?? {},
       signal: abortController.signal,
       onChunk: (_t, totalText) => scheduleRender(totalText),
       onDone: (m) => {
