@@ -553,6 +553,26 @@ export class WebLLM {
 		});
 	}
 
+	/**
+	 * Tokenize `text` using the loaded model's tokenizer and return the
+	 * resulting token IDs. Useful for context-window accounting on the
+	 * UI side — counting `tokenize(id, fullPromptText).length` against
+	 * `model.contextLength` reflects what the engine will actually
+	 * prefill more faithfully than a `chars / 4` estimate.
+	 *
+	 * Throws `ModelNotFoundError` if `modelHandleId` was never registered;
+	 * `ModelNotLoadedError` if the model is registered but its tokenizer
+	 * isn't ready yet (load in progress).
+	 */
+	tokenize(modelHandleId: string, text: string): readonly number[] {
+		const entry = this._modelManager.get(modelHandleId);
+		if (!entry) throw new ModelNotFoundError(modelHandleId);
+		if (!entry.loaded || !entry.tokenizer) {
+			throw new ModelNotLoadedError(modelHandleId);
+		}
+		return entry.tokenizer.encode(text);
+	}
+
 	async createConversation(
 		modelHandleId: string,
 		options: ConversationOptions = {},
