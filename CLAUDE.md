@@ -137,6 +137,30 @@ docs, and bug fixes alike.
   baselines are pinned at
   `eval/reports/pre-rebase-baselines-<DATE>/SUMMARY.md` with a
   ~1-month freshness window.
+- **Greedy by default for accuracy bench (set 2026-05-04).** The
+  `make bench-*` accuracy pass now pins **temperature 0** unless the
+  caller explicitly overrides via `--eval-temperature <n>`. Rationale:
+  small/weak models scored with temperature ≥ 0.4 had per-task
+  variance large enough to flip the dimension mean by 25-33% absolute
+  on n=1 reruns (tinyllama 04-26 0.35 → 04-28 0.24 was the trigger,
+  emb-001 flipping 1→0→1 across identical code being the smoking
+  gun). Greedy eliminates the sampling noise so a single pass per
+  model gives usable signal. Speed pass is unaffected — `chat-smoke.ts`
+  still uses the profile's native temperature so tok/s headlines stay
+  comparable to pre-cutover history. **Pre-cutover canonical
+  baselines (April 2026 and earlier) are a separate series**: they
+  were captured at profile-native temps (mostly 0.6) and must not be
+  cross-compared with greedy scores on the same dashboard chart.
+  Tag sessions accordingly via `bench_session_started.evalTemperature`.
+- **Bench session envelope (set 2026-05-04).** `eval/bench.ts` mints
+  a `sessionId` per invocation and emits `bench_session_started` /
+  `bench_session_complete` live events bracketing the multi-model
+  loop. Each per-model `eval_started` carries the parent `sessionId`
+  so the dashboard can roll up overall progress (model X/Y · task
+  A/B). Threading: `WEBLLM_BENCH_SESSION_ID` env var → child harness
+  → URL `?session=` → smoke page → `eval_started` payload. Sessions
+  are in-memory only on the live-server (no SQLite table); a backend
+  restart mid-session loses the rollup until the next session starts.
 - **TODO archival cadence.** When a top-level TODO block closes
   (all sub-items resolved, follow-ups landed, child probes filed),
   move the block out of `TODO.md` to `TODO_ARCHIVE.md` and leave a
