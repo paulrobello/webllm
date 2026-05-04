@@ -10,6 +10,48 @@ export async function runChatPage() {
 
   const lastModelId = localStorage.getItem("chat:lastModelId");
   if (lastModelId && findModel(lastModelId)) modelSelect.value = lastModelId;
+
+  const { WebLLM } = await import("./webllm-bundle.js");
+  const { loadSelectedModel } = await import("./chat-models.js");
+
+  const loadCard = document.getElementById("chat-load-card");
+  const sendBtn = document.getElementById("chat-send");
+
+  // State exposed to subsequent tasks via closure (Task 5+ will reference these).
+  let engine = null;
+  let loadedModel = null;
+
+  modelSelect.addEventListener("change", async () => {
+    const id = modelSelect.value;
+    if (!id) return;
+    const model = findModel(id);
+    if (!model) return;
+
+    if (engine) {
+      try { await engine.shutdown?.(); } catch (_e) { /* tolerate */ }
+      engine = null;
+      loadedModel = null;
+      sendBtn.disabled = true;
+    }
+    loadCard.hidden = false;
+    loadCard.textContent = `Loading ${model.name}…`;
+
+    try {
+      engine = new WebLLM({ baseAssetUrl: "./" });
+      await engine.init({});
+      await loadSelectedModel(model, engine, (pct, mb, totalMb) => {
+        loadCard.textContent = `Loading ${model.name}: ${(pct * 100).toFixed(0)}% (${mb.toFixed(1)} / ${totalMb.toFixed(1)} MB)`;
+      });
+      loadedModel = model;
+      localStorage.setItem("chat:lastModelId", model.id);
+      loadCard.textContent = `Loaded ${model.name} (${model.defaultQuant}, ctx ${model.contextLength})`;
+      sendBtn.disabled = false;
+    } catch (e) {
+      loadCard.textContent = `Load failed: ${e.message}`;
+      engine = null;
+      loadedModel = null;
+    }
+  });
   console.log("[chat-page] shell mounted");
 }
 

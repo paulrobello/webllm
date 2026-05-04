@@ -46,3 +46,48 @@ export function populateDropdown(selectEl) {
 export function findModel(id) {
   return BENCHMARK_MODELS.find((m) => m.id === id);
 }
+
+/**
+ * Fetch the GGUF with byte progress, then hand the buffer to the
+ * engine. Mirrors the smoke page's progress pattern so we drive a
+ * live load card. Returns the engine + handle ready for chat.
+ *
+ * @param {Object} model         A `BenchmarkModel` from `listChatModels()`.
+ * @param {Object} engine        A constructed `WebLLM` instance.
+ * @param {(pct:number, mb:number, totalMb:number)=>void} onProgress
+ */
+export async function loadSelectedModel(model, engine, onProgress) {
+  const url = ggufUrl(model);
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
+  const total = Number(resp.headers.get("content-length") || 0);
+  if (!total) throw new Error("missing content-length on model response");
+
+  const buf = new Uint8Array(total);
+  const reader = resp.body.getReader();
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf.set(value, received);
+    received += value.length;
+    onProgress(received / total, received / 1e6, total / 1e6);
+  }
+  if (received !== total) {
+    throw new Error(`short read: expected ${total} bytes, got ${received}`);
+  }
+
+  const result = await engine.loadModelFromBuffer(buf, model.id, undefined, {
+    flashAttn: true, // required for createConversation
+  });
+  return result;
+}
+
+/**
+ * Resolve a directly-fetchable GGUF URL for a registered model.
+ * The smoke harness puts pre-downloaded GGUFs at `./models/<id>.gguf`;
+ * fall back to that path. Custom hosting can be added later.
+ */
+function ggufUrl(model) {
+  return `./models/${model.id}.gguf`;
+}
