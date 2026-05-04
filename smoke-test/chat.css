@@ -561,8 +561,8 @@ a:hover { text-decoration: underline; }
 .chat-sparkline.open { display: inline-block; }
 
 .chat-sparkline canvas {
-	width: 120px;
-	height: 24px;
+	width: 160px;
+	height: 32px;
 	vertical-align: middle;
 	display: block;
 }

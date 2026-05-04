@@ -59,17 +59,69 @@ export function applyContextBar(barInner, labelEl, used, max) {
 /** Render a 20-point sparkline of decode tok/s into a canvas. */
 export function renderSparkline(canvas, history) {
   const ctx = canvas.getContext("2d");
-  const w = canvas.width, h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
-  if (history.length < 2) return;
-  const max = Math.max(...history) * 1.1 || 1;
+  // Match the bitmap to the CSS box at devicePixelRatio so the line
+  // stays crisp on retina (a 120×24 bitmap upscaled to 120×24 CSS px is
+  // sharp on 1×, blurry on 2×). Uses clientWidth/Height so the size
+  // tracks any responsive CSS overrides.
+  const dpr = globalThis.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || canvas.width;
+  const cssH = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  if (history.length === 0) return;
+
+  // Y-axis: tight min/max with padding so small fluctuations are visible.
+  // For a single point, draw a centered horizontal line.
+  const lo = Math.min(...history);
+  const hi = Math.max(...history);
+  const range = Math.max(hi - lo, hi * 0.1, 1); // never collapse to zero
+  const yMin = lo - range * 0.15;
+  const yMax = hi + range * 0.15;
+  const span = yMax - yMin || 1;
+
+  const padX = 2;
+  const padY = 3;
+  const innerW = cssW - padX * 2;
+  const innerH = cssH - padY * 2;
+  const xAt = (i) => history.length > 1
+    ? padX + (i / (history.length - 1)) * innerW
+    : padX + innerW / 2;
+  const yAt = (v) => padY + innerH - ((v - yMin) / span) * innerH;
+
+  // Fill area under the line for body. Translucent so the pill background
+  // shows through but the trend reads at a glance.
+  ctx.beginPath();
+  ctx.moveTo(padX, padY + innerH);
+  history.forEach((v, i) => ctx.lineTo(xAt(i), yAt(v)));
+  ctx.lineTo(xAt(history.length - 1), padY + innerH);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(74, 144, 226, 0.25)";
+  ctx.fill();
+
+  // Stroke the trend line.
   ctx.beginPath();
   history.forEach((v, i) => {
-    const x = (i / (history.length - 1)) * (w - 2) + 1;
-    const y = h - 1 - (v / max) * (h - 2);
+    const x = xAt(i);
+    const y = yAt(v);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
-  ctx.strokeStyle = "#4a90e2";
-  ctx.lineWidth = 1.5;
+  if (history.length === 1) {
+    // Force a visible mark for a single sample.
+    ctx.lineTo(xAt(0) + 0.01, yAt(history[0]));
+  }
+  ctx.strokeStyle = "#6db4ff";
+  ctx.lineWidth = 1.75;
+  ctx.lineJoin = "round";
   ctx.stroke();
+
+  // Most-recent point marker so the latest reading pops.
+  const last = history[history.length - 1];
+  ctx.beginPath();
+  ctx.arc(xAt(history.length - 1), yAt(last), 2.25, 0, Math.PI * 2);
+  ctx.fillStyle = "#a4cfff";
+  ctx.fill();
 }
