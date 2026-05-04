@@ -44,7 +44,11 @@ export async function runChatPage() {
       });
       loadedModel = model;
       localStorage.setItem("chat:lastModelId", model.id);
-      loadCard.textContent = `Loaded ${model.name} (${model.defaultQuant}, ctx ${model.contextLength})`;
+      if (model.vramMB > 5000) {
+        loadCard.innerHTML = `Loaded ${model.name} (${model.defaultQuant}, ctx ${model.contextLength}) <span class="pill amber">heavy: ${model.vramMB} MB — tight on 16 GB tier with Three.js</span>`;
+      } else {
+        loadCard.textContent = `Loaded ${model.name} (${model.defaultQuant}, ctx ${model.contextLength})`;
+      }
       sendBtn.disabled = false;
       rebuildSettings();
       if (settingsApi) settingsApi.close(); // collapsed by default
@@ -119,6 +123,7 @@ export async function runChatPage() {
         }
       }
       clearBtn.disabled = false;
+      exportBtn.disabled = false;
       refreshContext();
     };
   }
@@ -180,6 +185,31 @@ export async function runChatPage() {
   const clearBtn = document.getElementById("chat-clear");
   const systemPromptEl = document.getElementById("chat-system-prompt");
   const systemApplyBtn = document.getElementById("chat-system-apply");
+  const exportBtn = document.getElementById("chat-export");
+
+  async function exportTranscript() {
+    if (!conv) return;
+    let blob;
+    try { blob = await engine.exportConversation(conv.handle); } catch { /* fallback to messages-only */ }
+    const meta = {
+      modelId: loadedModel.id,
+      systemPrompt: conv.systemPrompt,
+      settings: settingsApi?.getConfig() ?? {},
+      messages: conv.messages,
+      blobBase64: blob ? btoa(String.fromCharCode(...blob)) : null,
+      exportedAt: new Date().toISOString(),
+    };
+    const dl = new Blob([JSON.stringify(meta, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(dl);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `chat-${loadedModel.id}-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+  exportBtn.addEventListener("click", () => void exportTranscript());
 
   let conv = null;
   let abortController = null;
@@ -196,6 +226,7 @@ export async function runChatPage() {
     conv = null;
     transcript.innerHTML = "";
     clearBtn.disabled = true;
+    exportBtn.disabled = true;
     session = newSessionTotals();
     lastPill.textContent = "last —";
     sessionPill.textContent = "session —";
@@ -260,8 +291,18 @@ export async function runChatPage() {
         if (sparklineEl.classList.contains("open")) renderSparkline(sparklineCanvas, session.history);
       },
       onError: (e) => {
-        assistantBubble.classList.add("error");
-        assistantBubble.textContent = `Error: ${e.message}`;
+        if (e?.name === "ConversationContextOverflowError" || /context.*(overflow|full)/i.test(String(e?.message))) {
+          assistantBubble.classList.add("error");
+          assistantBubble.innerHTML = `Context full. <button id="ovf-clear" type="button">Clear conversation</button> <button id="ovf-export-clear" type="button">Export &amp; clear</button>`;
+          document.getElementById("ovf-clear").onclick = () => void clearConversation();
+          document.getElementById("ovf-export-clear").onclick = async () => {
+            await exportTranscript();
+            await clearConversation();
+          };
+        } else {
+          assistantBubble.classList.add("error");
+          assistantBubble.textContent = `Error: ${e.message}`;
+        }
       },
     });
 
@@ -269,6 +310,7 @@ export async function runChatPage() {
     stopBtn.hidden = true;
     sendBtn.disabled = false;
     clearBtn.disabled = false;
+    exportBtn.disabled = false;
     if (conv) {
       await saveCurrent({
         engine, conv,

@@ -77,7 +77,13 @@ export async function sendTurn({
   }
 
   const endTime = performance.now();
-  conv.messages.push({ role: "assistant", content: totalText });
+  if (stopped && !firstChunkTime) {
+    // Drop the just-pushed user message so persisted history stays
+    // monotone (every user message has a corresponding assistant reply).
+    conv.messages.pop();
+  } else {
+    conv.messages.push({ role: "assistant", content: totalText });
+  }
 
   const metrics = {
     ttftMs: firstChunkTime ? firstChunkTime - sendTime : 0,
