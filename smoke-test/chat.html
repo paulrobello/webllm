@@ -5,8 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WebLLM Chat</title>
 <link rel="stylesheet" href="./chat.css">
+<!-- UMD vendor bundles must run as classic scripts so they register
+     `marked` / `hljs` on globalThis. ES-module `import()` of UMD files
+     runs them in module scope and the exports never reach the window. -->
+<script src="./vendor/marked.min.js"></script>
+<script src="./vendor/highlight.min.js"></script>
+<script src="./vendor/highlight-common.min.js"></script>
 <script type="module">
-import { runChatPage } from "./chat-page.js";
+const v = new URLSearchParams(globalThis.location.search).get("v");
+const suffix = v ? `?v=${encodeURIComponent(v)}` : "";
+const { runChatPage } = await import(`./chat-page.js${suffix}`);
 await runChatPage();
 </script>
 </head>

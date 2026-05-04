@@ -1,14 +1,12 @@
 // chat-render.js — transcript message rendering with markdown,
 // syntax highlight, and Qwen3 <think>...</think> collapse.
 
-// Vendored deps register UMD globals; load them once on first use.
-let _libsLoaded = false;
+// Vendored deps register UMD globals (`marked`, `hljs`) — chat.html
+// loads them via classic `<script>` tags before this module runs.
+// (ES-module `import()` of these files runs in module scope and never
+// reaches `globalThis`.)
 async function ensureLibs() {
-  if (_libsLoaded) return;
-  await import("./vendor/marked.min.js");
-  await import("./vendor/highlight.min.js");
-  await import("./vendor/highlight-common.min.js");
-  _libsLoaded = true;
+  // No-op kept for callers that previously awaited it.
 }
 
 /**
