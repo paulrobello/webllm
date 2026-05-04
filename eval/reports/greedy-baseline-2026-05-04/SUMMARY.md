@@ -211,6 +211,58 @@ ORDER BY 1;
 - Pre-cutover archive: [`../archive/smoke-runs-pre-greedy-cutover-20260504-140045.db`](../archive/smoke-runs-pre-greedy-cutover-20260504-140045.db)
 - §22 graph-allocator abort signature: [`../prefill-tiling-2026-04-27/00-phase0-diagnostic.txt`](../prefill-tiling-2026-04-27/00-phase0-diagnostic.txt)
 
+## Validation re-runs (2026-05-04 evening)
+
+Re-ran the bench against the two affected profiles after both fixes
+landed. Both fixes validate end-to-end against real WebGPU inference:
+
+### `mistral-7b-v0.3-warm` — tool-calling 0.17 → 0.48 (+31 pp)
+
+| Dimension | Pre-fix | Post-fix | Δ |
+| --- | --- | --- | --- |
+| reasoning | 0.75 | 0.75 | 0 |
+| instruction-following | 0.43 | 0.43 | 0 |
+| semantic-reasoning | 0.76 | 0.76 | 0 |
+| **tool-calling** | **0.17** | **0.48** | **+0.31** |
+| **overall** | **0.53** | **0.60** | **+0.07** |
+
+Per-task inspection confirms Mistral is now emitting its native
+format (`[{"name":"...","arguments":{...}}]`) on the tasks it
+handles. Of the 6 remaining tool-calling failures: 2 emit
+Python-syntax `func(arg=val)` instead of JSON (parser limitation,
+not format selection), 1 fails the implicit refusal (tc-012 — model
+called the tool when asked to delete files), and the rest are
+multi-step chain or tool-selection misses. All are model-quality
+issues — Mistral V0.3 at this quant has limited tool reasoning —
+not chat-template format issues. The fix delivers what was
+expected: from "model isn't trying" to "model emits native format
+and gets the easy ones right."
+
+### `qwen3-4b-warm` — 0.08 → 0.88 (+80 pp)
+
+| Dimension | Pre-fix | Post-fix | Δ |
+| --- | --- | --- | --- |
+| instruction-following | 0.00 (all errored) | 1.00 | +1.00 |
+| reasoning | 0.00 (all errored) | 0.92 | +0.92 |
+| semantic-reasoning | 0.00 (all errored) | 0.81 | +0.81 |
+| tool-calling | 0.33 (no-call default) | 0.79 | +0.46 |
+| **overall** | **0.08** | **0.88** | **+0.80** |
+
+Zero errors across all 48 tasks (vs 88 pre-fix). The model lands
+between qwen3-1.7B (0.84) and qwen3-8B (0.91) — exactly where a 4B
+Qwen3 should sit. The crash cascade is gone.
+
+### Implication for the greedy baseline
+
+The pinned snapshot at
+[`../archive/smoke-runs-greedy-baseline-2026-05-04.db`](../archive/smoke-runs-greedy-baseline-2026-05-04.db)
+captures the **pre-fix** state for these two models — qwen3-4B at
+0.08 and Mistral V0.3 at 0.53. Future bench cycles should be
+compared against the **post-fix** numbers above for those two
+specific profiles, not the snapshot. A full re-bench across all
+20 model variants is the cleanest way to refresh the canonical
+baseline; queued as follow-up ticket 3 below.
+
 ## Follow-up tickets
 
 1. **`feat(chat-template)`: Llama-3.x native tool format** — investigate
