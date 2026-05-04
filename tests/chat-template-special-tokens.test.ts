@@ -1,34 +1,42 @@
 /**
  * Audit that the special-token literals emitted by every formatter in
  * `src/inference/chat-template.ts` round-trip through their target
- * tokenizer to a single token id.
+ * tokenizer to a single token id, and that each family's expected
+ * chat-stop literal resolves via `tokenizer.getId(...)` (the API
+ * `engine.ts:addChatStopToken` calls).
  *
- * Catches latent equivalents of the `<|assistant|?` typo (Phi-3 bug #3,
- * 2026-04-29) before they ship to a public-API caller. The bug class:
- * a one-character corruption in a formatter literal is silently
- * tokenized as plain text, the model never sees the role marker, and
- * decode produces gibberish only at runtime.
+ * Catches two bug classes:
  *
- * Per-architecture coverage map:
- *   phi3            → phi-3.5-mini-q4km
- *   llama3          → llama-3.1-8b-instruct-iq3m
- *   chatml (qwen3)  → qwen3-0.6b-q4f16
- *   llama2-via-mistral-v3 → mistral-7b-instruct-v0.3-q4ks
- *                     (covers `[INST]`/`[/INST]` as actual special tokens
- *                     in the Mistral-v3 vocab)
+ * 1. The `<|assistant|?` typo class (Phi-3 bug #3, 2026-04-29): a
+ *    one-character corruption in a formatter literal is silently
+ *    tokenized as plain text, the model never sees the role marker,
+ *    and decode produces gibberish only at runtime.
+ *
+ * 2. The chat-stop-token-not-resolving class (Phi-3 + Mistral-v0.3,
+ *    2026-05-04): the family's expected EOS / turn-end literal isn't
+ *    registered in the tokenizer's `tokenToId` map, so
+ *    `tokenizer.getId(literal)` returns undefined,
+ *    `addChatStopToken` silently no-ops, and the model wanders past
+ *    end-of-turn into multi-turn self-dialogue.
+ *
+ * Coverage spans every chat-capable GGUF in `smoke-test/models/`:
+ *   phi3   → phi-3.5-mini
+ *   llama3 → llama-3.1-8b, llama-3.2-1b, llama-3.2-3b
+ *   chatml → hermes-3-llama-3.2-3b, qwen2.5-{1.5b,3b,coder-1.5b},
+ *            qwen3-{0.6b,1.7b,4b,8b,14b}, smollm2-{360m,1.7b}
+ *   llama2 → mistral-7b-v0.3, mistral-nemo
+ *   zephyr → tinyllama-1.1b-chat (only `</s>` is special; role markers
+ *            are plain text)
+ *   gemma  → gemma-2-2b
  *
  * Deferred:
- *   mistral-v7  — `[SYSTEM_PROMPT]`/`[/SYSTEM_PROMPT]` are only special
- *                 tokens in v7-template GGUFs (Mistral-Nemo, Mistral-Large).
- *                 Nemo is 6.6 GiB; too heavy for a unit test. Re-introduce
- *                 if a smaller v7-template GGUF appears in the fleet.
- *   gemma       — no Gemma GGUF in the fleet.
- *   zephyr/llama2 — `<|user|>`, `[INST]`, `<<SYS>>` etc. are *plain text*
- *                 in those vocabs, not special tokens; nothing to verify.
+ *   mistral-v7 — no v7-template GGUF in the fleet that's small enough
+ *                 to ship as a smoke fixture (Mistral-Large is too
+ *                 heavy; Nemo uses the llama2 template, not v7).
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { resolve } from "node:path";
 import { Tokenizer } from "../src/inference/tokenizer.js";
 import { ModelLoader } from "../src/models/model-loader.js";
@@ -53,7 +61,18 @@ interface AuditCase {
 	chatStopTokens: string[];
 }
 
+const LLAMA3_LITERALS = [
+	"<|begin_of_text|>",
+	"<|start_header_id|>",
+	"<|end_header_id|>",
+	"<|eot_id|>",
+];
+const CHATML_LITERALS = ["<|im_start|>", "<|im_end|>"];
+const MISTRAL_LITERALS = ["[INST]", "[/INST]", "</s>"];
+const GEMMA_LITERALS = ["<start_of_turn>", "<end_of_turn>"];
+
 const AUDIT_CASES: AuditCase[] = [
+	// --- phi3 ---
 	{
 		model: "phi-3.5-mini",
 		gguf: "smoke-test/models/phi-3.5-mini-q4km.gguf",
@@ -61,25 +80,113 @@ const AUDIT_CASES: AuditCase[] = [
 		literals: ["<|user|>", "<|assistant|>", "<|system|>", "<|end|>"],
 		chatStopTokens: ["<|end|>"],
 	},
+	// --- llama3 ---
 	{
 		model: "llama-3.1-8b",
 		gguf: "smoke-test/models/llama-3.1-8b-instruct-iq3m.gguf",
 		formatter: "formatLlama3",
-		literals: [
-			"<|begin_of_text|>",
-			"<|start_header_id|>",
-			"<|end_header_id|>",
-			"<|eot_id|>",
-		],
+		literals: LLAMA3_LITERALS,
 		chatStopTokens: ["<|eot_id|>"],
+	},
+	{
+		model: "llama-3.2-1b",
+		gguf: "smoke-test/models/llama-3.2-1b-q4f16.gguf",
+		formatter: "formatLlama3",
+		literals: LLAMA3_LITERALS,
+		chatStopTokens: ["<|eot_id|>"],
+	},
+	{
+		model: "llama-3.2-3b",
+		gguf: "smoke-test/models/llama-3.2-3b-q4f16.gguf",
+		formatter: "formatLlama3",
+		literals: LLAMA3_LITERALS,
+		chatStopTokens: ["<|eot_id|>"],
+	},
+	// --- chatml ---
+	// Hermes-3 is chatml on top of a Llama-3 vocab; only `<|im_end|>` is
+	// available as a stop literal (no `<|endoftext|>`).
+	{
+		model: "hermes-3-llama-3.2-3b",
+		gguf: "smoke-test/models/hermes-3-llama-3.2-3b-q4f16.gguf",
+		formatter: "formatChatml (Llama-3 vocab)",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>"],
+	},
+	{
+		model: "qwen2.5-1.5b",
+		gguf: "smoke-test/models/qwen2.5-1.5b-q4f16.gguf",
+		formatter: "formatChatml",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
+	},
+	{
+		model: "qwen2.5-3b",
+		gguf: "smoke-test/models/qwen2.5-3b-q4f16.gguf",
+		formatter: "formatChatml",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
+	},
+	{
+		model: "qwen2.5-coder-1.5b",
+		gguf: "smoke-test/models/qwen2.5-coder-1.5b-q4f16.gguf",
+		formatter: "formatChatml",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
 	},
 	{
 		model: "qwen3-0.6b",
 		gguf: "smoke-test/models/qwen3-0.6b-q4f16.gguf",
 		formatter: "formatChatml",
-		literals: ["<|im_start|>", "<|im_end|>"],
+		literals: CHATML_LITERALS,
 		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
 	},
+	{
+		model: "qwen3-1.7b",
+		gguf: "smoke-test/models/qwen3-1.7b-q4f16.gguf",
+		formatter: "formatChatml",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
+	},
+	{
+		model: "qwen3-4b",
+		gguf: "smoke-test/models/qwen3-4b-q4f16.gguf",
+		formatter: "formatChatml",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
+	},
+	{
+		model: "qwen3-8b",
+		gguf: "smoke-test/models/qwen3-8b-iq3m.gguf",
+		formatter: "formatChatml",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
+	},
+	{
+		model: "qwen3-14b",
+		gguf: "smoke-test/models/qwen3-14b-q4ks.gguf",
+		formatter: "formatChatml",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
+	},
+	// SmolLM2 uses chatml but is registered with `architecture: "llama"`
+	// and has no `<|endoftext|>` token. Stops on `<|im_end|>` (which
+	// happens to share id 2 with this vocab's eos slot — fine because
+	// the chatml-trained model emits `<|im_end|>` for turn ends).
+	{
+		model: "smollm2-360m",
+		gguf: "smoke-test/models/smollm2-360m-q4f16.gguf",
+		formatter: "formatChatml (SmolLM2 vocab)",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>"],
+	},
+	{
+		model: "smollm2-1.7b",
+		gguf: "smoke-test/models/smollm2-1.7b-q4f16.gguf",
+		formatter: "formatChatml (SmolLM2 vocab)",
+		literals: CHATML_LITERALS,
+		chatStopTokens: ["<|im_end|>"],
+	},
+	// --- llama2 (Mistral-Instruct family) ---
 	{
 		model: "mistral-7b-v0.3",
 		gguf: "smoke-test/models/mistral-7b-instruct-v0.3-q4ks.gguf",
@@ -87,8 +194,34 @@ const AUDIT_CASES: AuditCase[] = [
 		// `<<SYS>>`, `<</SYS>>` are plain text in this vocab and intentionally
 		// excluded — the audit only covers literals expected to be single
 		// special tokens.
-		literals: ["[INST]", "[/INST]", "</s>"],
+		literals: MISTRAL_LITERALS,
 		chatStopTokens: ["</s>"],
+	},
+	{
+		model: "mistral-nemo-2407",
+		gguf: "smoke-test/models/mistral-nemo-instruct-2407-q4ks.gguf",
+		formatter: "formatLlama2 (Mistral-Nemo vocab)",
+		literals: MISTRAL_LITERALS,
+		chatStopTokens: ["</s>"],
+	},
+	// --- zephyr ---
+	// TinyLlama-Chat: `<|user|>`, `<|assistant|>`, `<|system|>` are
+	// *plain text* in this vocab (not special tokens), so they are
+	// intentionally excluded from `literals`. Only `</s>` is special.
+	{
+		model: "tinyllama-1.1b",
+		gguf: "smoke-test/models/tinyllama-1.1b-chat-q4_0.gguf",
+		formatter: "formatZephyr",
+		literals: [],
+		chatStopTokens: ["</s>"],
+	},
+	// --- gemma ---
+	{
+		model: "gemma-2-2b",
+		gguf: "smoke-test/models/gemma-2-2b-q4f16.gguf",
+		formatter: "formatGemma",
+		literals: GEMMA_LITERALS,
+		chatStopTokens: ["<end_of_turn>"],
 	},
 ];
 
@@ -99,12 +232,41 @@ interface LoadedTokenizer {
 
 const tokenizerCache = new Map<string, LoadedTokenizer>();
 
+/**
+ * Read only enough of the GGUF to parse its header + tokenizer config.
+ * Loading the whole file via `readFileSync` runs out of address space
+ * on the larger fixtures (qwen3-14b, mistral-nemo, qwen3-8b) — Bun's
+ * V8 heap is capped well below the actual file size. Try progressively
+ * larger header reads (2 MiB → 16 MiB → 64 MiB) until parse succeeds;
+ * GGUF metadata is always at the front and 64 MiB covers every model
+ * in the fleet.
+ */
 function loadTokenizer(ggufPath: string): LoadedTokenizer {
 	const cached = tokenizerCache.get(ggufPath);
 	if (cached) return cached;
-	const data = readFileSync(ggufPath);
-	const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-	const parsed = ModelLoader.parseModel(view);
+	const fd = openSync(ggufPath, "r");
+	let parsed: ReturnType<typeof ModelLoader.parseModel> | null = null;
+	let lastErr: unknown = null;
+	try {
+		for (const sizeMb of [2, 16, 64]) {
+			const buf = Buffer.alloc(sizeMb * 1024 * 1024);
+			readSync(fd, buf, 0, buf.length, 0);
+			const view = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+			try {
+				parsed = ModelLoader.parseModel(view);
+				break;
+			} catch (e) {
+				lastErr = e;
+			}
+		}
+	} finally {
+		closeSync(fd);
+	}
+	if (!parsed) {
+		throw new Error(
+			`Failed to parse GGUF metadata from ${ggufPath} with up to 64 MiB header buffer: ${String(lastErr)}`,
+		);
+	}
 	const tokenizer = new Tokenizer(parsed.tokenizerConfig);
 	const result: LoadedTokenizer = {
 		tokenizer,
