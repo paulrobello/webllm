@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	PHI3_DEFAULTS,
 	QWEN_NON_THINKING_DEFAULTS,
 	QWEN_THINKING_DEFAULTS,
 	resolveSamplingParams,
@@ -45,7 +46,7 @@ describe("resolveSamplingParams — auto mode", () => {
 		).toEqual({ ...QWEN_NON_THINKING_DEFAULTS });
 	});
 
-	test("non-Qwen → engine fallback (no profile applied)", () => {
+	test("non-Qwen, non-Phi3 → engine fallback (no profile applied)", () => {
 		expect(
 			resolveSamplingParams({
 				samplingMode: "auto",
@@ -53,6 +54,28 @@ describe("resolveSamplingParams — auto mode", () => {
 				consumer: {},
 			}),
 		).toEqual(ENGINE_FALLBACK);
+	});
+
+	test("Phi3 → PHI3 profile", () => {
+		expect(
+			resolveSamplingParams({
+				samplingMode: "auto",
+				isQwenChatml: false,
+				isPhi3: true,
+				consumer: {},
+			}),
+		).toEqual({ ...PHI3_DEFAULTS });
+	});
+
+	test("Qwen takes precedence over Phi3 when both signal true", () => {
+		expect(
+			resolveSamplingParams({
+				samplingMode: "auto",
+				isQwenChatml: true,
+				isPhi3: true,
+				consumer: {},
+			}),
+		).toEqual({ ...QWEN_THINKING_DEFAULTS });
 	});
 
 	test("non-Qwen + thinking=false still falls back (auto only fires on Qwen+ChatML)", () => {

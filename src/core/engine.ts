@@ -419,6 +419,10 @@ export class WebLLM {
 			Array.isArray(input) &&
 			String(entry.hyperparams.architecture).startsWith("qwen") &&
 			detectChatTemplate(chatTemplate ?? "") === "chatml";
+		const isPhi3 =
+			Array.isArray(input) &&
+			(String(entry.hyperparams.architecture) === "phi3" ||
+				detectChatTemplate(chatTemplate ?? "") === "phi3");
 		const {
 			temperature: effectiveTemperature,
 			topK: effectiveTopK,
@@ -427,6 +431,7 @@ export class WebLLM {
 		} = resolveSamplingParams({
 			samplingMode: config?.sampling ?? "auto",
 			isQwenChatml,
+			isPhi3,
 			enableThinking: config?.enableThinking,
 			consumer: {
 				temperature: config?.temperature,
@@ -859,6 +864,9 @@ export class WebLLM {
 			const isQwenChatml =
 				String(entry.hyperparams.architecture).startsWith("qwen") &&
 				detectChatTemplate(tokenizer.options.chatTemplate ?? "") === "chatml";
+			const isPhi3 =
+				String(entry.hyperparams.architecture) === "phi3" ||
+				detectChatTemplate(tokenizer.options.chatTemplate ?? "") === "phi3";
 			const {
 				temperature: effectiveTemperature,
 				topK: effectiveTopK,
@@ -867,6 +875,7 @@ export class WebLLM {
 			} = resolveSamplingParams({
 				samplingMode: config?.sampling ?? "auto",
 				isQwenChatml,
+				isPhi3,
 				enableThinking: config?.enableThinking,
 				consumer: {
 					temperature: config?.temperature,

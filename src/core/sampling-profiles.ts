@@ -26,8 +26,27 @@ export const QWEN_NON_THINKING_DEFAULTS = Object.freeze({
 	repetitionPenalty: 1.1,
 } as const);
 
+/**
+ * Phi-3 / Phi-3.5 recommended sampling per the upstream model card.
+ * Without these, the engine fallback (1.0 / 0 / 1.0 / 1.0) is wide-open
+ * sampling — Phi-3.5-mini drifts into random-language responses and
+ * persona-incoherent replies (observed: "You are a pirate Jack" prompt
+ * yielded a Spanish "Mi nombre es Paul" reply).
+ */
+export const PHI3_DEFAULTS = Object.freeze({
+	temperature: 0.7,
+	topK: 50,
+	topP: 0.9,
+	repetitionPenalty: 1.1,
+} as const);
+
 /** Sampling mode dispatch on `CompletionConfig.sampling`. */
-export type SamplingMode = "auto" | "qwen-thinking" | "qwen-default" | "raw";
+export type SamplingMode =
+	| "auto"
+	| "qwen-thinking"
+	| "qwen-default"
+	| "phi3"
+	| "raw";
 
 /** Inputs to {@link resolveSamplingParams}. */
 export interface SamplingResolutionInput {
@@ -35,10 +54,15 @@ export interface SamplingResolutionInput {
 	samplingMode: SamplingMode;
 	/**
 	 * True when the loaded model is a Qwen-family architecture with a
-	 * ChatML chat template — the only context where `"auto"` applies a
-	 * profile.
+	 * ChatML chat template — selects the Qwen `"auto"` profile.
 	 */
 	isQwenChatml: boolean;
+	/**
+	 * True when the loaded model is a Phi-3 / Phi-3.5 architecture —
+	 * selects the Phi-3 `"auto"` profile. (Phi-3 has more conservative
+	 * recommended sampling than the engine fallback.)
+	 */
+	isPhi3?: boolean;
 	/**
 	 * Reasoning toggle from the chat config. `false` selects the
 	 * non-thinking profile under `"auto"` + Qwen+ChatML; `true` /
@@ -80,19 +104,25 @@ export interface ResolvedSamplingParams {
 export function resolveSamplingParams(
 	input: SamplingResolutionInput,
 ): ResolvedSamplingParams {
-	const { samplingMode, isQwenChatml, enableThinking, consumer } = input;
+	const { samplingMode, isQwenChatml, isPhi3, enableThinking, consumer } =
+		input;
 	const applyAutoQwen = samplingMode === "auto" && isQwenChatml;
+	const applyAutoPhi3 = samplingMode === "auto" && !!isPhi3 && !isQwenChatml;
 	const forcedProfile =
 		samplingMode === "qwen-thinking"
 			? QWEN_THINKING_DEFAULTS
 			: samplingMode === "qwen-default"
 				? QWEN_NON_THINKING_DEFAULTS
-				: null;
+				: samplingMode === "phi3"
+					? PHI3_DEFAULTS
+					: null;
 	const autoProfile = applyAutoQwen
 		? enableThinking === false
 			? QWEN_NON_THINKING_DEFAULTS
 			: QWEN_THINKING_DEFAULTS
-		: null;
+		: applyAutoPhi3
+			? PHI3_DEFAULTS
+			: null;
 	const activeProfile = forcedProfile ?? autoProfile;
 	return {
 		temperature: consumer.temperature ?? activeProfile?.temperature ?? 1.0,
