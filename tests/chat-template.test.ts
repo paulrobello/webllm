@@ -11,6 +11,9 @@ const QWEN_TMPL = `{%- for message in messages %}{%- if (message.role == "user")
 
 const LLAMA2_TMPL =
 	"{% if message['role'] == 'user' %}[INST] {{ content }} [/INST]{% endif %}";
+// True Llama-2 template — only path that should emit `<<SYS>>` envelope.
+const LLAMA2_SYS_TMPL =
+	"{% if message['role'] == 'user' %}[INST] <<SYS>>\\n{{ system_message }}\\n<</SYS>>\\n\\n{{ content }} [/INST]{% endif %}";
 const CHATML_TMPL =
 	"{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}";
 const GEMMA_TMPL =
@@ -57,29 +60,55 @@ describe("detectChatTemplate", () => {
 	});
 });
 
-describe("formatChatPrompt llama2", () => {
-	test("single user gets default system", () => {
+describe("formatChatPrompt llama2 (Mistral-instruct: no <<SYS>>)", () => {
+	test("single user gets default system merged into first user", () => {
 		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
 		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe(
-			"[INST] <<SYS>>\nYou are a helpful assistant. Answer questions directly and concisely.\n<</SYS>>\n\nHello [/INST] ",
+			"[INST] You are a helpful assistant. Answer questions directly and concisely.\n\nHello [/INST]",
 		);
 	});
-	test("system + user", () => {
+	test("system + user merges system prefix (no trailing space)", () => {
 		const m: ChatMessage[] = [
 			{ role: "system", content: "Sys" },
 			{ role: "user", content: "Hi" },
 		];
-		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe(
-			"[INST] <<SYS>>\nSys\n<</SYS>>\n\nHi [/INST] ",
-		);
+		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe("[INST] Sys\n\nHi [/INST]");
 	});
-	test("multi-turn gets default system", () => {
+	test("multi-turn merges default system; assistant content joined directly", () => {
 		const m: ChatMessage[] = [
 			{ role: "user", content: "Q1" },
 			{ role: "assistant", content: "A1" },
 			{ role: "user", content: "Q2" },
 		];
 		expect(formatChatPrompt(m, LLAMA2_TMPL)).toBe(
+			"[INST] You are a helpful assistant. Answer questions directly and concisely.\n\nQ1 [/INST]A1</s><s>[INST] Q2 [/INST]",
+		);
+	});
+});
+
+describe("formatChatPrompt llama2 (true Llama-2: <<SYS>> envelope)", () => {
+	test("single user gets default system in <<SYS>> envelope", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
+		expect(formatChatPrompt(m, LLAMA2_SYS_TMPL)).toBe(
+			"[INST] <<SYS>>\nYou are a helpful assistant. Answer questions directly and concisely.\n<</SYS>>\n\nHello [/INST] ",
+		);
+	});
+	test("system + user uses <<SYS>> envelope", () => {
+		const m: ChatMessage[] = [
+			{ role: "system", content: "Sys" },
+			{ role: "user", content: "Hi" },
+		];
+		expect(formatChatPrompt(m, LLAMA2_SYS_TMPL)).toBe(
+			"[INST] <<SYS>>\nSys\n<</SYS>>\n\nHi [/INST] ",
+		);
+	});
+	test("multi-turn keeps <<SYS>> envelope on first turn only", () => {
+		const m: ChatMessage[] = [
+			{ role: "user", content: "Q1" },
+			{ role: "assistant", content: "A1" },
+			{ role: "user", content: "Q2" },
+		];
+		expect(formatChatPrompt(m, LLAMA2_SYS_TMPL)).toBe(
 			"[INST] <<SYS>>\nYou are a helpful assistant. Answer questions directly and concisely.\n<</SYS>>\n\nQ1 [/INST] A1</s><s>[INST] Q2 [/INST] ",
 		);
 	});

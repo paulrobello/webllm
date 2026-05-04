@@ -38,7 +38,17 @@ export function detectChatTemplate(template: string): ChatTemplateType {
 function formatLlama2(
 	messages: ChatMessage[],
 	addGenerationPrompt: boolean,
+	template?: string,
 ): string {
+	// Llama-2 wraps system content in `<<SYS>>...<</SYS>>` inside the first
+	// `[INST]` block. Mistral-Instruct family (v0.1–v0.3) shares the
+	// `[INST]…[/INST]` skeleton but has no native system role — its official
+	// Jinja template raises an exception when `role === "system"`. The
+	// idiomatic workaround is to merge the system content into the first
+	// user turn. Detect by whether the original template references the
+	// `<<SYS>>` envelope.
+	const useSysEnvelope = (template ?? "").includes("<<SYS>>");
+
 	let systemContent = "";
 	let hasSystem = false;
 	const turns: Array<{ role: string; content: string }> = [];
@@ -55,10 +65,22 @@ function formatLlama2(
 	}
 
 	let prompt = "[INST] ";
-	if (hasSystem) {
+	if (hasSystem && useSysEnvelope) {
 		prompt += `<<SYS>>\n${systemContent}\n<</SYS>>\n\n`;
+	} else if (hasSystem) {
+		// Mistral-style: system content prefixes the first user message,
+		// separated by a blank line.
+		prompt += `${systemContent}\n\n`;
 	}
 	if (turns.length === 0) return prompt;
+
+	// Llama-2 training keeps a trailing space after `[/INST]`. Mistral's
+	// official Jinja emits `'[INST] ' + content + ' [/INST]'` — the space
+	// goes *before* `[/INST]` only, with no trailing space. Feeding Mistral
+	// the trailing-space variant makes the model emit no-leading-space
+	// variants of subsequent BPE tokens (e.g. `here` instead of `▁here`),
+	// producing missing spaces in the streamed output (`I'mhere`).
+	const closeInst = useSysEnvelope ? " [/INST] " : " [/INST]";
 
 	for (let i = 0; i < turns.length; i++) {
 		const t = turns[i];
@@ -66,13 +88,13 @@ function formatLlama2(
 			if (i > 0) {
 				prompt += "<s>[INST] ";
 			}
-			prompt += `${t.content} [/INST] `;
+			prompt += `${t.content}${closeInst}`;
 		} else {
 			prompt += `${t.content}</s>`;
 		}
 	}
 
-	if (addGenerationPrompt && !prompt.endsWith(" [/INST] ")) {
+	if (addGenerationPrompt && !prompt.endsWith(closeInst)) {
 		// already in generation-ready state
 	}
 	return prompt;
