@@ -39,6 +39,7 @@ function formatLlama2(
 	messages: ChatMessage[],
 	addGenerationPrompt: boolean,
 	template?: string,
+	options?: ChatTemplateRenderOptions,
 ): string {
 	// Llama-2 wraps system content in `<<SYS>>...<</SYS>>` inside the first
 	// `[INST]` block. Mistral-Instruct family (v0.1–v0.3) shares the
@@ -48,6 +49,7 @@ function formatLlama2(
 	// user turn. Detect by whether the original template references the
 	// `<<SYS>>` envelope.
 	const useSysEnvelope = (template ?? "").includes("<<SYS>>");
+	const isMistral = !useSysEnvelope;
 
 	let systemContent = "";
 	let hasSystem = false;
@@ -64,7 +66,22 @@ function formatLlama2(
 		}
 	}
 
-	let prompt = "[INST] ";
+	// Mistral-Instruct V0.3+ (with tekken tokenizer & function-calling
+	// fine-tuning) emits `[AVAILABLE_TOOLS] [...] [/AVAILABLE_TOOLS]` as a
+	// dedicated section preceding the first `[INST]`. The tool list is a
+	// JSON array of `{type: "function", function: {name, description,
+	// parameters}}` objects — same shape as the OpenAI tools schema. The
+	// model then emits its tool calls as `[TOOL_CALLS] [{...}, ...]</s>`.
+	// Without this block the model never sees the tools list and just
+	// answers conversationally (observed on tc-001..tc-012: 2/12 pass on
+	// no_tool_call tasks only). Real Llama-2 doesn't have a function-
+	// calling fine-tune so we skip the block when `<<SYS>>` is present.
+	const tools = options?.tools ?? [];
+	const mistralToolBlock =
+		isMistral && tools.length > 0 ? buildMistralToolBlock(tools) : "";
+
+	let prompt = mistralToolBlock;
+	prompt += "[INST] ";
 	if (hasSystem && useSysEnvelope) {
 		prompt += `<<SYS>>\n${systemContent}\n<</SYS>>\n\n`;
 	} else if (hasSystem) {
@@ -190,6 +207,32 @@ function injectToolsIntoSystem(
 		out.unshift({ role: "system", content: toolBlock });
 	}
 	return out;
+}
+
+/**
+ * Mistral-Instruct V0.3+ tool-block format. Lives BEFORE the first `[INST]`
+ * block, contains a JSON array of OpenAI-style function schemas, wrapped
+ * in `[AVAILABLE_TOOLS]…[/AVAILABLE_TOOLS]`. Mistral was specifically
+ * fine-tuned on this layout — feeding it the Qwen3-style `<tools>` block
+ * inside the system prompt produces conversational hallucinations of
+ * tool *results* instead of actual tool calls (observed across all four
+ * V0.3 quants on the 2026-05-04 greedy bench: 2/12 pass on no_tool_call
+ * tasks only, 0.17 overall).
+ *
+ * Reference: https://docs.mistral.ai/capabilities/function_calling/
+ */
+function buildMistralToolBlock(
+	tools: readonly ChatTemplateToolSchema[],
+): string {
+	const arr = tools.map((t) => ({
+		type: "function",
+		function: {
+			name: t.name,
+			description: t.description,
+			parameters: toJsonSchema(t.parameters),
+		},
+	}));
+	return `[AVAILABLE_TOOLS] ${JSON.stringify(arr)}[/AVAILABLE_TOOLS]`;
 }
 
 function buildToolsBlock(tools: readonly ChatTemplateToolSchema[]): string {

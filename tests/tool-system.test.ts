@@ -77,6 +77,21 @@ describe("ToolSystem", () => {
 		});
 	});
 
+	test("parseToolCall extracts Mistral V0.3 [TOOL_CALLS] emission", () => {
+		// Mistral V0.3 (function-calling fine-tune) emits tool calls as:
+		//   [TOOL_CALLS] [{"name": "...", "arguments": {...}}]</s>
+		// The standalone-JSON regex catches the inner object since the
+		// surrounding `[…]` array brackets aren't braces and the inner
+		// `{name, arguments}` shape matches the existing pattern.
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			'[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Tokyo"}}]',
+		);
+		expect(result).not.toBeNull();
+		expect(result?.name).toBe("get_weather");
+		expect(result?.arguments).toEqual({ city: "Tokyo" });
+	});
+
 	test("parseToolCall returns null for non-tool text", () => {
 		const system = new ToolSystem([]);
 		expect(system.parseToolCall("Hello, how are you?")).toBeNull();

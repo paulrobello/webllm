@@ -60,6 +60,60 @@ describe("detectChatTemplate", () => {
 	});
 });
 
+describe("formatChatPrompt llama2 (Mistral-instruct: tool-block injection)", () => {
+	test("Mistral V0.3 emits [AVAILABLE_TOOLS] block before [INST]", () => {
+		const m: ChatMessage[] = [
+			{ role: "system", content: "You are a weather bot." },
+			{ role: "user", content: "Tokyo?" },
+		];
+		const prompt = formatChatPrompt(m, LLAMA2_TMPL, {
+			tools: [
+				{
+					name: "get_weather",
+					description: "Get weather for a city.",
+					parameters: {
+						city: { type: "string", description: "The city", required: true },
+					},
+				},
+			],
+		});
+		// Block lives BEFORE the [INST], wrapping a JSON array of OpenAI-
+		// style function schemas. The system content stays merged into the
+		// first user turn (Mistral has no native system role).
+		expect(prompt.startsWith("[AVAILABLE_TOOLS] ")).toBe(true);
+		expect(prompt).toContain('"name":"get_weather"');
+		expect(prompt).toContain('"type":"function"');
+		expect(prompt).toContain("[/AVAILABLE_TOOLS][INST] ");
+		expect(prompt).toContain("You are a weather bot.");
+		// Mistral does NOT use Qwen3-style <tools> / <tool_call> tags;
+		// must not see them.
+		expect(prompt).not.toContain("<tools>");
+		expect(prompt).not.toContain("<tool_call>");
+	});
+
+	test("Mistral V0.3 with no tools omits [AVAILABLE_TOOLS] entirely", () => {
+		const m: ChatMessage[] = [{ role: "user", content: "Hi" }];
+		const prompt = formatChatPrompt(m, LLAMA2_TMPL);
+		expect(prompt).not.toContain("[AVAILABLE_TOOLS]");
+	});
+
+	test("real Llama-2 (<<SYS>> envelope) does NOT inject [AVAILABLE_TOOLS]", () => {
+		// Llama-2 had no function-calling fine-tune; the `[AVAILABLE_TOOLS]`
+		// layout is a Mistral-V0.3+ artefact. Real Llama-2 must not see
+		// tokens it wasn't trained on.
+		const m: ChatMessage[] = [
+			{ role: "system", content: "You are a bot." },
+			{ role: "user", content: "Hi" },
+		];
+		const prompt = formatChatPrompt(m, LLAMA2_SYS_TMPL, {
+			tools: [{ name: "noop", description: "", parameters: {} }],
+		});
+		expect(prompt).not.toContain("[AVAILABLE_TOOLS]");
+		// <<SYS>> envelope behaviour preserved.
+		expect(prompt).toContain("<<SYS>>");
+	});
+});
+
 describe("formatChatPrompt llama2 (Mistral-instruct: no <<SYS>>)", () => {
 	test("single user gets default system merged into first user", () => {
 		const m: ChatMessage[] = [{ role: "user", content: "Hello" }];
