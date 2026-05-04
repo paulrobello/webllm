@@ -38,6 +38,19 @@ interface AuditCase {
 	gguf: string;
 	formatter: string;
 	literals: string[];
+	/**
+	 * Chat-stop literals the engine's `addChatStopToken` helper looks up
+	 * via `tokenizer.getId(...)` for this family. If `getId` returns
+	 * undefined, the chat-stop branch in `engine.ts` silently no-ops and
+	 * the model wanders past end-of-turn into self-dialogue (the failure
+	 * mode that hit Phi-3 and Mistral-v0.3 in 2026-05-04).
+	 *
+	 * This is a separate check from `literals` above because `encode()`
+	 * can succeed (literal tokenizes as one id) while `getId()` returns
+	 * undefined (literal isn't registered in `tokenToId` map). The engine
+	 * uses `getId()`, so that's what must hold.
+	 */
+	chatStopTokens: string[];
 }
 
 const AUDIT_CASES: AuditCase[] = [
@@ -46,6 +59,7 @@ const AUDIT_CASES: AuditCase[] = [
 		gguf: "smoke-test/models/phi-3.5-mini-q4km.gguf",
 		formatter: "formatPhi3",
 		literals: ["<|user|>", "<|assistant|>", "<|system|>", "<|end|>"],
+		chatStopTokens: ["<|end|>"],
 	},
 	{
 		model: "llama-3.1-8b",
@@ -57,12 +71,14 @@ const AUDIT_CASES: AuditCase[] = [
 			"<|end_header_id|>",
 			"<|eot_id|>",
 		],
+		chatStopTokens: ["<|eot_id|>"],
 	},
 	{
 		model: "qwen3-0.6b",
 		gguf: "smoke-test/models/qwen3-0.6b-q4f16.gguf",
 		formatter: "formatChatml",
 		literals: ["<|im_start|>", "<|im_end|>"],
+		chatStopTokens: ["<|im_end|>", "<|endoftext|>"],
 	},
 	{
 		model: "mistral-7b-v0.3",
@@ -72,6 +88,7 @@ const AUDIT_CASES: AuditCase[] = [
 		// excluded — the audit only covers literals expected to be single
 		// special tokens.
 		literals: ["[INST]", "[/INST]", "</s>"],
+		chatStopTokens: ["</s>"],
 	},
 ];
 
@@ -144,6 +161,26 @@ for (const audit of AUDIT_CASES) {
 					expect(ids).toContain(expected);
 				}
 			});
+
+			for (const stop of audit.chatStopTokens) {
+				test(`chat-stop literal ${JSON.stringify(stop)} resolves via tokenizer.getId() (engine addChatStopToken contract)`, () => {
+					const { tokenizer } = loadTokenizer(ggufPath);
+					const id = tokenizer.getId(stop);
+					if (id === undefined) {
+						const encoded = tokenizer.encode(stop);
+						throw new Error(
+							`tokenizer.getId(${JSON.stringify(stop)}) returned undefined. ` +
+								`engine.ts:addChatStopToken silently no-ops in this case, leaving the model with no chat-turn stop and producing multi-turn self-dialogue. ` +
+								`encode(${JSON.stringify(stop)}) yields [${encoded.join(",")}] — if this is a single id, the GGUF vocab has the literal but it's not registered as a special token in tokenToId.`,
+						);
+					}
+					expect(typeof id).toBe("number");
+					// Cross-check: encoding the same literal yields the same id.
+					const encoded = tokenizer.encode(stop);
+					expect(encoded.length).toBe(1);
+					expect(encoded[0]).toBe(id);
+				});
+			}
 		},
 	);
 }
