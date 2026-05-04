@@ -28,6 +28,34 @@ import {
 	type WorkerToProxy,
 } from "./worker-bridge.js";
 
+/**
+ * Drop the non-cloneable `signal: AbortSignal` field from a config arg
+ * before posting it to the worker. The host injects its own signal tied
+ * to `stream-cancel` (`webllm-worker-host.ts:141`); the user's signal is
+ * wired back via {@link wireSignalToStream} so cancellation propagates.
+ *
+ * Returns the input unchanged when there is no signal to strip — keeps
+ * `undefined` / non-object configs working.
+ */
+function stripSignal(config: unknown): unknown {
+	if (!config || typeof config !== "object" || Array.isArray(config)) {
+		return config;
+	}
+	const obj = config as Record<string, unknown>;
+	if (!("signal" in obj)) return config;
+	const { signal: _signal, ...rest } = obj;
+	return rest;
+}
+
+/** Pull the `signal` field out of a config arg, if any. */
+function extractSignal(config: unknown): AbortSignal | undefined {
+	if (!config || typeof config !== "object" || Array.isArray(config)) {
+		return undefined;
+	}
+	const sig = (config as Record<string, unknown>).signal;
+	return sig instanceof AbortSignal ? sig : undefined;
+}
+
 interface MinimalWorker {
 	postMessage(m: ProxyToWorker, transfer?: Transferable[]): void;
 	addEventListener(
@@ -153,19 +181,27 @@ export class WebLLMProxy {
 	embed = (modelId: string, text: string) =>
 		this.callMethod<Float32Array>("embed", [modelId, text]);
 	chat = (modelId: string, prompt: string, config?: unknown) =>
-		this.callMethod<string>("chat", [modelId, prompt, config]);
+		this.callMethod<string>("chat", [modelId, prompt, stripSignal(config)]);
 	chatCompletion = (
 		modelOrConv: string | ConversationHandle,
 		messages: unknown[],
 		config?: unknown,
 	): AsyncIterableIterator<GenerationStreamChunk> =>
-		this.startStream("chatCompletion", [modelOrConv, messages, config]);
+		this.startStream(
+			"chatCompletion",
+			[modelOrConv, messages, stripSignal(config)],
+			extractSignal(config),
+		);
 	generateStream = (
 		modelId: string,
 		input: unknown,
 		config?: unknown,
 	): AsyncIterableIterator<GenerationStreamChunk> =>
-		this.startStream("generateStream", [modelId, input, config]);
+		this.startStream(
+			"generateStream",
+			[modelId, input, stripSignal(config)],
+			extractSignal(config),
+		);
 	createConversation = (
 		modelHandleId: string,
 		opts?: ConversationOptions,
@@ -357,6 +393,7 @@ export class WebLLMProxy {
 	private startStream(
 		name: "chatCompletion" | "generateStream",
 		args: unknown[],
+		signal?: AbortSignal,
 	): AsyncIterableIterator<GenerationStreamChunk> {
 		if (this.disposed) {
 			const err = new Error("WebLLM proxy disposed");
@@ -375,6 +412,37 @@ export class WebLLMProxy {
 		this.worker.postMessage({ type: "stream-start", streamId, name, args });
 		const self = this;
 		let cancelled = false;
+		const cancel = (): void => {
+			if (cancelled) return;
+			cancelled = true;
+			try {
+				self.worker.postMessage({ type: "stream-cancel", streamId });
+			} catch {
+				// ignore — worker may be terminating
+			}
+			// Reject any in-flight waiters with AbortError so consumers'
+			// `for await` exits promptly rather than hanging until the
+			// host's `stream-done` ack catches up.
+			const s = self.streams.get(streamId);
+			if (s) {
+				const err = new DOMException("chatCompletion aborted", "AbortError");
+				s.errored = err;
+				const waiters = s.waiters;
+				s.waiters = [];
+				for (const w of waiters) w.reject(err);
+			}
+		};
+		// Wire user-supplied AbortSignal to the worker's stream-cancel
+		// channel. The signal itself is not cloneable (`stripSignal` removed
+		// it before postMessage); this listener bridges main-side abort to
+		// worker-side cancellation.
+		if (signal) {
+			if (signal.aborted) {
+				cancel();
+			} else {
+				signal.addEventListener("abort", cancel, { once: true });
+			}
+		}
 		const iter: AsyncIterableIterator<GenerationStreamChunk> = {
 			[Symbol.asyncIterator]() {
 				return this;
@@ -402,14 +470,7 @@ export class WebLLMProxy {
 				);
 			},
 			return(): Promise<IteratorResult<GenerationStreamChunk>> {
-				if (!cancelled) {
-					cancelled = true;
-					try {
-						self.worker.postMessage({ type: "stream-cancel", streamId });
-					} catch {
-						// ignore
-					}
-				}
+				cancel();
 				self.streams.delete(streamId);
 				return Promise.resolve({ value: undefined, done: true });
 			},
