@@ -139,9 +139,16 @@ export function pickWasmUrl(
 	override?: string,
 ): string {
 	if (override) return override;
+	// Relative-path default: dynamic `import()` inside the bundle
+	// resolves this against the bundle's own URL, so consumers who
+	// drop `webllm-wasm.js` / `webllm-wasm-mem64.js` next to their
+	// bundle "just work" without passing an explicit override. Bare
+	// specifiers fail in plain ESM (no import map) and would force
+	// every consumer to pass an override. Override remains available
+	// for non-co-located deployments.
 	return modelByteLength > WASM32_HEAP_MARGIN
-		? "webllm-wasm-mem64.js"
-		: "webllm-wasm.js";
+		? "./webllm-wasm-mem64.js"
+		: "./webllm-wasm.js";
 }
 
 function isWorkerContext(): boolean {
