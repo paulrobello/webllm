@@ -273,6 +273,15 @@ The smoke-test page accepts URL overrides for `thinking`, `ctx`, `max`,
 `temp`, `topK`, `topP`, `rep`, `seed`, `prompt`, and `profile` — see
 `smoke-test/real-model-page.js` for the full parser.
 
+### Chat page
+
+`smoke-test/chat.html` provides a focused multi-turn chat surface
+against the registered chat-model fleet, with live context / TTFT /
+decode metrics, a settings panel, and single-slot persistence across
+reloads. Run `make smoke-serve` and open
+`http://localhost:8031/chat.html`. See [`docs/CHAT_PAGE.md`](docs/CHAT_PAGE.md)
+for the manual smoke checklist.
+
 ### Benchmarks
 
 ```bash
