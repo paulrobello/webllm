@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	MISTRAL_DEFAULTS,
 	PHI3_DEFAULTS,
 	QWEN_NON_THINKING_DEFAULTS,
 	QWEN_THINKING_DEFAULTS,
@@ -76,6 +77,40 @@ describe("resolveSamplingParams — auto mode", () => {
 				consumer: {},
 			}),
 		).toEqual({ ...QWEN_THINKING_DEFAULTS });
+	});
+
+	test("Mistral → MISTRAL profile", () => {
+		expect(
+			resolveSamplingParams({
+				samplingMode: "auto",
+				isQwenChatml: false,
+				isMistral: true,
+				consumer: {},
+			}),
+		).toEqual({ ...MISTRAL_DEFAULTS });
+	});
+
+	test("Qwen takes precedence over Mistral when both signal true", () => {
+		expect(
+			resolveSamplingParams({
+				samplingMode: "auto",
+				isQwenChatml: true,
+				isMistral: true,
+				consumer: {},
+			}),
+		).toEqual({ ...QWEN_THINKING_DEFAULTS });
+	});
+
+	test("Phi3 takes precedence over Mistral when both signal true", () => {
+		expect(
+			resolveSamplingParams({
+				samplingMode: "auto",
+				isQwenChatml: false,
+				isPhi3: true,
+				isMistral: true,
+				consumer: {},
+			}),
+		).toEqual({ ...PHI3_DEFAULTS });
 	});
 
 	test("non-Qwen + thinking=false still falls back (auto only fires on Qwen+ChatML)", () => {

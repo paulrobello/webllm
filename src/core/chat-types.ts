@@ -58,13 +58,15 @@ export interface CompletionConfig {
 	 * How to apply sampling-parameter defaults.
 	 * - `"auto"` (default): apply Qwen profiles when architecture starts
 	 *   with `"qwen"` and chat template is ChatML; apply the Phi-3
-	 *   profile for `phi3` architecture / template; otherwise use
-	 *   consumer-provided values.
+	 *   profile for `phi3` architecture / template; apply the Mistral
+	 *   profile for the `[INST]…[/INST]` family without `<<SYS>>`;
+	 *   otherwise use consumer-provided values.
 	 * - `"qwen-thinking"`: force `QWEN_THINKING_DEFAULTS` regardless of
 	 *   architecture.
 	 * - `"qwen-default"`: force `QWEN_NON_THINKING_DEFAULTS` regardless
 	 *   of architecture.
 	 * - `"phi3"`: force `PHI3_DEFAULTS` regardless of architecture.
+	 * - `"mistral"`: force `MISTRAL_DEFAULTS` regardless of architecture.
 	 * - `"raw"`: skip auto-application; use only consumer-provided values
 	 *   (with engine fallbacks for unspecified fields).
 	 *
@@ -72,7 +74,13 @@ export interface CompletionConfig {
 	 * Example: `sampling: "qwen-thinking", temperature: 0.9` applies the
 	 * qwen profile then overrides temperature with 0.9.
 	 */
-	sampling?: "auto" | "qwen-thinking" | "qwen-default" | "phi3" | "raw";
+	sampling?:
+		| "auto"
+		| "qwen-thinking"
+		| "qwen-default"
+		| "phi3"
+		| "mistral"
+		| "raw";
 	/**
 	 * Optional PRNG seed for deterministic sampling. When omitted the
 	 * sampler falls back to `Math.random`. Useful for reproducible

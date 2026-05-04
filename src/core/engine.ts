@@ -423,6 +423,10 @@ export class WebLLM {
 			Array.isArray(input) &&
 			(String(entry.hyperparams.architecture) === "phi3" ||
 				detectChatTemplate(chatTemplate ?? "") === "phi3");
+		const isMistral =
+			Array.isArray(input) &&
+			detectChatTemplate(chatTemplate ?? "") === "llama2" &&
+			!(chatTemplate ?? "").includes("<<SYS>>");
 		const {
 			temperature: effectiveTemperature,
 			topK: effectiveTopK,
@@ -432,6 +436,7 @@ export class WebLLM {
 			samplingMode: config?.sampling ?? "auto",
 			isQwenChatml,
 			isPhi3,
+			isMistral,
 			enableThinking: config?.enableThinking,
 			consumer: {
 				temperature: config?.temperature,
@@ -539,6 +544,17 @@ export class WebLLM {
 				// maxTokens and the response wanders through training-data
 				// completions after the real reply ends.
 				addChatStopToken(genConfig, tokenizer, config, "<|end|>");
+			} else {
+				const tmpl = detectChatTemplate(chatTemplate ?? "");
+				if (tmpl === "llama2" || tmpl === "mistral-v7") {
+					// Mistral / Llama-2 [INST]…[/INST] family terminates each
+					// assistant turn with `</s>`. The declared EOS in some
+					// uploader-built GGUFs is `<s>` (id 1) instead of `</s>`
+					// (id 2), so without this the model continues past
+					// end-of-turn into a fabricated multi-turn dialogue with
+					// itself. See CLAUDE.md regression notes.
+					addChatStopToken(genConfig, tokenizer, config, "</s>");
+				}
 			}
 		}
 
@@ -867,6 +883,9 @@ export class WebLLM {
 			const isPhi3 =
 				String(entry.hyperparams.architecture) === "phi3" ||
 				detectChatTemplate(tokenizer.options.chatTemplate ?? "") === "phi3";
+			const isMistral =
+				detectChatTemplate(tokenizer.options.chatTemplate ?? "") === "llama2" &&
+				!(tokenizer.options.chatTemplate ?? "").includes("<<SYS>>");
 			const {
 				temperature: effectiveTemperature,
 				topK: effectiveTopK,
@@ -876,6 +895,7 @@ export class WebLLM {
 				samplingMode: config?.sampling ?? "auto",
 				isQwenChatml,
 				isPhi3,
+				isMistral,
 				enableThinking: config?.enableThinking,
 				consumer: {
 					temperature: config?.temperature,
@@ -972,6 +992,13 @@ export class WebLLM {
 				// chatCompletion). Without this the conv path also wanders
 				// through training data after the real reply ends.
 				addChatStopToken(genConfig, tokenizer, config, "<|end|>");
+			} else {
+				const tmpl = detectChatTemplate(tokenizer.options.chatTemplate ?? "");
+				if (tmpl === "llama2" || tmpl === "mistral-v7") {
+					// Mistral / Llama-2 [INST] family: stop on `</s>` (see
+					// same-named block in chatCompletion).
+					addChatStopToken(genConfig, tokenizer, config, "</s>");
+				}
 			}
 
 			// 10. Decode loop — drive generateTextStream with the last prompt

@@ -43,12 +43,30 @@ export const PHI3_DEFAULTS = Object.freeze({
 	repetitionPenalty: 1.1,
 } as const);
 
+/**
+ * Mistral-Instruct (v0.1 / v0.2 / v0.3) default sampling — the official
+ * recommendation from MistralAI for instruct fine-tunes is `T=0.7`,
+ * `top_p=0.95`. Without these, the engine fallback (`T=1.0` /
+ * unconstrained) makes Mistral skip the special `</s>` (EOS) token in
+ * favour of higher-probability text continuations, producing multi-turn
+ * self-dialogue instead of a single bounded reply. The `[INST]…[/INST]`
+ * template family detected as `"llama2"` without a `<<SYS>>` envelope is
+ * Mistral-Instruct (true Llama-2 keeps `<<SYS>>`).
+ */
+export const MISTRAL_DEFAULTS = Object.freeze({
+	temperature: 0.7,
+	topK: 0,
+	topP: 0.95,
+	repetitionPenalty: 1.0,
+} as const);
+
 /** Sampling mode dispatch on `CompletionConfig.sampling`. */
 export type SamplingMode =
 	| "auto"
 	| "qwen-thinking"
 	| "qwen-default"
 	| "phi3"
+	| "mistral"
 	| "raw";
 
 /** Inputs to {@link resolveSamplingParams}. */
@@ -66,6 +84,12 @@ export interface SamplingResolutionInput {
 	 * recommended sampling than the engine fallback.)
 	 */
 	isPhi3?: boolean;
+	/**
+	 * True when the loaded model is a Mistral-Instruct family model
+	 * (template detected as `"llama2"` without a `<<SYS>>` envelope).
+	 * Selects Mistral's official recommended sampling under `"auto"`.
+	 */
+	isMistral?: boolean;
 	/**
 	 * Reasoning toggle from the chat config. `false` selects the
 	 * non-thinking profile under `"auto"` + Qwen+ChatML; `true` /
@@ -98,8 +122,9 @@ export interface ResolvedSamplingParams {
  * generation request.
  *
  * Precedence (highest first): consumer override → forced profile (from
- * `"qwen-thinking"` / `"qwen-default"`) → auto profile (from `"auto"`
- * when Qwen+ChatML) → engine fallback (`1.0` / `0` / `1.0` / `1.0`).
+ * `"qwen-thinking"` / `"qwen-default"` / `"phi3"` / `"mistral"`) →
+ * auto profile (selected by family flags) → engine fallback (`1.0` /
+ * `0` / `1.0` / `1.0`).
  *
  * Mode `"raw"` produces no profile, falling straight through to consumer
  * overrides + engine fallbacks.
@@ -107,10 +132,18 @@ export interface ResolvedSamplingParams {
 export function resolveSamplingParams(
 	input: SamplingResolutionInput,
 ): ResolvedSamplingParams {
-	const { samplingMode, isQwenChatml, isPhi3, enableThinking, consumer } =
-		input;
+	const {
+		samplingMode,
+		isQwenChatml,
+		isPhi3,
+		isMistral,
+		enableThinking,
+		consumer,
+	} = input;
 	const applyAutoQwen = samplingMode === "auto" && isQwenChatml;
 	const applyAutoPhi3 = samplingMode === "auto" && !!isPhi3 && !isQwenChatml;
+	const applyAutoMistral =
+		samplingMode === "auto" && !!isMistral && !isQwenChatml && !isPhi3;
 	const forcedProfile =
 		samplingMode === "qwen-thinking"
 			? QWEN_THINKING_DEFAULTS
@@ -118,14 +151,18 @@ export function resolveSamplingParams(
 				? QWEN_NON_THINKING_DEFAULTS
 				: samplingMode === "phi3"
 					? PHI3_DEFAULTS
-					: null;
+					: samplingMode === "mistral"
+						? MISTRAL_DEFAULTS
+						: null;
 	const autoProfile = applyAutoQwen
 		? enableThinking === false
 			? QWEN_NON_THINKING_DEFAULTS
 			: QWEN_THINKING_DEFAULTS
 		: applyAutoPhi3
 			? PHI3_DEFAULTS
-			: null;
+			: applyAutoMistral
+				? MISTRAL_DEFAULTS
+				: null;
 	const activeProfile = forcedProfile ?? autoProfile;
 	return {
 		temperature: consumer.temperature ?? activeProfile?.temperature ?? 1.0,

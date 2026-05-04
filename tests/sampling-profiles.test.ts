@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { CompletionConfig } from "../src/core/chat-types.js";
 import {
+	MISTRAL_DEFAULTS,
 	PHI3_DEFAULTS,
 	QWEN_NON_THINKING_DEFAULTS,
 	QWEN_THINKING_DEFAULTS,
@@ -34,6 +35,15 @@ describe("Sampling profile constants", () => {
 		});
 	});
 
+	test("MISTRAL_DEFAULTS matches MistralAI's official instruct recommendation", () => {
+		expect(MISTRAL_DEFAULTS).toEqual({
+			temperature: 0.7,
+			topK: 0,
+			topP: 0.95,
+			repetitionPenalty: 1.0,
+		});
+	});
+
 	test("constants are frozen at runtime (assignment throws in strict mode)", () => {
 		expect(() => {
 			// @ts-expect-error — readonly property cannot be assigned.
@@ -50,16 +60,17 @@ describe("Sampling profile constants", () => {
 });
 
 describe("CompletionConfig.sampling field", () => {
-	test("union accepts all five mode strings; rejects unknown strings", () => {
+	test("union accepts all six mode strings; rejects unknown strings", () => {
 		const a: CompletionConfig = { sampling: "auto" };
 		const b: CompletionConfig = { sampling: "qwen-thinking" };
 		const c: CompletionConfig = { sampling: "qwen-default" };
 		const d: CompletionConfig = { sampling: "raw" };
 		const e: CompletionConfig = { sampling: "phi3" };
+		const f: CompletionConfig = { sampling: "mistral" };
 
 		// @ts-expect-error — "off" is not a member of the sampling union.
-		const f: CompletionConfig = { sampling: "off" };
+		const g: CompletionConfig = { sampling: "off" };
 
-		expect([a, b, c, d, e, f]).toHaveLength(6);
+		expect([a, b, c, d, e, f, g]).toHaveLength(7);
 	});
 });
