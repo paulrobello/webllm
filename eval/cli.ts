@@ -107,12 +107,20 @@ function main(): void {
 
 	const modelId = effectiveModelId;
 	const runner = new EvalRunner(allTasks);
-	// CLI flags win over profile; profile wins over defaults.
+	// Precedence: CLI flag > parent bench-harness env override > profile > default.
+	// `WEBLLM_BENCH_EVAL_TEMPERATURE` (set by `eval/bench.ts`) pins greedy
+	// (or whatever the parent chose) for the accuracy pass without
+	// requiring every profile to be re-defined.
+	const evalTempEnvRaw = process.env.WEBLLM_BENCH_EVAL_TEMPERATURE;
+	const evalTempFromEnv =
+		evalTempEnvRaw !== undefined ? Number.parseFloat(evalTempEnvRaw) : NaN;
 	const options = {
 		temperature:
 			values.temperature !== undefined
 				? Number.parseFloat(values.temperature)
-				: profile?.temperature,
+				: Number.isFinite(evalTempFromEnv)
+					? evalTempFromEnv
+					: profile?.temperature,
 		maxTokens:
 			values["max-tokens"] !== undefined
 				? Number.parseInt(values["max-tokens"], 10)
@@ -175,6 +183,7 @@ function main(): void {
 		},
 	};
 
+	const sessionId = process.env.WEBLLM_BENCH_SESSION_ID;
 	const startPromise = liveBenchUrl
 		? publishEvalStarted(liveBenchUrl, {
 				evalId,
@@ -185,6 +194,7 @@ function main(): void {
 				),
 				label:
 					profile?.name ?? (values.dimension ? `${values.dimension}` : "all"),
+				...(sessionId ? { sessionId } : {}),
 			})
 		: Promise.resolve(true);
 

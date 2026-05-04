@@ -146,9 +146,21 @@ function main(): void {
 	// diversity actually matters. An explicit --dimension tool-calling
 	// always runs, on the assumption the caller knows what they want.
 	const COLD_TEMP_CEILING = 0.4;
+	// When the parent bench harness pins an `--eval-temperature`, it wins
+	// over the profile's native temperature (the speed pass keeps native;
+	// only the accuracy pass is pinned). Use the effective temperature for
+	// the cold-vs-warm gate so a greedy override unlocks tool-calling on
+	// warm profiles instead of pointlessly skipping it.
+	const evalTempOverrideRaw = process.env.WEBLLM_BENCH_EVAL_TEMPERATURE;
+	const evalTempOverride =
+		evalTempOverrideRaw !== undefined
+			? Number.parseFloat(evalTempOverrideRaw)
+			: NaN;
+	const effectiveTemp = Number.isFinite(evalTempOverride)
+		? evalTempOverride
+		: profile?.temperature;
 	const isCold =
-		typeof profile?.temperature === "number" &&
-		profile.temperature <= COLD_TEMP_CEILING;
+		typeof effectiveTemp === "number" && effectiveTemp <= COLD_TEMP_CEILING;
 
 	let tasks: EvalTask[];
 	if (dimension) {
@@ -158,7 +170,7 @@ function main(): void {
 	} else {
 		tasks = ALL_TASKS.filter((t) => t.dimension !== "tool-calling");
 		console.log(
-			`Skipping tool-calling tasks (profile temperature ${profile?.temperature ?? "default"} > ${COLD_TEMP_CEILING}; rerun with --dimension tool-calling to force).`,
+			`Skipping tool-calling tasks (effective temperature ${effectiveTemp ?? "default"} > ${COLD_TEMP_CEILING}; rerun with --dimension tool-calling to force).`,
 		);
 	}
 
@@ -266,6 +278,25 @@ async function run(
 	if (opts.profileName) extraParams.profile = opts.profileName;
 	if (opts.thinking) extraParams.thinking = 1;
 	if (opts.worker) extraParams.worker = 1;
+
+	// Tag this per-model eval with the parent bench session so the dashboard
+	// can aggregate progress across all models in the run.
+	const sessionId = process.env.WEBLLM_BENCH_SESSION_ID;
+	if (sessionId) extraParams.session = sessionId;
+
+	// Override profile temperature for the accuracy pass when the parent
+	// bench harness has pinned one (default: greedy). Spread *after*
+	// extraProfileParams so this wins; the speed pass is unaffected because
+	// it never sees this env var (chat-smoke.ts reads profile temp directly).
+	// The smoke page reads URL param `temp`, matching `profileToUrlParams`
+	// — using the long form `temperature` here would silently no-op.
+	const evalTemperatureRaw = process.env.WEBLLM_BENCH_EVAL_TEMPERATURE;
+	if (evalTemperatureRaw !== undefined) {
+		const t = Number.parseFloat(evalTemperatureRaw);
+		if (Number.isFinite(t) && t >= 0) {
+			extraParams.temp = t;
+		}
+	}
 
 	const url = buildSmokeTestUrl(model.id, opts.contextLength, {
 		page,

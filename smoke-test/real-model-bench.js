@@ -17,6 +17,7 @@ export async function runBenchMode({
 	parsed,
 	modelId,
 	taskListId,
+	sessionId,
 	ingestUrl,
 	log,
 	setProgress,
@@ -88,9 +89,17 @@ export async function runBenchMode({
 		totalTasks: tasks.length,
 		dimensions,
 		label: `${modelId} (${modelArchLabel}) · browser`,
+		...(sessionId ? { sessionId } : {}),
 	});
 
-	log("running", `[bench] running ${tasks.length} tasks through real WebGPU…`);
+	const tempLabel =
+		typeof params?.temperature === "number"
+			? ` · temp ${params.temperature}`
+			: "";
+	log(
+		"running",
+		`[bench] running ${tasks.length} tasks through real WebGPU${tempLabel}…`,
+	);
 	window.__benchStatus = {
 		done: false,
 		totalTasks: tasks.length,
@@ -101,10 +110,26 @@ export async function runBenchMode({
 
 	const results = [];
 	try {
-		await runTasks(engine, handleId, tasks, {
+		// Thread sampling overrides from URL params (?temp=, ?max=, …) into
+		// the per-task runner. Without this the Character defaults (T=0.7)
+		// silently override `?temp=0`, defeating the bench harness's
+		// greedy-pinning policy.
+		const runOpts = {
 			onTaskStart: (task) => {
 				log("running", `[bench]   ${task.id} (${task.dimension}/${task.difficulty})…`);
 			},
+		};
+		if (typeof params?.temperature === "number") {
+			runOpts.temperature = params.temperature;
+		}
+		if (typeof params?.maxTokens === "number") {
+			runOpts.maxTokens = params.maxTokens;
+		}
+		if (typeof thinking === "boolean") {
+			runOpts.enableThinking = thinking;
+		}
+		await runTasks(engine, handleId, tasks, {
+			...runOpts,
 			onTaskComplete: async (result) => {
 				// Score was computed inside runTasks, but re-run with the library
 				// scorer for any tasks that might have thrown. Keep authoritative.

@@ -137,6 +137,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	const promptOverride = params.get("prompt");
 	const profileName = params.get("profile");
 	const benchTaskListId = params.get("bench");
+	const benchSessionId = params.get("session");
 	// Resolve dashboard ingest URL with a "default-on" policy:
 	//   • `?ingest=<url>`   → use that URL.
 	//   • `?ingest=off`     → disable ingest entirely.
@@ -2398,6 +2399,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					parsed: parsedModel,
 					modelId,
 					taskListId: benchTaskListId,
+					sessionId: benchSessionId,
 					ingestUrl: benchIngestUrl,
 					log,
 					setProgress,
