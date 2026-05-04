@@ -876,6 +876,58 @@ Full block (eval/speed details, Path A vs Path B note for the next
 fused-projection arch) archived to `TODO_ARCHIVE.md` under "Phi-3
 causal LM support (closed 2026-04-29)".
 
+### Chat-template family dispatch hardening (CLOSED 2026-05-04)
+
+Closed 2026-05-04 — three-layer fix for the chat-template family
+dispatch (sampling profile + chat-stop registration + template
+formatter must all agree, or the model wanders past end-of-turn).
+Triggered by interactive smoke-test session debugging Mistral 7B
+Instruct v0.3 multi-turn self-dialogue, generalized to a fleet-wide
+audit + engine widening.
+
+**Layer 1 smoke (`tests/chat-template-special-tokens.test.ts`):**
+expanded from 4 → 19 chat-capable GGUFs with a per-model
+`chatStopTokens` audit asserting `tokenizer.getId(stopLiteral)` (the
+exact API `engine.ts:addChatStopToken` calls) resolves for every
+registered family. 92 tests / 0 fail. Header-only progressive read
+(2 → 16 → 64 MiB) avoids `readFileSync` ENOMEM on multi-GB fixtures.
+Commit `da720a6`.
+
+**Engine chat-stop registration widened (commit `c3d8261`):**
+- Non-Qwen ChatML (Hermes-3 + SmolLM2) — register `<|im_end|>`
+  explicitly. `<|endoftext|>` deliberately *not* registered for
+  non-Qwen chatml because in SmolLM2's vocab it aliases id 0 (unk/pad
+  slot).
+- Gemma — register `<end_of_turn>`. Was the only family genuinely
+  broken pre-fix: eosId=1 is `<eos>`, not the chat turn-end token at
+  id 107.
+- Detection now template-string-driven via `detectChatTemplate`, not
+  architecture flag, so SmolLM2/Hermes-3 (registered as
+  `architecture: "llama"` but chatml-templated) get correct
+  registration.
+
+**Mistral-Instruct family handling (commits `dafe4b4` + `27aacef`
++ `1f064e9`):**
+- `formatLlama2` differentiates Mistral-Instruct from true Llama-2
+  via `<<SYS>>` envelope presence: Llama-2 keeps `<<SYS>>...<</SYS>>`
+  + trailing space after `[/INST]`; Mistral merges system into first
+  user message + omits trailing space (matches official Jinja).
+- `</s>` registered as runtime chat-stop for `llama2`/`mistral-v7`
+  template families (Mistral GGUFs sometimes ship wrong eos id).
+- `MISTRAL_DEFAULTS` sampling profile (T=0.7 / top-p=0.95, official
+  MistralAI rec) added with auto-dispatch when
+  `detectChatTemplate(...) === "llama2" && !template.includes("<<SYS>>")`.
+  At T=1.0 unconstrained, Mistral skips `</s>` for higher-probability
+  prose continuations and fabricates multi-turn dialogue.
+- Chat-page UI (`smoke-test/chat-settings.js`) mirrors the new
+  defaults via `family =~ /^mistral/i`.
+
+**Memory note:** `feedback_chat_template_family_dispatch.md` —
+"chat-template family dispatch needs three signals, not one"
+(stop tokens + sampling profile + formatter must all agree;
+covers the Mistral-v0.3 three-round debug pattern as the canonical
+near-miss).
+
 ### Next session pickup (queued 2026-04-29; updated 2026-04-29)
 
 **Status:** algorithmic-perf backlog cleared (§17-§29 + Phi-3
