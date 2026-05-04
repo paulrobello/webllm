@@ -27,16 +27,19 @@ export const QWEN_NON_THINKING_DEFAULTS = Object.freeze({
 } as const);
 
 /**
- * Phi-3 / Phi-3.5 recommended sampling per the upstream model card.
- * Without these, the engine fallback (1.0 / 0 / 1.0 / 1.0) is wide-open
- * sampling — Phi-3.5-mini drifts into random-language responses and
- * persona-incoherent replies (observed: "You are a pirate Jack" prompt
- * yielded a Spanish "Mi nombre es Paul" reply).
+ * Phi-3 / Phi-3.5 default sampling — greedy, per the upstream model
+ * card. Phi-3.5-mini was trained on a heavily multilingual corpus and
+ * any non-zero temperature causes language drift on short English
+ * prompts (observed: same English prompt produced Spanish / Russian /
+ * Japanese continuations across consecutive turns at temperature 0.4).
+ * Greedy keeps Phi-3.5 in the prompt's language deterministically;
+ * users wanting creative variety can dial temperature up via the
+ * Settings panel.
  */
 export const PHI3_DEFAULTS = Object.freeze({
-	temperature: 0.7,
-	topK: 50,
-	topP: 0.9,
+	temperature: 0,
+	topK: 0,
+	topP: 1,
 	repetitionPenalty: 1.1,
 } as const);
 

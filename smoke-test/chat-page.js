@@ -130,26 +130,34 @@ export async function runChatPage() {
   let session = newSessionTotals();
 
   function refreshContext() {
-    const used = conv ? estimateContextTokens(conv) : 0;
+    if (!conv) {
+      applyContextBar(ctxBarInner, ctxPill, 0, loadedModel?.contextLength ?? 0);
+      return;
+    }
+    // Always render an immediate chars/4 estimate so the bar updates
+    // synchronously, then refine via the engine's tokenizer (sync in
+    // main-thread mode, async/Promise in worker mode).
     const max = loadedModel?.contextLength ?? 0;
-    applyContextBar(ctxBarInner, ctxPill, used, max);
+    applyContextBar(ctxBarInner, ctxPill, charsApprox(conv), max);
+    if (engine && loadedModel) {
+      const parts = [];
+      if (conv.systemPrompt) parts.push(conv.systemPrompt);
+      for (const m of conv.messages) parts.push(m.content);
+      Promise.resolve()
+        .then(() => engine.tokenize(loadedHandleId, parts.join("\n")))
+        .then((ids) => {
+          if (Array.isArray(ids) || (ids && typeof ids.length === "number")) {
+            applyContextBar(ctxBarInner, ctxPill, ids.length, max);
+          }
+        })
+        .catch(() => {/* keep the chars/4 fallback */});
+    }
   }
 
-  function estimateContextTokens(c) {
-    if (!engine || !loadedModel) return 0;
-    try {
-      const parts = [];
-      if (c.systemPrompt) parts.push(c.systemPrompt);
-      for (const m of c.messages) parts.push(m.content);
-      return engine.tokenize(loadedHandleId, parts.join("\n")).length;
-    } catch {
-      // Fallback if tokenize isn't available (older bundle / model
-      // not loaded yet): chars/4 is a reasonable order-of-magnitude
-      // estimate for the bar.
-      let chars = (c.systemPrompt || "").length;
-      for (const m of c.messages) chars += m.content.length;
-      return Math.ceil(chars / 4);
-    }
+  function charsApprox(c) {
+    let chars = (c.systemPrompt || "").length;
+    for (const m of c.messages) chars += m.content.length;
+    return Math.ceil(chars / 4);
   }
 
   const settingsPanel = document.getElementById("chat-settings-panel");

@@ -4,7 +4,7 @@ const ENGINE_FALLBACKS = { temperature: 1.0, topK: 0, topP: 1.0, repetitionPenal
 
 const QWEN_THINKING = { temperature: 0.6, topK: 20, topP: 0.95, repetitionPenalty: 1.05 };
 const QWEN_NON_THINKING = { temperature: 0.7, topK: 20, topP: 0.8, repetitionPenalty: 1.1 };
-const PHI3 = { temperature: 0.7, topK: 50, topP: 0.9, repetitionPenalty: 1.1 };
+const PHI3 = { temperature: 0, topK: 0, topP: 1, repetitionPenalty: 1.1 };
 
 /**
  * Compute the default settings for a given model. Mirrors the engine's

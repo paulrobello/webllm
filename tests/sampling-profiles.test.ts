@@ -25,11 +25,11 @@ describe("Sampling profile constants", () => {
 		});
 	});
 
-	test("PHI3_DEFAULTS matches the upstream Phi-3 model card recommendation", () => {
+	test("PHI3_DEFAULTS matches the upstream Phi-3 greedy recommendation", () => {
 		expect(PHI3_DEFAULTS).toEqual({
-			temperature: 0.7,
-			topK: 50,
-			topP: 0.9,
+			temperature: 0,
+			topK: 0,
+			topP: 1,
 			repetitionPenalty: 1.1,
 		});
 	});

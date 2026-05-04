@@ -202,6 +202,11 @@ export class WebLLMProxy {
 			[modelId, input, stripSignal(config)],
 			extractSignal(config),
 		);
+	tokenize = (
+		modelHandleId: string,
+		text: string,
+	): Promise<readonly number[]> =>
+		this.callMethod<readonly number[]>("tokenize", [modelHandleId, text]);
 	createConversation = (
 		modelHandleId: string,
 		opts?: ConversationOptions,
