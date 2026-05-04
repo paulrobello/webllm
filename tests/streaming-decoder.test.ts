@@ -109,6 +109,32 @@ describe("StreamingDecoder", () => {
 		expect(decoder.text).toBe("<s> thinking</s>");
 	});
 
+	test("holds back trailing U+FFFD until the multi-byte sequence completes", () => {
+		// Simulate BPE byte fallback splitting a 4-byte emoji (🌞 = F0 9F 8C 9E)
+		// across two tokens: first token decodes to one or two replacement chars,
+		// second token completes the sequence and decode() returns the real
+		// emoji. The streaming decoder must NOT emit `�` chunks the consumer
+		// would accumulate forever — it should hold them until decode resolves.
+		const tokens = ["<s>", "first-half", "second-half", "</s>"];
+		const tokenizer = makeTokenizer(tokens);
+		// Override decode to mimic the partial-UTF-8 → replacement-char shape
+		// real BPE byte fallback produces.
+		const orig = tokenizer.decode.bind(tokenizer);
+		(tokenizer as { decode: typeof tokenizer.decode }).decode = (
+			ids: number[],
+		) => {
+			if (ids.length === 1 && ids[0] === 1) return "Hi �";
+			if (ids.length === 2 && ids[0] === 1 && ids[1] === 2) return "Hi 🌞";
+			return orig(ids);
+		};
+
+		const decoder = new StreamingDecoder(tokenizer);
+		expect(decoder.push(1)).toBe("Hi "); // ← `�` held back
+		expect(decoder.text).toBe("Hi ");
+		expect(decoder.push(2)).toBe("🌞");
+		expect(decoder.text).toBe("Hi 🌞");
+	});
+
 	test("requires </think> before continuing visible answer text", () => {
 		const tokenizer = makeThinkingTokenizer();
 		const decoder = new StreamingDecoder(tokenizer);

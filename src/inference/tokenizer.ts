@@ -972,8 +972,21 @@ export class StreamingDecoder {
 			this.emittedTokenIds,
 			this.decodeOptions,
 		);
-		const delta = fullText.slice(this.prevText.length);
-		this.prevText = fullText;
+		// Hold back trailing U+FFFD REPLACEMENT CHARACTERs: they signal a
+		// partial UTF-8 sequence still in flight (BPE byte-fallback splits
+		// multi-byte codepoints — e.g. 🌞 (4 bytes) — across tokens). On the
+		// next push the full byte sequence decodes to the real codepoint, so
+		// emitting a `�` now would baked into the consumer's accumulated
+		// text and never be replaced.
+		let stable = fullText;
+		while (
+			stable.length > 0 &&
+			stable.charCodeAt(stable.length - 1) === 0xfffd
+		) {
+			stable = stable.slice(0, -1);
+		}
+		const delta = stable.slice(this.prevText.length);
+		this.prevText = stable;
 		return delta;
 	}
 
