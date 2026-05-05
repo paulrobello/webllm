@@ -839,24 +839,29 @@ upscale shader; tip `e29753286`); sweep matrix at
 
 ### Tier 3 migration to upstream `llama_decode` (NEW DIRECTION 2026-05-05)
 
-**Status:** **P1 BLOCKED 2026-05-05.** Adding any new export to the
-WASM binary (e.g. `webllm_tokenize`) triggers a `function signature
-mismatch` runtime trap in `__wasm_call_ctors` at module init,
-**before any user code runs**. Reproducer + 7 tested workarounds
-(all failed) in
+**Status:** **P1 UNBLOCKED 2026-05-05 via JSPI pivot (commit
+`b4d4b48`).** Dropped `-sASYNCIFY` for `-sJSPI` by flipping
+`GGML_WEBGPU_JSPI=ON` in `src/wasm/CMakeLists.txt`. JSPI uses native
+`WebAssembly.promising` / `Suspending` and sidesteps the
+Asyncify+exceptions+ctors trap that previously fired in
+`__wasm_call_ctors` whenever a new wasm export was added. P0 spike
+PASSES end-to-end on the JSPI build with all four new P1 exports
+(`webllm_tokenize`, `_detokenize`, `_token_bos`, `_token_eos`)
+re-applied. Required follow-on changes: `JSPI_EXPORTS` uses bare
+wasm export names (no leading `_`); TS bridge methods that call
+JSPI-promised exports must `await` (every JSPI-listed export now
+returns a Promise even when no actual suspend fires, unlike Asyncify
+which only Promised-wrapped on real suspends). Closure +
+remaining-work breakdown in
 [`eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md`](eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md).
-P1 cannot proceed; P2-P6 transitively blocked because every phase
-needs at least one new wasm export. Tasks 1+2 reverted (commits
-`cfc8d97`, `310cc24`) so P0 spike continues to PASS off main.
-**Recommended next step (when revisiting):** Emscripten rollback
-ruled out (verified bug spans 5.0.5/5.0.6/5.0.7 — three consecutive
-versions). Leading candidate is dropping `-sASYNCIFY` for `-sJSPI`
-(flip `GGML_WEBGPU_JSPI=ON` in CMakeLists.txt). Related unresolved
-upstream issues: #18254, #18045, #25551 (all OPEN, all
-ASYNCIFY+exceptions+ctors family). TS-side P1 work (LlamaBridge
-extension,
-LlamaTokenizer, fixture, smoke harness) remains on main and will
-unblock cleanly once the export bug is resolved.
+**P1 parity status:** llama-bpe 195/200 byte-exact; spm-llama 1/200
+(fixture-canonicalization gap — legacy `Tokenizer.encode()` doesn't
+match canonical `llama_tokenize`); qwen2 throws `undefined`
+mid-stream (needs diagnosis); qwen3 + wordpiece-bert not reached.
+**Next:** diagnose qwen2 throw, decide canonical-fixture-source
+(`llama_tokenize` is the new ground truth; legacy is going away in
+P2), regenerate per-vocab `expected` arrays, re-run to byte-exact
+green, then advance to P2 (encoder migration).
 
 **Status:** **P0 CLOSED 2026-05-05 — PASS.** Spec at
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md);

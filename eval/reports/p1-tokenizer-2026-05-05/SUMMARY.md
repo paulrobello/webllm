@@ -1,10 +1,90 @@
-# P1 — Tokenizer Migration — BLOCKED
+# P1 — Tokenizer Migration — UNBLOCKED via JSPI pivot
 
 **Date:** 2026-05-05
 **Spec:** [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](../../../docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md) §P1
 **Plan:** [`docs/superpowers/plans/2026-05-05-tier3-p1-tokenizer.md`](../../../docs/superpowers/plans/2026-05-05-tier3-p1-tokenizer.md)
 
-## Outcome
+## Resolution: JSPI pivot (commit `b4d4b48`)
+
+**🟢 P0 spike PASS** end-to-end on the JSPI build with all four new
+P1 wasm exports re-applied:
+
+```
+[1/6] Initializing WASM module...   ✓
+[2/6] Initializing WebGPU backend...  ✓
+[3/6] Fetching TinyLlama Q4_0 GGUF...  ✓ (637.8 MiB)
+[4/6] Loading model + creating context...  ✓
+[5/6] Decoding prompt (6 tokens)...  ✓
+[6/6] Reading logits + argmax...  ✓
+PASS — top-1 matches " Paris"
+```
+
+The Asyncify-only failure mode documented below is sidestepped by
+flipping `GGML_WEBGPU_JSPI=ON` in `src/wasm/CMakeLists.txt`. JSPI
+uses native `WebAssembly.promising` / `Suspending` instead of
+Asyncify's stack-rewinding transformation, and the
+`__wasm_call_ctors` static-initializer trampoline pattern that
+Asyncify mis-instruments under exceptions+ctors+export-count
+pressure no longer fires.
+
+### Required follow-on changes
+
+- **Bare wasm export names in `JSPI_EXPORTS`** (no leading `_`).
+  Mismatching the convention silently no-ops the
+  promising-wrapping and surfaces only at runtime as `trying to
+  suspend without WebAssembly.promising`.
+- **`await` JSPI-promised exports in TS bindings.** Under Asyncify,
+  exports returned synchronously unless an actual suspend fired;
+  under JSPI they always return a Promise.
+  `LlamaBridge.loadModel` / `createContext` / `getLogits` were
+  updated to await; `decode` was already awaited.
+  `LlamaBridge.createContext` and `getLogits` are now `Promise<…>`-
+  returning in the public type.
+
+### P1 parity status (partial)
+
+`smoke-test/p1-tokenizer-parity.html` runs the 200-prompt × 5-vocab
+fixture against the new `LlamaTokenizer.encode()` path on the
+unblocked JSPI build:
+
+| Vocab | Match | Notes |
+|---|---|---|
+| llama-bpe | 195 / 200 | 5 mismatches — likely whitespace/normalization edge cases |
+| spm-llama | 1 / 200 | Systematic divergence — fixture was built from legacy `Tokenizer(config).encode()` which does not match canonical SPM (legacy adds explicit `▁` / id `35` between word groups; `llama_tokenize` produces the canonical concatenated form) |
+| qwen2 | error | Bridge throws `undefined` mid-stream — needs diagnosis |
+| qwen3 | not reached | qwen2 error halts the run |
+| wordpiece-bert | not reached | qwen2 error halts the run |
+
+**Interpretation:** the spm-llama divergence is a *fixture* issue,
+not a `LlamaTokenizer` issue — the new path encodes correctly per
+`llama_tokenize` (which P0 used to derive the canonical
+`[1, 450, 7483, 310, 3444, 338]` "The capital of France is" prompt
+that produces top-1 " Paris"). The byte-exact parity bar in the
+spec measured against the legacy encoder is unachievable when the
+legacy encoder itself diverges from canonical. Closing this
+properly requires either:
+
+- Regenerating the fixture from `llama_tokenize` as the new ground
+  truth (and accepting the new path as canonical), **or**
+- Documenting per-vocab divergence rates as the
+  spec-text-vs-runtime-truth gap and shipping with regression
+  test against the new ground truth.
+
+This work is the natural Stage-D-byte-exact follow-on; it's
+**iterative discovery** rather than blocked, so the JSPI pivot
+itself is the load-bearing milestone closing the BLOCKED status.
+
+### Next steps
+
+- [ ] Diagnose the qwen2 `FAIL — undefined` exception
+- [ ] Decide fixture canonicalization (`llama_tokenize` vs legacy)
+      and regenerate the per-vocab `expected` arrays
+- [ ] Re-run parity to byte-exact green across all 5 vocabs
+- [ ] Close P1; advance to P2 (encoder migration)
+
+---
+
+## Original BLOCKED diagnosis (pre-JSPI, retained for context)
 
 **🛑 BLOCKED** — Adding any new export to the WASM module triggers a
 `function signature mismatch` runtime error during
