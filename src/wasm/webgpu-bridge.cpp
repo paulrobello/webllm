@@ -2,6 +2,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 #include "ggml-webgpu.h"
+#include "llama.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -371,6 +372,38 @@ double webgpu_last_graph_profile_encode_overhead_ms() {
 
 int32_t webgpu_last_graph_profile_dispatch_count() {
     return ggml_backend_webgpu_last_graph_profile_dispatch_count();
+}
+
+// ── llama.cpp model lifecycle ────────────────────────────────────────────
+
+// Load a llama.cpp model from a buffer in JS heap memory.
+//
+// Strategy: write the GGUF bytes to Emscripten MEMFS at a fixed virtual
+// path, then call llama_model_load_from_file. This avoids exposing the
+// FS runtime method to JS — the buffer ↔ MEMFS round trip happens
+// entirely inside the bridge.
+//
+// The buffer is COPIED into MEMFS — caller may free `buf` after this
+// returns. Returns model handle on success, nullptr on failure.
+void* webllm_load_model(const void* buf, size_t n_bytes) {
+    const char* path = "/tmp/webllm-model.gguf";
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return nullptr;
+    size_t wrote = std::fwrite(buf, 1, n_bytes, f);
+    std::fclose(f);
+    if (wrote != n_bytes) return nullptr;
+
+    llama_model_params mparams = llama_model_default_params();
+    // n_gpu_layers default is 0; we want all layers on the (only)
+    // backend. ggml-webgpu registers itself as the only available
+    // backend under Emscripten so layers route to it regardless of
+    // this setting, but setting 999 is the canonical pattern.
+    mparams.n_gpu_layers = 999;
+    return llama_model_load_from_file(path, mparams);
+}
+
+void webllm_free_model(void* model) {
+    if (model) llama_model_free(static_cast<llama_model*>(model));
 }
 
 } // extern "C"

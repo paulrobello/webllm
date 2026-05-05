@@ -1,4 +1,6 @@
 _exports: [
   "webgpu_init",
   "webgpu_shutdown",
+  "webllm_load_model",
+  "webllm_free_model",
 ]
