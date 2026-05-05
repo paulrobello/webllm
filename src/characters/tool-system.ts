@@ -50,6 +50,18 @@ export interface ToolResult {
 // balanced content between the tags non-greedily with the `s` flag to
 // let `.` cross line breaks.
 const XML_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/;
+// Sub-8B Llama-3 family (notably Llama-3.2-3B) interpret the
+// `<tool_call>` wrapper as XML and lift `name` / `arguments` into
+// child elements rather than emitting JSON inside the wrapper:
+//   <tool_call>
+//     <name>get_weather</name>
+//     <arguments>{"city": "Tokyo"}</arguments>
+//   </tool_call>
+// JSON-inside-XML is mechanically parseable; pure-XML arguments
+// (`<arguments><to>John</to>...</arguments>`) fall through the JSON
+// parse and return null gracefully.
+const XML_NESTED_RE =
+	/<tool_call>\s*<name>\s*([^<]+?)\s*<\/name>\s*<arguments>\s*([\s\S]*?)\s*<\/arguments>\s*<\/tool_call>/;
 // Legacy one-liner form we used to produce internally: `<tool_call={...}>`.
 // Keep parsing for back-compat with any stored outputs.
 const XML_LEGACY_TOOL_CALL_RE = /<tool_call=(\{.*?\})>/;
@@ -59,10 +71,12 @@ const JSON_OBJECT_RE =
 /**
  * Registers, parses, and executes tool/function calls from model output.
  *
- * Supports three formats:
+ * Supports four formats:
  *   1. `<tool_call>\n{"name":...,"arguments":...}\n</tool_call>` — Qwen3/Hermes style.
- *   2. `<tool_call={...}>` — legacy internal form (kept for back-compat).
- *   3. A bare JSON object with "name" and "arguments" fields.
+ *   2. `<tool_call><name>X</name><arguments>{...}</arguments></tool_call>` —
+ *      sub-8B Llama-3 family malformation (JSON-inside-XML).
+ *   3. `<tool_call={...}>` — legacy internal form (kept for back-compat).
+ *   4. A bare JSON object with "name" and "arguments" fields.
  */
 export class ToolSystem {
 	private tools: Map<string, ToolDefinition> = new Map();
@@ -87,6 +101,21 @@ export class ToolSystem {
 		if (xmlMatch?.[1]) {
 			const parsed = this.parseJson(xmlMatch[1].trim());
 			if (parsed) return parsed;
+		}
+
+		const nestedMatch = text.match(XML_NESTED_RE);
+		if (nestedMatch?.[1] && nestedMatch[2] !== undefined) {
+			const name = nestedMatch[1].trim();
+			const argsBody = nestedMatch[2].trim();
+			try {
+				const args: unknown = JSON.parse(argsBody);
+				if (typeof args === "object" && args !== null && !Array.isArray(args)) {
+					return { name, arguments: args as Record<string, unknown> };
+				}
+			} catch {
+				// arguments body is not JSON (e.g. pure-XML child elements);
+				// fall through to legacy/JSON branches and ultimately null.
+			}
 		}
 
 		const legacyMatch = text.match(XML_LEGACY_TOOL_CALL_RE);

@@ -92,6 +92,59 @@ describe("ToolSystem", () => {
 		expect(result?.arguments).toEqual({ city: "Tokyo" });
 	});
 
+	test("parseToolCall extracts Llama-3.2-3B nested-XML emission (JSON args)", () => {
+		// Sub-8B Llama-3 family interprets the <tool_call> wrapper as XML
+		// and lifts name/arguments into child elements. JSON-inside-XML
+		// is mechanically parseable.
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			'<tool_call>\n    <name>get_weather</name>\n    <arguments>\n        {"city": "Tokyo"}\n    </arguments>\n</tool_call>',
+		);
+		expect(result).not.toBeNull();
+		expect(result?.name).toBe("get_weather");
+		expect(result?.arguments).toEqual({ city: "Tokyo" });
+	});
+
+	test("parseToolCall handles nested-XML form with multi-key flat args", () => {
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			'<tool_call>\n  <name>set_reminder</name>\n  <arguments>{"task": "Call mom", "priority": "high"}</arguments>\n</tool_call>',
+		);
+		expect(result).not.toBeNull();
+		expect(result?.name).toBe("set_reminder");
+		expect(result?.arguments).toEqual({ task: "Call mom", priority: "high" });
+	});
+
+	test("parseToolCall handles nested-XML form with empty args", () => {
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			"<tool_call><name>tell_joke</name><arguments>{}</arguments></tool_call>",
+		);
+		expect(result).not.toBeNull();
+		expect(result?.name).toBe("tell_joke");
+		expect(result?.arguments).toEqual({});
+	});
+
+	test("parseToolCall returns null for nested-XML with pure-XML args body", () => {
+		// The medium-difficulty Llama-3.2-3B failure mode: model
+		// substitutes XML child elements where JSON was expected.
+		// We don't attempt to reconstruct an object from arbitrary XML;
+		// graceful no-parse is the correct behavior.
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			"<tool_call>\n  <name>send_email</name>\n  <arguments>\n    <to>John</to>\n    <subject>Hi</subject>\n  </arguments>\n</tool_call>",
+		);
+		expect(result).toBeNull();
+	});
+
+	test("parseToolCall returns null for nested-XML missing arguments tag", () => {
+		const system = new ToolSystem([]);
+		const result = system.parseToolCall(
+			"<tool_call>\n  <name>get_weather</name>\n</tool_call>",
+		);
+		expect(result).toBeNull();
+	});
+
 	test("parseToolCall returns null for non-tool text", () => {
 		const system = new ToolSystem([]);
 		expect(system.parseToolCall("Hello, how are you?")).toBeNull();
