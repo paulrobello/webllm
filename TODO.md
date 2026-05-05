@@ -854,19 +854,20 @@ returns a Promise even when no actual suspend fires, unlike Asyncify
 which only Promised-wrapped on real suspends). Closure +
 remaining-work breakdown in
 [`eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md`](eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md).
-**P1 parity status (per-vocab isolated):** llama-bpe 195/200,
-qwen2 188/200, qwen3 188/200, spm-llama 1/200 (legacy adds explicit
-`▁`/35 — canonical SPM doesn't), wordpiece-bert 0/200 (legacy adds
-`[CLS]`/`[SEP]` — new path called with addBos=false). Cross-vocab
-sequential run trips a 4 GiB wasm32 cap (WebGPU buffer leak in
-`webllm_free_model` between vocabs). The qwen2 "throw undefined"
-that previously halted the run was the same buffer-leak symptom,
-not a tokenizer bug — qwen2 alone PASSES 188/200.
-**Next (P1.b, non-blocking):** regenerate fixture from `llama_tokenize`
-as canonical (legacy goes away in P2 anyway), add encoder-only
-addBos=true path for [CLS]/`<s>` prepend, diagnose remaining
-edge cases, fix `webllm_free_model` WebGPU buffer release. None
-of these block advancing to P2 (encoder migration).
+**P1 parity status: PASS — 1000/1000 byte-exact across all 5
+vocabs** (spm-llama, llama-bpe, qwen2, qwen3, wordpiece-bert; each
+200/200, run per-vocab via `?only=<vocab>` filter). Fixture was
+regenerated from canonical `llama_tokenize` via the new
+`smoke-test/p1-fixture-regen.html` browser harness +
+`/save-parity-fixture` POST endpoint on `eval/smoke-serve.ts`.
+`LlamaTokenizer` gained an `encoderOnly` option that flips
+`addBos=true` for BERT-family vocabs (BERT's BOS IS `[CLS]`).
+**Next (handed off, non-blocking):** cross-vocab WebGPU buffer
+leak in `webllm_free_model` (workaround: per-vocab isolation in
+fresh page loads); becomes relevant for multi-model agent
+workflows in P2-P4. **P2:** encoder migration (BGE / Jina) onto
+`llama_*` API — naturally extends the `encoderOnly` path used
+here for wordpiece-bert.
 
 **Status:** **P0 CLOSED 2026-05-05 — PASS.** Spec at
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md);

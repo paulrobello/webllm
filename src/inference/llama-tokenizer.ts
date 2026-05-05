@@ -17,6 +17,14 @@ import type { LlamaBridge } from "./llama-bridge.js";
 // fields turn out to be load-bearing.
 export interface LlamaTokenizerOptions {
 	chatTemplate?: string;
+	/**
+	 * Encoder-only mode (BERT-family). When true, `encode()` calls
+	 * `llama_tokenize` with `add_bos=true`, which for BERT-family
+	 * vocabs prepends `[CLS]` and appends `[SEP]` (BOS for BERT IS
+	 * `[CLS]`). For causal LMs (the default), BOS is supplied via
+	 * the chat template, not at tokenize time, so this stays false.
+	 */
+	encoderOnly?: boolean;
 }
 
 export class LlamaTokenizer {
@@ -36,13 +44,16 @@ export class LlamaTokenizer {
 	}
 
 	encode(text: string): number[] {
-		// add_bos=false: engine.ts adds BOS via chat template. Match
-		// legacy Tokenizer.encode behavior (no implicit BOS).
+		// add_bos default false: engine.ts adds BOS via chat template
+		// for causal LMs. Match legacy Tokenizer.encode behavior
+		// (no implicit BOS) for that case. Encoder-only vocabs flip
+		// add_bos=true so [CLS]/[SEP] (BERT) or <s>/</s> (encoder
+		// SPM) are prepended/appended automatically by llama_tokenize.
 		// parse_special=true: chat-template tokens like <|im_start|>
 		// must encode as single ids (matches legacy
 		// encodeWithSpecialTokens path).
 		const ids = this.bridge.tokenize(this.model, text, {
-			addBos: false,
+			addBos: this._options.encoderOnly === true,
 			parseSpecial: true,
 		});
 		return Array.from(ids);

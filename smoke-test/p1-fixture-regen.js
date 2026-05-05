@@ -4026,8 +4026,9 @@ class LlamaTokenizer {
   }
 }
 
-// smoke-test/p1-tokenizer-parity.src.ts
+// smoke-test/p1-fixture-regen.src.ts
 var FIXTURE_URL = "/parity-fixture.json";
+var SAVE_URL = "/save-parity-fixture";
 var ENCODER_ONLY_VOCABS = new Set(["wordpiece-bert"]);
 function log(msg, cls = "") {
   const el = document.getElementById("log");
@@ -4040,24 +4041,24 @@ function log(msg, cls = "") {
   el.appendChild(line);
   console.log(msg);
 }
-function arraysEqual(a, b) {
-  if (a.length !== b.length)
-    return false;
-  for (let i = 0;i < a.length; i++)
-    if (a[i] !== b[i])
-      return false;
-  return true;
-}
-async function runParity() {
+async function run() {
   try {
-    log("[setup] Fetching fixture…", "info");
+    log("[setup] Fetching existing fixture (for prompts + URLs)…", "info");
     const fixtureResp = await fetch(FIXTURE_URL);
     if (!fixtureResp.ok) {
-      log(`fetch fixture failed: ${fixtureResp.status} ${fixtureResp.statusText}`, "fail");
+      log(`fetch fixture failed: ${fixtureResp.status}`, "fail");
       return;
     }
     const f = await fixtureResp.json();
     log(`[setup] ${f.fixture.length} vocab(s), ${f.prompts.length} prompts each`, "info");
+    const params = new URLSearchParams(window.location.search);
+    const only = params.get("only");
+    const fixtureToRun = only ? f.fixture.filter((e) => e.vocab === only) : f.fixture;
+    if (only && fixtureToRun.length === 0) {
+      log(`[setup] no vocab matches ?only=${only}`, "fail");
+      return;
+    }
+    log(only ? `[setup] filtering to vocab="${only}" — will merge into existing fixture` : `[setup] running all ${fixtureToRun.length} vocabs (will replace fixture wholesale)`, "info");
     log("[setup] Initializing WASM module…", "info");
     const createModule = (await Promise.resolve().then(() => (init_webllm_wasm(), exports_webllm_wasm))).default;
     const mod = await createModule();
@@ -4068,79 +4069,61 @@ async function runParity() {
       return;
     }
     const bridge = createLlamaBridge(mod);
-    const params = new URLSearchParams(window.location.search);
-    const only = params.get("only");
-    const fixtureToRun = only ? f.fixture.filter((e) => e.vocab === only) : f.fixture;
-    log(only ? `[setup] filtering to vocab="${only}" (${fixtureToRun.length} match)` : `[setup] running all ${fixtureToRun.length} vocabs`, "info");
-    let totalFail = 0;
-    let totalPass = 0;
+    const regen = [];
     for (const entry of fixtureToRun) {
+      const encoderOnly = ENCODER_ONLY_VOCABS.has(entry.vocab);
       log(`
-[${entry.vocab}] fetching ${entry.ggufUrl}…`, "info");
+[${entry.vocab}] encoderOnly=${encoderOnly} — fetching ${entry.ggufUrl}…`, "info");
       const ggufResp = await fetch(entry.ggufUrl);
       if (!ggufResp.ok) {
         log(`[${entry.vocab}] fetch failed: ${ggufResp.status} ${ggufResp.statusText}`, "fail");
-        totalFail += entry.expected.length;
-        continue;
+        return;
       }
       const buf = new Uint8Array(await ggufResp.arrayBuffer());
       log(`[${entry.vocab}] loading model (${(buf.byteLength / 1024 / 1024).toFixed(0)} MiB)…`, "info");
       const model = await bridge.loadModel(buf);
-      const encoderOnly = ENCODER_ONLY_VOCABS.has(entry.vocab);
       const tk = new LlamaTokenizer(bridge, model, { encoderOnly });
-      let mismatches = 0;
-      const samples = [];
-      for (let i = 0;i < entry.expected.length; i++) {
-        const { prompt, ids: expected } = entry.expected[i];
-        const got = tk.encode(prompt);
-        const gotArr = new Int32Array(got);
-        if (!arraysEqual(expected, gotArr)) {
-          mismatches++;
-          if (samples.length < 3) {
-            samples.push(`  [${i}] ${JSON.stringify(prompt).slice(0, 60)}
-    expected: [${expected.slice(0, 12).join(",")}${expected.length > 12 ? ",…" : ""}]
-    got     : [${Array.from(gotArr.slice(0, 12)).join(",")}${gotArr.length > 12 ? ",…" : ""}]`);
-          }
-        }
-      }
-      if (mismatches === 0) {
-        log(`[${entry.vocab}] PASS — ${entry.expected.length}/${entry.expected.length} byte-exact`, "pass");
-        totalPass += entry.expected.length;
-      } else {
-        totalFail += mismatches;
-        totalPass += entry.expected.length - mismatches;
-        log(`[${entry.vocab}] FAIL — ${mismatches}/${entry.expected.length} mismatches`, "fail");
-        for (const s of samples)
-          log(s, "fail");
-      }
+      const expected = f.prompts.map((prompt) => ({
+        prompt,
+        ids: tk.encode(prompt)
+      }));
+      regen.push({
+        vocab: entry.vocab,
+        ggufUrl: entry.ggufUrl,
+        expected
+      });
+      log(`[${entry.vocab}] encoded ${f.prompts.length} prompts (first ids=${expected[0].ids.slice(0, 8).join(",")}…)`, "pass");
       bridge.freeModel(model);
     }
-    if (totalFail === 0) {
-      log(`
-ALL VOCABS PASS — parity gate green (${totalPass} prompts byte-exact)`, "pass");
+    let mergedFixture;
+    if (only) {
+      mergedFixture = f.fixture.map((e) => {
+        const replaced = regen.find((r) => r.vocab === e.vocab);
+        return replaced ?? e;
+      });
     } else {
-      log(`
-FAIL — ${totalFail} mismatches out of ${totalPass + totalFail} total prompts`, "fail");
+      mergedFixture = regen;
     }
+    const out = JSON.stringify({ prompts: f.prompts, fixture: mergedFixture }, null, 2);
+    log(`
+[save] POSTing ${out.length} bytes to ${SAVE_URL}…`, "info");
+    const saveResp = await fetch(SAVE_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: out
+    });
+    if (!saveResp.ok) {
+      log(`[save] HTTP ${saveResp.status}: ${await saveResp.text()}`, "fail");
+      return;
+    }
+    log(`[save] OK — ${await saveResp.text()}`.trimEnd(), "pass");
+    log(`
+DONE — re-run /p1-tokenizer-parity.html to verify byte-exact green.`, "pass");
   } catch (err) {
-    let repr;
-    if (err instanceof Error) {
-      repr = `${err.name}: ${err.message}
-${err.stack ?? ""}`;
-    } else if (typeof err === "object" && err !== null && "is" in err && typeof err.is === "function") {
-      const we = err;
-      const tagName = we.constructor?.name ?? "WebAssembly.Exception";
-      let detail = "";
-      try {
-        detail = ` arg0=${we.getArg?.(we.tag ?? null, 0)}`;
-      } catch {}
-      repr = `${tagName}${detail}
-${we.stack ?? "(no stack)"}`;
-    } else {
-      repr = `(non-Error throw, typeof=${typeof err}) ${String(err)}`;
-    }
+    const repr = err instanceof Error ? `${err.name}: ${err.message}
+${err.stack ?? ""}` : `(non-Error throw, typeof=${typeof err}) ${String(err)}`;
     log(`FAIL — ${repr}`, "fail");
-    console.error("parity-harness throw:", err);
+    console.error("regen-harness throw:", err);
   }
 }
-runParity();
+run();

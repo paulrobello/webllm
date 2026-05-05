@@ -14,6 +14,7 @@ import { createLlamaBridge } from "../src/inference/llama-bridge.js";
 import { LlamaTokenizer } from "../src/inference/llama-tokenizer.js";
 
 const FIXTURE_URL = "/parity-fixture.json";
+const ENCODER_ONLY_VOCABS = new Set<string>(["wordpiece-bert"]);
 
 interface FixtureEntry {
 	vocab: string;
@@ -107,7 +108,8 @@ async function runParity(): Promise<void> {
 				"info",
 			);
 			const model = await bridge.loadModel(buf);
-			const tk = new LlamaTokenizer(bridge, model);
+			const encoderOnly = ENCODER_ONLY_VOCABS.has(entry.vocab);
+			const tk = new LlamaTokenizer(bridge, model, { encoderOnly });
 
 			let mismatches = 0;
 			const samples: string[] = [];

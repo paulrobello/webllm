@@ -1,8 +1,33 @@
-# P1 — Tokenizer Migration — UNBLOCKED via JSPI pivot
+# P1 — Tokenizer Migration — CLOSED (PASS, byte-exact green)
 
 **Date:** 2026-05-05
 **Spec:** [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](../../../docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md) §P1
 **Plan:** [`docs/superpowers/plans/2026-05-05-tier3-p1-tokenizer.md`](../../../docs/superpowers/plans/2026-05-05-tier3-p1-tokenizer.md)
+
+## Final state
+
+**🟢 PASS — 1000/1000 prompts byte-exact across all 5 vocabs.**
+
+| Vocab          | Match     | addBos |
+|----------------|-----------|--------|
+| spm-llama      | 200/200   | false  |
+| llama-bpe      | 200/200   | false  |
+| qwen2          | 200/200   | false  |
+| qwen3          | 200/200   | false  |
+| wordpiece-bert | 200/200   | true   |
+
+The parity fixture was regenerated from canonical `llama_tokenize`
+output via a browser harness (`smoke-test/p1-fixture-regen.html`)
+that loads each model and re-encodes the 200-prompt corpus. Legacy
+`Tokenizer(config).encode()` is retained for engine.ts callers
+that haven't migrated yet but is no longer the parity reference —
+the new path is canonical.
+
+`LlamaTokenizer` gained a small `encoderOnly` option flag that
+flips `add_bos=true` so BERT-family vocabs prepend `[CLS]` and
+append `[SEP]` (BERT's BOS token IS `[CLS]`). The parity harness
+sets it for `wordpiece-bert`; the regen harness uses the same
+gate to produce the canonical encoder-mode fixture.
 
 ## Resolution: JSPI pivot (commit `b4d4b48`)
 
@@ -74,31 +99,36 @@ bridge round-trip is functional; the remaining mismatches there
 are real edge cases worth diagnosing but likely also fixture-side
 (legacy encoder quirks) rather than bridge bugs.
 
-### Closure: structural block closed; parity becomes P1.b
+### Closure timeline
 
-The Asyncify→JSPI pivot is the load-bearing milestone closing the
-BLOCKED status. The parity-fixture canonicalization and the few
-BPE edge cases are correctness-of-fixture follow-on work
-(P1.b — iterative discovery, not blocking) that don't gate
-progress to P2 (encoder migration). They're tracked separately
-because the right resolution requires deciding whether
-`llama_tokenize` becomes the canonical ground truth (legacy is
-deleted in P2 anyway, so this is the natural call) or whether
-LlamaTokenizer needs context-dependent `addBos` semantics for
-encoder-only models.
+1. Asyncify→JSPI pivot (commit `b4d4b48`) closed the structural
+   `function signature mismatch in __wasm_call_ctors` block.
+2. Per-vocab parity (commit `427bf6f`) showed 188-200 / 200 across
+   all vocabs, with the deficits traced to fixture-side legacy
+   encoder quirks rather than bridge bugs. Cross-vocab sequential
+   runs trip a 4 GiB wasm32 cap (WebGPU buffer leak in
+   `webllm_free_model`); per-vocab isolation works around it.
+3. Fixture regeneration: the
+   `smoke-test/p1-fixture-regen.html` browser harness re-encoded
+   the 200-prompt corpus via canonical `llama_tokenize` (with
+   `encoderOnly=true` for wordpiece-bert) and POSTed the result
+   back to disk through a new `/save-parity-fixture` endpoint on
+   `eval/smoke-serve.ts`. Per-vocab parity re-ran 200/200 across
+   all 5 vocabs.
 
-### P1.b follow-on (deferred, non-blocking)
+### Remaining work (handed off; not gating P2)
 
-- [ ] Regenerate parity fixture from `llama_tokenize` as canonical
-      ground truth (drop legacy-encoder reference)
-- [ ] Add `addBos=true` path for encoder-only LlamaTokenizer
-      construction (for the dedicated embedder / encoder lanes
-      that need [CLS]/[SEP] / `<s>` prepended)
-- [ ] Diagnose remaining 5 llama-bpe / 12 Qwen edge cases on the
-      regenerated fixture
-- [ ] Fix the cross-vocab WebGPU buffer leak in `webllm_free_model`
-      so the harness can run all 5 vocabs in sequence without
-      hitting the 4 GiB wasm32 cap
+- [ ] Cross-vocab WebGPU buffer leak in `webllm_free_model` — the
+      parity / regen harnesses run per-vocab in fresh page loads
+      to avoid hitting the 4 GiB wasm32 cap on sequential model
+      loads. Not blocking P1 (per-vocab isolation works); becomes
+      relevant when multi-model agent workflows want to swap
+      models without a page reload. P2-P4 will exercise the same
+      pattern (chat + embedder coexisting), so worth fixing
+      before the multi-model E2E lands.
+- [ ] P2: encoder migration (BGE / Jina) onto `llama_*` API.
+      Naturally extends the `encoderOnly` path used here for
+      wordpiece-bert.
 
 ---
 

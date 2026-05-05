@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -83,6 +83,29 @@ const server = Bun.serve({
 	idleTimeout: 120,
 	async fetch(req) {
 		const url = new URL(req.url);
+
+		// POST endpoint — accept JSON-serialized regenerated parity fixture
+		// and write to the canonical eval/reports path. Browser harness
+		// uses this to round-trip canonical llama_tokenize output back to
+		// disk without going through the OS download dialog. Dev-only;
+		// the smoke server isn't exposed beyond localhost.
+		if (
+			req.method === "POST" &&
+			url.pathname === "/save-parity-fixture" &&
+			ROUTE_ALIASES["/parity-fixture.json"]
+		) {
+			try {
+				const body = await req.text();
+				writeFileSync(ROUTE_ALIASES["/parity-fixture.json"], body);
+				return new Response(`ok ${body.length} bytes\n`, { status: 200 });
+			} catch (err) {
+				return new Response(
+					`save failed: ${err instanceof Error ? err.message : String(err)}`,
+					{ status: 500 },
+				);
+			}
+		}
+
 		const aliasTarget = ROUTE_ALIASES[url.pathname];
 		if (aliasTarget) {
 			if (!existsSync(aliasTarget)) {
