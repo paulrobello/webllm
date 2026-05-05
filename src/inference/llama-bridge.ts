@@ -50,6 +50,27 @@ export interface LlamaBridge {
 	getLogits(ctx: number, model: number, ith?: number): Float32Array;
 	/** Returns the model's vocab size. Used to size logits views. */
 	nVocab(model: number): number;
+	/**
+	 * Tokenize text. Returns id list. Throws on bridge_malloc failure.
+	 * Internally retries with a larger buffer if the first attempt was
+	 * too small (mirrors upstream llama_tokenize's negative-count
+	 * semantics).
+	 */
+	tokenize(
+		model: number,
+		text: string,
+		options?: { addBos?: boolean; parseSpecial?: boolean },
+	): Int32Array;
+	/**
+	 * Detokenize id list back to a UTF-8 string. Throws on
+	 * bridge_malloc failure. Buffer-too-small triggers a retry
+	 * with the upstream-reported required size.
+	 */
+	detokenize(model: number, tokens: Int32Array): string;
+	/** BOS token id, or -1 if the vocab doesn't define one. */
+	tokenBos(model: number): number;
+	/** EOS token id, or -1 if the vocab doesn't define one. */
+	tokenEos(model: number): number;
 }
 
 /**
@@ -86,6 +107,32 @@ interface RawLlamaModule {
 	_webllm_get_logits: (ctx: any, ith: number) => any;
 	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
 	_webllm_n_vocab: (model: any) => number;
+	_webllm_tokenize: (
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		model: any,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		textPtr: any,
+		nText: number,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		tokensOut: any,
+		nTokensMax: number,
+		addBos: number,
+		parseSpecial: number,
+	) => number;
+	_webllm_detokenize: (
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		model: any,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		tokensPtr: any,
+		nTokens: number,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		textOut: any,
+		nTextMax: number,
+	) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_token_bos: (model: any) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_token_eos: (model: any) => number;
 	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
 	_bridge_malloc: (size: any) => any;
 	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
@@ -207,6 +254,136 @@ export function createLlamaBridge(mod: RawLlamaModule): LlamaBridge {
 
 		nVocab(model: number): number {
 			return mod._webllm_n_vocab(to64(model));
+		},
+
+		tokenize(
+			model: number,
+			text: string,
+			options?: { addBos?: boolean; parseSpecial?: boolean },
+		): Int32Array {
+			const addBos = options?.addBos ? 1 : 0;
+			const parseSpecial = options?.parseSpecial !== false ? 1 : 0;
+			const utf8 = new TextEncoder().encode(text);
+			const textPtr = malloc(utf8.byteLength);
+			if (textPtr === 0) {
+				throw new Error("webllm: bridge_malloc failed for tokenize text");
+			}
+			try {
+				mod.HEAPU8.set(utf8, textPtr);
+
+				let cap = Math.max(16, utf8.byteLength + 8);
+				let tokensPtr = malloc(cap * 4);
+				if (tokensPtr === 0) {
+					throw new Error("webllm: bridge_malloc failed for tokenize tokens");
+				}
+				try {
+					let n = mod._webllm_tokenize(
+						to64(model),
+						to64(textPtr),
+						utf8.byteLength,
+						to64(tokensPtr),
+						cap,
+						addBos,
+						parseSpecial,
+					);
+					if (n < 0) {
+						const required = -n;
+						free(tokensPtr);
+						cap = required;
+						tokensPtr = malloc(cap * 4);
+						if (tokensPtr === 0) {
+							throw new Error(
+								"webllm: bridge_malloc failed for tokenize retry",
+							);
+						}
+						n = mod._webllm_tokenize(
+							to64(model),
+							to64(textPtr),
+							utf8.byteLength,
+							to64(tokensPtr),
+							cap,
+							addBos,
+							parseSpecial,
+						);
+						if (n < 0) {
+							throw new Error(
+								`webllm: tokenize returned ${n} after retry (required ${required})`,
+							);
+						}
+					}
+					return new Int32Array(
+						mod.HEAPU8.buffer.slice(tokensPtr, tokensPtr + n * 4),
+					);
+				} finally {
+					free(tokensPtr);
+				}
+			} finally {
+				free(textPtr);
+			}
+		},
+
+		detokenize(model: number, tokens: Int32Array): string {
+			const tokensPtr = malloc(tokens.byteLength);
+			if (tokensPtr === 0) {
+				throw new Error("webllm: bridge_malloc failed for detokenize tokens");
+			}
+			try {
+				new Int32Array(mod.HEAPU8.buffer, tokensPtr, tokens.length).set(tokens);
+
+				let cap = Math.max(64, tokens.length * 4 + 8);
+				let textPtr = malloc(cap);
+				if (textPtr === 0) {
+					throw new Error("webllm: bridge_malloc failed for detokenize text");
+				}
+				try {
+					let n = mod._webllm_detokenize(
+						to64(model),
+						to64(tokensPtr),
+						tokens.length,
+						to64(textPtr),
+						cap,
+					);
+					if (n < 0) {
+						const required = -n;
+						free(textPtr);
+						cap = required;
+						textPtr = malloc(cap);
+						if (textPtr === 0) {
+							throw new Error(
+								"webllm: bridge_malloc failed for detokenize retry",
+							);
+						}
+						n = mod._webllm_detokenize(
+							to64(model),
+							to64(tokensPtr),
+							tokens.length,
+							to64(textPtr),
+							cap,
+						);
+						if (n < 0) {
+							throw new Error(
+								`webllm: detokenize returned ${n} after retry (required ${required})`,
+							);
+						}
+					}
+					const bytes = new Uint8Array(
+						mod.HEAPU8.buffer.slice(textPtr, textPtr + n),
+					);
+					return new TextDecoder().decode(bytes);
+				} finally {
+					free(textPtr);
+				}
+			} finally {
+				free(tokensPtr);
+			}
+		},
+
+		tokenBos(model: number): number {
+			return mod._webllm_token_bos(to64(model));
+		},
+
+		tokenEos(model: number): number {
+			return mod._webllm_token_eos(to64(model));
 		},
 	};
 }
