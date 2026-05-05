@@ -839,9 +839,18 @@ upscale shader; tip `e29753286`); sweep matrix at
 
 ### Tier 3 migration to upstream `llama_decode` (NEW DIRECTION 2026-05-05)
 
-**Status:** brainstorming complete 2026-05-05; design doc + plan
-pending. Spec target:
-`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`.
+**Status:** **P0 CLOSED 2026-05-05 — PASS.** Spec at
+[`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md);
+P0 plan at
+[`docs/superpowers/plans/2026-05-05-tier3-p0-spike.md`](docs/superpowers/plans/2026-05-05-tier3-p0-spike.md);
+closure report at
+[`eval/reports/p0-spike-2026-05-05/SUMMARY.md`](eval/reports/p0-spike-2026-05-05/SUMMARY.md).
+TinyLlama Q4_0 → `webllm_decode` → top-1 = " Paris" id 3681 green.
+Patch budget B intact (9 core llama.cpp patches, no new ones added).
+Three build-config deltas sufficed: `GGML_CPU=ON` (libllama load
+expects a CPU backend device), `WASM_BIGINT=1` on wasm32 (libllama's
+WebGPU async-wait i64 timeoutNS arg), `LLAMA_WASM_MEM64=OFF` (avoid
+wasm32/64 conflict). Decision: **PROCEED to P1 (tokenizer)**.
 
 **Decision summary.** Migrate the entire forward-pass surface
 (causal LM, encoder, embedder, tokenizer) off the hand-rolled TS
