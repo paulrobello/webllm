@@ -98,7 +98,8 @@ if(EMSCRIPTEN)
         "_webllm_load_model,_webllm_free_model,"
         "_webllm_create_context,_webllm_free_context,"
         "_webllm_decode,_webllm_get_logits,"
-        "_webllm_n_vocab"
+        "_webllm_n_vocab,"
+        "_webllm_tokenize"
     )
 
     if(WEBLLM_BUILD_MEM64)

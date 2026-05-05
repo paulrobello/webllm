@@ -492,4 +492,31 @@ int32_t webllm_n_vocab(void* model) {
     return llama_vocab_n_tokens(v);
 }
 
+// Tokenize text into model vocab IDs. Returns the number of tokens written
+// to tokens_out, OR a negative number whose absolute value is the required
+// buffer size if n_tokens_max was too small (mirrors upstream llama_tokenize
+// semantics — JS-side caller grows the buffer and retries). add_bos=1 to
+// prepend BOS, parse_special=1 to recognize <|...|>-style added tokens.
+// Export is via -sEXPORTED_FUNCTIONS in CMakeLists.txt (matches the
+// rest of the webllm_* surface in this block — no KEEPALIVE macro needed).
+int32_t webllm_tokenize(
+    void* model_handle,
+    const char* text,
+    int32_t n_text,
+    int32_t* tokens_out,
+    int32_t n_tokens_max,
+    int32_t add_bos,
+    int32_t parse_special)
+{
+    if (!model_handle || !text || !tokens_out) return 0;
+    auto* model = static_cast<llama_model*>(model_handle);
+    const llama_vocab* vocab = llama_model_get_vocab(model);
+    if (!vocab) return 0;
+    return llama_tokenize(
+        vocab, text, n_text,
+        tokens_out, n_tokens_max,
+        add_bos != 0,
+        parse_special != 0);
+}
+
 } // extern "C"
