@@ -1,0 +1,9 @@
+Staging 12 tasks at http://localhost:8033/tasks…
+Task list id: 1777954180239-s3b6ou
+Navigating to http://localhost:8031/real-model.html?model=llama-3.2-1b-q4f16&ctx=4096&browserEval=1777954180359&bench=1777954180239-s3b6ou&ingest=http%3A%2F%2Flocalhost%3A8033&temp=0&prompt=Tell+one+short+joke.&profile=llama-3.2-1b-warm
+  1/12 tasks (0 passing)
+  4/12 tasks (2 passing)
+  8/12 tasks (5 passing)
+  12/12 tasks (7 passing)
+
+Done: 7/12 passing · overall 56%

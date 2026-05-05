@@ -286,6 +286,105 @@ reconfiguration.
 
 ---
 
+## Implementation result (2026-05-04)
+
+The Llama-3.x parser-leniency follow-up shipped same-day. Added
+`XML_NESTED_RE` to `src/characters/tool-system.ts` matching
+`<tool_call><name>X</name><arguments>{...}</arguments></tool_call>`,
+with a graceful no-parse fallback when the arguments body is
+pure-XML (the medium-difficulty Llama-3.2 failure mode).
+
+### Tool-calling-only re-bench (greedy temp=0, 12 tasks, n=1)
+
+| Model | Pre (canonical) | Post (lenient) | Δ absolute | Δ relative |
+|---|---:|---:|---:|---:|
+| llama-3.2-3b-q4f16             | 0.17 | **0.48** | +0.31 | +186% |
+| llama-3.2-1b-q4f16             | 0.17 | **0.56** | +0.39 | +234% |
+| hermes-3-llama-3.2-3b-q4f16    | 0.17 | **0.23** | +0.06 |  +35% |
+
+Re-bench artifacts:
+[`eval/reports/parser-leniency-rebench-2026-05-04/`](../parser-leniency-rebench-2026-05-04/);
+DB rows `bench-1777954155157-361s56` (3B), `bench-1777954183535-jmj5m8`
+(1B), `bench-1777954205588-xsve6m` (Hermes-3).
+
+### Per-task breakdown (llama-3.2-3b-q4f16)
+
+| Task | Score | Cause |
+|---|---:|---|
+| tc-001 get_weather       | 1.00 | JSON-in-XML, parsed cleanly |
+| tc-002 search_restaurants | 0.00 | pure-XML args (`<city>...</city>`) — graceful no-parse |
+| tc-003 tell_joke (no-call) | 0.00 | model emitted unwanted tool call |
+| tc-004 set_reminder      | 0.75 | parsed; partial credit on arg match |
+| tc-005 send_email        | 0.00 | pure-XML args |
+| tc-006 book_flight       | 1.00 | JSON-in-XML |
+| tc-007 define_word       | 1.00 | clean Qwen3-style |
+| tc-008 calculate         | 1.00 | JSON-in-XML |
+| tc-009 get_weather       | 0.00 | pure-XML args |
+| tc-010 get_weather       | 1.00 | JSON-in-XML |
+| tc-011 calculate_total   | 0.00 | pure-XML args (nested `<args>...`) |
+| tc-012 delete_files (no-call) | 0.00 | model emitted unwanted tool call |
+
+**Failure-mode taxonomy:**
+- 5 / 12 perfect parses (JSON-inside-XML or clean Qwen3)
+- 1 / 12 partial parse (arg-match mismatch — separate scorer issue)
+- 4 / 12 pure-XML-args graceful no-parse (parser-correct rejection)
+- 2 / 12 no_tool_call discipline failures (model emits tool when
+  it shouldn't — orthogonal problem, not parseable to fix)
+
+The 4 pure-XML-args failures are the headroom for a hypothetical
+"XML-to-object reconstruction" parser; the lift would push 3B from
+0.48 → ~0.81 but at meaningful complexity / false-positive risk.
+Defer until a deployment ask names a 3B agent.
+
+### Surprise: 1B lifted MORE than 3B (0.17 → 0.56)
+
+Predicted "minimal lift" was wrong. The 1B model's headers-and-
+parroting failure mode (documented above) is not what dominates at
+greedy temp=0 — instead the 1B emits a similar XML-shaped wrapper
+to the 3B and the parser catches the JSON-inside-XML cases.
+At temp=0.6 (the original profile temp), the parroting / brace-
+omission patterns dominate and the lenient parser doesn't help.
+Greedy decoding alone removes most of the parroting noise, and
+the lenient parser closes the rest.
+
+**Codified:** the "model-quality cliff" framing oversimplified —
+greedy temp + lenient parser together unlock more headroom than
+either alone. For tool-calling specifically, **temp=0 + lenient
+parsing is the right combination for sub-8B Llama-3 family**.
+
+### Hermes-3-3B lifted modestly (+0.06) — confirms diagnosis
+
+Hermes-3's failure mode (mangled JSON, fabricated `args-json-object`
+key) is not parseable by either the strict or the lenient regex.
+The +6% lift represents the small fraction of Hermes-3 emissions
+that happen to land in the JSON-inside-XML form. Reasoning-fine-
+tune appears to have displaced strict-format adherence in
+Hermes-3-Llama-3.2-3B; not fixable at the parser layer.
+
+### Other model side-effects
+
+The same parser code path is used for all generative models, so
+worth flagging that 8B-class models (which were already emitting
+clean Qwen3-style JSON inside `<tool_call>`) take the
+strict-XML branch first and never hit the lenient regex — no
+behavior change, no regression risk. Tests pin this in
+`tests/tool-system.test.ts`.
+
+### Tests
+
+5 new tests in `tests/tool-system.test.ts`:
+
+- `parseToolCall extracts Llama-3.2-3B nested-XML emission (JSON args)` — positive
+- `parseToolCall handles nested-XML form with multi-key flat args` — positive
+- `parseToolCall handles nested-XML form with empty args` — positive
+- `parseToolCall returns null for nested-XML with pure-XML args body` — graceful negative
+- `parseToolCall returns null for nested-XML missing arguments tag` — strict negative
+
+Test count: 741 → 746 / 0 fail / 33 skip (baseline preserved).
+`make checkall` clean.
+
+---
+
 ## Artifacts
 
 - Per-model task outputs extracted from

@@ -1,0 +1,11 @@
+Staging 12 tasks at http://localhost:8033/tasks…
+Task list id: 1777954201010-1k1er1
+Navigating to http://localhost:8031/real-model.html?model=hermes-3-llama-3.2-3b-q4f16&ctx=4096&browserEval=1777954201130&bench=1777954201010-1k1er1&ingest=http%3A%2F%2Flocalhost%3A8033&temp=0&prompt=Tell+one+short+joke.&profile=hermes-3-llama-3.2-3b-warm
+  0/12 tasks (0 passing)
+  4/12 tasks (2 passing)
+  6/12 tasks (3 passing)
+  8/12 tasks (3 passing)
+  10/12 tasks (3 passing)
+  12/12 tasks (3 passing)
+
+Done: 3/12 passing · overall 23%
