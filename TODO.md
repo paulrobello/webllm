@@ -822,18 +822,20 @@ rebuilt, MANIFESTs verified — see closure entry in Watch list).
 **Algorithmic-perf backlog fully cleared.** All algorithmic levers
 at the canonical 4-baseline are exhausted (§17-§29 closed matmul,
 FA, drafter, encoder, prefill-tiling, spec-decode families).
-Rebase cadence: 2026-05-01 fired (§27 template — broad free win;
-every model +0.4% to +8.0%, matmul -1.4% to -5.0%). Two upstream
-`ggml-webgpu/` commits picked up: `c3c150539` (mul-mat /
-mul-mat-id vectorize fix #22578 — load-bearing) and
-`aab68217b` (upscale shader, image-gen op, not exercised by
-chat fleet). Tip: `e29753286`. Sweep matrix at
-[`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md);
+Rebase cadence: 2026-05-04 fired (§27 hybrid — maintenance free
+win, perf neutral; two local LayerNorm patches subsumed by
+upstream `d4b0c22f9`, patch stack 11 → 9). Encoder parity PASS at
+cosine 0.76. Cross-day perf vs 2026-05-01 baseline noise on 5/6;
+mistral-7b -14% outlier flagged for next-session rerun. Tip:
+`fc1f81242` on upstream base `a817a22bc`. Sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md);
 same-day pre-rebase control at
-[`eval/reports/pre-rebase-baselines-2026-05-01/SUMMARY.md`](eval/reports/pre-rebase-baselines-2026-05-01/SUMMARY.md).
-Prior cycle 2026-04-29 was §32 (small regressions accepted; 4/6
-models −3% to −5%; tip `fa8b16a6f`); sweep matrix at
-[`eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-04-29/SUMMARY.md).
+[`eval/reports/pre-rebase-baselines-2026-05-04/`](eval/reports/pre-rebase-baselines-2026-05-04/)
+(retained as a process lesson — same-day capture was anomalously
+cold and overstated the gain by ~30% on small models).
+Prior cycle 2026-05-01 was §27 (mul-mat vectorize #22578 +
+upscale shader; tip `e29753286`); sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md).
 
 **MEMORY64 full bridge migration — CLOSED 2026-04-29.** All 8
 phases shipped + all three closure follow-ups landed (Q5_K_M
@@ -953,8 +955,9 @@ Daily cadence check (item 1) still required at session start.
    ggml/src/ggml-webgpu/ ggml/include/`. **If non-empty:** apply
    §32 procedure (rebase, sweep, classify per §27/§28/§32
    templates). **If empty:** log and skip. Last fired:
-   2026-05-01 (§27 — mul-mat vectorize fix #22578, broad free win
-   on canonical 6, tip `e29753286`).
+   2026-05-04 (§27 hybrid — drop local LayerNorm patches subsumed
+   by upstream `d4b0c22f9`; encoder parity PASS, perf neutral vs
+   2026-05-01 cross-day baseline; tip `fc1f81242`).
 
 2. **Phi-3 closure follow-ups.**
    - ~~(a) Runtime contiguous-tensor assertion in fused helpers.~~
@@ -1390,10 +1393,14 @@ appetite remains; none are forced.
   (rebase, sweep, classify per §27/§28/§32 templates). **If empty**,
   log and skip. Cadence policy set 2026-04-29: run daily even when
   the surface has been quiet, since the cost is ~30s and a missed
-  rebase costs much more than catching one promptly. Last clean
-  run: **2026-05-03** (clean — `master` advanced past `e29753286`
-  to `e48034dfc` plus `b9012` tag landed, but no `ggml-webgpu/` or
-  `ggml/include/` commits since the 2026-05-01 §27 rebase).
+  rebase costs much more than catching one promptly. Last fired:
+  **2026-05-04** (§27 hybrid — `d4b0c22f9` ggml-webgpu LAYER_NORM
+  upstream landing subsumed local patches `72b6d001e` +
+  `c775ac26d`; rebased to upstream tip `a817a22bc`, local tip
+  `fc1f81242`, patch stack 11 → 9; encoder parity PASS; perf
+  neutral vs 2026-05-01 cross-day baseline; mistral-7b -14%
+  outlier flagged. Sweep matrix:
+  [`eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md)).
 - **Test skip count.** Currently 33 (rebaselined 2026-05-03 after
   prefix-cache mechanism + persistence ship), all environmental:
   - `pipeline-cache.test.ts` × 5 (`!indexedDBAvailable` — IndexedDB
