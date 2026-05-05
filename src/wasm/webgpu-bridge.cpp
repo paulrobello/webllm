@@ -519,4 +519,43 @@ int32_t webllm_tokenize(
         parse_special != 0);
 }
 
+// Detokenize ids back to a UTF-8 byte buffer. Returns the number of bytes
+// written, or a negative count whose absolute value is the required buffer
+// size if n_text_max was too small. Mirrors upstream llama_detokenize.
+// remove_special=0, unparse_special=0 — sensible defaults for the wrapper;
+// the streaming detokenizer in tokenizer.ts handles special-token control.
+int32_t webllm_detokenize(
+    void* model_handle,
+    const int32_t* tokens,
+    int32_t n_tokens,
+    char* text_out,
+    int32_t n_text_max)
+{
+    if (!model_handle || !tokens || !text_out) return 0;
+    auto* model = static_cast<llama_model*>(model_handle);
+    const llama_vocab* vocab = llama_model_get_vocab(model);
+    if (!vocab) return 0;
+    return llama_detokenize(
+        vocab, tokens, n_tokens,
+        text_out, n_text_max,
+        /*remove_special=*/false,
+        /*unparse_special=*/false);
+}
+
+int32_t webllm_token_bos(void* model_handle) {
+    if (!model_handle) return -1;
+    auto* model = static_cast<llama_model*>(model_handle);
+    const llama_vocab* vocab = llama_model_get_vocab(model);
+    if (!vocab) return -1;
+    return llama_vocab_bos(vocab);
+}
+
+int32_t webllm_token_eos(void* model_handle) {
+    if (!model_handle) return -1;
+    auto* model = static_cast<llama_model*>(model_handle);
+    const llama_vocab* vocab = llama_model_get_vocab(model);
+    if (!vocab) return -1;
+    return llama_vocab_eos(vocab);
+}
+
 } // extern "C"
