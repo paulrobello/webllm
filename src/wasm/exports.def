@@ -7,4 +7,5 @@ _exports: [
   "webllm_free_context",
   "webllm_decode",
   "webllm_get_logits",
+  "webllm_n_vocab",
 ]

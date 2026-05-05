@@ -483,4 +483,13 @@ const float* webllm_get_logits(void* ctx, int32_t ith) {
     return ith < 0 ? llama_get_logits(lctx) : llama_get_logits_ith(lctx, ith);
 }
 
+// Returns vocab size (number of tokens in the model's tokenizer).
+// Used by JS to size the logits Float32Array view created from
+// the pointer returned by webllm_get_logits.
+int32_t webllm_n_vocab(void* model) {
+    if (!model) return 0;
+    const llama_vocab* v = llama_model_get_vocab(static_cast<const llama_model*>(model));
+    return llama_vocab_n_tokens(v);
+}
+
 } // extern "C"
