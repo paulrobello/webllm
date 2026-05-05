@@ -1422,6 +1422,31 @@ appetite remains; none are forced.
   Watch for *new* skips appearing beyond this 33-count baseline — that
   might indicate an accidental regression. Browser-side smoke tests
   cover the WebGPU + IndexedDB code paths that skip-pass here.
+- **Tool-format investigations (queued 2026-05-04).** Surfaced from
+  the greedy-baseline bench cleanup
+  ([`eval/reports/greedy-baseline-2026-05-04/SUMMARY.md`](eval/reports/greedy-baseline-2026-05-04/SUMMARY.md))
+  after the Mistral V0.3 `[AVAILABLE_TOOLS]` fix landed. Both items
+  are **investigation-first** — no implementation until a probe
+  produces data.
+  - **Llama-3.x tool format.** Llama-3.1-8B scores tool-calling 0.98
+    while Llama-3.2-3B scores 0.17 on the same code path (canonical
+    Qwen3 `<tools>` block). The gap is too large to be capability;
+    suspect 3B is sensitive to a format the 8B happens to recover
+    from. Trigger probe: capture per-task tool-calling traces for
+    both models, diff the emitted prefix and finish-reason
+    distribution. If the 3B pattern is fixable by a Llama-3-family
+    formatter (`<|python_tag|>` / message-channel discipline /
+    upstream Llama-3.1 chat template's tool block), file as a
+    sibling ticket to the Mistral V0.3 fix. Re-evaluate priority if
+    a deployment ask names a Llama-3.x-3B-class agent.
+  - **Phi-3 tool format.** Phi-3.5-mini holds tool-calling at the
+    0.17 floor with no upstream-canonical tool format documented in
+    the ggml-org Phi-3 chat template. Trigger probe: capture
+    per-task traces, then check whether Microsoft's Phi-3
+    function-calling docs (or `Phi-3.5-mini-instruct` model card)
+    name an emission convention. If yes → ticket; if no → close as
+    "no usable format upstream" and demote tool-calling
+    expectations for Phi-3 in the dashboard.
 - **Encoder parity reference vectors freshness.** `eval/reports/
   encoder-parity-2026-04-28/{jina,nomic}-ref.json` are pinned to
   whatever sentence-transformers / HF model versions resolved on
