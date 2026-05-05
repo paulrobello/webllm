@@ -224,6 +224,18 @@ export class Generator {
 		let waitingForVisibleAnswer = requireVisibleAnswerBeforeStop;
 		let requireLeadingWhitespaceForNextStep = false;
 
+		if (config.signal?.aborted) {
+			const elapsed = performance.now() - startTime;
+			return {
+				tokens: [...session.tokens],
+				text: "",
+				tokenCount: 0,
+				tokensPerSecond: 0,
+				timeToFirstTokenMs: elapsed,
+				finishReason: "aborted",
+			};
+		}
+
 		// 1. Prefill: process all prompt tokens at once
 		const promptPositions = promptTokenIds.map(
 			(_: number, i: number) => session.currentPosition + i,

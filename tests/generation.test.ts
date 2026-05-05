@@ -732,6 +732,14 @@ describe("Generator", () => {
 	test("stops when AbortSignal is already aborted", async () => {
 		const controller = new AbortController();
 		controller.abort();
+		let forwardCalls = 0;
+		async function countedForwardPass(
+			tokenIds: number[],
+			positions: number[],
+		): Promise<Float32Array> {
+			forwardCalls++;
+			return mockForwardPass(tokenIds, positions);
+		}
 		const sampler = new Sampler({ temperature: 0 });
 		const session = new InferenceSession(BASE_SESSION_CONFIG, 0);
 		const config: GenerationConfig = {
@@ -749,12 +757,13 @@ describe("Generator", () => {
 			sampler,
 			session,
 			2,
-			mockForwardPass,
+			countedForwardPass,
 			config,
 		)) {
 			tokens.push(token);
 		}
-		expect(tokens.length).toBeLessThanOrEqual(1);
+		expect(tokens).toEqual([]);
+		expect(forwardCalls).toBe(0);
 	});
 
 	test("stops when AbortSignal fires during generation", async () => {

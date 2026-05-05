@@ -1767,6 +1767,7 @@ export class WebLLM {
 
 	async shutdown(): Promise<void> {
 		this.sessions.clear();
+		this.conversationPool.clear();
 		for (const [, wasm] of this.wasmModules) {
 			await wasm.shutdown();
 		}

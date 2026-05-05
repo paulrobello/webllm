@@ -350,6 +350,9 @@ export class WebLLMProxy {
 				const waiters = s.waiters;
 				s.waiters = [];
 				for (const w of waiters) w.resolve({ value: undefined, done: true });
+				if (s.queue.length === 0) {
+					this.streams.delete(m.streamId);
+				}
 				return;
 			}
 			case "stream-error": {
@@ -362,6 +365,9 @@ export class WebLLMProxy {
 				const waiters = s.waiters;
 				s.waiters = [];
 				for (const w of waiters) w.reject(err);
+				if (s.queue.length === 0) {
+					this.streams.delete(m.streamId);
+				}
 				return;
 			}
 			case "log":
@@ -457,14 +463,14 @@ export class WebLLMProxy {
 				if (!s) {
 					return Promise.resolve({ value: undefined, done: true });
 				}
+				if (s.queue.length > 0) {
+					const value = s.queue.shift() as GenerationStreamChunk;
+					return Promise.resolve({ value, done: false });
+				}
 				if (s.errored) {
 					const err = s.errored;
 					self.streams.delete(streamId);
 					return Promise.reject(err);
-				}
-				if (s.queue.length > 0) {
-					const value = s.queue.shift() as GenerationStreamChunk;
-					return Promise.resolve({ value, done: false });
 				}
 				if (s.done) {
 					self.streams.delete(streamId);

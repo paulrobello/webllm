@@ -148,6 +148,10 @@ export class ConversationPool {
 		this.entries.delete(conv.id);
 	}
 
+	clear(): void {
+		this.entries.clear();
+	}
+
 	disposeAllForModel(modelHandleId: string): void {
 		for (const [id, entry] of this.entries) {
 			if (entry.handle.modelHandleId === modelHandleId) {

@@ -63,6 +63,10 @@ function makeFakeEngine() {
 	};
 }
 
+function streamEntryCount(proxy: WebLLMProxy): number {
+	return (proxy as unknown as { streams: Map<number, unknown> }).streams.size;
+}
+
 describe("WebLLMProxy — non-streaming", () => {
 	test("embed round-trip returns the worker's value", async () => {
 		const { worker, hostPost, hostReceive } = makeInProcessChannel();
@@ -235,6 +239,7 @@ describe("WebLLMProxy — streaming", () => {
 			if (chunk.text) seen.push(chunk.text);
 		}
 		expect(seen).toEqual(["a", "b", "c"]);
+		expect(streamEntryCount(proxy)).toBe(0);
 	});
 
 	test("chatCompletion early-break sends stream-cancel", async () => {
@@ -308,6 +313,7 @@ describe("WebLLMProxy — streaming", () => {
 			if (c.text) collected.push(c.text);
 		}
 		expect(collected).toEqual(["a", "b", "c", "d", "e"]);
+		expect(streamEntryCount(proxy)).toBe(0);
 	});
 
 	test("chatCompletion propagates worker-side stream-error as typed error", async () => {
@@ -333,6 +339,7 @@ describe("WebLLMProxy — streaming", () => {
 			}
 		};
 		await expect(consume()).rejects.toBeInstanceOf(ModelNotFoundError);
+		expect(streamEntryCount(proxy)).toBe(0);
 	});
 });
 

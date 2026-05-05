@@ -11,6 +11,7 @@ type EngineInternals = {
 	_modelManager: {
 		get(id: string): unknown;
 		unregister(id: string): Promise<void>;
+		clear(): void;
 	};
 	inferenceEngines: Map<string, unknown>;
 	encoderEngines: Map<string, unknown>;
@@ -18,6 +19,8 @@ type EngineInternals = {
 	wasmModules: Map<string, unknown>;
 	conversationPool: ConversationPool;
 	sessions: Map<string, unknown>;
+	_scheduler: { clear(): void };
+	eventHandlers: Map<string, Set<unknown>>;
 };
 
 function asInternals(engine: WebLLM): EngineInternals {
@@ -50,6 +53,7 @@ function createFakeEngine(opts?: {
 			return undefined;
 		},
 		unregister: async () => {},
+		clear: () => {},
 	};
 	internals.inferenceEngines = new Map<string, unknown>(
 		hasInf
@@ -70,6 +74,8 @@ function createFakeEngine(opts?: {
 	internals.wasmModules = new Map();
 	internals.conversationPool = new ConversationPool({ maxConversations: max });
 	internals.sessions = new Map();
+	internals._scheduler = { clear: () => {} };
+	internals.eventHandlers = new Map();
 	return engine;
 }
 
@@ -139,6 +145,26 @@ describe("engine conversation lifecycle", () => {
 		await engine.unloadModel("tl");
 		expect(disposed).toBe("tl");
 		// After unload, the conv handle's pool entry is gone — assertExists throws.
+		expect(() => internals.conversationPool.assertExists(conv)).toThrow(
+			ConversationNotFoundError,
+		);
+	});
+
+	test("shutdown clears conversation snapshots held by the pool", async () => {
+		const engine = createFakeEngine();
+		const conv = await engine.createConversation("tl");
+		const internals = asInternals(engine);
+		internals.conversationPool.set(conv, {
+			conversationId: conv.id,
+			modelHandleId: conv.modelHandleId,
+			tokenIds: [1, 2, 3],
+			kvBytes: new Uint8Array(1024),
+			byteSize: 1024,
+			lastAccessMs: 0,
+		});
+
+		await engine.shutdown();
+
 		expect(() => internals.conversationPool.assertExists(conv)).toThrow(
 			ConversationNotFoundError,
 		);
