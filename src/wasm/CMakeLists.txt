@@ -23,7 +23,16 @@ set(GGML_WEBGPU ON CACHE BOOL "" FORCE)
 set(GGML_WEBGPU_JSPI OFF CACHE BOOL "" FORCE)
 set(GGML_WEBGPU_GPU_PROFILE ON CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
-set(GGML_CPU OFF CACHE BOOL "" FORCE)
+# GGML_CPU was OFF in the legacy graph-builder path: the project hand-
+# rolled forward graphs in TS and dispatched directly to ggml-webgpu, so
+# no scheduler fallback was needed. The Tier 3 migration uses libllama's
+# llama_model_load_from_file, which throws "no CPU backend found" at
+# llama-model.cpp:852 when use_extra_bufts is enabled. ON re-enables the
+# CPU backend so libllama's loader finds the device it expects for extra
+# buffer types and host-side staging. Layers still route to ggml-webgpu
+# via n_gpu_layers=999 — CPU code paths are present in the binary but
+# are not on the hot decode path.
+set(GGML_CPU ON CACHE BOOL "" FORCE)
 set(GGML_BLAS OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_ACCELERATE OFF CACHE BOOL "" FORCE)
@@ -146,6 +155,16 @@ if(EMSCRIPTEN)
             "-sSTACK_SIZE=8388608"
             "-sENVIRONMENT='web'"
             "-sASYNCIFY_STACK_SIZE=1048576"
+            # WASM_BIGINT on wasm32: pointers stay i32 (size_t is uint32_t),
+            # but i64 args at the JS↔WASM boundary (e.g. emwgpuWaitAny's
+            # timeoutNS) need BigInt to round-trip correctly. The Tier 3
+            # libllama load path triggers WebGPU async waits that fail with
+            # "Cannot convert undefined to a BigInt" without this flag.
+            # Browser support is universal as of Chrome 119+ / Safari 15+ /
+            # Firefox 78+. The legacy graph-builder path didn't hit this
+            # because it never engaged WebGPU's promise-await machinery
+            # through libllama-style scheduler calls.
+            "-sWASM_BIGINT=1"
             "-O3"
             "-sASSERTIONS=$<IF:$<BOOL:${WEBLLM_ASSERTIONS}>,1,0>"
         )
