@@ -837,6 +837,102 @@ Prior cycle 2026-05-01 was §27 (mul-mat vectorize #22578 +
 upscale shader; tip `e29753286`); sweep matrix at
 [`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md).
 
+### Tier 3 migration to upstream `llama_decode` (NEW DIRECTION 2026-05-05)
+
+**Status:** brainstorming complete 2026-05-05; design doc + plan
+pending. Spec target:
+`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`.
+
+**Decision summary.** Migrate the entire forward-pass surface
+(causal LM, encoder, embedder, tokenizer) off the hand-rolled TS
+graph builder onto upstream `llama_*` API surface. Code at risk of
+deletion: `src/inference/model-inference.ts` (~2890 LOC),
+`src/inference/encoder-inference.ts` (~565 LOC),
+`src/inference/causal-embedder-inference.ts`, the bulk of
+`src/inference/tokenizer.ts` (~1000 LOC of WordPiece + BPE +
+pre-tokenizer regex). Retained: `engine.ts` orchestration,
+`sampler.ts`, `generation.ts`, `chat-template.ts`, `stream-router.ts`,
+`speculative.ts` (rewired in P5).
+
+**Motivation.** Future-proof for any architecture llama.cpp
+supports (LFM2, Mamba, Qwen3-MoE, GLM, DeepSeek, hybrids) without
+TS-side reimplementation, and eliminate the maintenance burden of
+mirroring upstream graph builders. Triggered by an LFM2.5-350M
+support request 2026-05-05 — investigation revealed LFM2's hybrid
+short-conv + GQA layers would require ~500-1000 LOC of new TS
+graph code that already exists in upstream `src/models/lfm2.cpp`.
+Tier 3 makes LFM2 (and the next N hybrids) free.
+
+**Locked decisions (2026-05-05 brainstorm):**
+
+- **Tier 3** (full migration; not T1 trial, not T2 partial)
+- **Stage-aware parity bars** per phase (D): byte-exact tokenizer;
+  C-strict (accuracy ±sampling-noise, perf ±10% canonical 6,
+  embedder distinguishability gate strict) for causal/encoder/
+  embedder; perf-strict for spec-decode/KV; "it works" for spike
+  + LFM2.
+- **Pragmatic patch budget** (B): up to ~3 new core llama.cpp
+  patches with upstream-PR discipline; escalate to Liberal (C) if
+  P0 reveals ASYNCIFY blockers deeper than expected. Budgeted
+  patches: (1) `llama_decode` ASYNCIFY-aware suspend point,
+  (2) `llama_kv_cache_init` heap-pressure-aware sizing for the
+  WASM-32 ceiling, (3) reserve 1 for unknowns.
+- **Pragmatic tap preservation** (B): Bucket-D self-embed survives
+  natively via `llama_get_embeddings_ith` (load-bearing per
+  CLAUDE.md); speculative-decode rewired in P5 via two
+  `llama_context`s sharing one `llama_model`; `debugLayerOutput`
+  deleted (parity tests rewritten against logits / public
+  embeddings); per-op timing simplified to `llama_perf_*`; custom
+  FA gating + prefill tiling deleted (subsumed by
+  `llama_context_params`).
+- **Bridge structure** (A3 hybrid): one async `webllm_decode`
+  wrapper for the hot decode path (single ASYNCIFY round trip per
+  token) + direct cwrap bindings for stateless ops (kv reset,
+  logits/embedding readback, batch construction, model load).
+
+**Phase order (A — tokenizer-first, LFM2 last):**
+
+1. **P0 Spike** — TinyLlama or smollm2-360m generates "Paris"
+   through `llama_decode`. Validates ABI + ASYNCIFY patch + heap-
+   aware load. Parity bar: it works.
+2. **P1 Tokenizer** — replace BPE / WordPiece in `tokenizer.ts`
+   with `llama_tokenize`. Byte-exact gate on the existing fixture
+   set (wordpiece-golden, Mistral trailing-space, chat-template
+   stop-token suite).
+3. **P2 Causal-LM** — `ModelInference` → `webllm_decode` wrapper.
+   Delete `model-inference.ts`. C-strict bar.
+4. **P3 Encoder** — `EncoderInference` → `llama_encode` + pooling.
+   Delete `encoder-inference.ts`. C-strict + cosine parity vs HF
+   reference vectors.
+5. **P4 Embedder** — `CausalLMEmbedder` →
+   `llama_get_embeddings_ith`. C-strict + Bucket-D distinguishability
+   gate strict (16+16 mean-margin per 2026-04-30 doctrine).
+6. **P5 Spec-decode + KV** — two-context spec-decode rewire; KV
+   cache lifecycle moves under `llama_kv_cache`. Perf-strict
+   (this path is perf-load-bearing).
+7. **P6 LFM2** — `eval/models.ts` registration + ChatML stop tokens
+   + smoke test. Trivial; victory lap.
+
+**Side-effects: deferred items obviated.** Mark closed-by-
+superseded once spec lands: §1 "Decode graph reuse (deferred)" —
+TS-side optimization moot under Tier 3 (upstream handles graph
+caching internally). §4 "Flash attention in browser" — gating
+becomes `llama_context_params.flash_attn`; per-arch heuristics
+delete with `model-inference.ts`.
+
+**Risk register (high-level — full register lives in spec):**
+
+- **R1 ASYNCIFY blocker.** P0 may reveal `llama_decode`'s compute
+  path needs deeper restructuring than a single suspend-point
+  patch. Escape valve: escalate to Liberal patch budget (C).
+- **R2 P2 perf regression > 10%.** llama.cpp's prefill scheduler
+  may behave differently than the project's hand-tuned tiling.
+  Stage D allows perf-recovery sub-phase before merge.
+- **R3 Tokenizer fixture mismatch in P1.** Edge cases (chatml
+  `<|im_end|>` lookup, Mistral trailing-space, WordPiece phantom-
+  space) may diverge from `llama_tokenize`. Byte-exact gate
+  exposes this on a fixture set, not mid-decode.
+
 **MEMORY64 full bridge migration — CLOSED 2026-04-29.** All 8
 phases shipped + all three closure follow-ups landed (Q5_K_M
 decode validated, Q5_K canonical-6 row, Emscripten port bumped
