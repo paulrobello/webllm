@@ -213,32 +213,41 @@ ORDER BY 1;
 
 ## Validation re-runs (2026-05-04 evening)
 
-Re-ran the bench against the two affected profiles after both fixes
-landed. Both fixes validate end-to-end against real WebGPU inference:
+Wiped the 9 stale rows from the live DB (2 × broken qwen3-4b,
+4 × Mistral V0.3 quants in the format-mismatch floor, 1 × Mistral
+Nemo same, plus the two earlier validation re-runs) and re-ran the
+6 affected profiles end-to-end through real WebGPU. All six pass
+cleanly, all six show the predicted promotion. Refreshed canonical
+baseline pinned at
+[`../archive/smoke-runs-greedy-baseline-2026-05-04-v2.db`](../archive/smoke-runs-greedy-baseline-2026-05-04-v2.db).
 
-### `mistral-7b-v0.3-warm` — tool-calling 0.17 → 0.48 (+31 pp)
+### Tool-calling promotion table — Mistral family
 
-| Dimension | Pre-fix | Post-fix | Δ |
-| --- | --- | --- | --- |
-| reasoning | 0.75 | 0.75 | 0 |
-| instruction-following | 0.43 | 0.43 | 0 |
-| semantic-reasoning | 0.76 | 0.76 | 0 |
-| **tool-calling** | **0.17** | **0.48** | **+0.31** |
-| **overall** | **0.53** | **0.60** | **+0.07** |
+The non-tool-calling dimensions are byte-for-byte identical
+pre- and post-fix because the runs are greedy (deterministic).
+Only tool-calling moves, which is exactly the fix's surface area.
+This is also a clean validation of the n=1 stability claim from §3
+above — every other dimension reproduced exactly.
 
-Per-task inspection confirms Mistral is now emitting its native
-format (`[{"name":"...","arguments":{...}}]`) on the tasks it
-handles. Of the 6 remaining tool-calling failures: 2 emit
-Python-syntax `func(arg=val)` instead of JSON (parser limitation,
-not format selection), 1 fails the implicit refusal (tc-012 — model
-called the tool when asked to delete files), and the rest are
-multi-step chain or tool-selection misses. All are model-quality
-issues — Mistral V0.3 at this quant has limited tool reasoning —
-not chat-template format issues. The fix delivers what was
-expected: from "model isn't trying" to "model emits native format
-and gets the easy ones right."
+| Profile | Pre tool-call | Post tool-call | Δ tool-call | Pre overall | Post overall | Δ overall |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mistral-7b-v0.3-iq4xs` | 0.167 | 0.563 | **+0.40** | 0.46 | 0.56 | +0.10 |
+| `mistral-7b-v0.3-q3km` | 0.167 | 0.500 | **+0.33** | 0.53 | 0.61 | +0.08 |
+| `mistral-7b-v0.3-q4ks` | 0.167 | 0.479 | **+0.31** | 0.53 | 0.60 | +0.07 |
+| `mistral-7b-v0.3-q5km` | 0.167 | 0.688 | **+0.52** | 0.54 | 0.67 | +0.13 |
+| `mistral-nemo-q4ks` | 0.167 | 0.667 | **+0.50** | 0.73 | 0.85 | +0.12 |
 
-### `qwen3-4b-warm` — 0.08 → 0.88 (+80 pp)
+All five Mistral variants jumped from the 2/12-floor (passing only
+the no-tool-call tasks) to mid-tier tool-calling. Per-task
+inspection on q4ks confirms the model is now emitting its native
+`[{"name":..., "arguments":...}]` format — the [AVAILABLE_TOOLS]
+fix is working as designed across the entire Mistral family.
+
+The remaining tool-calling failures are model-quality issues
+(Python-syntax emissions on a few tasks, missed implicit refusal,
+multi-step chain misses) — not chat-template format issues.
+
+### qwen3-4B — complete recovery
 
 | Dimension | Pre-fix | Post-fix | Δ |
 | --- | --- | --- | --- |
@@ -250,18 +259,42 @@ and gets the easy ones right."
 
 Zero errors across all 48 tasks (vs 88 pre-fix). The model lands
 between qwen3-1.7B (0.84) and qwen3-8B (0.91) — exactly where a 4B
-Qwen3 should sit. The crash cascade is gone.
+Qwen3 should sit. The crash cascade is gone. tc-005 (the previous
+abort trigger) ran cleanly.
 
-### Implication for the greedy baseline
+### Refreshed leaderboard (post-fix)
 
-The pinned snapshot at
-[`../archive/smoke-runs-greedy-baseline-2026-05-04.db`](../archive/smoke-runs-greedy-baseline-2026-05-04.db)
-captures the **pre-fix** state for these two models — qwen3-4B at
-0.08 and Mistral V0.3 at 0.53. Future bench cycles should be
-compared against the **post-fix** numbers above for those two
-specific profiles, not the snapshot. A full re-bench across all
-20 model variants is the cleanest way to refresh the canonical
-baseline; queued as follow-up ticket 3 below.
+The 6 re-run profiles slot into the leaderboard like this:
+
+| Rank | Model | Overall (post-fix) |
+| --- | --- | --- |
+| 1 | `qwen3-8b-iq3m` | 0.91 |
+| 2 | `llama-3.1-8b-instruct-iq3m` | 0.89 |
+| 3 | **`qwen3-4b-q4f16`** ← was 0.08 (broken) | **0.88** |
+| 4 | `qwen2.5-3b-q4f16` | 0.86 |
+| 5 | **`mistral-nemo-instruct-2407-q4ks`** ← was 0.73 | **0.85** |
+| 6–8 | `qwen2.5-{1.5b,coder-1.5b}`, `qwen3-1.7b` | 0.84 |
+| 11 | **`mistral-7b-v0.3-q5km`** ← was 0.54 | **0.67** |
+| 13 | **`mistral-7b-v0.3-q3km`** ← was 0.53 | **0.61** |
+| 13 | **`mistral-7b-v0.3-q4ks`** ← was 0.53 | **0.60** |
+| 16 | **`mistral-7b-v0.3-iq4xs`** ← was 0.46 | **0.56** |
+
+qwen3-4B leapfrogs into 3rd place after the heuristic fix. Mistral
+Nemo lands in the top tier with both fixes (greedy + Mistral tool
+format) applied. The Mistral V0.3 quants split sharply — Q5_K_M
+hits 0.67 while IQ4_XS holds at 0.56, suggesting i-quant noise
+is meaningful for tool-emission accuracy at this size.
+
+### Canonical baseline policy
+
+- Pre-fix snapshot: [`../archive/smoke-runs-greedy-baseline-2026-05-04.db`](../archive/smoke-runs-greedy-baseline-2026-05-04.db)
+  retained for historical reference but **not** the comparison
+  baseline going forward — its qwen3-4b and Mistral rows are
+  superseded.
+- **Current canonical**: [`../archive/smoke-runs-greedy-baseline-2026-05-04-v2.db`](../archive/smoke-runs-greedy-baseline-2026-05-04-v2.db)
+  — 33 evals across 20 unique model variants, all post-fix where
+  applicable, all greedy.
+- Future cycles compare against v2.
 
 ## Follow-up tickets
 
