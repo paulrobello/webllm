@@ -33,7 +33,7 @@ export interface LlamaBridge {
 	/** Free a llama_model handle. Idempotent on null. */
 	freeModel(handle: number): void;
 	/** Create a llama_context for the given model. Throws on failure. */
-	createContext(model: number, params: LlamaContextParams): number;
+	createContext(model: number, params: LlamaContextParams): Promise<number>;
 	/** Free a llama_context handle. Idempotent on null. */
 	freeContext(ctx: number): void;
 	/**
@@ -47,7 +47,7 @@ export interface LlamaBridge {
 	 * logits-flagged token. Returns a Float32Array view INTO ctx-owned
 	 * memory — valid until the next decode call. Do not retain.
 	 */
-	getLogits(ctx: number, model: number, ith?: number): Float32Array;
+	getLogits(ctx: number, model: number, ith?: number): Promise<Float32Array>;
 	/** Returns the model's vocab size. Used to size logits views. */
 	nVocab(model: number): number;
 	/**
@@ -185,8 +185,10 @@ export function createLlamaBridge(mod: RawLlamaModule): LlamaBridge {
 			}
 			try {
 				mod.HEAPU8.set(buf, ptr);
+				// Under JSPI, webllm_load_model is promising-wrapped — must
+				// await before unwrapping the i32/i64 return value.
 				const handle = from64(
-					mod._webllm_load_model(to64(ptr), to64(buf.byteLength)),
+					await mod._webllm_load_model(to64(ptr), to64(buf.byteLength)),
 				);
 				if (handle === 0) {
 					throw new Error("webllm: webllm_load_model returned null");
@@ -201,9 +203,14 @@ export function createLlamaBridge(mod: RawLlamaModule): LlamaBridge {
 			mod._webllm_free_model(to64(handle));
 		},
 
-		createContext(model: number, params: LlamaContextParams): number {
+		async createContext(
+			model: number,
+			params: LlamaContextParams,
+		): Promise<number> {
+			// Under JSPI, webllm_create_context is promising-wrapped — must
+			// await before unwrapping the i32/i64 return value.
 			const handle = from64(
-				mod._webllm_create_context(
+				await mod._webllm_create_context(
 					to64(model),
 					params.nCtx,
 					params.embeddings ? 1 : 0,
@@ -243,8 +250,14 @@ export function createLlamaBridge(mod: RawLlamaModule): LlamaBridge {
 			}
 		},
 
-		getLogits(ctx: number, model: number, ith = -1): Float32Array {
-			const ptr = from64(mod._webllm_get_logits(to64(ctx), ith));
+		async getLogits(
+			ctx: number,
+			model: number,
+			ith = -1,
+		): Promise<Float32Array> {
+			// Under JSPI, webllm_get_logits is promising-wrapped — must
+			// await before unwrapping the i32/i64 pointer return.
+			const ptr = from64(await mod._webllm_get_logits(to64(ctx), ith));
 			if (ptr === 0) {
 				throw new Error("webllm: webllm_get_logits returned null");
 			}

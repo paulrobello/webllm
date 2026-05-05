@@ -3975,59 +3975,10 @@ function createLlamaBridge(mod) {
   };
 }
 
-// src/inference/llama-tokenizer.ts
-class LlamaTokenizer {
-  bridge;
-  model;
-  _options;
-  addedTokenCache = new Map;
-  constructor(bridge, model, options = {}) {
-    this.bridge = bridge;
-    this.model = model;
-    this._options = options;
-  }
-  encode(text) {
-    const ids = this.bridge.tokenize(this.model, text, {
-      addBos: false,
-      parseSpecial: true
-    });
-    return Array.from(ids);
-  }
-  decode(ids) {
-    if (ids.length === 0)
-      return "";
-    return this.bridge.detokenize(this.model, new Int32Array(ids));
-  }
-  getId(token) {
-    const cached = this.addedTokenCache.get(token);
-    if (cached !== undefined)
-      return cached;
-    const ids = this.bridge.tokenize(this.model, token, {
-      addBos: false,
-      parseSpecial: true
-    });
-    if (ids.length !== 1)
-      return;
-    const id = ids[0];
-    this.addedTokenCache.set(token, id);
-    return id;
-  }
-  get bosId() {
-    return this.bridge.tokenBos(this.model);
-  }
-  get eosId() {
-    return this.bridge.tokenEos(this.model);
-  }
-  get vocabSize() {
-    return this.bridge.nVocab(this.model);
-  }
-  get options() {
-    return this._options;
-  }
-}
-
-// smoke-test/p1-tokenizer-parity.src.ts
-var FIXTURE_URL = "/parity-fixture.json";
+// smoke-test/p0-spike.src.ts
+var PROMPT_TOKEN_IDS = [1, 450, 7483, 310, 3444, 338];
+var EXPECTED_PARIS_ID = 3681;
+var GGUF_URL = "/models/tinyllama-1.1b-chat-q4_0.gguf";
 function log(msg, cls = "") {
   const el = document.getElementById("log");
   if (!el)
@@ -4039,87 +3990,68 @@ function log(msg, cls = "") {
   el.appendChild(line);
   console.log(msg);
 }
-function arraysEqual(a, b) {
-  if (a.length !== b.length)
-    return false;
-  for (let i = 0;i < a.length; i++)
-    if (a[i] !== b[i])
-      return false;
-  return true;
-}
-async function runParity() {
+async function runSpike() {
   try {
-    log("[setup] Fetching fixture…", "info");
-    const fixtureResp = await fetch(FIXTURE_URL);
-    if (!fixtureResp.ok) {
-      log(`fetch fixture failed: ${fixtureResp.status} ${fixtureResp.statusText}`, "fail");
-      return;
-    }
-    const f = await fixtureResp.json();
-    log(`[setup] ${f.fixture.length} vocab(s), ${f.prompts.length} prompts each`, "info");
-    log("[setup] Initializing WASM module…", "info");
+    log("[1/6] Initializing WASM module...");
     const createModule = (await Promise.resolve().then(() => (init_webllm_wasm(), exports_webllm_wasm))).default;
     const mod = await createModule();
-    log("[setup] Initializing WebGPU backend…", "info");
+    log("[2/6] Initializing WebGPU backend...");
     const initStatus = await mod._webgpu_init();
     if (initStatus !== 0) {
       log(`webgpu_init returned ${initStatus}`, "fail");
       return;
     }
+    log(`[3/6] Fetching TinyLlama Q4_0 GGUF from ${GGUF_URL}...`);
+    const resp = await fetch(GGUF_URL);
+    if (!resp.ok) {
+      log(`fetch failed: ${resp.status} ${resp.statusText}`, "fail");
+      return;
+    }
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    log(`     loaded ${(buf.byteLength / 1024 / 1024).toFixed(1)} MiB`);
+    log("[4/6] Loading model + creating context...");
     const bridge = createLlamaBridge(mod);
-    let totalFail = 0;
-    let totalPass = 0;
-    for (const entry of f.fixture) {
-      log(`
-[${entry.vocab}] fetching ${entry.ggufUrl}…`, "info");
-      const ggufResp = await fetch(entry.ggufUrl);
-      if (!ggufResp.ok) {
-        log(`[${entry.vocab}] fetch failed: ${ggufResp.status} ${ggufResp.statusText}`, "fail");
-        totalFail += entry.expected.length;
-        continue;
-      }
-      const buf = new Uint8Array(await ggufResp.arrayBuffer());
-      log(`[${entry.vocab}] loading model (${(buf.byteLength / 1024 / 1024).toFixed(0)} MiB)…`, "info");
-      const model = await bridge.loadModel(buf);
-      const tk = new LlamaTokenizer(bridge, model);
-      let mismatches = 0;
-      const samples = [];
-      for (let i = 0;i < entry.expected.length; i++) {
-        const { prompt, ids: expected } = entry.expected[i];
-        const got = tk.encode(prompt);
-        const gotArr = new Int32Array(got);
-        if (!arraysEqual(expected, gotArr)) {
-          mismatches++;
-          if (samples.length < 3) {
-            samples.push(`  [${i}] ${JSON.stringify(prompt).slice(0, 60)}
-    expected: [${expected.slice(0, 12).join(",")}${expected.length > 12 ? ",…" : ""}]
-    got     : [${Array.from(gotArr.slice(0, 12)).join(",")}${gotArr.length > 12 ? ",…" : ""}]`);
-          }
-        }
-      }
-      if (mismatches === 0) {
-        log(`[${entry.vocab}] PASS — ${entry.expected.length}/${entry.expected.length} byte-exact`, "pass");
-        totalPass += entry.expected.length;
-      } else {
-        totalFail += mismatches;
-        totalPass += entry.expected.length - mismatches;
-        log(`[${entry.vocab}] FAIL — ${mismatches}/${entry.expected.length} mismatches`, "fail");
-        for (const s of samples)
-          log(s, "fail");
-      }
+    const t0 = performance.now();
+    const model = await bridge.loadModel(buf);
+    const tLoad = performance.now() - t0;
+    const vocab = bridge.nVocab(model);
+    log(`     model loaded in ${tLoad.toFixed(0)} ms; vocab = ${vocab}`);
+    const ctx = await bridge.createContext(model, { nCtx: 512 });
+    log(`[5/6] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
+    const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
+    const tDecode = performance.now();
+    const status = await bridge.decode(ctx, promptTokens, 0);
+    const tDecodeMs = performance.now() - tDecode;
+    log(`     llama_decode status = ${status} (${tDecodeMs.toFixed(0)} ms)`);
+    if (status !== 0) {
+      log(`     llama_decode FAILED with status ${status}`, "fail");
+      bridge.freeContext(ctx);
       bridge.freeModel(model);
+      return;
     }
-    if (totalFail === 0) {
-      log(`
-ALL VOCABS PASS — parity gate green (${totalPass} prompts byte-exact)`, "pass");
+    log("[6/6] Reading logits + argmax...");
+    const logits = await bridge.getLogits(ctx, model);
+    let topId = 0;
+    let topVal = -Infinity;
+    for (let i = 0;i < logits.length; i++) {
+      if (logits[i] > topVal) {
+        topVal = logits[i];
+        topId = i;
+      }
+    }
+    log(`     top-1 token id = ${topId} (logit ${topVal.toFixed(3)})`);
+    log(`     expected " Paris" id ${EXPECTED_PARIS_ID}`);
+    if (topId === EXPECTED_PARIS_ID) {
+      log('PASS — top-1 matches " Paris"', "pass");
     } else {
-      log(`
-FAIL — ${totalFail} mismatches out of ${totalPass + totalFail} total prompts`, "fail");
+      log(`FAIL — got id ${topId} instead of ${EXPECTED_PARIS_ID}`, "fail");
     }
+    bridge.freeContext(ctx);
+    bridge.freeModel(model);
   } catch (err) {
     const e = err;
     log(`FAIL — ${e.message}
 ${e.stack ?? ""}`, "fail");
   }
 }
-runParity();
+runSpike();

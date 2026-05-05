@@ -20,7 +20,14 @@ option(WEBLLM_BUILD_MEM64 "Build the wasm64 webllm-wasm-mem64 target instead of 
 
 # Disable everything we don't need
 set(GGML_WEBGPU ON CACHE BOOL "" FORCE)
-set(GGML_WEBGPU_JSPI OFF CACHE BOOL "" FORCE)
+# JSPI replaces ASYNCIFY for WebGPU async readback. Flipped ON 2026-05-05
+# to unblock Tier 3 P1 — adding any new wasm export under -sASYNCIFY +
+# -exceptions + libllama static initializers traps in __wasm_call_ctors
+# (related upstream issues #18045, #18254, #25551 — all OPEN). JSPI uses
+# native browser Promise integration; sidesteps the wasm-ld
+# static-init transformation that ASYNCIFY exposes.
+# Closure report: eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md
+set(GGML_WEBGPU_JSPI ON CACHE BOOL "" FORCE)
 set(GGML_WEBGPU_GPU_PROFILE ON CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 # GGML_CPU was OFF in the legacy graph-builder path: the project hand-
@@ -103,6 +110,31 @@ if(EMSCRIPTEN)
         "_webllm_token_bos,_webllm_token_eos"
     )
 
+    # JSPI requires explicit listing of exports that may transitively call
+    # async imports (WebGPU async readback, queue.onSubmittedWorkDone, etc).
+    # Each listed export is wrapped in WebAssembly.promising at module init,
+    # so the JS caller gets a Promise back. Anything that touches the WebGPU
+    # backend belongs here. Functions that don't touch WebGPU (pure C
+    # tokenization, tensor inspection, malloc) are intentionally excluded —
+    # promising-wrapping them adds a per-call suspend-frame allocation.
+    # NOTE: JSPI_EXPORTS uses bare wasm export names (no leading
+    # underscore), unlike EXPORTED_FUNCTIONS. Emscripten puts these names
+    # into a regex against the wasm-side export keys (e.g. "webgpu_init"),
+    # not the Module-side aliases (e.g. "_webgpu_init"). Mismatch ⇒
+    # silent no-op ⇒ "trying to suspend without WebAssembly.promising".
+    string(CONCAT JSPI_EXPORTS
+        "webgpu_init,"
+        "ctx_create,ctx_free,"
+        "backend_alloc_ctx_tensors,backend_buffer_free,"
+        "backend_tensor_set,backend_tensor_set3,backend_tensor_get,"
+        "backend_tensor_get_async_begin,backend_tensor_get_async_poll,"
+        "backend_tensor_get_async_finish,backend_tensor_get_async_cancel,"
+        "graph_compute,"
+        "webllm_load_model,webllm_free_model,"
+        "webllm_create_context,webllm_free_context,"
+        "webllm_decode,webllm_get_logits"
+    )
+
     if(WEBLLM_BUILD_MEM64)
         # ── MEMORY64 cap probe target.
         # Built only when -DWEBLLM_BUILD_MEM64=ON is passed at cmake configure
@@ -148,6 +180,7 @@ if(EMSCRIPTEN)
         )
         target_link_options(webllm-wasm PRIVATE
             "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
+            "-sJSPI_EXPORTS=${JSPI_EXPORTS}"
             "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"

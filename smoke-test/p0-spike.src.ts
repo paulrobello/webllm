@@ -59,7 +59,7 @@ async function runSpike(): Promise<void> {
 		const tLoad = performance.now() - t0;
 		const vocab = bridge.nVocab(model);
 		log(`     model loaded in ${tLoad.toFixed(0)} ms; vocab = ${vocab}`);
-		const ctx = bridge.createContext(model, { nCtx: 512 });
+		const ctx = await bridge.createContext(model, { nCtx: 512 });
 
 		log(`[5/6] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
 		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
@@ -75,7 +75,7 @@ async function runSpike(): Promise<void> {
 		}
 
 		log("[6/6] Reading logits + argmax...");
-		const logits = bridge.getLogits(ctx, model);
+		const logits = await bridge.getLogits(ctx, model);
 		let topId = 0;
 		let topVal = -Infinity;
 		for (let i = 0; i < logits.length; i++) {
