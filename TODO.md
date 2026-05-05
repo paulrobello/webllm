@@ -1429,31 +1429,44 @@ appetite remains; none are forced.
   Watch for *new* skips appearing beyond this 33-count baseline — that
   might indicate an accidental regression. Browser-side smoke tests
   cover the WebGPU + IndexedDB code paths that skip-pass here.
-- **Tool-format investigations (queued 2026-05-04).** Surfaced from
-  the greedy-baseline bench cleanup
-  ([`eval/reports/greedy-baseline-2026-05-04/SUMMARY.md`](eval/reports/greedy-baseline-2026-05-04/SUMMARY.md))
-  after the Mistral V0.3 `[AVAILABLE_TOOLS]` fix landed. Both items
-  are **investigation-first** — no implementation until a probe
-  produces data.
-  - **Llama-3.x tool format.** Llama-3.1-8B scores tool-calling 0.98
-    while Llama-3.2-3B scores 0.17 on the same code path (canonical
-    Qwen3 `<tools>` block). The gap is too large to be capability;
-    suspect 3B is sensitive to a format the 8B happens to recover
-    from. Trigger probe: capture per-task tool-calling traces for
-    both models, diff the emitted prefix and finish-reason
-    distribution. If the 3B pattern is fixable by a Llama-3-family
-    formatter (`<|python_tag|>` / message-channel discipline /
-    upstream Llama-3.1 chat template's tool block), file as a
-    sibling ticket to the Mistral V0.3 fix. Re-evaluate priority if
-    a deployment ask names a Llama-3.x-3B-class agent.
-  - **Phi-3 tool format.** Phi-3.5-mini holds tool-calling at the
-    0.17 floor with no upstream-canonical tool format documented in
-    the ggml-org Phi-3 chat template. Trigger probe: capture
-    per-task traces, then check whether Microsoft's Phi-3
-    function-calling docs (or `Phi-3.5-mini-instruct` model card)
-    name an emission convention. If yes → ticket; if no → close as
-    "no usable format upstream" and demote tool-calling
-    expectations for Phi-3 in the dashboard.
+- **Tool-format investigations — CLOSED 2026-05-04.** Both probes
+  ran; investigation report at
+  [`eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md`](eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md).
+  - **Llama-3.x — RECLASSIFIED.** Not a chat-template format issue.
+    Llama-3.1-8B already scores 0.98 on the current Qwen3 path — no
+    formatter swap would help. Sub-8B Llama emits *structurally-
+    shaped but malformed* attempts (Llama-3.2-3B: XML-inside-XML
+    wrapper; 1B: header-parroting; Hermes-3-3B: fabricated JSON
+    keys). **Right fix is parser-side, not template-side.** Filed
+    follow-up: **"Tool-call parser leniency for sub-8B Llama-3
+    family emissions"** (see Watch list new entry).
+  - **Phi-3 — CLOSED no-fix.** Phi-3.5-mini emits zero structural
+    tool-call signal (no `<tool_call>` tags, no JSON, no `name`/
+    `arguments` references) — hallucinates results conversationally.
+    Phi-3-instruct base is not function-calling-fine-tuned; no
+    learned format exists to elicit. Microsoft documentation
+    confirms: no Phi-3 function-calling format. **Action:** demote
+    tool-calling expectations for Phi-3.5-mini in dashboard /
+    per-model docs. Strong on reasoning (1.00) + instruction-
+    following (0.76); accept the 0.17 tool-calling floor.
+- **Tool-call parser leniency for sub-8B Llama-3 family emissions
+  (queued 2026-05-04).** Follow-up from the tool-format investigation
+  ([`eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md`](eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md)).
+  Llama-3.2-3B emits `<tool_call><name>X</name><arguments>{...}</arguments></tool_call>`
+  on tool tasks — structurally parseable JSON-inside-XML, but the
+  current strict regex in `src/characters/tool-system.ts` rejects
+  it. Scope:
+  - Add `XML_NESTED_RE` regex covering the `<name>...</name>
+    <arguments>{...}</arguments>` shape with JSON args.
+  - Tests in `tests/tool-system.test.ts`: positive (Llama-3.2-3B
+    pattern), negative (no-args partial — don't false-match),
+    negative (pure-XML args — graceful no-parse, not incorrect
+    parse).
+  - Re-bench llama-3.2-3b-q4f16 + llama-3.2-1b-q4f16 +
+    hermes-3-llama-3.2-3b-q4f16 to validate predicted lift.
+  - Predicted impact: llama-3.2-3b 0.17 → ~0.50-0.70; 1B and
+    Hermes-3-3B minimal (failures upstream of parser).
+  - Predicted scope: ~1 hour wall (1 regex + 3 tests + 1 bench).
 - **Encoder parity reference vectors freshness.** `eval/reports/
   encoder-parity-2026-04-28/{jina,nomic}-ref.json` are pinned to
   whatever sentence-transformers / HF model versions resolved on
