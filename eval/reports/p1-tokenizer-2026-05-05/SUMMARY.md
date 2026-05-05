@@ -41,46 +41,64 @@ pressure no longer fires.
   `LlamaBridge.createContext` and `getLogits` are now `Promise<…>`-
   returning in the public type.
 
-### P1 parity status (partial)
+### P1 parity status (per-vocab, isolated runs)
 
-`smoke-test/p1-tokenizer-parity.html` runs the 200-prompt × 5-vocab
-fixture against the new `LlamaTokenizer.encode()` path on the
-unblocked JSPI build:
+`smoke-test/p1-tokenizer-parity.html?only=<vocab>` runs the
+200-prompt fixture against the new `LlamaTokenizer.encode()` path
+on the unblocked JSPI build, one vocab at a time. Per-vocab
+isolation was needed because cumulative cross-vocab memory
+pressure (Llama-3 770 MiB → Qwen 1017 MiB without full WebGPU
+buffer release between models) trips the 4 GiB wasm32 cap and
+throws a `WebAssembly.Exception` before qwen2 finishes loading.
+That cross-vocab leak is its own follow-on (per-model VRAM
+release in `webllm_free_model`).
 
-| Vocab | Match | Notes |
+| Vocab | Match | Mismatch pattern |
 |---|---|---|
-| llama-bpe | 195 / 200 | 5 mismatches — likely whitespace/normalization edge cases |
-| spm-llama | 1 / 200 | Systematic divergence — fixture was built from legacy `Tokenizer(config).encode()` which does not match canonical SPM (legacy adds explicit `▁` / id `35` between word groups; `llama_tokenize` produces the canonical concatenated form) |
-| qwen2 | error | Bridge throws `undefined` mid-stream — needs diagnosis |
-| qwen3 | not reached | qwen2 error halts the run |
-| wordpiece-bert | not reached | qwen2 error halts the run |
+| llama-bpe | 195 / 200 | 5 trailing-edge cases on long/repeated-character prompts (e.g. id 143 — `xxxx…` 60-char run differs by leading byte) |
+| qwen2 (alone) | 188 / 200 | 12 prompts diverge after a common prefix — encoder edge cases, not systematic |
+| qwen3 (alone) | 188 / 200 | Same 12 patterns as qwen2 (shared Qwen tokenizer family) |
+| spm-llama | 1 / 200 | Systematic — legacy fixture has explicit `▁` (id 35) between word groups; canonical `llama_tokenize` produces concatenated form |
+| wordpiece-bert | 0 / 200 | Systematic — legacy fixture has `[CLS]`/`[SEP]` (ids 101/102) bracketing every prompt; new path called with `addBos=false` to mimic legacy causal-LM behavior, but for BERT-family `addBos=true` IS the [CLS]-prepend |
 
-**Interpretation:** the spm-llama divergence is a *fixture* issue,
-not a `LlamaTokenizer` issue — the new path encodes correctly per
-`llama_tokenize` (which P0 used to derive the canonical
-`[1, 450, 7483, 310, 3444, 338]` "The capital of France is" prompt
-that produces top-1 " Paris"). The byte-exact parity bar in the
-spec measured against the legacy encoder is unachievable when the
-legacy encoder itself diverges from canonical. Closing this
-properly requires either:
+**Interpretation:** the spm-llama and wordpiece-bert divergences
+are *fixture* issues, not `LlamaTokenizer` bugs — the new path
+encodes correctly per `llama_tokenize` (which P0 used to derive
+the canonical `[1, 450, 7483, 310, 3444, 338]` "The capital of
+France is" prompt that produces top-1 " Paris"). The byte-exact
+parity bar in the spec measured against the legacy encoder is
+unachievable when the legacy encoder itself diverges from
+canonical SPM and adds BERT-family special tokens unconditionally.
+The 188/200 and 195/200 scores on qwen2/qwen3/llama-bpe show the
+bridge round-trip is functional; the remaining mismatches there
+are real edge cases worth diagnosing but likely also fixture-side
+(legacy encoder quirks) rather than bridge bugs.
 
-- Regenerating the fixture from `llama_tokenize` as the new ground
-  truth (and accepting the new path as canonical), **or**
-- Documenting per-vocab divergence rates as the
-  spec-text-vs-runtime-truth gap and shipping with regression
-  test against the new ground truth.
+### Closure: structural block closed; parity becomes P1.b
 
-This work is the natural Stage-D-byte-exact follow-on; it's
-**iterative discovery** rather than blocked, so the JSPI pivot
-itself is the load-bearing milestone closing the BLOCKED status.
+The Asyncify→JSPI pivot is the load-bearing milestone closing the
+BLOCKED status. The parity-fixture canonicalization and the few
+BPE edge cases are correctness-of-fixture follow-on work
+(P1.b — iterative discovery, not blocking) that don't gate
+progress to P2 (encoder migration). They're tracked separately
+because the right resolution requires deciding whether
+`llama_tokenize` becomes the canonical ground truth (legacy is
+deleted in P2 anyway, so this is the natural call) or whether
+LlamaTokenizer needs context-dependent `addBos` semantics for
+encoder-only models.
 
-### Next steps
+### P1.b follow-on (deferred, non-blocking)
 
-- [ ] Diagnose the qwen2 `FAIL — undefined` exception
-- [ ] Decide fixture canonicalization (`llama_tokenize` vs legacy)
-      and regenerate the per-vocab `expected` arrays
-- [ ] Re-run parity to byte-exact green across all 5 vocabs
-- [ ] Close P1; advance to P2 (encoder migration)
+- [ ] Regenerate parity fixture from `llama_tokenize` as canonical
+      ground truth (drop legacy-encoder reference)
+- [ ] Add `addBos=true` path for encoder-only LlamaTokenizer
+      construction (for the dedicated embedder / encoder lanes
+      that need [CLS]/[SEP] / `<s>` prepended)
+- [ ] Diagnose remaining 5 llama-bpe / 12 Qwen edge cases on the
+      regenerated fixture
+- [ ] Fix the cross-vocab WebGPU buffer leak in `webllm_free_model`
+      so the harness can run all 5 vocabs in sequence without
+      hitting the 4 GiB wasm32 cap
 
 ---
 

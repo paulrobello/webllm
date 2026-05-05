@@ -4067,9 +4067,13 @@ async function runParity() {
       return;
     }
     const bridge = createLlamaBridge(mod);
+    const params = new URLSearchParams(window.location.search);
+    const only = params.get("only");
+    const fixtureToRun = only ? f.fixture.filter((e) => e.vocab === only) : f.fixture;
+    log(only ? `[setup] filtering to vocab="${only}" (${fixtureToRun.length} match)` : `[setup] running all ${fixtureToRun.length} vocabs`, "info");
     let totalFail = 0;
     let totalPass = 0;
-    for (const entry of f.fixture) {
+    for (const entry of fixtureToRun) {
       log(`
 [${entry.vocab}] fetching ${entry.ggufUrl}…`, "info");
       const ggufResp = await fetch(entry.ggufUrl);
@@ -4117,9 +4121,24 @@ ALL VOCABS PASS — parity gate green (${totalPass} prompts byte-exact)`, "pass"
 FAIL — ${totalFail} mismatches out of ${totalPass + totalFail} total prompts`, "fail");
     }
   } catch (err) {
-    const e = err;
-    log(`FAIL — ${e.message}
-${e.stack ?? ""}`, "fail");
+    let repr;
+    if (err instanceof Error) {
+      repr = `${err.name}: ${err.message}
+${err.stack ?? ""}`;
+    } else if (typeof err === "object" && err !== null && "is" in err && typeof err.is === "function") {
+      const we = err;
+      const tagName = we.constructor?.name ?? "WebAssembly.Exception";
+      let detail = "";
+      try {
+        detail = ` arg0=${we.getArg?.(we.tag ?? null, 0)}`;
+      } catch {}
+      repr = `${tagName}${detail}
+${we.stack ?? "(no stack)"}`;
+    } else {
+      repr = `(non-Error throw, typeof=${typeof err}) ${String(err)}`;
+    }
+    log(`FAIL — ${repr}`, "fail");
+    console.error("parity-harness throw:", err);
   }
 }
 runParity();

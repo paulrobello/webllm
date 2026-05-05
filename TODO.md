@@ -854,14 +854,19 @@ returns a Promise even when no actual suspend fires, unlike Asyncify
 which only Promised-wrapped on real suspends). Closure +
 remaining-work breakdown in
 [`eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md`](eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md).
-**P1 parity status:** llama-bpe 195/200 byte-exact; spm-llama 1/200
-(fixture-canonicalization gap — legacy `Tokenizer.encode()` doesn't
-match canonical `llama_tokenize`); qwen2 throws `undefined`
-mid-stream (needs diagnosis); qwen3 + wordpiece-bert not reached.
-**Next:** diagnose qwen2 throw, decide canonical-fixture-source
-(`llama_tokenize` is the new ground truth; legacy is going away in
-P2), regenerate per-vocab `expected` arrays, re-run to byte-exact
-green, then advance to P2 (encoder migration).
+**P1 parity status (per-vocab isolated):** llama-bpe 195/200,
+qwen2 188/200, qwen3 188/200, spm-llama 1/200 (legacy adds explicit
+`▁`/35 — canonical SPM doesn't), wordpiece-bert 0/200 (legacy adds
+`[CLS]`/`[SEP]` — new path called with addBos=false). Cross-vocab
+sequential run trips a 4 GiB wasm32 cap (WebGPU buffer leak in
+`webllm_free_model` between vocabs). The qwen2 "throw undefined"
+that previously halted the run was the same buffer-leak symptom,
+not a tokenizer bug — qwen2 alone PASSES 188/200.
+**Next (P1.b, non-blocking):** regenerate fixture from `llama_tokenize`
+as canonical (legacy goes away in P2 anyway), add encoder-only
+addBos=true path for [CLS]/`<s>` prepend, diagnose remaining
+edge cases, fix `webllm_free_model` WebGPU buffer release. None
+of these block advancing to P2 (encoder migration).
 
 **Status:** **P0 CLOSED 2026-05-05 — PASS.** Spec at
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md);

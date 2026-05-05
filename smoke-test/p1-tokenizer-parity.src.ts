@@ -72,9 +72,25 @@ async function runParity(): Promise<void> {
 		}
 		const bridge = createLlamaBridge(mod);
 
+		// Optional ?only=<vocab> filter — for diagnosing per-vocab issues
+		// without flooding the console with libllama load chatter from
+		// earlier vocabs (Llama-3's 256 reserved-special-token "is not
+		// marked as EOG" lines easily overflow the 256-entry buffer).
+		const params = new URLSearchParams(window.location.search);
+		const only = params.get("only");
+		const fixtureToRun = only
+			? f.fixture.filter((e) => e.vocab === only)
+			: f.fixture;
+		log(
+			only
+				? `[setup] filtering to vocab="${only}" (${fixtureToRun.length} match)`
+				: `[setup] running all ${fixtureToRun.length} vocabs`,
+			"info",
+		);
+
 		let totalFail = 0;
 		let totalPass = 0;
-		for (const entry of f.fixture) {
+		for (const entry of fixtureToRun) {
 			log(`\n[${entry.vocab}] fetching ${entry.ggufUrl}…`, "info");
 			const ggufResp = await fetch(entry.ggufUrl);
 			if (!ggufResp.ok) {
@@ -142,8 +158,32 @@ async function runParity(): Promise<void> {
 			);
 		}
 	} catch (err: unknown) {
-		const e = err as Error;
-		log(`FAIL — ${e.message}\n${e.stack ?? ""}`, "fail");
+		// Show the throw value verbatim — under JSPI a non-Error value can
+		// surface from a wasm trap and yields "undefined" with the old
+		// e.message-only formatter.
+		let repr: string;
+		if (err instanceof Error) {
+			repr = `${err.name}: ${err.message}\n${err.stack ?? ""}`;
+		} else if (
+			typeof err === "object" &&
+			err !== null &&
+			"is" in err &&
+			typeof (err as { is: unknown }).is === "function"
+		) {
+			// WebAssembly.Exception: try to extract the wasm error code.
+			// biome-ignore lint/suspicious/noExplicitAny: wasm exception shape
+			const we = err as any;
+			const tagName = we.constructor?.name ?? "WebAssembly.Exception";
+			let detail = "";
+			try {
+				detail = ` arg0=${we.getArg?.(we.tag ?? null, 0)}`;
+			} catch {}
+			repr = `${tagName}${detail}\n${we.stack ?? "(no stack)"}`;
+		} else {
+			repr = `(non-Error throw, typeof=${typeof err}) ${String(err)}`;
+		}
+		log(`FAIL — ${repr}`, "fail");
+		console.error("parity-harness throw:", err);
 	}
 }
 
