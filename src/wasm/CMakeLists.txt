@@ -36,12 +36,29 @@ set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 
+# Disable llama.cpp extras we don't need (tests/tools/examples default OFF
+# when LLAMA_STANDALONE is OFF, but set explicitly to be safe).
+# Force LLAMA_WASM_MEM64=OFF: its default is ON which adds -sMEMORY64=1
+# globally, making libllama.a a wasm64 archive incompatible with the wasm32
+# webllm-wasm target. The mem64 build goes through a separate build dir.
+set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+set(LLAMA_WASM_MEM64     OFF CACHE BOOL "" FORCE)
+
 # Upstream bug: ggml-webgpu CMakeLists.txt line 80 links DawnWebGPU_TARGET
 # unconditionally. Under Emscripten this variable is never set. Pre-set to empty.
 set(DawnWebGPU_TARGET "" CACHE STRING "WebGPU target" FORCE)
 
 # Pull in ggml build system (builds ggml-base + enabled backends)
 add_subdirectory(${LLAMA_CPP_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml)
+
+# Pull in llama.cpp top-level (EXCLUDE_FROM_ALL so only explicitly linked
+# targets are built). The ggml target already exists at this point, so
+# llama.cpp's CMakeLists.txt will skip its own ggml add_subdirectory.
+add_subdirectory(${LLAMA_CPP_DIR} ${CMAKE_BINARY_DIR}/llama-cpp EXCLUDE_FROM_ALL)
 
 # Emscripten needs an executable target to produce .js + .wasm output.
 # add_library only produces an archive; add_executable triggers the linker.
@@ -81,8 +98,9 @@ if(EMSCRIPTEN)
         # ggml-base + ggml-webgpu archives.
         # Spec: docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md
         add_executable(webllm-wasm-mem64 webgpu-bridge.cpp)
-        target_link_libraries(webllm-wasm-mem64 PRIVATE ggml-base ggml-webgpu)
+        target_link_libraries(webllm-wasm-mem64 PRIVATE llama ggml-base ggml-webgpu)
         target_include_directories(webllm-wasm-mem64 PRIVATE
+            ${LLAMA_CPP_DIR}/include
             ${LLAMA_CPP_DIR}/ggml/include
             ${LLAMA_CPP_DIR}/ggml/src
         )
@@ -107,8 +125,9 @@ if(EMSCRIPTEN)
         )
     else()
         add_executable(webllm-wasm webgpu-bridge.cpp)
-        target_link_libraries(webllm-wasm PRIVATE ggml-base ggml-webgpu)
+        target_link_libraries(webllm-wasm PRIVATE llama ggml-base ggml-webgpu)
         target_include_directories(webllm-wasm PRIVATE
+            ${LLAMA_CPP_DIR}/include
             ${LLAMA_CPP_DIR}/ggml/include
             ${LLAMA_CPP_DIR}/ggml/src
         )
@@ -132,8 +151,9 @@ if(EMSCRIPTEN)
     endif()
 else()
     add_library(webllm-bridge webgpu-bridge.cpp)
-    target_link_libraries(webllm-bridge PRIVATE ggml-base ggml-webgpu)
+    target_link_libraries(webllm-bridge PRIVATE llama ggml-base ggml-webgpu)
     target_include_directories(webllm-bridge PRIVATE
+        ${LLAMA_CPP_DIR}/include
         ${LLAMA_CPP_DIR}/ggml/include
         ${LLAMA_CPP_DIR}/ggml/src
     )
