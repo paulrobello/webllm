@@ -9,7 +9,4 @@ _exports: [
   "webllm_get_logits",
   "webllm_n_vocab",
   "webllm_tokenize",
-  "webllm_detokenize",
-  "webllm_token_bos",
-  "webllm_token_eos",
 ]

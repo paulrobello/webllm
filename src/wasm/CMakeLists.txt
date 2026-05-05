@@ -99,8 +99,7 @@ if(EMSCRIPTEN)
         "_webllm_create_context,_webllm_free_context,"
         "_webllm_decode,_webllm_get_logits,"
         "_webllm_n_vocab,"
-        "_webllm_tokenize,_webllm_detokenize,"
-        "_webllm_token_bos,_webllm_token_eos"
+        "_webllm_tokenize"
     )
 
     if(WEBLLM_BUILD_MEM64)
