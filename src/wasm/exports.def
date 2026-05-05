@@ -3,4 +3,6 @@ _exports: [
   "webgpu_shutdown",
   "webllm_load_model",
   "webllm_free_model",
+  "webllm_create_context",
+  "webllm_free_context",
 ]

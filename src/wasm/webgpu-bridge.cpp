@@ -406,4 +406,39 @@ void webllm_free_model(void* model) {
     if (model) llama_model_free(static_cast<llama_model*>(model));
 }
 
+// Create a llama_context for the given model.
+//
+//   n_ctx        — KV cache size in tokens. 0 = use the model's
+//                  training-time default (n_ctx_train).
+//   embeddings   — 0 = causal LM (logits output), 1 = embedder mode
+//                  (pooled embeddings output).
+//   pooling_type — 0=NONE, 1=MEAN, 2=CLS, 3=LAST. Ignored when
+//                  embeddings=0; required for BERT-family encoders
+//                  and for Bucket-D self-embedding (P4).
+//   flash_attn   — 0=DISABLED, 1=ENABLED (maps to llama_flash_attn_type).
+//                  Replaces the per-arch FA gating that lived in TS
+//                  ModelInference under the legacy path.
+//
+// Returns context handle on success, nullptr on failure.
+//
+// Threading is pinned to 1 — pthreads are not enabled in this
+// Emscripten build (CMakeLists.txt does not set
+// USE_PTHREADS / -pthread).
+void* webllm_create_context(void* model, int32_t n_ctx, int32_t embeddings,
+                            int32_t pooling_type, int32_t flash_attn) {
+    if (!model) return nullptr;
+    llama_context_params cparams = llama_context_default_params();
+    if (n_ctx > 0) cparams.n_ctx = (uint32_t) n_ctx;
+    cparams.embeddings = embeddings != 0;
+    cparams.pooling_type = (enum llama_pooling_type) pooling_type;
+    cparams.flash_attn_type = (enum llama_flash_attn_type) flash_attn;
+    cparams.n_threads = 1;
+    cparams.n_threads_batch = 1;
+    return llama_init_from_model(static_cast<llama_model*>(model), cparams);
+}
+
+void webllm_free_context(void* ctx) {
+    if (ctx) llama_free(static_cast<llama_context*>(ctx));
+}
+
 } // extern "C"
