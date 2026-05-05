@@ -1449,24 +1449,25 @@ appetite remains; none are forced.
     tool-calling expectations for Phi-3.5-mini in dashboard /
     per-model docs. Strong on reasoning (1.00) + instruction-
     following (0.76); accept the 0.17 tool-calling floor.
-- **Tool-call parser leniency for sub-8B Llama-3 family emissions
-  (queued 2026-05-04).** Follow-up from the tool-format investigation
-  ([`eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md`](eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md)).
-  Llama-3.2-3B emits `<tool_call><name>X</name><arguments>{...}</arguments></tool_call>`
-  on tool tasks — structurally parseable JSON-inside-XML, but the
-  current strict regex in `src/characters/tool-system.ts` rejects
-  it. Scope:
-  - Add `XML_NESTED_RE` regex covering the `<name>...</name>
-    <arguments>{...}</arguments>` shape with JSON args.
-  - Tests in `tests/tool-system.test.ts`: positive (Llama-3.2-3B
-    pattern), negative (no-args partial — don't false-match),
-    negative (pure-XML args — graceful no-parse, not incorrect
-    parse).
-  - Re-bench llama-3.2-3b-q4f16 + llama-3.2-1b-q4f16 +
-    hermes-3-llama-3.2-3b-q4f16 to validate predicted lift.
-  - Predicted impact: llama-3.2-3b 0.17 → ~0.50-0.70; 1B and
-    Hermes-3-3B minimal (failures upstream of parser).
-  - Predicted scope: ~1 hour wall (1 regex + 3 tests + 1 bench).
+- **Tool-call parser leniency for sub-8B Llama-3 family — CLOSED 2026-05-04.**
+  `XML_NESTED_RE` shipped in `src/characters/tool-system.ts`; 5 new
+  tests in `tests/tool-system.test.ts` cover positive (Llama-3.2-3B
+  JSON-in-XML), negative (pure-XML args graceful no-parse), and
+  negative (missing args tag). Tool-calling-dimension re-bench at
+  greedy temp=0:
+  - **llama-3.2-3b: 0.17 → 0.48** (+0.31 absolute, +186% relative)
+  - **llama-3.2-1b: 0.17 → 0.56** (+0.39, +234% — surprise: lifted
+    more than 3B; greedy decoding alone removes the parroting noise
+    that dominated at temp=0.6)
+  - **hermes-3-3b: 0.17 → 0.23** (+0.06; confirms diagnosis —
+    mangled JSON not parseable at any layer)
+  Closure report appended to
+  [`eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md`](eval/reports/tool-format-investigation-2026-05-04/SUMMARY.md);
+  re-bench artifacts at
+  [`eval/reports/parser-leniency-rebench-2026-05-04/`](eval/reports/parser-leniency-rebench-2026-05-04/).
+  Process lesson codified: "greedy temp + lenient parsing is the
+  right combination for sub-8B Llama-3 tool-calling" — not just one
+  or the other.
 - **Encoder parity reference vectors freshness.** `eval/reports/
   encoder-parity-2026-04-28/{jina,nomic}-ref.json` are pinned to
   whatever sentence-transformers / HF model versions resolved on
