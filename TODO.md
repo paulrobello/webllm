@@ -1401,6 +1401,10 @@ appetite remains; none are forced.
   neutral vs 2026-05-01 cross-day baseline; mistral-7b -14%
   outlier flagged. Sweep matrix:
   [`eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md)).
+  Last clean run: **2026-05-05** (clean — `master` advanced
+  ~9 commits past `a817a22bc` to `d5003b6e4`, but no
+  `ggml/src/ggml-webgpu/` or `ggml/include/` commits since the
+  2026-05-04 §27-hybrid rebase).
 - **Test skip count.** Currently 33 (rebaselined 2026-05-03 after
   prefix-cache mechanism + persistence ship), all environmental:
   - `pipeline-cache.test.ts` × 5 (`!indexedDBAvailable` — IndexedDB
