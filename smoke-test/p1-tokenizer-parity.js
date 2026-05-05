@@ -2310,6 +2310,37 @@ async function Module(moduleArg = {}) {
       return -e.errno;
     }
   }
+  function ___syscall_rmdir(path) {
+    path >>>= 0;
+    try {
+      path = SYSCALLS.getStr(path);
+      FS.rmdir(path);
+      return 0;
+    } catch (e) {
+      if (typeof FS == "undefined" || !(e.name === "ErrnoError"))
+        throw e;
+      return -e.errno;
+    }
+  }
+  function ___syscall_unlinkat(dirfd, path, flags) {
+    path >>>= 0;
+    try {
+      path = SYSCALLS.getStr(path);
+      path = SYSCALLS.calculateAt(dirfd, path);
+      if (!flags) {
+        FS.unlink(path);
+      } else if (flags === 512) {
+        FS.rmdir(path);
+      } else {
+        return -28;
+      }
+      return 0;
+    } catch (e) {
+      if (typeof FS == "undefined" || !(e.name === "ErrnoError"))
+        throw e;
+      return -e.errno;
+    }
+  }
   var __abort_js = () => abort("");
   function __mmap_js(len, prot, flags, fd, offset, allocated, addr) {
     len >>>= 0;
@@ -3761,7 +3792,7 @@ async function Module(moduleArg = {}) {
     memory = wasmMemory = wasmExports2["memory"];
     __indirect_function_table = wasmTable = wasmExports2["__indirect_function_table"];
   }
-  var wasmImports = { __syscall_fcntl64: ___syscall_fcntl64, __syscall_ioctl: ___syscall_ioctl, __syscall_openat: ___syscall_openat, _abort_js: __abort_js, _mmap_js: __mmap_js, _munmap_js: __munmap_js, _tzset_js: __tzset_js, clock_time_get: _clock_time_get, emscripten_get_heap_max: _emscripten_get_heap_max, emscripten_has_asyncify: _emscripten_has_asyncify, emscripten_resize_heap: _emscripten_resize_heap, emscripten_sleep: _emscripten_sleep, emwgpuAdapterRequestDevice: _emwgpuAdapterRequestDevice, emwgpuBufferDestroy: _emwgpuBufferDestroy, emwgpuBufferGetConstMappedRange: _emwgpuBufferGetConstMappedRange, emwgpuBufferMapAsync: _emwgpuBufferMapAsync, emwgpuBufferUnmap: _emwgpuBufferUnmap, emwgpuDelete: _emwgpuDelete, emwgpuDeviceCreateBuffer: _emwgpuDeviceCreateBuffer, emwgpuDeviceCreateShaderModule: _emwgpuDeviceCreateShaderModule, emwgpuDeviceDestroy: _emwgpuDeviceDestroy, emwgpuInstanceRequestAdapter: _emwgpuInstanceRequestAdapter, emwgpuQueueOnSubmittedWorkDone: _emwgpuQueueOnSubmittedWorkDone, emwgpuWaitAny: _emwgpuWaitAny, environ_get: _environ_get, environ_sizes_get: _environ_sizes_get, fd_close: _fd_close, fd_read: _fd_read, fd_seek: _fd_seek, fd_write: _fd_write, ggml_webgpu_notify_async_tensor_get, wgpuAdapterGetFeatures: _wgpuAdapterGetFeatures, wgpuAdapterGetInfo: _wgpuAdapterGetInfo, wgpuAdapterGetLimits: _wgpuAdapterGetLimits, wgpuAdapterHasFeature: _wgpuAdapterHasFeature, wgpuBufferGetSize: _wgpuBufferGetSize, wgpuCommandEncoderBeginComputePass: _wgpuCommandEncoderBeginComputePass, wgpuCommandEncoderCopyBufferToBuffer: _wgpuCommandEncoderCopyBufferToBuffer, wgpuCommandEncoderFinish: _wgpuCommandEncoderFinish, wgpuCommandEncoderResolveQuerySet: _wgpuCommandEncoderResolveQuerySet, wgpuComputePassEncoderDispatchWorkgroups: _wgpuComputePassEncoderDispatchWorkgroups, wgpuComputePassEncoderEnd: _wgpuComputePassEncoderEnd, wgpuComputePassEncoderSetBindGroup: _wgpuComputePassEncoderSetBindGroup, wgpuComputePassEncoderSetPipeline: _wgpuComputePassEncoderSetPipeline, wgpuComputePipelineGetBindGroupLayout: _wgpuComputePipelineGetBindGroupLayout, wgpuDeviceCreateBindGroup: _wgpuDeviceCreateBindGroup, wgpuDeviceCreateCommandEncoder: _wgpuDeviceCreateCommandEncoder, wgpuDeviceCreateComputePipeline: _wgpuDeviceCreateComputePipeline, wgpuDeviceCreateQuerySet: _wgpuDeviceCreateQuerySet, wgpuQuerySetDestroy: _wgpuQuerySetDestroy, wgpuQueueSubmit: _wgpuQueueSubmit, wgpuQueueWriteBuffer: _wgpuQueueWriteBuffer };
+  var wasmImports = { __syscall_fcntl64: ___syscall_fcntl64, __syscall_ioctl: ___syscall_ioctl, __syscall_openat: ___syscall_openat, __syscall_rmdir: ___syscall_rmdir, __syscall_unlinkat: ___syscall_unlinkat, _abort_js: __abort_js, _mmap_js: __mmap_js, _munmap_js: __munmap_js, _tzset_js: __tzset_js, clock_time_get: _clock_time_get, emscripten_get_heap_max: _emscripten_get_heap_max, emscripten_has_asyncify: _emscripten_has_asyncify, emscripten_resize_heap: _emscripten_resize_heap, emscripten_sleep: _emscripten_sleep, emwgpuAdapterRequestDevice: _emwgpuAdapterRequestDevice, emwgpuBufferDestroy: _emwgpuBufferDestroy, emwgpuBufferGetConstMappedRange: _emwgpuBufferGetConstMappedRange, emwgpuBufferMapAsync: _emwgpuBufferMapAsync, emwgpuBufferUnmap: _emwgpuBufferUnmap, emwgpuDelete: _emwgpuDelete, emwgpuDeviceCreateBuffer: _emwgpuDeviceCreateBuffer, emwgpuDeviceCreateShaderModule: _emwgpuDeviceCreateShaderModule, emwgpuDeviceDestroy: _emwgpuDeviceDestroy, emwgpuInstanceRequestAdapter: _emwgpuInstanceRequestAdapter, emwgpuQueueOnSubmittedWorkDone: _emwgpuQueueOnSubmittedWorkDone, emwgpuWaitAny: _emwgpuWaitAny, environ_get: _environ_get, environ_sizes_get: _environ_sizes_get, fd_close: _fd_close, fd_read: _fd_read, fd_seek: _fd_seek, fd_write: _fd_write, ggml_webgpu_notify_async_tensor_get, wgpuAdapterGetFeatures: _wgpuAdapterGetFeatures, wgpuAdapterGetInfo: _wgpuAdapterGetInfo, wgpuAdapterGetLimits: _wgpuAdapterGetLimits, wgpuAdapterHasFeature: _wgpuAdapterHasFeature, wgpuBufferGetSize: _wgpuBufferGetSize, wgpuCommandEncoderBeginComputePass: _wgpuCommandEncoderBeginComputePass, wgpuCommandEncoderCopyBufferToBuffer: _wgpuCommandEncoderCopyBufferToBuffer, wgpuCommandEncoderFinish: _wgpuCommandEncoderFinish, wgpuCommandEncoderResolveQuerySet: _wgpuCommandEncoderResolveQuerySet, wgpuComputePassEncoderDispatchWorkgroups: _wgpuComputePassEncoderDispatchWorkgroups, wgpuComputePassEncoderEnd: _wgpuComputePassEncoderEnd, wgpuComputePassEncoderSetBindGroup: _wgpuComputePassEncoderSetBindGroup, wgpuComputePassEncoderSetPipeline: _wgpuComputePassEncoderSetPipeline, wgpuComputePipelineGetBindGroupLayout: _wgpuComputePipelineGetBindGroupLayout, wgpuDeviceCreateBindGroup: _wgpuDeviceCreateBindGroup, wgpuDeviceCreateCommandEncoder: _wgpuDeviceCreateCommandEncoder, wgpuDeviceCreateComputePipeline: _wgpuDeviceCreateComputePipeline, wgpuDeviceCreateQuerySet: _wgpuDeviceCreateQuerySet, wgpuQuerySetDestroy: _wgpuQuerySetDestroy, wgpuQueueSubmit: _wgpuQueueSubmit, wgpuQueueWriteBuffer: _wgpuQueueWriteBuffer };
   function applySignatureConversions(wasmExports2) {
     wasmExports2 = Object.assign({}, wasmExports2);
     var makeWrapper_pp = (f) => (a0) => f(a0) >>> 0;

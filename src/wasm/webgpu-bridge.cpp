@@ -385,13 +385,28 @@ int32_t webgpu_last_graph_profile_dispatch_count() {
 //
 // The buffer is COPIED into MEMFS — caller may free `buf` after this
 // returns. Returns model handle on success, nullptr on failure.
+//
+// Memory-pressure notes (cross-model loads on the wasm32 4 GiB cap):
+//   - use_mmap=false: under Emscripten MEMFS, mmap keeps the entire
+//     file's Uint8Array region pinned for the lifetime of the
+//     llama_model. Peak heap then reaches ~2× model size (MEMFS
+//     copy + mmap view + decode scratch) before weights are on GPU
+//     and the host copy is released. Direct fread frees the host
+//     copy as soon as ggml-webgpu finishes the upload.
+//   - std::remove() after load drops the MEMFS file once the
+//     weights are on GPU. Without this, sequential loads hit the
+//     wasm32 cap because the prior model's GGUF bytes (770 MiB,
+//     1017 MiB, ...) accumulate in MEMFS until the runtime exits.
 void* webllm_load_model(const void* buf, size_t n_bytes) {
     const char* path = "/tmp/webllm-model.gguf";
     FILE* f = std::fopen(path, "wb");
     if (!f) return nullptr;
     size_t wrote = std::fwrite(buf, 1, n_bytes, f);
     std::fclose(f);
-    if (wrote != n_bytes) return nullptr;
+    if (wrote != n_bytes) {
+        std::remove(path);
+        return nullptr;
+    }
 
     llama_model_params mparams = llama_model_default_params();
     // n_gpu_layers default is 0; we want all layers on the (only)
@@ -399,7 +414,14 @@ void* webllm_load_model(const void* buf, size_t n_bytes) {
     // backend under Emscripten so layers route to it regardless of
     // this setting, but setting 999 is the canonical pattern.
     mparams.n_gpu_layers = 999;
-    return llama_model_load_from_file(path, mparams);
+    mparams.use_mmap = false;
+
+    llama_model* model = llama_model_load_from_file(path, mparams);
+    // Drop the MEMFS file regardless of load outcome — weights are
+    // either on GPU (model != nullptr) or the load failed and the
+    // bytes are no longer needed.
+    std::remove(path);
+    return model;
 }
 
 void webllm_free_model(void* model) {

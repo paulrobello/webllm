@@ -116,16 +116,31 @@ are real edge cases worth diagnosing but likely also fixture-side
    `eval/smoke-serve.ts`. Per-vocab parity re-ran 200/200 across
    all 5 vocabs.
 
+### Cross-model load fix (commit pending)
+
+The wasm32 4 GiB cap that previously fired mid-load on the second
+sequential model load (e.g. llama-bpe → qwen2) is closed by two
+changes in `webllm_load_model`:
+
+- `mparams.use_mmap = false`. Under Emscripten MEMFS, mmap pins
+  the file's `Uint8Array` for the model's lifetime AND adds a
+  mapped view to the heap, leading to ~2× model size peak heap
+  before the GPU upload. Direct fread frees the host copy as
+  soon as ggml-webgpu finishes the upload.
+- `std::remove("/tmp/webllm-model.gguf")` after load. Without
+  this, sequential GGUFs accumulate in MEMFS (770 MiB Llama-3 +
+  1017 MiB Qwen2 + 64 MiB BERT = 1.85 GiB) until the runtime
+  exits, even though `fopen("wb")` truncates each file's content
+  — MEMFS doesn't recycle the entry across truncate boundaries
+  in a way that frees the prior peak.
+
+**Validation:** the parity harness now PASSES all 5 vocabs in a
+single page load (`/p1-tokenizer-parity.html` with no `?only=`
+filter): 1000/1000 prompts byte-exact, no `WebAssembly.Exception`
+mid-load.
+
 ### Remaining work (handed off; not gating P2)
 
-- [ ] Cross-vocab WebGPU buffer leak in `webllm_free_model` — the
-      parity / regen harnesses run per-vocab in fresh page loads
-      to avoid hitting the 4 GiB wasm32 cap on sequential model
-      loads. Not blocking P1 (per-vocab isolation works); becomes
-      relevant when multi-model agent workflows want to swap
-      models without a page reload. P2-P4 will exercise the same
-      pattern (chat + embedder coexisting), so worth fixing
-      before the multi-model E2E lands.
 - [ ] P2: encoder migration (BGE / Jina) onto `llama_*` API.
       Naturally extends the `encoderOnly` path used here for
       wordpiece-bert.

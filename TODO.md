@@ -862,12 +862,19 @@ regenerated from canonical `llama_tokenize` via the new
 `/save-parity-fixture` POST endpoint on `eval/smoke-serve.ts`.
 `LlamaTokenizer` gained an `encoderOnly` option that flips
 `addBos=true` for BERT-family vocabs (BERT's BOS IS `[CLS]`).
-**Next (handed off, non-blocking):** cross-vocab WebGPU buffer
-leak in `webllm_free_model` (workaround: per-vocab isolation in
-fresh page loads); becomes relevant for multi-model agent
-workflows in P2-P4. **P2:** encoder migration (BGE / Jina) onto
-`llama_*` API — naturally extends the `encoderOnly` path used
-here for wordpiece-bert.
+**Cross-model load fix:** `webllm_load_model` now uses
+`use_mmap=false` and `std::remove()` after load. The wasm32 4 GiB
+cap that previously fired on the 2nd sequential model load is
+closed; the parity harness now runs all 5 vocabs in a single
+page load (1000/1000 byte-exact) instead of needing per-vocab
+`?only=` isolation. Reasoning: under Emscripten MEMFS mmap pins
+the file Uint8Array for the model lifetime *plus* keeps a mapped
+view on the heap, doubling the peak; and successive `fopen("wb")`
+truncates didn't recycle MEMFS entry storage so 770 MiB +
+1017 MiB + 64 MiB accumulated.
+**P2:** encoder migration (BGE / Jina) onto `llama_*` API —
+naturally extends the `encoderOnly` path used here for
+wordpiece-bert.
 
 **Status:** **P0 CLOSED 2026-05-05 — PASS.** Spec at
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md);
