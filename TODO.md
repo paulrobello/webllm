@@ -848,9 +848,13 @@ mismatch` runtime trap in `__wasm_call_ctors` at module init,
 P1 cannot proceed; P2-P6 transitively blocked because every phase
 needs at least one new wasm export. Tasks 1+2 reverted (commits
 `cfc8d97`, `310cc24`) so P0 spike continues to PASS off main.
-**Recommended next step (when revisiting):** roll back Emscripten
-from 5.0.6 to 5.0.5; if that doesn't resolve, evaluate dropping
-`-sASYNCIFY` for `-sJSPI`. TS-side P1 work (LlamaBridge extension,
+**Recommended next step (when revisiting):** Emscripten rollback
+ruled out (verified bug spans 5.0.5/5.0.6/5.0.7 — three consecutive
+versions). Leading candidate is dropping `-sASYNCIFY` for `-sJSPI`
+(flip `GGML_WEBGPU_JSPI=ON` in CMakeLists.txt). Related unresolved
+upstream issues: #18254, #18045, #25551 (all OPEN, all
+ASYNCIFY+exceptions+ctors family). TS-side P1 work (LlamaBridge
+extension,
 LlamaTokenizer, fixture, smoke harness) remains on main and will
 unblock cleanly once the export bug is resolved.
 

@@ -178,21 +178,90 @@ In rough order of "least invasive to most":
    This avoids adding new exports but requires a TS-side
    trampoline. Last-resort hack.
 
-## Recommendation
+## Cross-version test (added 2026-05-05 post-initial-report)
 
-The blocker is a real Emscripten + ASYNCIFY interaction issue that's
-not specific to webllm's code. **Option 1 (rollback Emscripten to
-5.0.5)** is the cheapest test and most likely to unblock — try that
-first. If it still fails, **Option 2/3 (drop ASYNCIFY for JSPI)** is
-the next move, but it has wider blast radius and should be filed
-as its own design discussion.
+Re-applied the wasm-side P1 commits and rebuilt against three
+consecutive Emscripten releases. All FAIL identically:
 
-For now, the rest of the Tier 3 migration (P2-P6) cannot proceed —
-every phase needs at least one new wasm export. This blocker is the
-top-priority item to resolve.
+| Emscripten | Built clean? | P0 spike result | Specific symptom |
+|---|---|---|---|
+| 5.0.5 (`bc56904`) | yes | FAIL | "table index is out of bounds" |
+| 5.0.6 (`6ea9c28`) | yes | FAIL | "function signature mismatch" |
+| 5.0.7 (`263db4c`) | yes | FAIL | "table index is out of bounds" |
+
+5.0.7 is the latest tag (released 2026-04-30). 5.0.7's ChangeLog has
+no ASYNCIFY-relevant fixes (mimalloc bump, futex_wait improvements,
+pthread/Wasm Workers hybrid mode, `-m64` alias). 5.0.6's ChangeLog
+similarly has nothing relevant.
+
+The error message varies between 5.0.5 ("table index out of bounds")
+and 5.0.6/5.0.7 ("function signature mismatch"), but both are
+manifestations of the same underlying issue: an indirect call inside
+`__wasm_call_ctors` lands at a wrong/missing function-table slot.
+
+**Conclusion:** the bug is structural — it spans 3+ consecutive
+Emscripten versions and is not a recent regression. Rolling back is
+not a fix.
+
+## Related upstream issues (all unresolved)
+
+- **#18254** (open since 2022-11) — "Cannot instantiate module using
+  value_object with ASYNCIFY and DISABLE_EXCEPTION_CATCHING=0
+  enabled." Same symptom: ASYNCIFY + exception catching + global
+  ctors → fails to instantiate.
+- **#18045** (open since 2022-10) — "dynCalls in Asyncify Add List
+  are ignored when building with Legacy Exception Handling + Main
+  Module." Adjacent symptom area.
+- **#25551** (open since 2025-10) — "Enabling Asyncify breaks
+  module: Module.dynCall_i is not a function." Different specific
+  manifestation, same family.
+
+The unifying theme across these long-standing OPEN issues is
+**ASYNCIFY + exception handling + complex C++ static initializers**.
+Our build hits all three: `-sASYNCIFY` (forced by emdawnwebgpu for
+WebGPU async readback), `-exceptions` (in the link line by default),
+and libllama's heavy C++ globals (vtables, std::vector, std::string
+construction in `__wasm_call_ctors`).
+
+## Recommendation (updated)
+
+Emscripten version rollback **does not fix the bug** — confirmed
+across 5.0.5, 5.0.6, 5.0.7. The remaining options:
+
+1. **Drop `-sASYNCIFY` for `-sJSPI`.** This is now the leading
+   candidate. JSPI (JavaScript Promise Integration) is the modern
+   browser-native replacement for Asyncify and is gated behind
+   `GGML_WEBGPU_JSPI=OFF` in our CMakeLists.txt. Switching it ON
+   means the WebGPU backend uses native promise-based suspension
+   instead of Asyncify's transformed code, which would sidestep
+   the static-init transformation that's confusing wasm-ld.
+   Caveats: requires Chrome ≥123 / Firefox ≥130; project's hardware
+   baseline allows this.
+
+2. **Drop `-exceptions` (i.e. compile with `-fno-exceptions`).**
+   Would break C++ exception support in libllama. Probably
+   non-starter — libllama uses exceptions for error propagation in
+   model loaders.
+
+3. **File a minimal repro upstream.** Strip our project down to a
+   ~50-LOC reproducer (libllama init + ASYNCIFY + 1 added export →
+   crash) and file as a new issue alongside #18254 / #25551. This
+   helps unblock everyone hitting this class of bug, but doesn't
+   give us a near-term path forward.
+
+**Recommended action:** flip `-sJSPI` ON, rebuild, retest. This is
+the smallest blast-radius change with the highest probability of
+unblocking the migration. If JSPI works, it also obsoletes Asyncify
+for this project (a cleaner long-term posture).
+
+For now, P2-P6 cannot proceed — every phase needs at least one new
+wasm export. This blocker is the top-priority item to resolve.
 
 ## Time spent
 
-~1.5 hours of debugging across the bridge build, ASYNCIFY flags,
-emcc cache clear, signature variations, and wasm-dis inspection.
-Aborted after Option 7 (ALLOW_TABLE_GROWTH) failed.
+~2 hours of debugging:
+- ~1.5h on the initial reproduction, 7 source-permutation tests, 6
+  build-flag workarounds, wasm-dis inspection.
+- ~30min on the cross-version Emscripten test (5.0.5/5.0.6/5.0.7)
+  and the upstream-issue search confirming the bug's structural
+  nature.
