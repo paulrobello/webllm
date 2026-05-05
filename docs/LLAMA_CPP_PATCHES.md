@@ -34,12 +34,40 @@ binary that crashes the page during inference.
 
 ## Patch Inventory
 
-The branch currently carries **eleven commits** on top of upstream
+The branch currently carries **nine commits** on top of upstream
 `master`, in the order shown (oldest first). Commit 7 and its revert
 (commit 8) are kept as a pair pending a proper replacement; treat them
 as a no-op until you hear otherwise.
 
-Last rebased onto upstream master 2026-05-01 to tip `b97ebdc98`
+Last rebased onto upstream master 2026-05-04 to tip `a817a22bc`
+("ggml : implement fast walsh-hadamard transform for kv rotation").
+Local tip: `fc1f81242`. The 2026-05-01 → 2026-05-04 delta was small;
+1 upstream commit touched `ggml-webgpu/`: `d4b0c22f9` (LayerNorm ops
+#22406), which **subsumes** our local patches `72b6d001e`
+(`GGML_OP_NORM` support) and `c775ac26d` (LAYER_NORM split). Both
+local patches **dropped** during the rebase; the 9-patch stack
+replayed cleanly with zero conflicts.
+
+Sweep classification: **§27 hybrid (maintenance free win, perf
+neutral)**. Encoder-parity gate PASS at cosine 0.76 vs 0.76
+reference (synonym pair "happy" / "joyful" on arctic-embed-s, ‖v‖
+1.00) — upstream's two-pass mean-then-variance algorithm is more
+numerically stable than our single-pass `Σx²/n − mean²`, but the
+difference is in the f32 noise floor. `bun test` clean (741/0/33
+skip baseline). Cross-day perf vs 2026-05-01 baseline: noise-level
+on 5/6 models; mistral-7b -14% outlier flagged for next-session
+rerun (single-data-point cross-day not enough to declare a real
+regression). Full sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md`](../eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md);
+same-day pre-rebase control at
+[`eval/reports/pre-rebase-baselines-2026-05-04/`](../eval/reports/pre-rebase-baselines-2026-05-04/)
+(captured anomalously cold; SUMMARY documents the
+"same-day-floor-anchored-on-noise" failure mode as a process
+lesson).
+
+#### Earlier rebase (2026-05-01, §27)
+
+Rebased onto upstream master 2026-05-01 to tip `b97ebdc98`
 ("llama-quant : fix --tensor-type when default qtype is overridden").
 The 2026-04-29 → 2026-05-01 delta was small; 2 of the upstream commits
 touched `ggml-webgpu/`: `c3c150539` (mul-mat / mul-mat-id vectorize
@@ -177,32 +205,7 @@ Decode-phase specialization for the matmul dispatch path.
 Kept as a pair with commit 7 until the specialization is replaced.
 Effectively a no-op relative to commit 6's state.
 
-### 9. ggml-webgpu: add `GGML_OP_NORM` (LayerNorm) support
-
-Upstream `ggml-webgpu` only registers `GGML_OP_RMS_NORM` and
-`GGML_OP_L2_NORM`; `GGML_OP_NORM` falls through to `supports_op=false`
-and silently no-ops on a CPU-less build. That broke webllm's BERT
-encoder path (`EncoderInference`), producing bit-identical embeddings
-for every input. This patch extends `row_norm.wgsl` with a
-`LAYER_NORM` variant that computes both Σx and Σx² in one workgroup
-pass, derives variance, and emits `(x − mean) / sqrt(var + eps)`;
-registers the pipeline in `ggml-webgpu-shader-lib.hpp`; and dispatches
-`GGML_OP_NORM` through `ggml_webgpu_row_norm`. Touches the same three
-files as the other `ggml-webgpu` patches (`ggml-webgpu.cpp`,
-`ggml-webgpu-shader-lib.hpp`, `wgsl-shaders/row_norm.wgsl`).
-
-### 10. ggml-webgpu: split LAYER_NORM accumulation loop from legacy norms
-
-The patch 9 LAYER_NORM addition hoisted the inner load into
-`let v = src[...]` and replaced `pow(v, 2.0)` with `v * v`, which is
-correct for LAYER_NORM but also subtly changed codegen on the
-RMS_NORM / L2_NORM path that shader already used. This patch splits
-the inner accumulation so the LAYER_NORM branch keeps the
-single-load form (needed for `sum_x`) while the RMS_NORM / L2_NORM
-branch reverts to the original `pow(src[...], 2.0)` form. Behavior
-is byte-identical to the pre-LAYER_NORM shader on the legacy paths.
-
-### 11. ggml-webgpu: fix UB shift-by-32 in `load_u32_at_src{,0}`
+### 9. ggml-webgpu: fix UB shift-by-32 in `load_u32_at_src{,0}`
 
 The unaligned u32 helpers in `wgsl-shaders/common_decls.tmpl` compute
 `hi << (32u - shift)` where `shift = (byte_offset & 0x3u) * 8u`. When

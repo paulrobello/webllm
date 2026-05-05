@@ -1,0 +1,28 @@
+{
+  "modelId": "bge-small-en-v1.5-q0f16",
+  "mode": "single",
+  "fixture": "short",
+  "traces": [
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 0,
+      "wallMs": 10.700000002980232
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 1,
+      "wallMs": 11
+    },
+    {
+      "mode": "single",
+      "fixture": "short",
+      "rep": 2,
+      "wallMs": 10.899999991059303
+    }
+  ],
+  "p50WallMs": 10.899999991059303,
+  "p90WallMs": 11,
+  "meanWallMs": 10.866666664679846
+}
