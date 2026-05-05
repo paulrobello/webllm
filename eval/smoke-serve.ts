@@ -23,7 +23,9 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 function contentTypeFor(path: string): string {
-	return CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
+	return (
+		CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream"
+	);
 }
 
 function parseServerArgs(): { port: number; host: string; root: string } {
@@ -66,12 +68,34 @@ if (!existsSync(options.root) || !statSync(options.root).isDirectory()) {
 	process.exit(1);
 }
 
+// Route aliases — map a virtual URL onto an absolute path outside the
+// static root. Used to expose canonical artifacts (e.g. parity fixtures
+// under eval/reports/) without requiring a symlink in smoke-test/.
+const ROUTE_ALIASES: Record<string, string> = {
+	"/parity-fixture.json": resolve(
+		"eval/reports/p1-tokenizer-2026-05-05/parity-fixture.json",
+	),
+};
+
 const server = Bun.serve({
 	hostname: options.host,
 	port: options.port,
 	idleTimeout: 120,
 	async fetch(req) {
 		const url = new URL(req.url);
+		const aliasTarget = ROUTE_ALIASES[url.pathname];
+		if (aliasTarget) {
+			if (!existsSync(aliasTarget)) {
+				return new Response("Not found", { status: 404 });
+			}
+			return new Response(Bun.file(aliasTarget), {
+				status: 200,
+				headers: {
+					"content-type": contentTypeFor(aliasTarget),
+					"cache-control": "no-cache",
+				},
+			});
+		}
 		// Strip query string, prevent path escape, default to index
 		const rel = url.pathname === "/" ? "/index.html" : url.pathname;
 		const safe = rel.replace(/\.\./g, "").replace(/^\/+/, "");
