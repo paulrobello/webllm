@@ -839,6 +839,21 @@ upscale shader; tip `e29753286`); sweep matrix at
 
 ### Tier 3 migration to upstream `llama_decode` (NEW DIRECTION 2026-05-05)
 
+**Status:** **P1 BLOCKED 2026-05-05.** Adding any new export to the
+WASM binary (e.g. `webllm_tokenize`) triggers a `function signature
+mismatch` runtime trap in `__wasm_call_ctors` at module init,
+**before any user code runs**. Reproducer + 7 tested workarounds
+(all failed) in
+[`eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md`](eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md).
+P1 cannot proceed; P2-P6 transitively blocked because every phase
+needs at least one new wasm export. Tasks 1+2 reverted (commits
+`cfc8d97`, `310cc24`) so P0 spike continues to PASS off main.
+**Recommended next step (when revisiting):** roll back Emscripten
+from 5.0.6 to 5.0.5; if that doesn't resolve, evaluate dropping
+`-sASYNCIFY` for `-sJSPI`. TS-side P1 work (LlamaBridge extension,
+LlamaTokenizer, fixture, smoke harness) remains on main and will
+unblock cleanly once the export bug is resolved.
+
 **Status:** **P0 CLOSED 2026-05-05 — PASS.** Spec at
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md);
 P0 plan at
