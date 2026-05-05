@@ -441,4 +441,46 @@ void webllm_free_context(void* ctx) {
     if (ctx) llama_free(static_cast<llama_context*>(ctx));
 }
 
+// Decode n_tokens tokens at sequence positions [past_len, past_len+n_tokens).
+// All tokens go to seq_id=0. Logits are computed for the LAST token only
+// (sufficient for greedy / single-step decode; P5 spec-decode will need
+// a richer logits-mask API).
+//
+// Returns 0 on success, non-zero llama.cpp status on failure.
+//
+// The caller-side ABI uses int32_t past_len and int32_t n_tokens — these
+// are llama_pos and (logically) batch size. Cast happens at the boundary.
+int32_t webllm_decode(void* ctx, const int32_t* token_ids, int32_t n_tokens,
+                      int32_t past_len) {
+    if (!ctx || n_tokens <= 0) return -1;
+    llama_context* lctx = static_cast<llama_context*>(ctx);
+
+    llama_batch batch = llama_batch_init(n_tokens, /*embd*/ 0, /*n_seq_max*/ 1);
+    for (int32_t i = 0; i < n_tokens; ++i) {
+        batch.token[i] = token_ids[i];
+        batch.pos[i] = past_len + i;
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+        batch.logits[i] = (i == n_tokens - 1) ? 1 : 0;
+    }
+    batch.n_tokens = n_tokens;
+
+    int32_t status = llama_decode(lctx, batch);
+    llama_batch_free(batch);
+    return status;
+}
+
+// Returns pointer to logits for the i-th token of the last decode batch.
+// ith=-1 → use llama_get_logits (returns logits for the most recent
+// logits-flagged token). Otherwise llama_get_logits_ith(ith) which
+// indexes into the batch's logits-flagged tokens.
+//
+// The pointer is into ctx-owned memory; valid until the next decode
+// call. Caller must NOT free it.
+const float* webllm_get_logits(void* ctx, int32_t ith) {
+    if (!ctx) return nullptr;
+    llama_context* lctx = static_cast<llama_context*>(ctx);
+    return ith < 0 ? llama_get_logits(lctx) : llama_get_logits_ith(lctx, ith);
+}
+
 } // extern "C"

@@ -5,4 +5,6 @@ _exports: [
   "webllm_free_model",
   "webllm_create_context",
   "webllm_free_context",
+  "webllm_decode",
+  "webllm_get_logits",
 ]

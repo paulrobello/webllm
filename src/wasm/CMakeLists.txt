@@ -87,7 +87,8 @@ if(EMSCRIPTEN)
         "_webgpu_last_graph_profile_matmul_ms,_webgpu_last_graph_profile_attention_ms,"
         "_webgpu_last_graph_profile_encode_overhead_ms,_webgpu_last_graph_profile_dispatch_count,"
         "_webllm_load_model,_webllm_free_model,"
-        "_webllm_create_context,_webllm_free_context"
+        "_webllm_create_context,_webllm_free_context,"
+        "_webllm_decode,_webllm_get_logits"
     )
 
     if(WEBLLM_BUILD_MEM64)
