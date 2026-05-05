@@ -839,55 +839,111 @@ upscale shader; tip `e29753286`); sweep matrix at
 
 ### Tier 3 migration to upstream `llama_decode` (NEW DIRECTION 2026-05-05)
 
-**Status:** **P1 UNBLOCKED 2026-05-05 via JSPI pivot (commit
-`b4d4b48`).** Dropped `-sASYNCIFY` for `-sJSPI` by flipping
-`GGML_WEBGPU_JSPI=ON` in `src/wasm/CMakeLists.txt`. JSPI uses native
-`WebAssembly.promising` / `Suspending` and sidesteps the
-Asyncify+exceptions+ctors trap that previously fired in
-`__wasm_call_ctors` whenever a new wasm export was added. P0 spike
-PASSES end-to-end on the JSPI build with all four new P1 exports
-(`webllm_tokenize`, `_detokenize`, `_token_bos`, `_token_eos`)
-re-applied. Required follow-on changes: `JSPI_EXPORTS` uses bare
-wasm export names (no leading `_`); TS bridge methods that call
-JSPI-promised exports must `await` (every JSPI-listed export now
-returns a Promise even when no actual suspend fires, unlike Asyncify
-which only Promised-wrapped on real suspends). Closure +
-remaining-work breakdown in
-[`eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md`](eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md).
-**P1 parity status: PASS — 1000/1000 byte-exact across all 5
-vocabs** (spm-llama, llama-bpe, qwen2, qwen3, wordpiece-bert; each
-200/200, run per-vocab via `?only=<vocab>` filter). Fixture was
-regenerated from canonical `llama_tokenize` via the new
-`smoke-test/p1-fixture-regen.html` browser harness +
-`/save-parity-fixture` POST endpoint on `eval/smoke-serve.ts`.
-`LlamaTokenizer` gained an `encoderOnly` option that flips
-`addBos=true` for BERT-family vocabs (BERT's BOS IS `[CLS]`).
-**Cross-model load fix:** `webllm_load_model` now uses
-`use_mmap=false` and `std::remove()` after load. The wasm32 4 GiB
-cap that previously fired on the 2nd sequential model load is
-closed; the parity harness now runs all 5 vocabs in a single
-page load (1000/1000 byte-exact) instead of needing per-vocab
-`?only=` isolation. Reasoning: under Emscripten MEMFS mmap pins
-the file Uint8Array for the model lifetime *plus* keeps a mapped
-view on the heap, doubling the peak; and successive `fopen("wb")`
-truncates didn't recycle MEMFS entry storage so 770 MiB +
-1017 MiB + 64 MiB accumulated.
-**P2:** encoder migration (BGE / Jina) onto `llama_*` API —
-naturally extends the `encoderOnly` path used here for
-wordpiece-bert.
+**Status: P0 + P1 CLOSED. Next phase = P2 (Causal-LM migration).**
 
-**Status:** **P0 CLOSED 2026-05-05 — PASS.** Spec at
-[`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md);
-P0 plan at
+**Spec:**
+[`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md)
+(see §P2 for the canonical step list).
+
+#### Next-session quickstart for P2 — Causal-LM migration
+
+**Goal:** delete `src/inference/model-inference.ts` (~2890 LOC of
+hand-rolled TS graph code) and route causal-LM forward through
+`webllm_decode` instead. Engine.ts orchestration stays; only the
+causal branch flips to the new wrapper.
+
+**State you can rely on (all on `main` as of 2026-05-05):**
+- WASM build is JSPI (`-sJSPI -fwasm-exceptions`,
+  `GGML_WEBGPU_JSPI=ON`). `JSPI_EXPORTS` uses BARE export names
+  (no leading underscore) — see commit `b4d4b48` if you forget.
+- `LlamaBridge` (`src/inference/llama-bridge.ts`) public surface:
+  `loadModel` / `freeModel` / `createContext` / `freeContext` /
+  `decode` / `getLogits` / `nVocab` / `tokenize` / `detokenize` /
+  `tokenBos` / `tokenEos`. All async-capable methods return
+  `Promise<…>` under JSPI — `await` everywhere.
+- `LlamaTokenizer` (`src/inference/llama-tokenizer.ts`) is the
+  drop-in replacement for the legacy `Tokenizer` causal path,
+  with an `encoderOnly` option for BERT-family vocabs.
+- `webllm_load_model` uses `use_mmap=false` + post-load
+  `std::remove("/tmp/webllm-model.gguf")` so cross-model loads
+  in a single page survive the wasm32 4 GiB cap (validated:
+  parity harness runs all 5 vocabs in one page load).
+- P0 spike harness (`smoke-test/p0-spike.html`) is the canonical
+  end-to-end smoke for the bridge surface — keep it green.
+
+**Steps (per spec §P2):**
+1. Add `src/inference/llama-decode-wrapper.ts` (~150 LOC)
+   implementing the same public surface `ModelInference` exposes
+   (`forward`, `forwardSingle`, `loadWeights`, `initKVCache`).
+   Wraps `LlamaBridge.createContext` + `decode` + `getLogits`.
+2. Rewrite `src/models/model-loader.ts`: GGUF parsing collapses
+   to a metadata pass-through (`webllm_get_metadata`-style export
+   surfaces `general.architecture` + chat-template string for
+   family routing). Most of the ~400 LOC of header parsing
+   deletes.
+3. Update `engine.ts:loadModelFromUrl` to dispatch causal-LM
+   loads through the new wrapper. Three-way isEncoder /
+   isCausalEmbedder / isCausalLM dispatch stays; only the causal
+   branch flips.
+4. Delete `src/inference/model-inference.ts`. Anything that still
+   imports it is either being deleted in P3-P4 (encoder /
+   embedder paths) or needs migrating.
+5. **Parity gate (C-strict per spec):**
+   - `make checkall` green
+   - `make bench-*` (canonical 6, greedy per 2026-05-04 doctrine)
+     accuracy within sampling noise of the pre-migration baseline
+     (TODO.md header block is source of truth)
+   - `make smoke-bench PERF_RUNS=3` decode tok/s within ±10% on
+     canonical 6 vs pre-migration baseline
+   - All existing `tests/*.test.ts` green
+
+**Bridge gaps to add in P2 (anticipated):**
+- `webllm_get_metadata(model_handle, key, buf, n_buf) -> int32`
+  returning the metadata string for a key (e.g.
+  `general.architecture`, `tokenizer.chat_template`). Required
+  for step 2. Add to `EXPORTED_FUNCTIONS`; sync, no JSPI wrap.
+- Possibly `webllm_n_ctx_train`, `webllm_n_embd`, etc. for the
+  metadata fields the rewritten loader needs. Match upstream
+  `llama_n_*` accessor names.
+
+**Patch budget:** still in band B (3 reserved). P0 used 0; P1
+used 0. P2 should also need 0 — pure additive bridge surface +
+TS rewrite. Escalate to band C only if `llama_decode`'s prefill
+scheduler genuinely can't match the project's tile heuristic
+within ±10% (spec §P2 sub-phase: perf recovery).
+
+**Risk to watch (R2 in spec):** llama.cpp's prefill scheduler may
+behave differently than the project's hand-tuned tiling. Stage D
+allows a perf-recovery sub-phase before merge — tune
+`llama_context_params.n_ubatch` first.
+
+#### Closure summaries
+
+**P0 (CLOSED 2026-05-05).** TinyLlama Q4_0 → `webllm_decode` →
+top-1 = " Paris" id 3681. Plan
 [`docs/superpowers/plans/2026-05-05-tier3-p0-spike.md`](docs/superpowers/plans/2026-05-05-tier3-p0-spike.md);
-closure report at
+closure report
 [`eval/reports/p0-spike-2026-05-05/SUMMARY.md`](eval/reports/p0-spike-2026-05-05/SUMMARY.md).
-TinyLlama Q4_0 → `webllm_decode` → top-1 = " Paris" id 3681 green.
-Patch budget B intact (9 core llama.cpp patches, no new ones added).
-Three build-config deltas sufficed: `GGML_CPU=ON` (libllama load
-expects a CPU backend device), `WASM_BIGINT=1` on wasm32 (libllama's
-WebGPU async-wait i64 timeoutNS arg), `LLAMA_WASM_MEM64=OFF` (avoid
-wasm32/64 conflict). Decision: **PROCEED to P1 (tokenizer)**.
+Three build-config deltas: `GGML_CPU=ON`, `WASM_BIGINT=1` on
+wasm32, `LLAMA_WASM_MEM64=OFF`.
+
+**P1 (CLOSED 2026-05-05).** 1000/1000 prompts byte-exact across
+all 5 vocabs (spm-llama, llama-bpe, qwen2, qwen3, wordpiece-bert)
+in a single-page parity run. Closure report
+[`eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md`](eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md).
+Load-bearing commits:
+- `b4d4b48` JSPI pivot (drops `-sASYNCIFY` for `-sJSPI`,
+  sidesteps the Asyncify+exceptions+ctors `function signature
+  mismatch in __wasm_call_ctors` trap that blocked any new wasm
+  export under the prior build)
+- `f9b8b36` fixture regenerated from canonical `llama_tokenize`
+  (legacy encoder retained but no longer the parity reference;
+  deleted in P2)
+- `ab850cf` cross-model load fix (`use_mmap=false` +
+  `std::remove()` after load — closes the wasm32 4 GiB cap that
+  previously fired on the 2nd sequential model load)
+- `LlamaTokenizer` gained an `encoderOnly` option that flips
+  `addBos=true` for BERT-family vocabs ([CLS] is BERT's BOS)
 
 **Decision summary.** Migrate the entire forward-pass surface
 (causal LM, encoder, embedder, tokenizer) off the hand-rolled TS
