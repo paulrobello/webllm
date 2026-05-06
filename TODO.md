@@ -893,9 +893,41 @@ Both paths support I64 + I32 indices. `supports_op` widened in companion llama.c
 
 Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle" slot (`jsep_tensor_handle(t) = t->data − GGML_JSEP_PTR_BASE`) is actually the **offset within the buffer**, not a buffer handle. The Phase 2 synthetic offload probe never tripped this because each test tensor got its own `ggml_jsep_alloc` (offset 0). Under Option A-prime with a real model loaded, ~6 big JSEP buffers each contain 100+ tensors at distinct offsets; the dispatchers' `dataManager.get(handle)` rightly throws `invalid handle 0`. Closure: [`STAGE-1.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-1.5-RESULT.md).
 
+**Stage 3 PARTIALLY CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch).** Q4_K WGSL kernel landed in `src/inference/jsep/ops/matmul.ts` (~110 LOC) replacing the Stage-2 throw. Kernel verified correct in isolation via a hand-crafted single-super-block self-test in the spike harness (delta 4.5e-6 vs CPU reference dequant). 805 Q4_K matmul dispatches per 5 decode tokens + 1 prefill (~134/pass, matches TinyLlama's 22 layers × 6 q4_K matmuls). **But:** all 32000 logits in step 0 are exactly 0.0 (no NaN, no Inf, all finite, min=max=0) → **Outcome C**. The all-zero collapse is upstream of the new kernel — possible loci: CPY ordering between JSEP↔CPU splits, RMS_NORM kernel bug on real-model shapes, GET_ROWS / MUL on CPU, or scheduler not invoking `synchronize` between splits. Stage 3.5 (queued) localizes via RMS_NORM self-test, first-model-matmul dst capture, and first-CPU→JSEP-write byte dump. Side improvements that landed: `jsepRead` / `jsepWrite` / `jsepClear` now flush the encoder batcher before issuing host-roundtrip queue ops (correctness fix for FIFO ordering — does not cure Outcome C but removes a latent race); `tests/jsep-matmul-golden.test.ts` got a Q4_K golden case (skips on Bun, structural reference); `src/index-jsep.ts` re-exports `dispatchMatmul` and a few JSEP enums for spike-harness use. Closure: [`STAGE-3-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3-RESULT.md). Patch stack: 6 (unchanged); webllm: +1 commit.
+
 **Stage 2 CLOSED 2026-05-06 — `9406496` + llama.cpp `53c66649f`.** Bumped `GGML_JSEP_TENSOR_BLOCK_I32` 18→19 and split the conflated slot into `(buf_handle, offset)`. JS-side `JsepTensorMeta` now exposes both fields; `dispatchMatmul` / `dispatchRmsNorm` / `dispatchSetRows` bind via `{buffer, offset, size: rec.size - offset}` using the buffer handle as the dataManager key. Buffer handle source: `tensor->buffer->context->handle` (safe post-Stage-1.5 since `supports_buft = jsep_buft only`). Spike at `?v=A-prime-stage2` progressed past the "invalid handle 0" wall: model loads end-to-end into JSEP (455 MiB jsep_buf weights + 11 MiB KV across 22 layers, all `dev = JSEP`), `sched_reserve` passes (798 nodes / 379 splits / 5.00 ms), then decode failed at the next missing kernel — **Q4_K matmul** (`matmul.ts:316`: `"matmul Q4_K kernel: deferred to Task 7"`). **Outcome B** per the original Stage 2 outcome table. Closure: [`STAGE-2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-2-RESULT.md). Patch stack +5 → +6.
 
-### Next session pickup — Phase 3 Stage 3: Q4_K matmul kernel. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 3.5: localize the all-zero logits collapse. START HERE in a fresh session.
+
+**Goal:** root-cause why TinyLlama's full forward pass with the (kernel-correct) Q4_K matmul produces exactly-zero logits, and unblock the Outcome A "Paris" decode. Stage 3 shipped the Q4_K kernel and verified it correct in isolation (delta 4.5e-6 vs CPU reference); but the same kernel run inside the real model decode produces output that collapses to zero somewhere in the 22-layer pipeline. Stage 3.5 localizes the fault before adding any more kernels.
+
+**Concrete pickup steps** (cheapest-first per Stage 3 closure §"Stage 3.5"):
+
+1. **RMS_NORM self-test** in the spike harness, modeled on the existing `runQ4KSelfTest` (`smoke-test/p2-v2-spike.src.ts`). Drive `dispatchRmsNorm` directly with a known F32 row, read back, compare against a JS `mean(x²) → inverseSqrt → multiply` reference. RMS_NORM was Phase 2 and unit-tested via synthetic harness only — never validated on real-model shapes.
+2. **First-model-matmul dst capture.** Add a one-shot probe in `dispatchMatmul` that records the first NON-self-test dispatch's dst metadata + first 8 f32 of dst (via follow-on `mapAsync`). Non-zero → kernel works in-context, bug is in the JSEP→CPU CPY path. Zero → src1 (the activation) is already zero when the kernel runs; bug is upstream.
+3. **First CPU→JSEP write byte dump.** If src1 turns out zero, instrument `jsepWrite` to log the first model write's first 8 bytes. Confirms whether CPU is producing zero before writing.
+4. **Pinning bisect.** Re-run with `WEBLLM_PIN_TO_JSEP=0` (Stage-0 / WebGPU-only) to confirm the same wasm build still produces "Paris" — rules out an orthogonal regression from the Stage 3 changes.
+
+**Working hypothesis to test first:** the JSEP backend's `cpy_tensor = NULL` forces every inter-split copy through a host-roundtrip via `set_tensor` / `get_tensor`. The Stage 3 flushes addressed WebGPU-side queue FIFO ordering on the JS side; but the C++ scheduler may itself be queuing a `set_tensor` before the previous backend's `graph_compute` has actually completed (rather than just returned). `ggml_backend_synchronize` is the contract for "wait for all queued work to complete"; if the scheduler doesn't call it in the inter-split copy path, the encoder-batcher state is irrelevant — the data simply isn't there yet for the read to capture. 612 `jsepSync` calls per token suggests the scheduler IS calling synchronize frequently, but maybe not at the right point.
+
+**Fresh-session prerequisites (verify before editing):**
+
+- **llama.cpp checkout:** `cd ~/Repos/llama.cpp && git rev-parse --short HEAD` should report `53c66649f` on branch `webllm-browser-patches`. Stage 3 was zero-patch on the C++ side.
+- **Smoke server:** `lsof -nP -iTCP:8031 -sTCP:LISTEN` should show a `bun` process. If absent: `make smoke-serve`.
+- **agentchrome session:** `agentchrome connect --status` reports an active session. Note the port (currently 64702). Reuse the existing `p2-v2-spike.html` tab via `agentchrome --port <PORT> tabs list`.
+- **Spike model:** `smoke-test/models/tinyllama-1.1b-chat-q4_0.gguf` (637.8 MiB). Despite the `q4_0` filename, the GGUF contains Q4_K weights (file_type=15 = Q4_K_M) plus 21 q6_K tensors that fall back to CPU.
+
+**Opening sequence (read before editing):**
+
+1. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3-RESULT.md` — Stage 3 closure context, including the Stage 3.5 hypothesis register and full diagnostic data.
+2. `smoke-test/p2-v2-spike.src.ts::runQ4KSelfTest` — the pattern to copy for the Stage 3.5 RMS_NORM self-test.
+3. `src/inference/jsep/ops/rms-norm.ts` — the kernel that may or may not be the bug. F32 path only; one-thread-per-(row,col) with each thread independently recomputing the row sum. WG_X=1, WG_Y=256.
+4. `src/inference/jsep/index.ts:185-220` — `jsepRead` / `jsepWrite` / `jsepClear` with the Stage 3 flush calls.
+5. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:316-320` — `ggml_backend_jsep_synchronize`. Verify whether the inter-split CPY path actually calls this between backends, or whether `ggml_backend_jsep_buffer_get_tensor` is invoked without a prior `synchronize` on the JSEP backend.
+
+**Once Stage 3.5 lands the localization,** the next op kernel (or the missing flush) becomes Stage 4. If Outcome A "Paris" decode comes out at the end of Stage 3.5 (i.e., the bug was in the flush ordering and Stage 3's flush fix DID help, just not the right one), Phase 3 is at parity with WebGPU-only and the work shifts from op-surface to perf characterization.
+
+### Earlier Stage 3 brief (now historical) — Q4_K matmul kernel
 
 **Goal:** add a Q4_K dispatch path to `dispatchMatmul` so TinyLlama (and every other Q4_K-quantized model) can decode a token through the JSEP residency path. After Q4_K matmul lands, the spike either completes (greedy "Paris" + tok/s readout — Outcome A) or surfaces the next missing op kernel (Outcome B again, e.g. `GET_ROWS` for the token embedding lookup if it routes via JSEP, or `ROPE` / `SOFT_MAX` / `MUL` / `ADD`).
 
