@@ -6,7 +6,40 @@
 **Browser + GPU:** Chrome 147.0.7727.138 headless, Apple Metal-3 (per
 `ggml_webgpu: adapter_info: vendor: apple | architecture: metal-3`)
 
-## Status: **BLOCKED**
+## Status: **RESOLVED 2026-05-05 23:00 PT** (fix at commit `91e0396`)
+
+The hang was diagnosed via Path A instrumentation as a TS-side bug:
+`backendTensorGetAsync*` bindings did not await JSPI-promised wasm
+exports → `requestId` was a Promise object, not the integer the
+C++ notifier emits → `asyncTensorGetWaiters.get(intId)` never
+matched → silent hang.
+
+Fix: 4 TS bindings made `async` + `await` the wasm call; callers
+(beginDownloadFromTensor + KV-slab readback + unit test) updated.
+
+**Resolved metrics — gate baseline now captured:**
+
+| Metric | Value | Notes |
+|---|---|---|
+| Decode tok/s (median, 3 runs) | **125.3** | bench mode, profile=on (perturbs ≤15%) |
+| Per-token wall (ms, median) | **8.0** | derives from tok/s; matches profile graphCompute mean 7.04 ms |
+| Dispatches/token | **450** | from webllm_perf_counter |
+| Greedy 5-token output | "1. Introduction:" | prompt="Hello" |
+| Greedy 5-token decode wall | 35 ms (= **7 ms/token**) | smoke harness (non-profile) |
+| 64-token chat decode | 146.5 tok/s | smoke chat warmup |
+
+**Cross-baseline check:**
+- Pre-pivot ASYNCIFY (b8cada0): 88.1 tok/s
+- Post-fix JSPI: **125.3 tok/s** (+42%)
+- Canonical pin (TODO.md, 2026-04-25 pre-greedy-cutover): 110.8 tok/s
+- Post-fix JSPI: **+13%**
+
+The entire +42% gain is recovered async-mechanism overhead — matmul
+time is unchanged (4.02 ms, 57% of graph). This is exactly the
+gain `b54503497` was claiming in its "perf-neutral" footnote;
+the TS-side fix unlocked it.
+
+## Original block (preserved for context)
 
 Task 0 cannot capture the legacy decode baseline because the smoke-test
 chat-completion path **hangs deterministically** at the shader-cache

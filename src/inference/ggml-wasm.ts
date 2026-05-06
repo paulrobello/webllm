@@ -1209,11 +1209,7 @@ export class GgmlWasm {
 			);
 			return;
 		}
-		await this.m._backend_tensor_get_async_finish(
-			requestId,
-			dstHeapPtr,
-			size,
-		);
+		await this.m._backend_tensor_get_async_finish(requestId, dstHeapPtr, size);
 	}
 
 	async backendTensorGetAsyncCancel(requestId: number): Promise<void> {
