@@ -3,385 +3,184 @@ import {
 	isEncoderArchitecture,
 	type ModelHyperparams,
 } from "../core/types.js";
-import {
-	TokenAttribute,
-	type TokenData,
-	type TokenizerConfig,
-	TokenizerType,
-} from "../inference/tokenizer.js";
-import { GgufParser } from "./gguf-parser.js";
-import type { GgufContext } from "./gguf-types.js";
+import type { LlamaBridge } from "../inference/llama-bridge.js";
 import type { KVCacheConfig } from "./kv-cache.js";
 
-/** Result of parsing a GGUF model file. */
-export interface ParsedModel {
+/** Result of loading + introspecting a GGUF model via the bridge. */
+export interface LoadedModelMetadata {
+	/** Bridge handle to the upstream llama_model. Owned by the caller. */
+	model: number;
 	hyperparams: ModelHyperparams;
-	tokenizerConfig: TokenizerConfig;
 	kvCacheConfig: KVCacheConfig;
+	/** Chat template string, or "" if missing. */
+	chatTemplate: string;
 }
 
 /**
- * Loads and parses GGUF model files, extracting hyperparameters, tokenizer
- * configuration, and KV cache configuration from GGUF metadata.
+ * Load a GGUF buffer through the bridge and pull metadata back into
+ * the {@link ModelHyperparams} shape engine.ts already consumes. The
+ * caller owns the returned model handle and must call
+ * `bridge.freeModel(metadata.model)` on disposal.
  *
- * The actual GPU weight loading is deferred to the WASM bridge integration.
+ * In the legacy path, `ModelLoader.parseModel` re-implemented every
+ * GGUF header field in TS. Upstream's parser is the source of truth
+ * for everything llama.cpp supports — this thin wrapper surfaces it.
  */
-// biome-ignore lint/complexity/noStaticOnlyClass: instance methods planned for Phase 2
-export class ModelLoader {
-	/** Parse a GGUF model buffer into hyperparams, tokenizer config, and KV cache config. */
-	static parseModel(data: Uint8Array): ParsedModel {
-		const ctx = GgufParser.parse(data);
-		const hyperparams = ModelLoader.extractHyperparams(ctx);
-		const tokenizerConfig = ModelLoader.buildTokenizerConfig(ctx);
-		// Fill vocabularySize from tokenizer config now that we know it
-		hyperparams.vocabularySize = tokenizerConfig.vocabSize;
-		tokenizerConfig.contextLength = hyperparams.contextLength;
-		const kvCacheConfig = ModelLoader.buildKvCacheConfig(hyperparams);
-		return { hyperparams, tokenizerConfig, kvCacheConfig };
-	}
+export async function loadModelMetadata(
+	bridge: LlamaBridge,
+	data: Uint8Array,
+): Promise<LoadedModelMetadata> {
+	const model = await bridge.loadModel(data);
+	try {
+		const archStr =
+			bridge.getMetadata(model, "general.architecture") ?? "llama";
+		const metaPrefix = archStr;
 
-	/** Extract model hyperparameters from GGUF metadata. */
-	private static extractHyperparams(ctx: GgufContext): ModelHyperparams {
-		const rawArch = getMetaString(
-			ctx,
-			"general.architecture",
-			"llama",
-		) as ModelHyperparams["architecture"];
-
-		// Derive qwen3-embedding from the qwen3 base arch when LAST-TOKEN pooling
-		// is set in metadata (qwen3.pooling_type=3). The Qwen3-Embedding GGUFs
-		// share the qwen3 architecture string but carry a pooling_type that the
-		// chat Qwen3 GGUFs do not. See bucket C Phase 0 probe report.
+		// Same Qwen3-Embedding derivation rule as the legacy loader:
+		// pooling_type=3 (LAST) on a qwen3 model means it's the embedding
+		// variant, not the chat variant. Surfaces via metadata so the
+		// rule stays load-bearing post-migration.
 		const qwen3PoolingRaw =
-			rawArch === "qwen3"
-				? getMetaNumberOptional(ctx, "qwen3.pooling_type")
-				: undefined;
+			archStr === "qwen3"
+				? Number(bridge.getMetadata(model, "qwen3.pooling_type") ?? "")
+				: Number.NaN;
 		const arch: ModelHyperparams["architecture"] =
-			rawArch === "qwen3" && qwen3PoolingRaw === 3
+			archStr === "qwen3" && qwen3PoolingRaw === 3
 				? "qwen3-embedding"
-				: rawArch;
+				: (archStr as ModelHyperparams["architecture"]);
 
-		// `arch` is the project's *identity* tag (used for routing into the
-		// right inference class); `metaPrefix` is the GGUF metadata key prefix
-		// (always the on-disk `general.architecture` string). They diverge for
-		// causal-LM-derived embedders: Qwen3-Embedding GGUFs carry
-		// `general.architecture = "qwen3"` and store hyperparams under
-		// `qwen3.*` keys, but we tag the model as `qwen3-embedding` so the
-		// engine routes through `CausalLMEmbedder` instead of the chat path.
-		const metaPrefix: string = rawArch;
+		const embeddingLength = bridge.nEmbd(model);
+		const headCount = bridge.nHead(model);
+		const headCountKv = bridge.nHeadKv(model);
+		const layerCount = bridge.nLayer(model);
+		const contextLength = bridge.nCtxTrain(model);
 
-		const embeddingLength = getMetaNumber(
-			ctx,
-			`${metaPrefix}.embedding_length`,
-			4096,
-		);
-		const headCount = getMetaNumber(
-			ctx,
-			`${metaPrefix}.attention.head_count`,
-			32,
-		);
+		const ftypeRaw = bridge.getMetadata(model, "general.file_type");
+		const quantType =
+			ftypeRaw !== null ? mapFtypeToQuantName(Number(ftypeRaw)) : "unknown";
 
-		// BERT-family encoders use a plain LayerNorm epsilon under a different
-		// metadata key. Fall back to the RMSNorm key for non-encoder archs.
-		const normEpsilon = isEncoderArchitecture(arch)
-			? getMetaFloat(ctx, `${metaPrefix}.attention.layer_norm_epsilon`, 1e-12)
-			: getMetaFloat(
-					ctx,
+		// Norm epsilon: encoders use layer_norm_epsilon, others use
+		// the RMSNorm key. Same dispatch as the legacy loader.
+		const normEpsilonStr = isEncoderArchitecture(arch)
+			? bridge.getMetadata(model, `${metaPrefix}.attention.layer_norm_epsilon`)
+			: bridge.getMetadata(
+					model,
 					`${metaPrefix}.attention.layer_norm_rms_epsilon`,
-					1e-5,
 				);
+		const normEpsilon =
+			normEpsilonStr !== null
+				? Number(normEpsilonStr)
+				: isEncoderArchitecture(arch)
+					? 1e-12
+					: 1e-5;
 
-		// Pooling + causal flag live on encoder models; causal-LM embedders
-		// (e.g. qwen3-embedding) carry pooling_type=LAST. Causal defaults true elsewhere.
+		// Pooling + causal flag for encoders / causal-LM-derived embedders.
 		let poolingType: ModelHyperparams["poolingType"];
 		let causalAttention: boolean | undefined;
 		let alibiMaxBias: number | undefined;
 		if (isEncoderArchitecture(arch)) {
-			const pt = getMetaNumberOptional(ctx, `${metaPrefix}.pooling_type`) ?? 2;
-			// llama.cpp enum: NONE=0, MEAN=1, CLS=2, LAST=3, RANK=4. We only
-			// implement CLS and MEAN for encoders; anything else falls back to CLS.
+			const ptStr = bridge.getMetadata(model, `${metaPrefix}.pooling_type`);
+			const pt = ptStr !== null ? Number(ptStr) : 2;
 			poolingType = pt === 1 ? "mean" : "cls";
+			const causalStr = bridge.getMetadata(
+				model,
+				`${metaPrefix}.attention.causal`,
+			);
 			causalAttention =
-				getMetaBooleanOptional(ctx, `${metaPrefix}.attention.causal`) ?? false;
+				causalStr === null ? false : causalStr.toLowerCase() === "true";
 			if (arch === "jina-bert-v2") {
-				// gaianet GGUF mirror omits this key; 8.0 is the upstream default
-				// (jina-bert-v2 reference impl + llama.cpp).
-				alibiMaxBias =
-					getMetaNumberOptional(
-						ctx,
-						`${metaPrefix}.attention.alibi_bias_max`,
-					) ?? 8.0;
+				const alibiStr = bridge.getMetadata(
+					model,
+					`${metaPrefix}.attention.alibi_bias_max`,
+				);
+				alibiMaxBias = alibiStr !== null ? Number(alibiStr) : 8.0;
 			}
 		} else if (isCausalEmbedderArchitecture(arch)) {
-			// llama.cpp enum: LAST=3. Hard-pin "last-token" for the causal-LM-derived
-			// embedder family — no other pooling mode is supported for them.
 			poolingType = "last-token";
 		}
 
-		const ftypeRaw = getMetaNumberOptional(ctx, "general.file_type");
-		const quantType =
-			ftypeRaw !== undefined ? mapFtypeToQuantName(ftypeRaw) : "unknown";
-
-		return {
+		const hyperparams: ModelHyperparams = {
 			architecture: arch,
-			contextLength: getMetaNumber(ctx, `${metaPrefix}.context_length`, 2048),
+			contextLength,
 			embeddingLength,
 			headCount,
-			headCountKv: getMetaNumber(
-				ctx,
-				`${metaPrefix}.attention.head_count_kv`,
-				headCount,
-			),
-			layerCount: getMetaNumber(ctx, `${metaPrefix}.block_count`, 32),
-			vocabularySize: 0, // filled after tokenizer parse
-			embeddingHeadLength: getMetaNumber(
-				ctx,
+			headCountKv,
+			layerCount,
+			vocabularySize: bridge.nVocab(model),
+			embeddingHeadLength: numFromMeta(
+				bridge,
+				model,
 				`${metaPrefix}.attention.key_length`,
-				embeddingLength / headCount,
+				Math.floor(embeddingLength / Math.max(1, headCount)),
 			),
-			feedForwardLength: getMetaNumber(
-				ctx,
+			feedForwardLength: numFromMeta(
+				bridge,
+				model,
 				`${metaPrefix}.feed_forward_length`,
 				11008,
 			),
 			ropeFreqBase:
-				getMetaNumberOptional(ctx, `${metaPrefix}.rope_freq_base`) ??
-				getMetaNumberOptional(ctx, `${metaPrefix}.rope.freq_base`) ??
+				numFromMetaOptional(bridge, model, `${metaPrefix}.rope_freq_base`) ??
+				numFromMetaOptional(bridge, model, `${metaPrefix}.rope.freq_base`) ??
 				10000,
-			ropeScale: getMetaNumber(ctx, `${metaPrefix}.rope_scale`, 1),
+			ropeScale: numFromMeta(bridge, model, `${metaPrefix}.rope_scale`, 1),
 			normEpsilon,
-			expertCount: getMetaNumber(ctx, `${metaPrefix}.expert_count`, 0),
-			expertUsedCount: getMetaNumber(ctx, `${metaPrefix}.expert_used_count`, 0),
+			expertCount: numFromMeta(bridge, model, `${metaPrefix}.expert_count`, 0),
+			expertUsedCount: numFromMeta(
+				bridge,
+				model,
+				`${metaPrefix}.expert_used_count`,
+				0,
+			),
 			quantType,
 			poolingType,
 			causalAttention,
 			alibiMaxBias,
 		};
-	}
 
-	/** Build tokenizer configuration from GGUF metadata. */
-	private static buildTokenizerConfig(ctx: GgufContext): TokenizerConfig {
-		const modelStr = getMetaString(ctx, "tokenizer.ggml.model", "llama");
-		const type =
-			modelStr === "gpt2"
-				? TokenizerType.BPE
-				: modelStr === "bert"
-					? TokenizerType.WORDPIECE
-					: TokenizerType.SPM;
-
-		const rawTokens = getMetaStringArray(ctx, "tokenizer.ggml.tokens", []);
-		const rawScores = getMetaNumberArray(ctx, "tokenizer.ggml.scores", []);
-		const rawTokenTypes = getMetaNumberArray(
-			ctx,
-			"tokenizer.ggml.token_type",
-			[],
-		);
-		const rawMerges = getMetaStringArray(ctx, "tokenizer.ggml.merges", []);
-
-		const tokens: TokenData[] = rawTokens.map((text, i) => ({
-			text,
-			score: rawScores[i] ?? 0,
-			attr: mapGgufTokenTypeToTokenizerAttr(rawTokenTypes[i] ?? 0),
-		}));
-
-		const eosTokenId = getMetaNumber(ctx, "tokenizer.ggml.eos_token_id", 2);
-		const bosTokenId = getMetaNumber(ctx, "tokenizer.ggml.bos_token_id", 1);
-		const padTokenId = getMetaNumberOptional(
-			ctx,
-			"tokenizer.ggml.padding_token_id",
-		);
-		const preTokenizer = getMetaStringOptional(ctx, "tokenizer.ggml.pre");
-		const addBosToken = getMetaBooleanOptional(
-			ctx,
-			"tokenizer.ggml.add_bos_token",
-		);
-
-		const addedTokens = new Map<string, number>();
-
-		// GGUF tokenizer.ggml.token_type uses llama.cpp vocab types where
-		// CONTROL=3 and USER_DEFINED=4. Both should be treated as special tokens
-		// that bypass normal subword tokenization.
-		for (let i = 0; i < tokens.length && i < rawTokenTypes.length; i++) {
-			if (rawTokenTypes[i] === 3 || rawTokenTypes[i] === 4) {
-				addedTokens.set(tokens[i].text, i);
-			}
-		}
-
-		// Always ensure EOS and BOS are in addedTokens regardless of token_type
-		if (eosTokenId >= 0 && eosTokenId < tokens.length) {
-			addedTokens.set(tokens[eosTokenId].text, eosTokenId);
-		}
-		if (bosTokenId >= 0 && bosTokenId < tokens.length) {
-			addedTokens.set(tokens[bosTokenId].text, bosTokenId);
-		}
-
-		const bpeRanks = new Map<string, number>();
-		if (type === TokenizerType.BPE) {
-			for (let i = 0; i < rawMerges.length; i++) {
-				bpeRanks.set(rawMerges[i], i);
-			}
-		}
-
-		// BERT-family WordPiece convention: [CLS] = bos and [SEP] = eos.
-		// Some BERT-family GGUFs (e.g. nomic-embed-text-v1.5) omit
-		// `cls_token_id` and rely on the bos/eos fallback. Mirroring this
-		// fallback keeps WordPiece initialization working across all
-		// BERT-family encoders without per-model special cases.
-		const clsTokenId =
-			getMetaNumberOptional(ctx, "tokenizer.ggml.cls_token_id") ??
-			(type === TokenizerType.WORDPIECE && bosTokenId >= 0
-				? bosTokenId
-				: undefined);
-		// GGUF key is misspelled "seperator" upstream (llama.cpp + Arctic-Embed
-		// GGUFs); do NOT correct to "separator" or bert metadata reads will fail.
-		const sepTokenId =
-			getMetaNumberOptional(ctx, "tokenizer.ggml.seperator_token_id") ??
-			(type === TokenizerType.WORDPIECE && eosTokenId >= 0
-				? eosTokenId
-				: undefined);
-		const unkTokenId = getMetaNumberOptional(
-			ctx,
-			"tokenizer.ggml.unknown_token_id",
-		);
-		const maskTokenId = getMetaNumberOptional(
-			ctx,
-			"tokenizer.ggml.mask_token_id",
-		);
-
-		return {
-			type,
-			tokens,
-			bpeRanks,
-			addedTokens,
-			eosTokenId,
-			bosTokenId,
-			padTokenId: padTokenId ?? -1,
-			vocabSize: tokens.length,
-			chatTemplate: getMetaString(ctx, "tokenizer.chat_template", ""),
-			preTokenizer,
-			addBosToken,
-			clsTokenId,
-			sepTokenId,
-			unkTokenId,
-			maskTokenId,
-		};
-	}
-
-	/** Build KV cache configuration from model hyperparameters. */
-	private static buildKvCacheConfig(hp: ModelHyperparams): KVCacheConfig {
-		return {
-			nLayers: hp.layerCount,
-			nEmbdHeadK: hp.embeddingHeadLength,
-			nEmbdHeadV: hp.embeddingHeadLength,
-			nKvHead: hp.headCountKv,
-			maxContextLength: hp.contextLength,
+		const kvCacheConfig: KVCacheConfig = {
+			nLayers: hyperparams.layerCount,
+			nEmbdHeadK: hyperparams.embeddingHeadLength,
+			nEmbdHeadV: hyperparams.embeddingHeadLength,
+			nKvHead: hyperparams.headCountKv,
+			maxContextLength: hyperparams.contextLength,
 			dataType: "f32",
 		};
+
+		const chatTemplate =
+			bridge.getMetadata(model, "tokenizer.chat_template") ?? "";
+
+		return { model, hyperparams, kvCacheConfig, chatTemplate };
+	} catch (err) {
+		bridge.freeModel(model);
+		throw err;
 	}
 }
 
-function mapGgufTokenTypeToTokenizerAttr(rawType: number): TokenAttribute {
-	switch (rawType) {
-		case 1:
-			return TokenAttribute.NORMAL;
-		case 2:
-			return TokenAttribute.UNKNOWN;
-		case 3:
-			return TokenAttribute.CONTROL;
-		case 4:
-			return TokenAttribute.USER_DEFINED;
-		case 6:
-			return TokenAttribute.BYTE;
-		default:
-			return 0 as TokenAttribute;
-	}
-}
-
-/** Get a string metadata value or default. */
-function getMetaString(
-	ctx: GgufContext,
+function numFromMeta(
+	bridge: LlamaBridge,
+	model: number,
 	key: string,
-	defaultValue: string,
-): string {
-	const kv = ctx.metadata.get(key);
-	if (kv && typeof kv.value === "string") return kv.value;
-	return defaultValue;
-}
-
-/** Get a numeric metadata value or default. */
-function getMetaNumber(
-	ctx: GgufContext,
-	key: string,
-	defaultValue: number,
+	fallback: number,
 ): number {
-	const kv = ctx.metadata.get(key);
-	if (kv && typeof kv.value === "number") return kv.value;
-	return defaultValue;
+	const v = bridge.getMetadata(model, key);
+	if (v === null) return fallback;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : fallback;
 }
 
-/** Get a numeric metadata value if present. */
-function getMetaNumberOptional(
-	ctx: GgufContext,
+function numFromMetaOptional(
+	bridge: LlamaBridge,
+	model: number,
 	key: string,
 ): number | undefined {
-	const kv = ctx.metadata.get(key);
-	if (kv && typeof kv.value === "number") return kv.value;
-	return undefined;
+	const v = bridge.getMetadata(model, key);
+	if (v === null) return undefined;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : undefined;
 }
 
-function getMetaStringOptional(
-	ctx: GgufContext,
-	key: string,
-): string | undefined {
-	const kv = ctx.metadata.get(key);
-	if (kv && typeof kv.value === "string") return kv.value;
-	return undefined;
-}
-
-function getMetaBooleanOptional(
-	ctx: GgufContext,
-	key: string,
-): boolean | undefined {
-	const kv = ctx.metadata.get(key);
-	if (kv && typeof kv.value === "boolean") return kv.value;
-	return undefined;
-}
-
-/** Get a float metadata value (covers both FLOAT32 and FLOAT64 stored values). */
-function getMetaFloat(
-	ctx: GgufContext,
-	key: string,
-	defaultValue: number,
-): number {
-	return getMetaNumber(ctx, key, defaultValue);
-}
-
-/** Get a string array metadata value or default. */
-function getMetaStringArray(
-	ctx: GgufContext,
-	key: string,
-	defaultValue: string[],
-): string[] {
-	const kv = ctx.metadata.get(key);
-	if (kv && Array.isArray(kv.value)) return kv.value as string[];
-	return defaultValue;
-}
-
-/** Get a number array metadata value or default. */
-function getMetaNumberArray(
-	ctx: GgufContext,
-	key: string,
-	defaultValue: number[],
-): number[] {
-	const kv = ctx.metadata.get(key);
-	if (kv && Array.isArray(kv.value)) return kv.value as number[];
-	return defaultValue;
-}
-
-// Mirrors llama.cpp `enum llama_ftype` (llama.h). Stable since 2024; new
-// quants are appended, so unknown values fall through to "unknown" rather
-// than corrupting the persistence fingerprint. Indices 4, 5, 6 are
-// deprecated/unused and intentionally absent.
+// Mirrors llama.cpp `enum llama_ftype` (llama.h). Stable since 2024.
 const LLAMA_FTYPE_NAMES: Readonly<Record<number, string>> = {
 	0: "F32",
 	1: "F16",
@@ -420,3 +219,15 @@ const LLAMA_FTYPE_NAMES: Readonly<Record<number, string>> = {
 function mapFtypeToQuantName(ftype: number): string {
 	return LLAMA_FTYPE_NAMES[ftype] ?? "unknown";
 }
+
+export type { ParsedModel } from "./model-loader-legacy.js";
+/**
+ * Legacy compatibility shim. Encoder + causal-embedder loaders still
+ * construct `ParsedModel` from a Uint8Array; they're rewritten in
+ * P3/P4. Re-exporting the legacy API surface here lets P2 land
+ * without touching them. Direct test consumers
+ * (tests/model-loader-bpe, kv-snapshot-roundtrip,
+ * forward-verify-equivalence, encoder-inference,
+ * chat-template-special-tokens) also resolve through this re-export.
+ */
+export { ModelLoader } from "./model-loader-legacy.js";
