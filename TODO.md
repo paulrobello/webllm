@@ -839,46 +839,52 @@ upscale shader; tip `e29753286`); sweep matrix at
 
 ### Tier 3 migration to upstream `llama_decode` (REDIRECTED 2026-05-05)
 
-**Status: P0 + P1 closed. P2 v1 attempted then partially reverted (18× decode regression — architectural mismatch, not perf-tuning).** Next phase = **P2-v2 (JSEP-style architecture)**, design-and-prototype phase before any further migration work. P3-P5 deferred behind P2-v2.
+**Status: P0 + P1 closed. P2 v1 reverted 2026-05-05 (18× decode regression — architectural mismatch).** P2-v2 (JSEP-style architecture) **Phase 1 research probe closed 2026-05-05; Phase 2 spec + plan written 2026-05-05, ready to execute.** P3-P5 deferred behind P2-v2 gate.
 
 **Why redirected:** P2 v1 routed causal-LM through `ggml-webgpu` compiled inside WASM (Dawn / `emdawnwebgpu` port). Per-WebGPU-command JS↔WASM shim crossings under the emdawnwebgpu port dominated decode time. Path A investigation (commits `c8e1dc6` + `fe167aa`) ruled out graph caching, JSPI polling loops, and end-of-graph waits as bottlenecks; the cost is intrinsic to running `ggml-webgpu` inside WASM and not patchable in llama.cpp. The fix is architectural: route WebGPU calls from JS, not from WASM (the JSEP pattern that transformers.js + ORT-Web ships in production). Full reasoning: [`eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md`](eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md) §P2.1.A + §P2.1.B.
 
-**Spec:**
+**Tier 3 spec (broader, governs P3-P5):**
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md)
-(needs an addendum for the P2-v2 architectural redirect — first task of next session).
+(written before the P2-v2 redirect; still load-bearing for P3-P5).
 
-#### Next-session quickstart for P2-v2 — JSEP-style architecture
+**P2-v2 spec + plan (governs Phase 2 prototype):**
+- Spec: [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
+- Plan: [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
 
-**Goal of next session: design + prototype, not implement.** Treat this as a multi-week phase that opens with a research probe, validates with a single-op prototype, then re-plans the implementation phase based on measurements.
+#### Next-session opener — execute P2-v2 Phase 2 (matmul + RMS_NORM stub)
 
-**Core architectural shift:** llama.cpp's tensor allocator + graph builder + scheduler + KV cache + sampler + tokenizer stay in WASM. A new ggml backend (`ggml-jsep` or similar) replaces `ggml-webgpu` in the WASM build. Its kernel implementations don't issue Dawn/wgpu calls — they emit `EM_ASM` / Emscripten callbacks that hand the JS side a {op type, operand handles, dims, strides} descriptor and await a "kernel done" callback. JS-side TS module implements WebGPU recording for each ggml op (matmul, RMS norm, rotary, attention variants, MLP variants, quant-dequant). It speaks WebGPU directly via `navigator.gpu` — same model as the legacy `ModelInference`, but driven by the WASM scheduler.
+**Action: begin Task 0 of the plan immediately.** Per the user's CLAUDE.md ("Plan approval IS execution approval"), no further confirmation needed. Use `superpowers:subagent-driven-development` to execute the 8-task plan task-by-task with spec-compliance + code-quality review gates between tasks; each task ships as a separate commit.
 
-**State you can rely on (all on `main` as of `0b57d41`, post-revert):**
-- Legacy `ModelInference` is restored (`src/inference/model-inference.ts`, ~2890 LOC) and runs at the canonical-6 baseline (110 tok/s tinyllama). It's the **kernel reference** — JSEP-style TS kernels can be ported from its hand-rolled WebGPU recording.
-- Bridge expansion from P2 Tasks 1-4 + 5 is **kept** across the revert. Useful for JSEP-style: any time the WASM scheduler needs to expose state to JS-side kernels (KV mutation, embeddings readback, model metadata), these exports already exist.
-  - C++ exports (`src/wasm/webgpu-bridge.cpp`): `webllm_get_metadata`, `webllm_n_ctx_train/n_embd/n_layer/n_head/n_head_kv/n_ctx`, `webllm_kv_seq_rm/kv_clear`, `webllm_state_seq_get_size/get_data/set_data`, `webllm_get_embeddings`, `webllm_perf_counter`.
-  - TS bindings (`src/inference/llama-bridge.ts`): typed wrappers for all of the above.
-- `webllm_perf_counter` (commit `fe167aa`) reads `llama_perf_context()` directly — useful for verifying graph-reuse engagement under any future backend.
-- llama.cpp local branch `webllm-browser-patches` has an uncommitted JSPI `WaitAny` patch in `ggml-webgpu` (correctness improvement, not perf-recovery). To be committed in the next session as a standalone patch.
+**Goal:** validate the JSEP-style architecture via a 2-op stub (matmul + RMS_NORM); measure 5-token tinyllama Q4_0 greedy decode against legacy `ModelInference`; gate green/yellow/red on per-token wall + EM_ASM crossings/token.
 
-**Phase 1 — Research probe (NEW SESSION OPENER):**
-1. Read ORT-Web `jsep/` source (https://github.com/microsoft/onnxruntime, `js/web/lib/wasm/jsep/`). Specifically: how does the WASM core call back into JS to execute a kernel? What's the shape of the descriptor passed across the boundary? How are GPU buffers referenced (handle vs pointer)? How does the scheduler decide which kernel to invoke? Aim: 1-page mental model of the JSEP ABI.
-2. Read ggml's backend interface (`ggml/src/ggml-backend-impl.h` + `ggml-cpu.cpp` as the reference implementation). Understand the contract a backend implements: tensor allocation, op dispatch, async work, queue waits. Aim: identify the minimum surface a JSEP-style backend needs to fill.
-3. Catalog ggml ops the project actually uses for the canonical 6 (run `webllm_perf_counter` + a small instrumentation patch on `ggml-webgpu` to log op kinds during a tinyllama decode). Aim: bounded list of TS kernels needed for v2 (likely ~20-30 ops).
+**Phase 1 closure (state you can rely on as of `d76bd38`):**
+- JSEP ABI mental model: [`eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md`](eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md) (commit `ec18120`). One EM_ASM/node + flat `uintptr_t[]` descriptor + integer GPU handles. ggml's `graph_compute(cgraph)` lets us go further (graph-once is a Phase 3 yellow-recovery lever).
+- ggml backend contract: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md) (commit `cec7172`). ~12-entry vtable; matmul-only stub auto-falls-back to CPU via scheduler. Existing `webllm-browser-patches` async-readback bundle (`846e0685e` + `702d40ee9` + `55fba3670` + `ff362d4ae`) directly reusable for the `get_tensor` async path.
+- ggml op catalog: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md) (commit `b6d807a`). 19 distinct ggml ops cover the working fleet; ~40 TS kernels once dtype permutations counted (Phase 3 sizing). Phase 2 only needs MUL_MAT + RMS_NORM.
 
-**Phase 2 — Single-op prototype:**
-4. Implement a stub JSEP-style backend in llama.cpp that supports exactly one op (matmul) — the rest fall through to CPU. Wire JS-side matmul kernel that records WebGPU dispatches for the same op the legacy `ModelInference` already handles.
-5. Build webllm WASM with the stub backend. Run a 1-token tinyllama decode and measure: total decode time, kernel-callback count, JS↔WASM crossing count.
-6. Compare against legacy `ModelInference` (same model, same hardware, same browser). Decision gate: per-token cost within ±2× of legacy → green-light Phase 3. Worse than 5× → re-evaluate (the JSEP pattern itself may be incompatible with our scheduler shape).
+**State on `main` as of `d76bd38` (post-Phase-1 + spec + plan commits):**
+- Legacy `ModelInference` (`src/inference/model-inference.ts`, ~2890 LOC) restored, running at the canonical-6 baseline (110 tok/s tinyllama). It's the **kernel reference** — JSEP-style WGSL ports from its hand-rolled recording. Untouched in Phase 2 (legacy stays the default; jsep is opt-in).
+- Bridge expansion from P2 v1 Tasks 1-4 + 5 kept across the revert. C++ exports (`src/wasm/webgpu-bridge.cpp`): `webllm_get_metadata`, `webllm_n_ctx_train/n_embd/n_layer/n_head/n_head_kv/n_ctx`, `webllm_kv_seq_rm/kv_clear`, `webllm_state_seq_get_size/get_data/set_data`, `webllm_get_embeddings`, `webllm_perf_counter`. TS bindings in `src/inference/llama-bridge.ts`.
+- llama.cpp `webllm-browser-patches` tip: `b54503497 ggml-webgpu: use wgpu::WaitAny under JSPI` (note: the JSPI WaitAny patch was committed since the prior TODO note).
 
-**Phase 3+ (only after Phase 2 passes the gate):**
-7. Plan written for all needed ops. Effort scales with op count (~20-30 ops × small kernel each).
-8. Execute via subagent-driven-development on the new plan.
-9. Parity + perf gate: same canonical-6 sweep as legacy, ±10% throughput, accuracy within sampling noise.
+**P2-v2 Phase 2 task summary (from plan):**
+0. Capture pre-prototype baseline (5-token tinyllama legacy decode wall + EM_ASM crossings/token).
+1. C++ skeleton — `ggml/src/ggml-jsep/ggml-jsep.cpp` with vtables, all ops `false`. CMake hook + 1-line registration. webllm `wasm-build-jsep` target.
+2. C++ op dispatch — flip `supports_op` to `true` for `(MUL_MAT, src1=F32, src0 ∈ {F32, F16, Q4_0, Q4_K})` + `(RMS_NORM, F32)`. EM_ASM per qualifying node. **Amend Task 1's commit** (single +1 patch).
+3. TS jsep runtime scaffold (`src/inference/jsep/{index, gpu-data-manager, command-encoder, pipeline-cache}.ts`); buffer-roundtrip golden.
+4. TS matmul kernel (`ops/matmul.ts`); 3-dtype golden.
+5. TS rms_norm kernel (`ops/rms-norm.ts`); 2-shape golden.
+6. Engine integration (`engine.init({ backend: "jsep" })`) + `dist/webllm-{wasm,bundle}-jsep.*` artifacts.
+7. End-to-end smoke + gate report at `eval/reports/p2-v2-prototype-<DATE>/SUMMARY.md`; update this TODO.md with green/yellow/red disposition.
 
-**Patch budget:** band B unchanged (3 reserved). P0 used 0; P1 used 0; P2 v1 used 0; expected P2-v2 budget: 1-2 patches (a JSEP-style backend in `ggml/`, possibly a hook in `llama-context.cpp` for the kernel-dispatch callback registration). Likely upstreamable to llama.cpp under a `GGML_BACKEND_JSEP` flag.
+**T3 gate (tinyllama Q4_0, 5-token greedy):**
+- Per-token wall ≤2× legacy = green; 2-5× = yellow; >5× = red.
+- EM_ASM crossings/token <1500 = green; 1500-4000 = yellow; >4000 = red.
+- Greedy 5/5 token equality required either band.
 
-**Side-effects: items obviated.** P2 v1's "side-effects closed" claims for §1 (Decode graph reuse) and §4 (Flash attention in browser) are **withdrawn** with the revert. The legacy `ModelInference` retains its own graph caching + FA gating, and those remain live until P2-v2 ships its replacement.
+**Patch budget:** band B has 3 reserved. P2-v2 Phase 2 uses **1** (the ggml-jsep skeleton patch). Remaining: 2 for Phase 3.
+
+**Side-effects: items obviated.** P2 v1's "side-effects closed" claims for §1 (Decode graph reuse) and §4 (Flash attention in browser) are **withdrawn** with the revert. The legacy `ModelInference` retains its own graph caching + FA gating, and those remain live until Phase 3 ships their replacement.
 
 #### Closure stub: P2 v1 (REVERTED 2026-05-05)
 
