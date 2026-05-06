@@ -917,9 +917,46 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 ### Next session pickup — Phase 3 Stage 4.3: production-shape kernel selftests + full-graph runOp capture. START HERE in a fresh session.
 
+**Paste-and-go bootstrap (run this first, no thinking required):**
+
+```bash
+# 1. Confirm you're in the right working tree on the right tip.
+cd /Users/probello/Repos/webllm
+git log --oneline -1
+#   → 4c41b88 docs(TODO): Stage 4.2 closed — queue Stage 4.3 ...
+
+# 2. Confirm llama.cpp is on the patched branch.
+( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
+#   → 53c66649f
+#   → webllm-browser-patches
+
+# 3. Smoke-server must be up on 8031. If not running, start it:
+lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
+
+# 4. Reuse the existing agentchrome session + spike tab — do NOT spawn a new browser.
+PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
+TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
+[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.3-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+echo "PORT=$PORT TAB=$TAB"
+
+# 5. Reproduce the post-Stage-4.2 baseline (Outcome C still active).
+#    Expect: PREPREFILL=all zeros, POSTPREFILL=canonical NaN, GPU_ERR_COUNT=0,
+#    LOGIT_STATS_STEP0.first8=[0,...,0], GENERATED_TOKENS=[0,0,0,0,0].
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.3-replay" --tab "$TAB"
+until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
+agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText'
+```
+
+If those checks pass, jump to Step 1 (Stage 4.3a kernel selftests). If anything fails, see Step 0 below for the unrolled verify-state procedure.
+
 **One-line goal:** localize Bug A (NaN producer in JSEP-supported op chain) and Bug B (lm_head silently doesn't write) by running the existing kernels at *production shapes* in isolation and by capturing every dispatch in the prefill graph (not just the first 30).
 
 **One-line context:** Stage 4.2 proved the bug isn't WebGPU validation (errors=0), isn't aliasing (every dispatch hits the divert path), and isn't stale GPU memory (buf 11 starts at zeros). It IS that JSEP-supported ops produce canonical NaN at every offset by post-prefill, AND lm_head's output stays at zero (not NaN). Two parallel sub-probes — pick whichever blocker hits first.
+
+**Recommended order of attack:**
+1. **Step 1 (4.3a) first** — production-shape kernel selftests are pure, deterministic, and run in <1 second each. If RMS_NORM-rows=6 or MUL_MAT-K=2048 fails, Bug A is localized to a kernel and the fix is mechanical. If both pass, you've eliminated the kernel-correctness hypothesis cheaply.
+2. **Step 2 (4.3b) second** — only if Step 1 both pass. The full-graph runOp capture is more invasive and harder to read.
+3. **Bug B (lm_head) last** — once Bug A is fixed, the lm_head non-write may resolve on its own (NaN inputs were preventing meaningful output anyway). If logits remain zero after Bug A is fixed, file Stage 4.4 narrowly on lm_head.
 
 **Files you'll touch:**
 - `smoke-test/p2-v2-spike.src.ts` — add multi-row RMS_NORM selftest (rows=6, cols=2048) and production-shape MUL_MAT selftest (M=K=2048, N=6, src0=Q4_K). Raise `RUN_MAX` from 30 to 1700 so the runLog covers the entire prefill graph. Add async-deferred per-runOp readback for the first 10 ops (use `Promise.resolve().then(() => dumpBuf11(dst.handle, dst.offset, 32))` collected into an indexed array; the `.then` runs after the wasm side moves on, but the GPU buffer state at the .then-time IS the post-runOp state from that runOp's perspective if no further runOps have written to it yet).
@@ -936,12 +973,13 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 #   → 53c66649f
 #   → webllm-browser-patches
 
-git log --oneline -5
-#   → <Stage 4.2 closure commits>
+git log --oneline -6
+#   → 4c41b88 docs(TODO): Stage 4.2 closed — queue Stage 4.3 production-shape selftests + full-graph capture
+#   → dadaf24 docs(reports): Stage 4.2 closure — JSEP NaN cascade + lm_head non-write
+#   → b6f1631 chore(jsep): Stage 4.2 spike diagnostic instrumentation
 #   → 731f666 docs(TODO): polish Stage 4.2 brief for fresh-session paste-and-go
 #   → b5298f7 docs(TODO): Stage 4.1 closed — queue Stage 4.2 jsepWrite byte-dump probe
 #   → 8b81ca7 docs(reports): Stage 4.1 closure — SET_ROWS divert lands; not the Outcome C cause
-#   → 0161595 feat(jsep): SET_ROWS divert for WebGPU sync-scope buffer aliasing (Stage 4.1)
 
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2
 #   → bun  ...  TCP *:8031 (LISTEN)
