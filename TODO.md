@@ -903,19 +903,31 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 
 **Stage 4.1 CLOSED 2026-05-06 — `0161595` (no llama.cpp patch).** SET_ROWS divert with read-modify-write semantics landed in `src/inference/jsep/ops/set-rows.ts` (~80 LOC). Aliasing rate measurement confirmed the brief's hypothesis exactly: `SETROWS_STATS = {total:264, aliasesSrc0:0, aliasesSrc1:0, aliasesSrc2:264}` — 100% structural alias with src[2] (the destination buffer that dst is a view of, per ggml SET_ROWS semantics). Divert fires for every SET_ROWS call (`SETROWS_DIVERT_FIRES = 264`). **But Outcome A "Paris" decode not achieved** — `LOGIT_STATS_STEP0` still all-zero, `GENERATED_TOKENS = [0,0,0,0,0]`. Per-token decode 23.74 ms vs Stage-3.5 baseline 24.30 ms (within noise — divert overhead invisible). This is **exit criterion (b)** from the Stage 4.1 brief: SET_ROWS aliasing was a real latent bug worth fixing structurally, but it's *not* the load-bearing cause of the Outcome C all-zero collapse. Closure: [`STAGE-4.1-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md). Patch stack: 6 (unchanged). Next suspect: CPU-side writeback (`jsepWrite`) for unsupported ops — Stage 4.2 brief below.
 
-### Next session pickup — Phase 3 Stage 4.2: jsepWrite byte-dump probe (CPU-side writeback audit). START HERE in a fresh session.
+**Stage 4.2 CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch; no `src/` changes — diagnostic-only stage).** jsepWrite/jsepRead/jsepRunOp wrappers + pre-/post-prefill GPU buffer dumps + uncapturederror listener landed in `smoke-test/p2-v2-spike.src.ts`. Per-token decode 24.34 ms (Stage-4.1 baseline 23.74 ms; +0.6 ms = within noise; the diagnostic adds first-30-call wraps, no perf impact during decode steady state). Headline findings:
+- **Buf 11 starts at all-zeros** post-load (`PREPREFILL_BUF11 = {0:[0,…], 4194304:[0,…], …}`) — the post-prefill canonical NaN (`0x7fc00000`) is *computed*, not stale memory. Stage 3.5's "uninitialized memory pattern" framing was off — the corruption is from a JSEP shader producing NaN, then CPU faithfully copying it through `jsepRead`/`jsepWrite`.
+- **GPU_ERR_COUNT = 0** — every dispatch passes WebGPU validation. The Stage-3.5 silent-rejection failure mode is genuinely fixed by the divert pattern.
+- **All 30 captured runOps hit divert path** (matmul/RMS_NORM/SET_ROWS, all aliasing buf 11 with src1 or src2). The lm_head (likely the only non-divert in the graph) is past the RUN_MAX=30 capture window.
+- **Final logits = exactly zero**, not NaN — strongly suggesting **lm_head's dispatch silently doesn't write to its dst buffer**, leaving it at the post-allocation zero state. This is a *separate* bug from the NaN-cascade in buf 11.
 
-**One-line goal:** identify the upstream producer that's leaving `attn_q.src1` filled with the uninitialized-memory byte pattern (`[-5e-5, 142.08, -4.48, -7.4e+18, ...]`) by capturing the first few `jsepWrite` invocations during prefill and tracing which CPU-fallback op is targeting the wrong jsep_buf offset (or writing wrong-shaped data).
+Two distinct downstream bugs surfaced (per closure §"Diagnosis"):
+- **Bug A** — JSEP-supported ops compute canonical NaN starting somewhere in the chain. First runOp (RMS_NORM dst=[11+0] src0=[11+0]) operates on a known-valid embedding (jsepRead i=0 retrieves it cleanly). By post-prefill, offset 0 reads NaN. Either RMS_NORM at production shape (rows=6, cols=2048 — untested; selftest covers rows=1) or MUL_MAT at K=2048 (selftest covers K=256) produces NaN.
+- **Bug B** — lm_head non-divert dispatch silently doesn't land. Logits stay at the buffer's zero-init state.
 
-**One-line context:** Stage 3.5 fixed matmul + RMS_NORM aliasing; Stage 4.1 fixed SET_ROWS aliasing. None of those flipped Outcome C. Per the brief's Step 4 fallback, the remaining suspect is CPU-side writeback for ops the JSEP backend doesn't support (`~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:584-650` lists the supports_op gate). Unsupported ops fall back to CPU; the scheduler issues `get_tensor` → `jsepRead` to fetch JSEP-resident inputs into CPU heap, runs the CPU op, then `set_tensor` → `jsepWrite` to push results back. A wrong offset in `jsepWrite` (or a stale read in `jsepRead`) corrupts whatever tensor lives at the targeted slot — most likely the activation feeding attn_q.
+Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md). Patch stack: 6 (unchanged). Stage 4.3 brief below splits into 4.3a (production-shape kernel selftests) and 4.3b (full-graph runOp capture + per-op readback).
+
+### Next session pickup — Phase 3 Stage 4.3: production-shape kernel selftests + full-graph runOp capture. START HERE in a fresh session.
+
+**One-line goal:** localize Bug A (NaN producer in JSEP-supported op chain) and Bug B (lm_head silently doesn't write) by running the existing kernels at *production shapes* in isolation and by capturing every dispatch in the prefill graph (not just the first 30).
+
+**One-line context:** Stage 4.2 proved the bug isn't WebGPU validation (errors=0), isn't aliasing (every dispatch hits the divert path), and isn't stale GPU memory (buf 11 starts at zeros). It IS that JSEP-supported ops produce canonical NaN at every offset by post-prefill, AND lm_head's output stays at zero (not NaN). Two parallel sub-probes — pick whichever blocker hits first.
 
 **Files you'll touch:**
-- `src/inference/jsep/index.ts:173-216` — `module.jsepWrite` (line 173) and `module.jsepRead` (line 192); add a temporary log of `(handle, offset, size, first8 bytes)` for the first 10-20 writes during prefill. Both helpers already call `encoderBatcher.flush()` before the queue op, so any race-vs-pending-dispatch ordering bugs are already ruled out — focus on the data + offsets.
-- `smoke-test/p2-v2-spike.src.ts` — add the `JSEPWRITE_LOG` readout near the existing `LOGIT_STATS_STEP0` line.
-- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md` — closure report (force-add per `eval/reports/` gitignore).
-- `TODO.md` — closure stub + queue next pickup (Stage 4.3 if more work needed, or Stage 5 if jsepWrite was the bug).
+- `smoke-test/p2-v2-spike.src.ts` — add multi-row RMS_NORM selftest (rows=6, cols=2048) and production-shape MUL_MAT selftest (M=K=2048, N=6, src0=Q4_K). Raise `RUN_MAX` from 30 to 1700 so the runLog covers the entire prefill graph. Add async-deferred per-runOp readback for the first 10 ops (use `Promise.resolve().then(() => dumpBuf11(dst.handle, dst.offset, 32))` collected into an indexed array; the `.then` runs after the wasm side moves on, but the GPU buffer state at the .then-time IS the post-runOp state from that runOp's perspective if no further runOps have written to it yet).
+- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.3-RESULT.md` — closure (force-add per `eval/reports/` gitignore).
+- `TODO.md` — closure stub + queue Stage 4.4 (or Stage 5 if Outcome A flips).
+- Possibly `src/inference/jsep/ops/{matmul,rms-norm}.ts` — if Bug A localizes to a kernel correctness issue, the fix lives here. No llama.cpp patches expected.
 
-**Likely no llama.cpp changes.** If the bug is in `jsep_buft`'s offset accounting (the `tensor->data − GGML_JSEP_PTR_BASE` offset arithmetic that Stage 1.5 already touched once), it might require a llama.cpp patch (cap stack +1, currently at +6).
+**Likely no llama.cpp changes** unless Bug B turns out to be a `ggml-jsep.cpp` graph-walk issue (e.g., `graph_compute` silently skips the lm_head node).
 
 #### Step 0 — verify state (5 min, no editing)
 
@@ -925,11 +937,11 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 #   → webllm-browser-patches
 
 git log --oneline -5
+#   → <Stage 4.2 closure commits>
+#   → 731f666 docs(TODO): polish Stage 4.2 brief for fresh-session paste-and-go
 #   → b5298f7 docs(TODO): Stage 4.1 closed — queue Stage 4.2 jsepWrite byte-dump probe
 #   → 8b81ca7 docs(reports): Stage 4.1 closure — SET_ROWS divert lands; not the Outcome C cause
 #   → 0161595 feat(jsep): SET_ROWS divert for WebGPU sync-scope buffer aliasing (Stage 4.1)
-#   → 0b33b54 docs(TODO): archive completed work not relevant to Stage 4.1
-#   → 6007048 docs(TODO): expand Stage 4.1 brief into paste-and-go fresh-session checklist
 
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2
 #   → bun  ...  TCP *:8031 (LISTEN)
@@ -937,141 +949,145 @@ lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))')
 echo "PORT=$PORT TAB=$TAB"
-# If TAB is empty: agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=baseline"
 
-# Confirm post-Stage-4.1 baseline reproduces (still Outcome C):
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.2-replay" --tab "$TAB"
+# Confirm post-Stage-4.2 baseline reproduces (still Outcome C):
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.3-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
 agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText'
 # Expected:
-#   Q4K_SELFTEST + RMSNORM_SELFTEST pass
-#   LOGIT_STATS_STEP0 first8 = [0,0,0,0,0,0,0,0]
+#   Q4K_SELFTEST + RMSNORM_SELFTEST (rows=1) pass
+#   PREPREFILL_BUF11 = all zeros at probed offsets
+#   POSTPREFILL_BUF11 = canonical NaN at every f32 offset, position-id slots non-NaN
+#   GPU_ERR_COUNT = 0
+#   LOGIT_STATS_STEP0.first8 = [0,0,0,0,0,0,0,0]
 #   GENERATED_TOKENS = [0,0,0,0,0]
-#   PER_TOKEN_MS ~23-25
+#   PER_TOKEN_MS ~24
 ```
 
-#### Step 1 — instrument jsepWrite (and jsepRead) (~10 min)
+#### Step 1 — Stage 4.3a: production-shape kernel selftests (~30 min)
 
-Locate `installJsepCallbacks` in `src/inference/jsep/index.ts`. The
-JSEP wrapper installs `module.jsepRead`, `module.jsepWrite`,
-`module.jsepClear` callbacks; `webllm_decode` uses them via
-`set_tensor` / `get_tensor` for any CPU-fallback op. Wrap the
-existing `jsepWrite` (and optionally `jsepRead`) to log the first
-10-20 invocations during the prefill step:
+Add two new selftest functions in `smoke-test/p2-v2-spike.src.ts` (sibling to `runRmsNormSelfTest` and `runQ4KSelfTest`):
 
+**Selftest A — multi-row RMS_NORM:**
 ```ts
-// TEMP — Stage 4.2 Step 1 diagnostic. Remove before commit.
-const wAny = globalThis as unknown as {
-    __jsepWriteLog?: Array<{
-        handle: number;
-        offset: number;
-        size: number;
-        first8: number[];   // f32 view
-        firstBytes: number[]; // raw u8 (for non-f32 dst types)
-    }>;
-};
-if (!wAny.__jsepWriteLog) wAny.__jsepWriteLog = [];
-if (wAny.__jsepWriteLog.length < 20) {
-    const n = Math.min(8, Math.floor(size / 4));
-    const first8 = Array.from(
-        new Float32Array(module.HEAPU8.buffer, hostPtr, n)
-    );
-    const firstBytes = Array.from(
-        new Uint8Array(module.HEAPU8.buffer, hostPtr, Math.min(16, size))
-    );
-    wAny.__jsepWriteLog.push({ handle, offset, size, first8, firstBytes });
+async function runRmsNormMultiRowSelfTest(mod, runtime) {
+    const rows = 6, cols = 2048, eps = 1e-5;
+    // Distinct per-row patterns so a row-mix bug shows up as cross-row contamination.
+    const x = new Float32Array(rows * cols);
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            x[r * cols + c] = ((c % 17) - 8) * 0.1 + r * 0.01;
+        }
+    }
+    // CPU reference: per-row inv_rms × x.
+    const ref = new Float32Array(rows * cols);
+    for (let r = 0; r < rows; r++) {
+        let sumSq = 0;
+        for (let c = 0; c < cols; c++) sumSq += x[r * cols + c] ** 2;
+        const inv = 1 / Math.sqrt(sumSq / cols + eps);
+        for (let c = 0; c < cols; c++) ref[r * cols + c] = x[r * cols + c] * inv;
+    }
+    // ... (alloc, upload, dispatchRmsNorm, mapAsync, compare) ...
+    // Assert: maxAbsDelta < 1e-5 across ALL 12288 elements; no NaN/Inf.
 }
 ```
 
-Add the readout to `smoke-test/p2-v2-spike.src.ts` right before
-`LOGIT_STATS_STEP0` so it lands during prefill, not post-decode:
+**Selftest B — production-shape MUL_MAT (Q4_K × F32 → F32):**
+```ts
+async function runMatmulProductionSelfTest(runtime) {
+    const M = 2048, K = 2048, N = 6;
+    // Build a synthetic Q4_K matrix: M rows × (K/256)=8 super-blocks per row.
+    // Use deterministic d, dmin, sc, m, nibbles per super-block.
+    // CPU dequant for reference.
+    // Random-ish src1 of shape [K, N].
+    // Dispatch matmul; compare to CPU reference.
+    // Assert: maxAbsDelta < 1e-3 (Q4_K dequant has ~1e-4 error per element,
+    // accumulated over K=2048 → ~5e-3 worst case, but typical ~1e-3).
+}
+```
+
+Place both before [4/8] webgpu_init so they run with a fresh runtime (no model loaded yet — they exercise pure kernel correctness).
+
+**Outcome triage:**
+- If Selftest A fails (rows=6 produces NaN or wrong output where rows=1 succeeds) → **Bug A is RMS_NORM at multi-row.** Fix in `src/inference/jsep/ops/rms-norm.ts` — likely a per-thread row indexing bug that's invisible at rows=1 because gid.x is always 0.
+- If Selftest B fails (K=2048 produces NaN where K=256 succeeds) → **Bug A is MUL_MAT Q4_K kernel at large K.** Fix in `src/inference/jsep/ops/matmul.ts` — likely a per-super-block accumulator overflow, or an f16-unpack edge case at specific d/dmin patterns.
+- If both pass → Bug A is in **graph orchestration**, not kernel correctness. Pivot to Stage 4.3b which captures the full-graph trace.
+
+#### Step 2 — Stage 4.3b: full-graph runOp capture + per-op readback (~30 min)
+
+Raise `RUN_MAX` from 30 to 1700 (covers the full prefill 1602 dispatches + decode steps). Then for the first 10 runOps, also capture the post-dispatch dst contents:
 
 ```ts
-log(`JSEPWRITE_LOG = ${JSON.stringify((window as unknown as {__jsepWriteLog?:unknown}).__jsepWriteLog ?? null)}`);
+const runDstReads: Array<{i: number; first8: number[]}> = [];
+mod.jsepRunOp = (descriptorPtr, descriptorWords, opParamsPtr, opParamsLen) => {
+    // ... existing capture into runLog ...
+    const status = runOpOrig(descriptorPtr, descriptorWords, opParamsPtr, opParamsLen);
+    if (entry && entry.i < 10) {
+        // Schedule a deferred read of dst — runs after the current
+        // wasm-side sync chain returns. By then the dispatch has been
+        // submitted and the GPU has either completed it or is in queue.
+        // If a *later* runOp also writes to dst before our read fires,
+        // we lose isolation — but for the first 10 ops this is fine
+        // because the JSEP graph's first 10 ops mostly write to
+        // distinct offsets in buf 11.
+        const idx = entry.i;
+        const dstH = entry.dstH, dstO = entry.dstO;
+        Promise.resolve().then(async () => {
+            const first8 = await dumpBuf11Pre(dstO, 32);  // re-use Stage 4.2 helper
+            runDstReads[idx] = {i: idx, first8};
+        });
+    }
+    return status;
+};
 ```
 
-Build + run:
+After decode completes, dump `runDstReads` to the log. Cross-reference with `runLog`: for each runOp index, what op was it, what was its dst, and what did dst contain after dispatch?
 
-```bash
-bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.2-jsepwrite" --tab "$TAB"
-until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
-agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' | grep -E "JSEPWRITE_LOG|LOGIT|GENERATED"
-```
+**Outcome triage:**
+- The **first runOp whose dst reads back as canonical NaN** is the first NaN producer. If that's runOp i=0 (RMS_NORM) — Bug A is the multi-row RMS_NORM kernel. If it's runOp i=1 or i=2 (MUL_MAT) but src1 (read separately) is real — Bug A is MUL_MAT.
+- If runOp i=0's dst reads valid (normalized embedding) but runOp i=1's dst reads NaN AND src1 (offset 0, the runOp i=0 output) reads NaN at MUL_MAT-time — there's a buffer-state divergence between runOp i=0's submit and runOp i=1's read. Possible cause: tempDst destroy invalidates the in-flight copy on this Chrome version (Stage 4.2 disproved this for the post-prefill state, but didn't probe inter-op state). Re-test with destroy deferred for just runOp i=0.
+- For Bug B specifically: scan the full runLog for `divert=false` entries. The first one is likely lm_head. Verify its dst.bufHandle, offset, and shape. Add a deferred read of that dst after dispatch — if it reads zeros, Bug B is confirmed at that op. Investigate via WebGPU-error-scope per-dispatch (`device.pushErrorScope("validation")` around the encoder.finish) to catch any GPU-state error that's silenced by the Stage-4.2-installed uncapturederror listener.
 
-#### Step 2 — interpret the log (~30 min)
+#### Step 3 — branch on diagnosis
 
-Each `jsepWrite` entry tells you:
-- **`handle`** — which JSEP buffer the write targets (look up in
-  `dataManager` keys). Buffer 6 is most likely `model_buf` (weights);
-  bufs 7-12-ish are jsep_buf instances holding KV cache + activations.
-- **`offset`** — where within that buffer the write lands.
-- **`first8`** — the first 8 f32 of the write payload. Sanity check:
-  if you see `[-5e-5, 142.08, -4.48, -7.4e+18, ...]` (the corruption
-  signature), the CPU side is writing garbage. If you see plausible
-  activation values (`~[-0.05, 0.10, -0.02, ...]`) the CPU side is
-  fine and the bug is JSEP-side.
-- **`firstBytes`** — raw u8; useful when the dst type isn't f32
-  (token-embd lookup output is f32, RMS_NORM weight bias multiply
-  output is f32, but cache_k writes are f16).
-
-Cross-reference each `(handle, offset)` against what tensor lives
-there at decode time. The spike harness already stores
-`window.__jsep` — its `dataManager` map gives the buffer-handle →
-{buffer, size} mapping. To get tensor-name → (handle, offset)
-mapping, you may need to add a one-shot dump in
-`webllm_load_model` or in the bridge layer right after model load
-(print every `ggml_backend_buffer` and its tensors).
-
-#### Step 3 — branch on the diagnosis
-
-- **CPU writes garbage to JSEP**: bug is in the CPU op fallback or
-  in `jsepRead` (the inputs to the CPU op were already corrupt). Walk
-  back to `jsepRead` and dump *its* inputs.
-- **CPU writes look correct but at wrong offset**: bug is in
-  `jsep_buft`'s `set_tensor` offset arithmetic or in how the
-  scheduler computes `(handle, offset)` for the cross-backend
-  write. Likely needs a llama.cpp patch (`ggml-jsep.cpp::jsep_set_tensor`
-  or similar).
-- **CPU writes look correct AND go to the right offset**: the bug
-  is downstream — possibly the JSEP op that reads this tensor is
-  reading from a different offset (off-by-one on the `tensor->data
-  − GGML_JSEP_PTR_BASE` accounting), or the GPU memory model isn't
-  flushed before the JSEP read.
-
-Each branch has its own Stage 4.2.x sub-stage. Document whichever
-fires in `STAGE-4.2-RESULT.md`.
+- **Selftest A or B fails** → kernel fix in TS. Re-run spike. Should flip Outcome A immediately.
+- **Both selftests pass + runOp i=0 dst is NaN post-dispatch** → the divert path's submit isn't landing. Investigate WebGPU command-encoder lifecycle (the matmul/RMS_NORM/SET_ROWS divert each calls `device.queue.submit([enc.finish()])` with a fresh encoder; maybe the encoderBatcher's lifecycle interacts with this).
+- **Selftests pass + runOp i=0 lands valid + first NaN appears at runOp N>0** → trace upstream of N. The producer of dst's input is the bug.
+- **Bug A localized but Bug B remains** → file Stage 4.4 narrowly on lm_head. Likely a non-divert batched-encoder issue.
 
 #### Files to read first (reading order, ~15 min)
 
-1. [`STAGE-4.1-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md) — Stage 4.1 closure with the full Outcome-C-survives-divert analysis.
-2. [`STAGE-3.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md) — corruption byte pattern; matmul probe technique that may need to be re-applied at jsepWrite scale.
-3. `src/inference/jsep/index.ts` — installJsepCallbacks; understand how `jsepRead`/`jsepWrite`/`jsepClear` are wired to `module.HEAPU8` and to `dataManager`.
-4. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:567-651` — `supports_op` (which ops route to JSEP vs CPU). Anything NOT in this list falls back to CPU and triggers the JSEP↔CPU round trip.
-5. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp` — `jsep_set_tensor` / `jsep_get_tensor` (cross-backend write/read implementations). The scheduler calls these to push/pull tensor data across the JSEP↔CPU boundary.
+1. [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md) — Stage 4.2 closure with the full Bug A / Bug B analysis, all probe outputs, and the eliminated hypotheses list.
+2. `src/inference/jsep/ops/rms-norm.ts` — RMS_NORM kernel + divert. Note the per-thread row-sum loop (no shared-memory reduction) — every thread in a workgroup recomputes the row sum from scratch. Correct in isolation, but if `gid.x` indexing is wrong at multi-row scale it'd be invisible at rows=1.
+3. `src/inference/jsep/ops/matmul.ts` — Q4_K dispatch (`load_q4_K`, `q4k_unpack_scale_min`). The Stage 3 self-test exercises K=256 (single super-block per row). Production K=2048 hits 8 super-blocks per row — if any per-super-block offset arithmetic is off, the row sum diverges.
+4. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:567-651` — `supports_op` (which ops route to JSEP vs CPU). Confirms only NONE/VIEW/RESHAPE/PERMUTE/TRANSPOSE/MUL_MAT/RMS_NORM/SET_ROWS go to JSEP; everything else (ROPE, SOFTMAX, SCALE, MUL, ADD, SILU, CPY, GET_ROWS) falls back to CPU.
 
 #### Spike state cheat sheet
 
-- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.2-<probe>`
-- **Per-token decode (post-Stage-4.1):** ~24 ms. Stage 4.2 is diagnostic-only; budget no perf change.
-- **Built-in self-tests** still permanent (Q4K + RMSNORM at TinyLlama cols=2048). Both should still pass after any Stage 4.2 changes — if either breaks, your instrumentation broke the kernel path.
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.3-<probe>`
+- **Per-token decode (post-Stage-4.2):** ~24.3 ms. Stage 4.3 selftests add ~50 ms each at startup but no per-token impact. Stage 4.3b's deferred dst reads are async-scheduled and don't block decode.
+- **Built-in self-tests** still permanent (Q4K + RMSNORM single-row). If you add multi-row RMSNORM and production-shape MUL_MAT, those become permanent regression checks too — keep them passing.
 - **Build:** `bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser` (TS-only). WASM rebuild only if you change `src/wasm/*.cpp` or `~/Repos/llama.cpp/ggml/src/ggml-jsep/*.cpp`.
-- **`make checkall` must be green** before committing. Cleanup commit pattern: feat (or chore for diagnostic-only) → docs(reports) → docs(TODO).
+- **`make checkall` must be green** before committing. If you're cleaning up Stage 4.2 diagnostic instrumentation (jsepWrite/jsepRead/jsepRunOp wrappers, PREPREFILL/POSTPREFILL probes, GPU_ERR_LOG) and they're no longer needed for Stage 4.3 — feel free to remove them; otherwise leave them in until Outcome A flips and we ship.
 
 #### Exit criteria
 
-Stage 4.2 closes when ONE of the following holds, documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md` (force-add):
+Stage 4.3 closes when ONE of the following holds, documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.3-RESULT.md`:
 
-- **Outcome A "Paris" decode achieved** — root cause was in jsepWrite/jsepRead and a fix landed. Closure stub queues Stage 5 (perf characterization).
-- **Bug localized but fix needs llama.cpp patch** — diagnosis lives in STAGE-4.2-RESULT.md; closure stub queues Stage 4.3 with the C-side patch sketch.
-- **CPU-side writeback proves correct** — eliminate the suspect; closure stub bisects further upstream (token-embedding GET_ROWS path, initial activation upload).
+- **Outcome A "Paris" decode achieved** — Bug A and (if applicable) Bug B fixed; non-zero finite logits with sensible top-1 token. Closure stub queues Stage 5 (perf characterization + accuracy bench).
+- **Bug A localized + fixed, Bug B remains** — file Stage 4.4 narrowly on lm_head non-divert path.
+- **Both bugs localized but fix needs llama.cpp patch** — diagnosis lives in STAGE-4.3-RESULT.md; closure stub queues Stage 4.4 with the C-side patch sketch (cap stack +1, currently at +6).
 
 #### Operational tips
 
 - **Don't kill the dashboard** if you have committed-bench traffic running. The spike posts to `localhost:8033` only when `?ingest=...` is set; default is off for the spike URL.
 - **Cache-bust every navigate:** always change the `?v=` query param when re-testing.
 - **Reuse the same spike tab** so console history + `__stderrLines` persist.
-- **Strict typing for diagnostic globals:** `globalThis as unknown as {__name?: ...}` — Biome's `noExplicitAny` is enforced.
+- **Strict typing for diagnostic globals:** `globalThis as unknown as {__name?: ...}` — Biome's `noExplicitAny` is enforced (smoke-test is excluded from biome but typecheck still runs through bun build).
+
+### Earlier Stage 4.2 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.2 brief (Step 0 baseline verification, Step 1 jsepWrite/jsepRead instrumentation, Step 2 log interpretation, Step 3 diagnosis branch + closure) lives in [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md). The CPU-writeback hypothesis was validated as branch (c) "CPU writes are correct AND go to the right offset; bug is downstream"; the live work was promoted into Stage 4.3 (Bug A: NaN-producing JSEP shader; Bug B: lm_head silently doesn't write). Collapsed at Stage 4.3 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.1 brief — collapsed (full text in closure report)
 
