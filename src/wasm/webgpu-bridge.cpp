@@ -688,4 +688,19 @@ int32_t webllm_state_seq_set_data(
         ctx, (const uint8_t*) src, (size_t) size, (llama_seq_id) dest_seq_id);
 }
 
+// Get pointer to embeddings for the i-th token of the last decode.
+// ith=-1 → use llama_get_embeddings (returns the pooled embedding
+// when pooling_type != NONE, or the last-position embedding when
+// pooling_type == NONE). Otherwise llama_get_embeddings_ith(ith)
+// for per-position embeddings (Bucket-D pre-pool tap).
+//
+// Returns a pointer into ctx-owned memory; valid until the next
+// decode call. JS-side caller wraps it as a Float32Array view of
+// length n_embd. Caller must NOT free.
+const float* webllm_get_embeddings(void* ctx_handle, int32_t ith) {
+    if (!ctx_handle) return nullptr;
+    auto* ctx = static_cast<llama_context*>(ctx_handle);
+    return ith < 0 ? llama_get_embeddings(ctx) : llama_get_embeddings_ith(ctx, ith);
+}
+
 } // extern "C"
