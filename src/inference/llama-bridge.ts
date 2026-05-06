@@ -71,6 +71,45 @@ export interface LlamaBridge {
 	tokenBos(model: number): number;
 	/** EOS token id, or -1 if the vocab doesn't define one. */
 	tokenEos(model: number): number;
+	/** Read a string metadata value by key. Returns null if missing. */
+	getMetadata(model: number, key: string): string | null;
+	/** Hyperparam accessors. Negative return = missing model handle. */
+	nCtxTrain(model: number): number;
+	nEmbd(model: number): number;
+	nLayer(model: number): number;
+	nHead(model: number): number;
+	nHeadKv(model: number): number;
+	/** Per-context KV size in tokens. */
+	nCtx(ctx: number): number;
+
+	/** Drop tokens [p0, p1) for seq_id. p1=-1 means "to the end". */
+	kvSeqRm(ctx: number, seqId: number, p0: number, p1: number): void;
+	/** Clear all sequences in this context's KV cache. */
+	kvClear(ctx: number): void;
+
+	/** Bytes needed to serialize seq_id's KV state. */
+	stateSeqGetSize(ctx: number, seqId: number): number;
+	/** Copy seq_id's KV state into a freshly-allocated Uint8Array. */
+	stateSeqGetData(ctx: number, seqId: number): Uint8Array;
+	/**
+	 * Restore seq_id's KV state from a previously-captured blob.
+	 * Returns true on success. The blob must come from a context
+	 * with the SAME model + n_ctx + flash_attn flag — restoring
+	 * across mismatched configs is undefined behavior.
+	 */
+	stateSeqSetData(ctx: number, blob: Uint8Array, destSeqId: number): boolean;
+
+	/**
+	 * Read embeddings for the i-th token of the last decode.
+	 * ith=-1 → pooled (or last-position when pooling is NONE).
+	 * Returns a Float32Array view INTO ctx-owned memory — valid
+	 * until the next decode call. Length = nEmbd(model).
+	 */
+	getEmbeddings(
+		ctx: number,
+		model: number,
+		ith?: number,
+	): Promise<Float32Array>;
 }
 
 /**
@@ -133,6 +172,59 @@ interface RawLlamaModule {
 	_webllm_token_bos: (model: any) => number;
 	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
 	_webllm_token_eos: (model: any) => number;
+	_webllm_get_metadata: (
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		model: any,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		keyPtr: any,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		bufPtr: any,
+		bufSize: number,
+	) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_n_ctx_train: (model: any) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_n_embd: (model: any) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_n_layer: (model: any) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_n_head: (model: any) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_n_head_kv: (model: any) => number;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_n_ctx: (ctx: any) => number;
+
+	_webllm_kv_seq_rm: (
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		ctx: any,
+		seqId: number,
+		p0: number,
+		p1: number,
+	) => void;
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_kv_clear: (ctx: any) => void;
+
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_state_seq_get_size: (ctx: any, seqId: number) => number;
+	_webllm_state_seq_get_data: (
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		ctx: any,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		dst: any,
+		size: number,
+		seqId: number,
+	) => number;
+	_webllm_state_seq_set_data: (
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		ctx: any,
+		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+		src: any,
+		size: number,
+		destSeqId: number,
+	) => number;
+
+	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
+	_webllm_get_embeddings: (ctx: any, ith: number) => any;
 	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
 	_bridge_malloc: (size: any) => any;
 	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
@@ -397,6 +489,130 @@ export function createLlamaBridge(mod: RawLlamaModule): LlamaBridge {
 
 		tokenEos(model: number): number {
 			return mod._webllm_token_eos(to64(model));
+		},
+
+		getMetadata(model: number, key: string): string | null {
+			const utf8 = new TextEncoder().encode(`${key}\0`);
+			const keyPtr = malloc(utf8.byteLength);
+			if (keyPtr === 0) {
+				throw new Error("webllm: bridge_malloc failed for metadata key");
+			}
+			try {
+				mod.HEAPU8.set(utf8, keyPtr);
+				// First call sized to 0 → returns required size or -1 if missing.
+				const required = mod._webllm_get_metadata(
+					to64(model),
+					to64(keyPtr),
+					to64(0),
+					0,
+				);
+				if (required < 0) return null;
+				const cap = required + 1;
+				const bufPtr = malloc(cap);
+				if (bufPtr === 0) {
+					throw new Error("webllm: bridge_malloc failed for metadata buf");
+				}
+				try {
+					const n = mod._webllm_get_metadata(
+						to64(model),
+						to64(keyPtr),
+						to64(bufPtr),
+						cap,
+					);
+					if (n < 0) return null;
+					return new TextDecoder().decode(
+						new Uint8Array(mod.HEAPU8.buffer.slice(bufPtr, bufPtr + n)),
+					);
+				} finally {
+					free(bufPtr);
+				}
+			} finally {
+				free(keyPtr);
+			}
+		},
+
+		nCtxTrain(model: number): number {
+			return mod._webllm_n_ctx_train(to64(model));
+		},
+		nEmbd(model: number): number {
+			return mod._webllm_n_embd(to64(model));
+		},
+		nLayer(model: number): number {
+			return mod._webllm_n_layer(to64(model));
+		},
+		nHead(model: number): number {
+			return mod._webllm_n_head(to64(model));
+		},
+		nHeadKv(model: number): number {
+			return mod._webllm_n_head_kv(to64(model));
+		},
+		nCtx(ctx: number): number {
+			return mod._webllm_n_ctx(to64(ctx));
+		},
+
+		kvSeqRm(ctx: number, seqId: number, p0: number, p1: number): void {
+			mod._webllm_kv_seq_rm(to64(ctx), seqId, p0, p1);
+		},
+		kvClear(ctx: number): void {
+			mod._webllm_kv_clear(to64(ctx));
+		},
+
+		stateSeqGetSize(ctx: number, seqId: number): number {
+			return mod._webllm_state_seq_get_size(to64(ctx), seqId);
+		},
+		stateSeqGetData(ctx: number, seqId: number): Uint8Array {
+			const size = mod._webllm_state_seq_get_size(to64(ctx), seqId);
+			if (size === 0) return new Uint8Array(0);
+			const ptr = malloc(size);
+			if (ptr === 0) {
+				throw new Error("webllm: bridge_malloc failed for state-seq blob");
+			}
+			try {
+				const n = mod._webllm_state_seq_get_data(
+					to64(ctx),
+					to64(ptr),
+					size,
+					seqId,
+				);
+				if (n === 0) {
+					throw new Error("webllm: state_seq_get_data returned 0 bytes");
+				}
+				return new Uint8Array(mod.HEAPU8.buffer.slice(ptr, ptr + n));
+			} finally {
+				free(ptr);
+			}
+		},
+		stateSeqSetData(ctx: number, blob: Uint8Array, destSeqId: number): boolean {
+			if (blob.byteLength === 0) return true;
+			const ptr = malloc(blob.byteLength);
+			if (ptr === 0) {
+				throw new Error("webllm: bridge_malloc failed for state-seq restore");
+			}
+			try {
+				mod.HEAPU8.set(blob, ptr);
+				const n = mod._webllm_state_seq_set_data(
+					to64(ctx),
+					to64(ptr),
+					blob.byteLength,
+					destSeqId,
+				);
+				return n > 0;
+			} finally {
+				free(ptr);
+			}
+		},
+
+		async getEmbeddings(
+			ctx: number,
+			model: number,
+			ith = -1,
+		): Promise<Float32Array> {
+			const ptr = from64(await mod._webllm_get_embeddings(to64(ctx), ith));
+			if (ptr === 0) {
+				throw new Error("webllm: webllm_get_embeddings returned null");
+			}
+			const nEmbd = mod._webllm_n_embd(to64(model));
+			return new Float32Array(mod.HEAPU8.buffer, ptr, nEmbd);
 		},
 	};
 }
