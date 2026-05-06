@@ -557,6 +557,110 @@ export function dispatchMatmul(
 	const src1Rec = ctx.dataManager.get(src1.bufHandle);
 	const dstRec = ctx.dataManager.get(dst.bufHandle);
 
+	const dispatchX = Math.ceil(M / TILE_M);
+	const dispatchY = Math.ceil(N / TILE_N);
+	const dispatchZ = batchCount;
+
+	// WebGPU sync-scope rule: a single GPUBuffer bound as both read-only
+	// storage and writable storage in the same compute pass is rejected
+	// ("[Buffer] usage (Storage(read-write)|Storage(read-only)) includes
+	// writable usage and another usage in the same synchronization
+	// scope"). Even non-overlapping byte ranges trip the rule — the
+	// validator works at buffer granularity.
+	//
+	// The libllama scheduler packs activation tensors and matmul
+	// intermediates into a single jsep_buf to save memory, so dst
+	// routinely aliases src1 (sometimes src0). Without the divert below
+	// every aliased dispatch is silently dropped at encoder.finish() and
+	// dst stays at its previous (often zero) state — the Outcome C
+	// "all-zero logits" failure mode that gated Stage 3.
+	//
+	// Divert: when dst.bufHandle equals any src bufHandle, allocate a
+	// fresh temp GPUBuffer of size batchCount*N*M*4 (f32 contiguous
+	// matmul output), bind that as the kernel's dst at offset 0, then
+	// copyBufferToBuffer back into dstRec at dst.offset after the
+	// dispatch. The diverted dispatch lives in its own command-encoder
+	// (flush the batcher first) so unrelated batched dispatches can't
+	// claim the same buffer pair in the same pass.
+	const dstAliasesSrc =
+		dst.bufHandle === src0.bufHandle || dst.bufHandle === src1.bufHandle;
+
+	if (dstAliasesSrc) {
+		// Contiguity assertion — divert assumes dst is f32-contiguous
+		// (nb[1]=M*4, nb[2]=N*M*4). matmul output from libllama's
+		// scheduler is always contiguous, but guard against future
+		// callers that might pass strided dst.
+		const expectedRowBytes = M * 4;
+		const expectedBatchBytes = N * M * 4;
+		if (
+			dst.nb[1] !== expectedRowBytes ||
+			(batchCount > 1 && dst.nb[2] !== expectedBatchBytes)
+		) {
+			console.error(
+				`dispatchMatmul: aliased dst is non-contiguous (nb=[${dst.nb.join(",")}], ` +
+					`expected row=${expectedRowBytes}, batch=${expectedBatchBytes}); ` +
+					`divert path requires contiguous dst.`,
+			);
+			return -1;
+		}
+
+		const dstBytesNeeded = batchCount * N * M * 4;
+		const tempDst = ctx.device.createBuffer({
+			size: dstBytesNeeded,
+			usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+		});
+		const divertBindGroup = ctx.device.createBindGroup({
+			layout: bindGroupLayout,
+			entries: [
+				{
+					binding: 0,
+					resource: {
+						buffer: src0Rec.buffer,
+						offset: src0.offset,
+						size: src0Rec.size - src0.offset,
+					},
+				},
+				{
+					binding: 1,
+					resource: {
+						buffer: src1Rec.buffer,
+						offset: src1.offset,
+						size: src1Rec.size - src1.offset,
+					},
+				},
+				{
+					binding: 2,
+					resource: { buffer: tempDst, offset: 0, size: dstBytesNeeded },
+				},
+				{ binding: 3, resource: { buffer: shapeBuffer } },
+			],
+		});
+
+		// Flush any pending batched dispatches — the diverted matmul +
+		// its CPY-back must live in a self-contained encoder.
+		ctx.encoderBatcher.flush();
+
+		const enc = ctx.device.createCommandEncoder();
+		const pass = enc.beginComputePass();
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, divertBindGroup);
+		pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+		pass.end();
+		enc.copyBufferToBuffer(
+			tempDst,
+			0,
+			dstRec.buffer,
+			dst.offset,
+			dstBytesNeeded,
+		);
+		ctx.device.queue.submit([enc.finish()]);
+		// destroy() after submit is documented-safe — pending GPU work is
+		// allowed to complete using the destroyed buffer's underlying
+		// memory.
+		tempDst.destroy();
+		return 0;
+	}
+
 	const bindGroup = ctx.device.createBindGroup({
 		layout: bindGroupLayout,
 		entries: [
@@ -587,10 +691,6 @@ export function dispatchMatmul(
 			{ binding: 3, resource: { buffer: shapeBuffer } },
 		],
 	});
-
-	const dispatchX = Math.ceil(M / TILE_M);
-	const dispatchY = Math.ceil(N / TILE_N);
-	const dispatchZ = batchCount;
 
 	ctx.encoderBatcher.record({
 		pipeline,

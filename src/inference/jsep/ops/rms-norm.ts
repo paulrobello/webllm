@@ -184,6 +184,59 @@ export function dispatchRmsNorm(
 	const src0Rec = ctx.dataManager.get(src0.bufHandle);
 	const dstRec = ctx.dataManager.get(dst.bufHandle);
 
+	const dispatchX = Math.ceil(rows / WG_X);
+	const dispatchY = Math.ceil(cols / WG_Y);
+	const dispatchZ = 1;
+
+	// WebGPU sync-scope rule (same as dispatchMatmul): a single GPUBuffer
+	// bound as both read-only and read-write storage in the same compute
+	// pass is rejected. The libllama scheduler often packs RMS_NORM input
+	// and output into the same jsep_buf at different offsets, so divert
+	// the dispatch into a temp buffer and copyBufferToBuffer back.
+	const dstAliasesSrc = dst.bufHandle === src0.bufHandle;
+	if (dstAliasesSrc) {
+		const dstBytesNeeded = rows * cols * 4;
+		const tempDst = ctx.device.createBuffer({
+			size: dstBytesNeeded,
+			usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+		});
+		const divertBindGroup = ctx.device.createBindGroup({
+			layout: bindGroupLayout,
+			entries: [
+				{
+					binding: 0,
+					resource: {
+						buffer: src0Rec.buffer,
+						offset: src0.offset,
+						size: src0Rec.size - src0.offset,
+					},
+				},
+				{
+					binding: 1,
+					resource: { buffer: tempDst, offset: 0, size: dstBytesNeeded },
+				},
+				{ binding: 2, resource: { buffer: shapeBuffer } },
+			],
+		});
+		ctx.encoderBatcher.flush();
+		const enc = ctx.device.createCommandEncoder();
+		const pass = enc.beginComputePass();
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, divertBindGroup);
+		pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+		pass.end();
+		enc.copyBufferToBuffer(
+			tempDst,
+			0,
+			dstRec.buffer,
+			dst.offset,
+			dstBytesNeeded,
+		);
+		ctx.device.queue.submit([enc.finish()]);
+		tempDst.destroy();
+		return 0;
+	}
+
 	const bindGroup = ctx.device.createBindGroup({
 		layout: bindGroupLayout,
 		entries: [
@@ -206,10 +259,6 @@ export function dispatchRmsNorm(
 			{ binding: 2, resource: { buffer: shapeBuffer } },
 		],
 	});
-
-	const dispatchX = Math.ceil(rows / WG_X);
-	const dispatchY = Math.ceil(cols / WG_Y);
-	const dispatchZ = 1;
 
 	ctx.encoderBatcher.record({
 		pipeline,

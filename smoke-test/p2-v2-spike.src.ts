@@ -19,7 +19,11 @@ import {
 	GGML_TYPE_Q4_K,
 	type JsepOpDescriptor,
 } from "../src/inference/jsep/ops/matmul.js";
-import { GGML_OP_MUL_MAT } from "../src/inference/jsep/index.js";
+import {
+	GGML_OP_MUL_MAT,
+	GGML_OP_RMS_NORM,
+} from "../src/inference/jsep/index.js";
+import { dispatchRmsNorm } from "../src/inference/jsep/ops/rms-norm.js";
 
 // Same fixture as p0-spike.src.ts — "The capital of France is".
 const PROMPT_TOKEN_IDS = [1, 450, 7483, 310, 3444, 338];
@@ -200,6 +204,144 @@ async function runQ4KSelfTest(
 	runtime.dataManager.free(hd);
 }
 
+// ----- RMS_NORM real-shape self-test ---------------------------------------
+//
+// Stage 3.5 Step 1: drive `dispatchRmsNorm` with a row whose column count
+// matches TinyLlama's first model RMS_NORM (cols=2048). The kernel was
+// written and validated only via the synthetic golden-test harness in
+// Phase 2. If RMS_NORM produces zero (or NaN, or wrong-magnitude) output
+// for non-zero input on real-model shapes, the residual stream collapses
+// to zero on the first layer's first norm — fully consistent with the
+// observed Outcome C all-zero logits.
+
+interface MallocModule {
+	_malloc: (n: number) => number;
+	_free: (p: number) => void;
+	HEAPU8: Uint8Array;
+	HEAPF32: Float32Array;
+}
+
+async function runRmsNormSelfTest(
+	mod: MallocModule,
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+): Promise<void> {
+	const rows = 1;
+	const cols = 2048;
+	const eps = 1e-5;
+
+	// Non-zero input pattern that exercises both signs and a non-trivial
+	// magnitude. Mean(x²) is ~0.21 for this pattern, so inv_rms is near 2.18.
+	const x = new Float32Array(rows * cols);
+	for (let i = 0; i < x.length; i++) x[i] = ((i % 17) - 8) * 0.1;
+
+	// CPU reference.
+	let sumSq = 0;
+	for (let i = 0; i < cols; i++) sumSq += x[i] * x[i];
+	const invRms = 1 / Math.sqrt(sumSq / cols + eps);
+	const reference = new Float32Array(cols);
+	for (let i = 0; i < cols; i++) reference[i] = x[i] * invRms;
+
+	const totalBytes = x.byteLength;
+	const hX = runtime.dataManager.alloc(totalBytes);
+	const hOut = runtime.dataManager.alloc(totalBytes);
+
+	// Upload x into the JSEP-side input buffer.
+	runtime.device.queue.writeBuffer(
+		runtime.dataManager.get(hX).buffer,
+		0,
+		new Uint8Array(x.buffer),
+		0,
+		totalBytes,
+	);
+
+	// `dispatchRmsNorm` reads eps from `heapBuffer[opParamsPtr]` as f32, so
+	// allocate 4 bytes in the wasm heap and write eps there. This mirrors
+	// the production path where `op_params[0]` is a node field on the
+	// wasm side.
+	const opParamsPtr = mod._malloc(4);
+	mod.HEAPF32[opParamsPtr >>> 2] = eps;
+
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_RMS_NORM,
+		nSrc: 1,
+		dst: {
+			bufHandle: hOut,
+			offset: 0,
+			type: GGML_TYPE_F32,
+			ne: [cols, rows, 1, 1],
+			nb: [4, 4 * cols, 4 * cols * rows, 0],
+		},
+		srcs: [
+			{
+				bufHandle: hX,
+				offset: 0,
+				type: GGML_TYPE_F32,
+				ne: [cols, rows, 1, 1],
+				nb: [4, 4 * cols, 4 * cols * rows, 0],
+			},
+		],
+	};
+
+	const status = dispatchRmsNorm(
+		{
+			device: runtime.device,
+			dataManager: runtime.dataManager,
+			encoderBatcher: runtime.encoderBatcher,
+			pipelineCache: runtime.pipelineCache,
+			bindGroupLayoutCache: runtime.bindGroupLayoutCache,
+		},
+		desc,
+		opParamsPtr,
+		mod.HEAPU8.buffer,
+	);
+	runtime.encoderBatcher.flush();
+
+	const recOut = runtime.dataManager.get(hOut);
+	const staging = runtime.device.createBuffer({
+		size: totalBytes,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	const enc = runtime.device.createCommandEncoder();
+	enc.copyBufferToBuffer(recOut.buffer, 0, staging, 0, totalBytes);
+	runtime.device.queue.submit([enc.finish()]);
+	await staging.mapAsync(GPUMapMode.READ, 0, totalBytes);
+	const got = new Float32Array(staging.getMappedRange().slice(0));
+	staging.unmap();
+	staging.destroy();
+
+	let maxAbsDelta = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	let zeroCount = 0;
+	for (let i = 0; i < cols; i++) {
+		const v = got[i];
+		if (Number.isNaN(v)) hasNaN = true;
+		else if (!Number.isFinite(v)) hasInf = true;
+		else if (v === 0) zeroCount++;
+		const d = Math.abs(v - reference[i]);
+		if (d > maxAbsDelta) maxAbsDelta = d;
+	}
+
+	const passLog = {
+		status,
+		invRms,
+		first4Got: Array.from(got.slice(0, 4)),
+		first4Ref: Array.from(reference.slice(0, 4)),
+		last4Got: Array.from(got.slice(-4)),
+		last4Ref: Array.from(reference.slice(-4)),
+		maxAbsDelta,
+		hasNaN,
+		hasInf,
+		zeroCount,
+	};
+	log(`RMSNORM_SELFTEST = ${JSON.stringify(passLog)}`);
+	(window as any).__rmsNormSelfTest = passLog;
+
+	mod._free(opParamsPtr);
+	runtime.dataManager.free(hX);
+	runtime.dataManager.free(hOut);
+}
+
 function log(msg: string, cls = ""): void {
 	const el = document.getElementById("log");
 	if (!el) return;
@@ -238,6 +380,11 @@ async function runSpike(): Promise<void> {
 		// to localize whether the all-zeros logits chain comes from the Q4_K
 		// kernel or from elsewhere (RMS_NORM, splits, CPY).
 		await runQ4KSelfTest(runtime);
+
+		// Stage 3.5 Step 1 self-test: real-model RMS_NORM shape (cols=2048,
+		// matches TinyLlama first norm). Disambiguates whether the residual
+		// stream is being zeroed at the first norm vs further downstream.
+		await runRmsNormSelfTest(mod as MallocModule, runtime);
 
 		log("[4/8] Initializing ggml-webgpu backend...");
 		const initStatus = await mod._webgpu_init();
