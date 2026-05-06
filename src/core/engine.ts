@@ -19,6 +19,12 @@ import {
 	type LightweightModelConfig,
 } from "../inference/lightweight.js";
 import {
+	createLlamaBridge,
+	type LlamaBridge,
+} from "../inference/llama-bridge.js";
+import { LlamaDecodeWrapper } from "../inference/llama-decode-wrapper.js";
+import { LlamaTokenizer } from "../inference/llama-tokenizer.js";
+import {
 	type DecodeMode,
 	type DecodeResult,
 	ModelInference,
@@ -30,7 +36,7 @@ import type { GgufContext } from "../models/gguf-types.js";
 import { InferenceSession } from "../models/inference-session.js";
 import { KVCache } from "../models/kv-cache.js";
 import type { ParsedModel } from "../models/model-loader.js";
-import { ModelLoader } from "../models/model-loader.js";
+import { loadModelMetadata, ModelLoader } from "../models/model-loader.js";
 import type {
 	ChatMessage,
 	CompletionChunk,
@@ -210,7 +216,10 @@ export class WebLLM {
 	private characterManager: CharacterManager;
 	private eventHandlers = new Map<string, Set<EventHandler>>();
 	private wasmModules = new Map<string, GgmlWasm>();
-	private inferenceEngines = new Map<string, ModelInference>();
+	private inferenceEngines = new Map<
+		string,
+		ModelInference | LlamaDecodeWrapper
+	>();
 	private encoderEngines = new Map<string, EncoderInference>();
 	private causalEmbedderEngines = new Map<string, CausalLMEmbedder>();
 	private sessions = new Map<string, ConversationSession>();
@@ -602,8 +611,12 @@ export class WebLLM {
 			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
 		};
 
+		// forwardDecode is the legacy ModelInference-only fast path used
+		// by speculative decoding's verify pass. LlamaDecodeWrapper has no
+		// equivalent — falls through to the CPU sampling path. P3 / P4
+		// re-introduces a bridge-side decode primitive if needed.
 		const forwardDecode =
-			typeof inf.forwardDecode === "function"
+			inf instanceof ModelInference && typeof inf.forwardDecode === "function"
 				? async (
 						ids: number[],
 						positions: number[],
@@ -1044,8 +1057,13 @@ export class WebLLM {
 					new Int32Array(positions),
 				);
 			};
+			// forwardDecode is the legacy ModelInference-only fast path
+			// used by speculative decoding's verify pass.
+			// LlamaDecodeWrapper has no equivalent — falls through to the
+			// CPU sampling path. P3 / P4 re-introduces a bridge-side
+			// decode primitive if needed.
 			const forwardDecode =
-				typeof inf.forwardDecode === "function"
+				inf instanceof ModelInference && typeof inf.forwardDecode === "function"
 					? async (
 							ids: number[],
 							positions: number[],
@@ -1146,7 +1164,9 @@ export class WebLLM {
 	 * model id so tests can spy on its KV-cache primitives. Not a stable
 	 * API; the field type is the public {@link ModelInference}.
 	 */
-	__debugInferenceForModel(modelId: string): ModelInference | undefined {
+	__debugInferenceForModel(
+		modelId: string,
+	): ModelInference | LlamaDecodeWrapper | undefined {
 		return this.inferenceEngines.get(modelId);
 	}
 
@@ -1228,7 +1248,7 @@ export class WebLLM {
 		modelId: string,
 		messages: ChatMessage[],
 		tokenizer: Tokenizer,
-		inf: ModelInference,
+		inf: ModelInference | LlamaDecodeWrapper,
 		config?: StreamConfig,
 	): number[] {
 		const sessionInfo = this.getOrCreateSession(modelId);
@@ -1313,7 +1333,11 @@ export class WebLLM {
 		name: string,
 		pipeline: {
 			wasm: GgmlWasm;
-			inference: ModelInference | EncoderInference | CausalLMEmbedder;
+			inference:
+				| ModelInference
+				| LlamaDecodeWrapper
+				| EncoderInference
+				| CausalLMEmbedder;
 			parsed: ParsedModel;
 		},
 		options?: {
@@ -1329,7 +1353,9 @@ export class WebLLM {
 		// existing state. Encoder and causal-embedder pipelines have no
 		// KV cache to reset.
 		if (!isEncoder && !isCausalEmbedder) {
-			(pipeline.inference as ModelInference).resetKVCache();
+			(
+				pipeline.inference as ModelInference | LlamaDecodeWrapper
+			).resetKVCache();
 		}
 
 		const handle = this.registerModelHandle(name, { priority: 0 });
@@ -1370,7 +1396,7 @@ export class WebLLM {
 		} else {
 			this.inferenceEngines.set(
 				handle.id,
-				pipeline.inference as ModelInference,
+				pipeline.inference as ModelInference | LlamaDecodeWrapper,
 			);
 		}
 		return handle;
@@ -1400,7 +1426,11 @@ export class WebLLM {
 		options?: Partial<ModelLoadOptions>,
 	): Promise<{
 		handle: ModelHandle;
-		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		inference:
+			| ModelInference
+			| LlamaDecodeWrapper
+			| EncoderInference
+			| CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const view = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -1456,7 +1486,11 @@ export class WebLLM {
 		onProgress?: (received: number, total: number) => void,
 	): Promise<{
 		handle: ModelHandle;
-		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		inference:
+			| ModelInference
+			| LlamaDecodeWrapper
+			| EncoderInference
+			| CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const resp = await fetch(url);
@@ -1596,7 +1630,11 @@ export class WebLLM {
 		stagingPtr?: number,
 	): Promise<{
 		handle: ModelHandle;
-		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		inference:
+			| ModelInference
+			| LlamaDecodeWrapper
+			| EncoderInference
+			| CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const freeStaging = (): void => {
@@ -1611,11 +1649,26 @@ export class WebLLM {
 			stagingPtr = 0;
 		};
 
+		// P2 stash: causal-LM branch builds these via the bridge; encoder +
+		// causal-embedder branches leave them null and fall back to the
+		// legacy Tokenizer below. P3 / P4 will plumb bridge handles for
+		// those paths too and remove the legacy Tokenizer fallback.
+		let bridgeForHandle: LlamaBridge | null = null;
+		let tokenizerForHandle: LlamaTokenizer | null = null;
+		// `bridgeForHandle` is currently parked-only — it's stashed here so
+		// future cleanup paths (P3) have a place to free the bridge handle
+		// without re-deriving it from the wrapper.
+		void bridgeForHandle;
+
 		try {
 			const arch = parsed.hyperparams.architecture;
 			const isEncoder = isEncoderArchitecture(arch);
 			const isCausalEmbedder = isCausalEmbedderArchitecture(arch);
-			let inference: ModelInference | EncoderInference | CausalLMEmbedder;
+			let inference:
+				| ModelInference
+				| LlamaDecodeWrapper
+				| EncoderInference
+				| CausalLMEmbedder;
 			if (isEncoder) {
 				const enc = new EncoderInference(wasm, parsed.hyperparams);
 				enc.loadWeights(ggufCtx, dataSrc);
@@ -1627,21 +1680,61 @@ export class WebLLM {
 				freeStaging();
 				inference = cembed;
 			} else {
-				const inf = new ModelInference(wasm, parsed.hyperparams, {
+				// P2: causal-LM goes through the bridge wrapper. Encoder and
+				// causal-embedder branches above still use the legacy graph
+				// builder until P3 / P4. The legacy `parsed.hyperparams` was
+				// produced upstream by ModelLoader.parseModel; we re-query
+				// metadata from the bridge so the wrapper sees the same
+				// source-of-truth (upstream llama.cpp) the rest of the new
+				// path uses.
+				const bridge = createLlamaBridge(
+					wasm.module as Parameters<typeof createLlamaBridge>[0],
+				);
+				// Get the full GGUF buffer view. JS-heap form: dataSrc is the
+				// Uint8Array. WASM-heap form: dataSrc is a callback over a
+				// region sized by ggufCtx.dataOffset + ggufCtx.totalDataSize.
+				const totalBytes =
+					typeof dataSrc === "function"
+						? ggufCtx.dataOffset + ggufCtx.totalDataSize
+						: dataSrc.byteLength;
+				const dataView =
+					typeof dataSrc === "function" ? dataSrc(0, totalBytes) : dataSrc;
+				// loadModelMetadata bridge_malloc's a copy internally; peak
+				// heap is briefly staging + bridge_malloc + MEMFS during this
+				// call. freeStaging() fires immediately after to bring it
+				// back down. Do not insert any large allocations between the
+				// two — see CLAUDE.md memory-peak warning.
+				const meta = await loadModelMetadata(bridge, dataView);
+				freeStaging();
+				const wrapper = new LlamaDecodeWrapper(bridge, meta.model, {
 					flashAttn: !!options?.flashAttn,
 				});
-				inf.loadWeights(ggufCtx, dataSrc);
-				// Free staging BEFORE initKVCache so the model-file-sized
-				// region doesn't share the WASM heap with the ~1 GB KV cache
-				// + scratch buffers ctx_create allocates.
-				freeStaging();
+				wrapper.loadWeights();
 				const requestedCtx = options?.contextLength;
 				const ctxLen =
 					typeof requestedCtx === "number" && requestedCtx > 0
-						? Math.min(requestedCtx, parsed.kvCacheConfig.maxContextLength)
-						: parsed.kvCacheConfig.maxContextLength;
-				inf.initKVCache(ctxLen);
-				inference = inf;
+						? Math.min(requestedCtx, meta.kvCacheConfig.maxContextLength)
+						: meta.kvCacheConfig.maxContextLength;
+				await wrapper.initKVCache(ctxLen);
+				inference = wrapper;
+				// Stash the bridge + tokenizer for the per-handle bookkeeping
+				// immediately below (set outside the branch so encoder /
+				// causal-embedder paths leave them null).
+				bridgeForHandle = bridge;
+				tokenizerForHandle = new LlamaTokenizer(bridge, meta.model, {
+					chatTemplate: meta.chatTemplate,
+				});
+				// Override parsed's downstream-consumed fields so per-handle
+				// bookkeeping (tokenizerHash, fingerprint, kvCache) sees the
+				// bridge-derived values. parsed.tokenizerConfig stays as the
+				// legacy one (still produced by ModelLoader.parseModel at the
+				// top of loadModelFromBuffer / loadModelFromUrl) so
+				// computeTokenizerHash continues to produce a stable hash.
+				parsed = {
+					hyperparams: meta.hyperparams,
+					tokenizerConfig: parsed.tokenizerConfig,
+					kvCacheConfig: meta.kvCacheConfig,
+				};
 			}
 
 			const handle = this.registerModelHandle(name, {
@@ -1651,7 +1744,16 @@ export class WebLLM {
 			const entry = this._modelManager.get(handle.id);
 			if (entry) {
 				entry.hyperparams = parsed.hyperparams;
-				entry.tokenizer = new Tokenizer(parsed.tokenizerConfig);
+				// P2: causal branch builds a LlamaTokenizer via the bridge;
+				// encoder + causal-embedder branches still build a legacy
+				// Tokenizer from parsed.tokenizerConfig. The cast keeps the
+				// `entry.tokenizer: Tokenizer` field type unchanged for P2 —
+				// engine.ts only reads the encode/decode/getId/eosId/options
+				// surface, which both classes provide. Field type widens in
+				// P3 / P4 when the legacy Tokenizer goes away entirely.
+				entry.tokenizer =
+					(tokenizerForHandle as unknown as Tokenizer) ??
+					new Tokenizer(parsed.tokenizerConfig);
 				entry.kvCache = new KVCache(parsed.kvCacheConfig);
 				entry.tokenizerHash = await computeTokenizerHash(
 					parsed.tokenizerConfig,
@@ -1708,7 +1810,11 @@ export class WebLLM {
 	): Promise<{
 		handle: ModelHandle;
 		engine: WebLLM;
-		inference: ModelInference | EncoderInference | CausalLMEmbedder;
+		inference:
+			| ModelInference
+			| LlamaDecodeWrapper
+			| EncoderInference
+			| CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const engine = await WebLLM.init(config);

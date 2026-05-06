@@ -112,6 +112,17 @@ export class GgmlWasm {
 	private is64 = false;
 
 	/**
+	 * Raw Emscripten module handle. Returned as `unknown` so callers must
+	 * cast at the boundary (e.g. `wasm.module as RawLlamaModule`). Used by
+	 * paths that need direct bridge access alongside the GgmlWasm wrapper —
+	 * notably the Tier 3 P2 causal-LM dispatch in `core/engine.ts` which
+	 * constructs a `LlamaBridge` over the same module the GgmlWasm wraps.
+	 */
+	get module(): unknown {
+		return this.m;
+	}
+
+	/**
 	 * Pointer/size_t boundary discipline.
 	 *
 	 * Under MEMORY64 + WASM_BIGINT, every `void*` and `size_t` arg is i64
