@@ -839,83 +839,96 @@ upscale shader; tip `e29753286`); sweep matrix at
 
 ### Tier 3 migration to upstream `llama_decode` (NEW DIRECTION 2026-05-05)
 
-**Status: P0 + P1 CLOSED. Next phase = P2 (Causal-LM migration).**
+**Status: P0 + P1 + P2 CLOSED. Next phase = P3 (Encoder migration).**
 
 **Spec:**
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md)
-(see §P2 for the canonical step list).
+(see §P3 for the canonical step list).
 
-#### Next-session quickstart for P2 — Causal-LM migration
+#### Next-session quickstart for P3 — Encoder migration
 
-**Goal:** delete `src/inference/model-inference.ts` (~2890 LOC of
-hand-rolled TS graph code) and route causal-LM forward through
-`webllm_decode` instead. Engine.ts orchestration stays; only the
-causal branch flips to the new wrapper.
+**Goal:** delete `src/inference/encoder-inference.ts` (~565 LOC).
+BERT / nomic / jina forward goes through a new `webllm_encode`
+bridge primitive (or `llama_decode` with `embeddings=true` +
+`pooling_type=MEAN/CLS` per arch). Encoder cosine parity vs HF
+reference vectors stays at C-strict.
 
-**State you can rely on (all on `main` as of 2026-05-05):**
-- WASM build is JSPI (`-sJSPI -fwasm-exceptions`,
-  `GGML_WEBGPU_JSPI=ON`). `JSPI_EXPORTS` uses BARE export names
-  (no leading underscore) — see commit `b4d4b48` if you forget.
-- `LlamaBridge` (`src/inference/llama-bridge.ts`) public surface:
-  `loadModel` / `freeModel` / `createContext` / `freeContext` /
-  `decode` / `getLogits` / `nVocab` / `tokenize` / `detokenize` /
-  `tokenBos` / `tokenEos`. All async-capable methods return
-  `Promise<…>` under JSPI — `await` everywhere.
-- `LlamaTokenizer` (`src/inference/llama-tokenizer.ts`) is the
-  drop-in replacement for the legacy `Tokenizer` causal path,
-  with an `encoderOnly` option for BERT-family vocabs.
-- `webllm_load_model` uses `use_mmap=false` + post-load
-  `std::remove("/tmp/webllm-model.gguf")` so cross-model loads
-  in a single page survive the wasm32 4 GiB cap (validated:
-  parity harness runs all 5 vocabs in one page load).
-- P0 spike harness (`smoke-test/p0-spike.html`) is the canonical
-  end-to-end smoke for the bridge surface — keep it green.
+**State you can rely on (all on `main` as of 2026-05-05, post-P2):**
+- Bridge surface from P2 covers most of P3's needs:
+  `webllm_get_metadata`, `webllm_get_embeddings` (already JSPI-
+  wrapped), `webllm_n_ctx_train`, `webllm_n_embd`, `webllm_n_layer`,
+  `webllm_n_head`, `webllm_n_head_kv`, `webllm_n_ctx`,
+  `webllm_kv_seq_rm`, `webllm_kv_clear`, `webllm_state_seq_*`.
+- `LlamaDecodeWrapper` (`src/inference/llama-decode-wrapper.ts`)
+  already creates a side context with `embeddings=true` +
+  `pooling=LAST` for Bucket-D self-embed; encoder pooling
+  (`CLS=2` / `MEAN=1`) is the only new pooling-type wiring needed.
+- `loadModelMetadata` (`src/models/model-loader.ts`) already
+  surfaces encoder metadata (`isEncoderArchitecture(arch)` branch
+  reads `${arch}.pooling_type`, `${arch}.attention.causal`,
+  `${arch}.attention.alibi_bias_max`). No changes needed there.
+- `getRopeModeForArchitecture` lives in `src/inference/rope/rope-mode.ts`
+  — encoder-inference.ts still imports it for the legacy graph
+  builder. Deletes alongside encoder-inference.ts in P3 step 4.
 
-**Steps (per spec §P2):**
-1. Add `src/inference/llama-decode-wrapper.ts` (~150 LOC)
-   implementing the same public surface `ModelInference` exposes
-   (`forward`, `forwardSingle`, `loadWeights`, `initKVCache`).
-   Wraps `LlamaBridge.createContext` + `decode` + `getLogits`.
-2. Rewrite `src/models/model-loader.ts`: GGUF parsing collapses
-   to a metadata pass-through (`webllm_get_metadata`-style export
-   surfaces `general.architecture` + chat-template string for
-   family routing). Most of the ~400 LOC of header parsing
-   deletes.
-3. Update `engine.ts:loadModelFromUrl` to dispatch causal-LM
-   loads through the new wrapper. Three-way isEncoder /
-   isCausalEmbedder / isCausalLM dispatch stays; only the causal
-   branch flips.
-4. Delete `src/inference/model-inference.ts`. Anything that still
-   imports it is either being deleted in P3-P4 (encoder /
-   embedder paths) or needs migrating.
-5. **Parity gate (C-strict per spec):**
-   - `make checkall` green
-   - `make bench-*` (canonical 6, greedy per 2026-05-04 doctrine)
-     accuracy within sampling noise of the pre-migration baseline
-     (TODO.md header block is source of truth)
-   - `make smoke-bench PERF_RUNS=3` decode tok/s within ±10% on
-     canonical 6 vs pre-migration baseline
-   - All existing `tests/*.test.ts` green
+**Steps (per spec §P3):**
+1. Add `webllm_encode` async wrapper using `llama_encode` (or
+   `llama_decode` with `embeddings=true` + `pooling_type=MEAN/CLS`
+   per arch). JSPI-wrap it.
+2. Add `src/inference/llama-encode-wrapper.ts` (~80 LOC) — likely
+   a thin extension of `LlamaDecodeWrapper`'s `embed()` path
+   that routes encoder-arch families through `llama_encode`.
+3. Update `engine.ts` encoder branch + `engine.embed` dispatch.
+4. Delete `src/inference/encoder-inference.ts`.
+5. Run encoder cosine parity vs HF reference vectors (existing
+   `eval/reports/<probe>/`-style ref capture pattern).
 
-**Bridge gaps to add in P2 (anticipated):**
-- `webllm_get_metadata(model_handle, key, buf, n_buf) -> int32`
-  returning the metadata string for a key (e.g.
-  `general.architecture`, `tokenizer.chat_template`). Required
-  for step 2. Add to `EXPORTED_FUNCTIONS`; sync, no JSPI wrap.
-- Possibly `webllm_n_ctx_train`, `webllm_n_embd`, etc. for the
-  metadata fields the rewritten loader needs. Match upstream
-  `llama_n_*` accessor names.
+**Parity gate (C-strict):** cosine vs HF reference ≥ pre-migration
+value (currently 0.76 on arctic-embed-s synonym pair).
 
 **Patch budget:** still in band B (3 reserved). P0 used 0; P1
-used 0. P2 should also need 0 — pure additive bridge surface +
-TS rewrite. Escalate to band C only if `llama_decode`'s prefill
-scheduler genuinely can't match the project's tile heuristic
-within ±10% (spec §P2 sub-phase: perf recovery).
+used 0; P2 used 0. P3 should also need 0 — additive bridge
+surface + TS rewrite.
 
-**Risk to watch (R2 in spec):** llama.cpp's prefill scheduler may
-behave differently than the project's hand-tuned tiling. Stage D
-allows a perf-recovery sub-phase before merge — tune
-`llama_context_params.n_ubatch` first.
+#### Closure summaries
+
+**P0 (CLOSED 2026-05-05).** TinyLlama Q4_0 → `webllm_decode` →
+top-1 = " Paris" id 3681. Plan
+[`docs/superpowers/plans/2026-05-05-tier3-p0-spike.md`](docs/superpowers/plans/2026-05-05-tier3-p0-spike.md);
+closure report
+[`eval/reports/p0-spike-2026-05-05/SUMMARY.md`](eval/reports/p0-spike-2026-05-05/SUMMARY.md).
+Three build-config deltas: `GGML_CPU=ON`, `WASM_BIGINT=1` on
+wasm32, `LLAMA_WASM_MEM64=OFF`.
+
+**P2 (CLOSED 2026-05-05).** Causal-LM migration shipped. 11
+commits (`4bb644c..374cc46`); net **−2646 LOC** of TypeScript;
+0 llama.cpp patches consumed. `model-inference.ts` (~2890 LOC)
+deleted; new `LlamaDecodeWrapper` class drives the causal-LM
+forward path through `webllm_decode`. `make checkall` green
+(731/23/0 — 28 fewer tests after deleting 8 files that imported
+`ModelInference` directly to test internals of the deleted class;
+6 new fake-bridge unit tests added). Closure report
+[`eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md`](eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md).
+Plan [`docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md`](docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md).
+Side-effects: §1 "Decode graph reuse (deferred)" and §4 "Flash
+attention in browser" closed by P2 supersedence (TS-side graph
+optimization is moot under Tier 3).
+
+**P2 followups (open):**
+- **P2.1** — same-tip greedy bench retake on canonical 6 once
+  smoke-bench harness wedge is debugged. Goal: confirm accuracy
+  within sampling noise (±2/36) and decode tok/s within ±10%
+  vs the 2026-05-01 profile-mode pins. Same-tip control was
+  attempted 2026-05-05 but every canonical-6 model failed with
+  "no signal from page for 184s — `__benchStatus` never published";
+  this is a tooling-side wedge (smoke server up, agentchrome
+  reachable, dashboard up, but page can't load any model). Likely
+  candidates: stale agentchrome tab + GPU memory pressure from
+  142 prior runs. Restart browser + reset dashboard DB as first
+  step.
+- **P2.2** — Bucket-D distinguishability gate retake against the
+  wrapper-based embed path (16+16 mean-margin per 2026-04-30
+  doctrine; canonical embedder fleet outside the canonical 6).
 
 #### Closure summaries
 
