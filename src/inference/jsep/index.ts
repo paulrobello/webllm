@@ -25,6 +25,7 @@ import { CommandEncoderBatcher } from "./command-encoder.js";
 import { GpuDataManager } from "./gpu-data-manager.js";
 import { dispatchMatmul, readDescriptor } from "./ops/matmul.js";
 import { dispatchRmsNorm } from "./ops/rms-norm.js";
+import { dispatchSetRows } from "./ops/set-rows.js";
 import { PipelineCache } from "./pipeline-cache.js";
 
 export const STATUS_OK = 0;
@@ -37,8 +38,12 @@ export const STATUS_FAILED = -1;
 // CUMSUM=16, MEAN=17, ARGMAX=18, COUNT_EQUAL=19, REPEAT=20, REPEAT_BACK=21,
 // CONCAT=22, SILU_BACK=23, NORM=24, RMS_NORM=25, RMS_NORM_BACK=26,
 // GROUP_NORM=27, L2_NORM=28, MUL_MAT=29).
+// Continuing from MUL_MAT=29: MUL_MAT_ID=30, OUT_PROD=31, SCALE=32, SET=33,
+// CPY=34, CONT=35, RESHAPE=36, VIEW=37, PERMUTE=38, TRANSPOSE=39,
+// GET_ROWS=40, GET_ROWS_BACK=41, SET_ROWS=42.
 export const GGML_OP_RMS_NORM = 25;
 export const GGML_OP_MUL_MAT = 29;
+export const GGML_OP_SET_ROWS = 42;
 
 /**
  * Minimal Emscripten module shape the JSEP scaffold needs. The real
@@ -227,6 +232,9 @@ export function installJsepCallbacks(
 		}
 		if (desc.op === GGML_OP_RMS_NORM) {
 			return dispatchRmsNorm(ctx, desc, opParamsPtr, buf);
+		}
+		if (desc.op === GGML_OP_SET_ROWS) {
+			return dispatchSetRows(ctx, desc);
 		}
 		// Other ops stay NOT_IMPLEMENTED — C++ side falls back to CPU.
 		return STATUS_NOT_IMPLEMENTED;
