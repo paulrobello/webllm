@@ -55,6 +55,8 @@ smoke-test/webllm-wasm-mem64.wasm
 smoke-test/webllm-bundle-jsep.js
 smoke-test/webllm-wasm-jsep.js
 smoke-test/webllm-wasm-jsep.wasm
+smoke-test/p2-v2-spike.js
+smoke-test/p2-v2-offload-probe.js
 
 # Downloaded model files
 smoke-test/models/

@@ -203,6 +203,13 @@ if(EMSCRIPTEN)
         if(WEBLLM_BACKEND_JSEP)
             target_link_libraries(webllm-wasm PRIVATE llama ggml-base ggml-webgpu ggml-jsep)
             set_target_properties(webllm-wasm PROPERTIES OUTPUT_NAME "webllm-wasm-jsep")
+            # Phase 3 / Option A-prime — pin libllama to JSEP only so weights+KV
+            # land in jsep_buf; every consumer op naturally targets JSEP via the
+            # scheduler's GpuDataManager-based dispatch path. Inversion of the
+            # Phase 2 Task 11 device-hint (which pinned to WebGPU only and left
+            # JSEP structurally dormant). See TODO.md "Phase 3 entry: Option
+            # A-prime" + eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md.
+            target_compile_definitions(webllm-wasm PRIVATE WEBLLM_PIN_TO_JSEP=1)
         else()
             target_link_libraries(webllm-wasm PRIVATE llama ggml-base ggml-webgpu)
         endif()
