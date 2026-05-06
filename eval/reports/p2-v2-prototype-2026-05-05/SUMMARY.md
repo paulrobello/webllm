@@ -1,10 +1,39 @@
 # P2-v2 Phase 2 Prototype — Closure Report
 
-**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike + Task 9 + Task 10 + Task 11/12 micro-cycles
+**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike + Task 9 + Task 10 + Task 11/12 + Task 13/14 micro-cycles
 **webllm SHA:** `039f448` (Task 11 device-hint); predecessor `4ea3d39` (Task 10 closure); predecessor Task 9 closure; predecessor Task 8 spike; predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
 **llama.cpp `webllm-browser-patches` SHA:** `49413d8e9` (Task 10 offload_op + supports_buft); predecessor `7919d1839` (Task 9 metadata-op allowlist); predecessor `48acb658d` (Phase 2 Tasks 1+2+4) — **patch stack frozen at +3; Task 11 was zero-patch**
 **Browser + GPU:** Chrome (agentchrome session 64702), Apple Metal-3
 **Prompt:** `"The capital of France is"` 6-token fixture, `max=5`, greedy (Task 8 spike harness)
+
+## TL;DR (Task 13 + Task 14 update — synthetic offload probe)
+
+**Gate disposition: OUTCOME E — routing-validated, execution-blocked-by-tensor-import-gap.** Task 13 (commit `4353594`) added a `webllm_synthetic_offload_probe` bridge entry-point that skips libllama and constructs a tiny ggml graph (F32 MUL_MAT, A=[128×64] B=[128]) with both src tensors allocated on `ggml_backend_cpu_buffer_type()` (host memory), then runs it through `ggml_backend_sched_new(..., op_offload=true)` with backends `[jsep, webgpu, cpu]`. Task 14 ran the probe in-browser at `?v=task14-3`. After two harness fixes (a) cache-bust the dynamic `webllm-wasm-jsep.js` import to defeat the browser's module cache after `make wasm-build-jsep`, (b) add `webllm_synthetic_offload_probe` to `JSPI_EXPORTS` in `CMakeLists.txt` so the entry frame can suspend through webgpu's async readback — the probe ran and produced this signal:
+
+| Metric | Value | Meaning |
+|---|---|---|
+| `jsep.counters.runOp` delta | **1** | scheduler called `offload_op(MUL_MAT) → true` and dispatched to `jsepRunOp` ✅ |
+| `jsep.counters.sync` delta | 1 | scheduler synchronized JSEP after dispatch (so the routing path expects results) |
+| `jsep.counters.alloc/free/write/read/clear` delta | 0 each | no cross-backend buffer copy fired — JSEP did not pre-allocate or pre-fill from host_buf |
+| Throw site | `dispatchMatmul → GpuDataManager.get(handle 0xBE3000)` | JSEP's kernel got a host-memory pointer it doesn't manage |
+
+**Routing-layer validation: ✅ CONFIRMED.** Task 10's `offload_op` + `supports_buft(host_buft)` patch IS exercised correctly when src tensors really live on host_buf. Phase 2's architectural premise — that JSEP can advertise itself as a willing offload target and the scheduler will honor it — is proven viable at the routing layer. This is the missing piece that Outcome D's chat-decode test could not show (because libllama puts everything in webgpu_buf, never host_buf).
+
+**Execution-layer gap: ❌ TENSOR-IMPORT SHIM MISSING.** When the scheduler dispatches a MUL_MAT to JSEP whose src tensors live on the CPU backend's host_buf, JSEP's `dispatchMatmul` looks the src handle up in its own `GpuDataManager` and finds nothing — the handle is the raw host pointer, not a JSEP buffer ID. Two viable fixes for Phase 3:
+
+1. **JSEP-side import shim**: when `dispatchMatmul`/`dispatchRmsNorm` see a src whose buffer isn't JSEP-owned, allocate a transient JSEP buffer, blit the bytes via `device.queue.writeBuffer(...)` from the source backend's storage (CPU host_buf is `mod.HEAPU8`-readable; webgpu_buf would require a GPU↔GPU copy via `copyBufferToBuffer`), then dispatch with the temporary handle. ~50-100 LOC; lives entirely in JSEP TS, no llama.cpp patch.
+2. **Pre-allocation contract**: have JSEP's `supports_buft` return true ONLY for bufts JSEP can directly read (its own + ggml-webgpu's via cross-backend GPU copy), and rely on the scheduler's pre-existing `cpy_tensor_async` mechanism to mirror tensors before dispatch. Cleaner architecturally but requires the scheduler to actually invoke the copy — needs verification that scheduler does this for offload routing (it may only do it for non-offload buft mismatches).
+
+Path (1) is simpler and self-contained. Path (2) is more elegant if the scheduler cooperates.
+
+**Phase 3 entry decision (firmed up by Task 14 data).** Two architecture endpoints remain:
+
+- **Option A-prime (full JSEP residency)**: kernel SET_ROWS / GET_ROWS / ROPE / SOFT_MAX / MUL / ADD + matmul dtype permutations (~1k LOC of WGSL + dispatch). Pair with **device-hint inversion** (pass `params.devices = {jsep_dev, NULL}` instead of `{webgpu_dev, NULL}`) so libllama places weights+KV in jsep_buf. JSEP runs the entire graph; tensor-import shim never needed because all tensors are JSEP-resident. **Architecturally cleanest.**
+- **Option B-prime (offload-routed mixed residency)**: keep weights+KV in webgpu_buf, register JSEP, add the tensor-import shim from path (1) above, plus the same kernel coverage as Option A-prime (because the scheduler will dispatch every supported op to JSEP via offload_op, not just MUL_MAT/RMS_NORM). **More plumbing, less architectural payoff.**
+
+Recommendation: **Option A-prime** as the canonical Phase 3 entry. The synthetic probe has banked the value of Phase 2's offload-routing work — it's documented and reproducible — without committing to Option B-prime's plumbing tax.
+
+**Patch budget unchanged.** llama.cpp `webllm-browser-patches` still at +3. Task 13 was zero-patch. Both Phase 3 paths above are also zero-patch.
 
 ## TL;DR (Task 11 + Task 12 update)
 

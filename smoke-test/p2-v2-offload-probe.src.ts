@@ -29,8 +29,18 @@ function log(msg: string, cls = ""): void {
 async function runProbe(): Promise<void> {
 	try {
 		log("[1/6] Initializing JSEP WASM module...");
+		// Cache-bust the dynamic import so a hard reload after
+		// `make wasm-build-jsep` actually picks up the freshly-built
+		// glue. Without this the browser's module cache keeps the old
+		// `./webllm-wasm-jsep.js` instance and new exports show up as
+		// "not a function". (CLAUDE.md regression lesson.)
+		const wasmGlueUrl =
+			`./webllm-wasm-jsep.js${window.location.search || "?v=fresh"}`;
 		// @ts-ignore — Emscripten output, no .d.ts
-		const createModule = (await import("./webllm-wasm-jsep.js")).default;
+		const createModule = (await import(/* @vite-ignore */ wasmGlueUrl))
+			.default;
+		// Stash a reference for post-throw counter inspection.
+		(window as any).__lastModuleRef = null;
 		(window as any).__stderrLines = [];
 		const mod: any = await createModule({
 			printErr: (s: string) => {
@@ -38,6 +48,7 @@ async function runProbe(): Promise<void> {
 				console.error(s);
 			},
 		});
+		(window as any).__lastModuleRef = mod;
 
 		log("[2/6] Acquiring WebGPU device...");
 		const adapter = await navigator.gpu?.requestAdapter();
@@ -64,7 +75,9 @@ async function runProbe(): Promise<void> {
 		log(`     counters@pre = ${JSON.stringify(counter0)}`);
 
 		log("[6/6] Running webllm_synthetic_offload_probe...");
-		const status: number = mod._webllm_synthetic_offload_probe();
+		// JSPI-wrapped: returns a Promise (the probe transitively
+		// suspends through webgpu async readback).
+		const status: number = await mod._webllm_synthetic_offload_probe();
 		const logPtr = mod._webllm_synthetic_probe_log();
 		const probeLog = mod.UTF8ToString(logPtr);
 
@@ -111,6 +124,25 @@ async function runProbe(): Promise<void> {
 	} catch (err: unknown) {
 		const e = err as Error;
 		log(`FAIL — ${e.message}\n${e.stack ?? ""}`, "fail");
+		// Snapshot counters even on error — the routing-path
+		// observation (did jsepRunOp fire before the throw?) is what
+		// we care about for Outcome-D follow-up diagnosis.
+		try {
+			const modAny = (window as any).__lastModuleRef;
+			if (modAny?.__jsep?.counters) {
+				log(
+					`POST_THROW_COUNTERS = ${JSON.stringify(modAny.__jsep.counters)}`,
+				);
+				(window as any).__probeResult = {
+					status: -1,
+					error: e.message,
+					stack: e.stack ?? "",
+					countersOnThrow: { ...modAny.__jsep.counters },
+				};
+			}
+		} catch {
+			// best-effort
+		}
 	}
 }
 

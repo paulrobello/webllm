@@ -851,7 +851,7 @@ upscale shader; tip `e29753286`); sweep matrix at
 - Spec: [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
 - Plan: [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
 
-#### Phase 2 prototype CLOSED 2026-05-06 — gate **PARTIAL-UNBLOCK / OUTCOME D** after Task 11 device-hint + Task 12 spike (chat works; JSEP runOp counters stay at zero; Phase 3 must own kernel coverage if JSEP-routed inference is the actual goal)
+#### Phase 2 prototype CLOSED 2026-05-06 — Outcome D (chat works, JSEP dormant) confirmed by Task 11/12, then **OUTCOME E** banked by Task 13/14 synthetic probe (routing-layer validated: scheduler routes MUL_MAT to JSEP via `offload_op` when src on host_buf, `runOp = 1`; execution-layer blocked by missing cross-backend tensor-import shim — Phase 3 path firmed to **Option A-prime / full JSEP residency**)
 
 - **Spec:** [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
 - **Plan:** [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
@@ -872,15 +872,15 @@ upscale shader; tip `e29753286`); sweep matrix at
   - Task 10 supports_buft + offload_op: llama.cpp `49413d8e9` (broaden supports_buft to accept host + WebGPU bufts; add offload_op for MUL_MAT/RMS_NORM)
   - Task 11 device-hint unblock: webllm `039f448` (zero-patch — enumerate registered backends in `webllm_load_model`, pass `params.devices = {webgpu_dev, NULL}` when JSEP also registered)
   - Task 12 gate measurement: spike `?v=task11-1` (no commit — measurement only; recorded in SUMMARY.md "TL;DR (Task 11 + Task 12 update)")
+  - Task 13 synthetic offload probe entry-point: webllm `4353594` (zero-patch — `webllm_synthetic_offload_probe` bridge function + spike harness)
+  - Task 14 probe gate measurement: spike `?v=task14-3` (no commit — measurement only; routing validated via `jsep.counters.runOp = 1` after offload dispatch; execution failed in `dispatchMatmul` on missing host-buf tensor handle; recorded in SUMMARY.md "TL;DR (Task 13 + Task 14 update)")
+  - Task 14 harness fixes: pending commit — cache-bust dynamic `webllm-wasm-jsep.js` import + `await` JSPI-promised probe call + add `webllm_synthetic_offload_probe` to JSPI_EXPORTS in `src/wasm/CMakeLists.txt` + post-throw counter snapshot
 - **Patch stack:** llama.cpp `webllm-browser-patches` carries **+3 patches** (`48acb658d` Phase 2; `7919d1839` Task 9 metadata-op allowlist; `49413d8e9` Task 10 supports_buft + offload_op). **Phase 2 budget exhausted; Task 11 was zero-patch.**
 - **Build infra unchanged for production path:** `make wasm-build` legacy artifacts unaffected; canonical-6 baseline unchanged. `make wasm-build-jsep` produces `webllm-wasm-jsep.{js,wasm}` + `webllm-bundle-jsep.js` + the new `p2-v2-spike.js`. `make checkall` green post-Task-11.
 
-**Next session pickup — Phase 3 entry: Option A-prime (full kernel port) OR synthetic offload probe.** Task 12 measurements confirmed Outcome D: device-hint successfully unblocks the chat path and produces correct generation, but JSEP `runOp` counter delta over the decode window is 0 — JSEP is structurally dormant when libllama places weights in webgpu_buf (the offload_op path is gated on host-memory leaves). Two paths remain for Phase 3:
+**Next session pickup — Phase 3 entry: Option A-prime (full JSEP residency).** Task 14 banked the synthetic probe's signal: scheduler routes MUL_MAT to JSEP correctly when src tensors live on host_buf (`runOp` counter +1; `sync` +1), but JSEP's `dispatchMatmul` hits a missing-handle error because the host-memory tensor was never imported into JSEP's `GpuDataManager`. Outcome E firms up the Phase 3 architectural choice — **Option A-prime** (kernel SET_ROWS / GET_ROWS / ROPE / SOFT_MAX / MUL / ADD + matmul dtype permutations, ~1k LOC; paired with a **device-hint inversion** that pins libllama to JSEP-only so weights+KV land in jsep_buf and the entire graph runs through JSEP). Option B-prime (mixed residency + tensor-import shim) is more plumbing for less architectural payoff and is now de-prioritized.
 
-1. **Option A-prime** — kernel SET_ROWS, GET_ROWS, ROPE, SOFT_MAX, MUL, ADD + matmul dtype permutations (~1k LOC of WGSL + dispatch code). Pair with device-hint inversion: pin libllama to JSEP only so weights+KV live in jsep_buf and JSEP runs the full graph. This is the architectural endpoint the JSEP-vs-llama.cpp-WGSL bet is built around (freedom from upstream WGSL surface evolution).
-2. **Synthetic offload probe** — skip libllama; build a tiny raw-ggml graph with weights on host_buf and a MUL_MAT consumer; verify scheduler routes MUL_MAT to JSEP via `offload_op`. ~100 LOC. Doesn't unblock real chat but proves the Phase-2 kernel dispatch path correct in its native habitat — credible smoke for the work that exists.
-
-Concrete write-up + measurements in [`SUMMARY.md` "TL;DR (Task 11 + Task 12 update)"](eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md).
+Concrete write-up + measurements in [`SUMMARY.md` "TL;DR (Task 13 + Task 14 update — synthetic offload probe)"](eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md). Patch budget at +3 (unchanged); Option A-prime is also zero-patch (kernels live in JSEP TS).
 
 **Phase 1 closure links retained (still load-bearing for Phase 3):**
 - JSEP ABI: [`eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md`](eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md)
@@ -1139,9 +1139,12 @@ Daily cadence check (item 1) still required at session start.
    ggml/src/ggml-webgpu/ ggml/include/`. **If non-empty:** apply
    §32 procedure (rebase, sweep, classify per §27/§28/§32
    templates). **If empty:** log and skip. Last fired:
-   2026-05-04 (§27 hybrid — drop local LayerNorm patches subsumed
-   by upstream `d4b0c22f9`; encoder parity PASS, perf neutral vs
-   2026-05-01 cross-day baseline; tip `fc1f81242`).
+   2026-05-06 (empty — no upstream activity in
+   `ggml/src/ggml-webgpu/` or `ggml/include/` since 2026-05-04
+   `fc1f81242`; cadence noop). Prior fire: 2026-05-04 (§27 hybrid —
+   drop local LayerNorm patches subsumed by upstream `d4b0c22f9`;
+   encoder parity PASS, perf neutral vs 2026-05-01 cross-day
+   baseline; tip `fc1f81242`).
 
 2. **Phi-3 closure follow-ups.**
    - ~~(a) Runtime contiguous-tensor assertion in fused helpers.~~

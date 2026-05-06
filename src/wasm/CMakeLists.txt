@@ -159,7 +159,8 @@ if(EMSCRIPTEN)
         "webllm_load_model,webllm_free_model,"
         "webllm_create_context,webllm_free_context,"
         "webllm_decode,webllm_get_logits,"
-        "webllm_get_embeddings"
+        "webllm_get_embeddings,"
+        "webllm_synthetic_offload_probe"
     )
 
     if(WEBLLM_BUILD_MEM64)
