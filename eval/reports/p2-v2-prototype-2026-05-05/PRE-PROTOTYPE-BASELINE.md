@@ -120,28 +120,83 @@ sequence.
 
 ## Recommendation
 
-Phase 2 implementation **must not** begin until either:
+Phase 2 implementation **must not** begin until the legacy chat-decode
+hang is resolved end-to-end (`make smoke-bench PERF_MODEL=tinyllama-1.1b-chat-q4_0
+PERF_RUNS=3` produces ≥100 tok/s and a 5-token greedy reference
+sequence is captured into this file).
 
-1. The `b54503497` `wgpu::WaitAny` path is debugged or reverted such
-   that `make smoke-bench PERF_MODEL=tinyllama-1.1b-chat-q4_0
-   PERF_RUNS=3` produces ≥100 tok/s decode end-to-end, and a 5-token
-   greedy reference token sequence is captured into this file; OR
-2. The plan is amended so that the gate's "Legacy baseline" column
-   uses the most recent green tinyllama Q4_0 datapoint
-   (2026-05-05 02:59 UTC, 106.3 tok/s, dispatchCount unrecorded)
-   as a stale reference, with the explicit caveat that
-   `dispatchCount/token` cannot be back-filled without a working
-   smoke decode.
+## Update 2026-05-05 21:30 PT — `b54503497` is NOT the cause
 
-Option 1 preserves the gate's load-bearing property (current-day
-legacy number is the comparison ground-truth). Option 2 ships Phase 2
-on stale data and accepts the corresponding noise.
+The `wgpu::WaitAny` hypothesis above was **disproven**. Verification
+trail:
 
-The `b54503497` revert path is one commit deep
-(`git checkout webllm-browser-patches~1` would land on `fc1f81242`),
-making investigation cheap. Surgery on the `WaitAny` integration is
-out of Task 0's scope and explicitly out of "surgical changes"
-doctrine for this session.
+1. Reverted `b54503497` on `webllm-browser-patches` via
+   `git revert --no-edit b54503497` → revert commit
+   `ffaa6ad4e Revert "ggml-webgpu: use wgpu::WaitAny under JSPI ..."`
+   (non-destructive — restorable via `git revert HEAD` on the same
+   branch).
+2. Rebuilt both wasm32 + mem64 WASM artifacts (`make wasm-build` →
+   ggml commit pin moved to `ffaa6ad4e` per CMake configure log).
+3. Re-ran `make smoke-bench PERF_MODEL=tinyllama-1.1b-chat-q4_0
+   PERF_RUNS=3` → **timed out on Run 1/3 with the identical
+   signature**.
+4. Manual fresh navigation to `?v=postrevert-1&ingest=off` in the
+   reused agentchrome tab progressed steps 1-6/8 cleanly, then
+   stalled at "[6/8] Tokenizer ready" with no further progress
+   for 7+ minutes (still pinned at the time of writing). Identical
+   to the pre-revert behavior. Same single benign console message
+   (`adapter_info: vendor: apple ...`). No errors.
+
+Inspection of `b54503497`'s `get_tensor_map_pending` flag logic:
+correct on paper (acquire → set true → WaitAny → reset to false at
+line 642). Logic doesn't explain the hang.
+
+## Updated root cause hypothesis
+
+Tracing what changed since the last green tinyllama trace at
+**2026-05-05 03:03:50 UTC** (run_id `1777950230832-irej74`,
+79.8 tok/s greedy at 64 tokens per `eval/reports/smoke-runs.db`):
+
+- llama.cpp `webllm-browser-patches` only added `b54503497` (now
+  ruled out) — `fc1f81242` was already in tree at 03:03 UTC.
+- webllm tree diff vs that timestamp: ~30 commits including the
+  full **P2 v1 migration** (`4bb644c..bd7ae4b`, 11 commits that
+  deleted `model-inference.ts` and routed everything through
+  `LlamaDecodeWrapper`) **and its revert** at `0b57d41`
+  (`revert(p2): roll back wrapper+dispatch+delete; keep bridge
+  surface`, **4179 insertions / 1243 deletions across 25 files**).
+
+The P2 v1 revert kept the C++ bridge expansion live
+(`webllm_get_metadata`, `webllm_n_ctx_*`, `webllm_kv_seq_rm/clear`,
+`webllm_state_seq_*`, `webllm_get_embeddings`, `webllm_perf_counter`
+on `src/wasm/webgpu-bridge.cpp`; matching TS bindings in
+`src/inference/llama-bridge.ts`). The hang therefore most plausibly
+lives in **incomplete revert state** — either
+`engine.adoptPreloadedModel` (smoke page line 743), the restored
+`model-inference.ts` (2890 LOC re-introduced), or the `model-loader.ts`
+delta (451 lines modified) — rather than in `b54503497`.
+
+## Suggested next-session triage
+
+1. **Quick bisect**: `git checkout 72cd44c` (the commit immediately
+   before P2 v1 plan-write — `docs(TODO): close P0+P1, surface P2
+   quickstart for next session`), rebuild WASM (still need to also
+   `git checkout webllm-browser-patches~N` on llama.cpp to pre-`b4d4b48`
+   JSPI pivot), run `make smoke-bench`. If green: confirms regression
+   landed during P2 v1 work and survived the revert. If still hangs:
+   look further back, possibly to the JSPI-pivot commit `b4d4b48`.
+2. **Targeted diff**: `git diff 72cd44c...0b57d41 -- src/core/engine.ts
+   src/inference/model-inference.ts src/inference/generation.ts
+   src/models/model-loader.ts` to surface the post-revert deltas
+   most likely to affect the chat-decode hot path.
+3. **Decide whether to keep `ffaa6ad4e` (the WaitAny revert)** — it
+   pollutes the patch stack one commit deep and was based on a
+   wrong hypothesis. Cleanup: `git revert HEAD` on
+   `webllm-browser-patches` (restores `b54503497` via a second
+   revert) **or** force-rebuild back to `b54503497` via
+   `git reset --hard b54503497` (destructive — flagged in CLAUDE.md
+   as needing explicit user authorization). The reflog still
+   contains `ffaa6ad4e` for ≥30 days regardless.
 
 ## Notes
 
