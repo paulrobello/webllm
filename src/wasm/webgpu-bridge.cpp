@@ -649,4 +649,43 @@ void webllm_kv_clear(void* ctx_handle) {
     llama_memory_clear(mem, /*data=*/true);
 }
 
+// Get the byte size needed to serialize seq_id's KV state.
+// Returns 0 on failure (or empty seq).
+int32_t webllm_state_seq_get_size(void* ctx_handle, int32_t seq_id) {
+    if (!ctx_handle) return 0;
+    auto* ctx = static_cast<llama_context*>(ctx_handle);
+    return (int32_t) llama_state_seq_get_size(ctx, (llama_seq_id) seq_id);
+}
+
+// Copy seq_id's KV state into a caller-provided buffer.
+// Returns the number of bytes written, 0 on failure.
+// Caller must size dst to at least webllm_state_seq_get_size.
+int32_t webllm_state_seq_get_data(
+    void* ctx_handle,
+    void* dst,
+    int32_t size,
+    int32_t seq_id)
+{
+    if (!ctx_handle || !dst || size <= 0) return 0;
+    auto* ctx = static_cast<llama_context*>(ctx_handle);
+    return (int32_t) llama_state_seq_get_data(
+        ctx, (uint8_t*) dst, (size_t) size, (llama_seq_id) seq_id);
+}
+
+// Restore seq_id's KV state from a caller-provided buffer.
+// Returns positive on success, 0 on failure (per upstream contract).
+// The buffer must have been produced by webllm_state_seq_get_data
+// from a context with the SAME model + n_ctx + flash_attn flag.
+int32_t webllm_state_seq_set_data(
+    void* ctx_handle,
+    const void* src,
+    int32_t size,
+    int32_t dest_seq_id)
+{
+    if (!ctx_handle || !src || size <= 0) return 0;
+    auto* ctx = static_cast<llama_context*>(ctx_handle);
+    return (int32_t) llama_state_seq_set_data(
+        ctx, (const uint8_t*) src, (size_t) size, (llama_seq_id) dest_seq_id);
+}
+
 } // extern "C"
