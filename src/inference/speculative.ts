@@ -3,9 +3,33 @@ import type {
 	GenerationResult,
 	InternalGenerationOptions,
 } from "./generation.js";
-import type { ModelInference } from "./model-inference.js";
 import type { Sampler } from "./sampler.js";
 import { StreamingDecoder, type Tokenizer } from "./tokenizer.js";
+
+/**
+ * Structural slice of the legacy ModelInference / new
+ * LlamaDecodeWrapper public surface that spec-decode reads. Declared
+ * locally so this file compiles without binding to either concrete
+ * class — spec-decode rewires onto LlamaDecodeWrapper in P5.
+ *
+ * Runtime path is gated by SpeculativeDecodingReservedError in
+ * engine.ts; this interface exists for type-checker continuity only.
+ *
+ * `forwardVerify` returns logits for ALL positions in the verify batch
+ * (one row per position); `forward` returns just the last position's
+ * logits. The legacy ModelInference implements both; LlamaDecodeWrapper
+ * implements only `forward`. P5 adds a verify-shaped bridge primitive
+ * to fill the gap.
+ */
+export interface SpecDecodeForwardPass {
+	forward(tokenIds: Int32Array, positions: Int32Array): Promise<Float32Array>;
+	forwardVerify(
+		tokenIds: Int32Array,
+		positions: Int32Array,
+	): Promise<Float32Array>;
+	truncateKVCache(keepLen: number): void;
+	cachedTokenCount: number;
+}
 
 /**
  * Per-stream warn-once state. The driver constructs one of these per stream
@@ -215,10 +239,10 @@ function sampleResidual(
 export interface SpeculativeGenerateOptions {
 	/** Pre-tokenized prompt token IDs. */
 	promptTokenIds: number[];
-	/** Loaded target ModelInference. */
-	target: ModelInference;
-	/** Loaded drafter ModelInference (must share the target's tokenizer). */
-	drafter: ModelInference;
+	/** Loaded target forward-pass surface. */
+	target: SpecDecodeForwardPass;
+	/** Loaded drafter forward-pass surface (must share the target's tokenizer). */
+	drafter: SpecDecodeForwardPass;
 	/** Tokenizer for streaming-text decoding. */
 	tokenizer: Tokenizer;
 	/** User's Sampler (seeded; both drafter and target draws + rejection rolls
