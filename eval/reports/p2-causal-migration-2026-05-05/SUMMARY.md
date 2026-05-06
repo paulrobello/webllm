@@ -1,8 +1,13 @@
 # P2 — Causal-LM migration to `webllm_decode` (closure)
 
 > **Date:** 2026-05-05
-> **Commit range:** `4bb644c..374cc46` (11 commits)
-> **Verdict:** **PASS-with-followups** — code-level migration complete and locked behind passing `make checkall`; same-tip canonical-6 bench parity gate **not captured** (browser bench harness wedged before any model loaded — see "Parity gate caveat" below). Code-side correctness is high-confidence (typecheck/lint/fake-bridge unit tests + structural review on every commit); throughput parity gate **deferred to a follow-up retake** once the smoke-bench harness wedge is debugged.
+> **Original commit range:** `4bb644c..374cc46` (11 commits)
+> **Original verdict (superseded):** PASS-with-followups
+> **Final verdict:** **PARTIAL REVERT** — same-tip canonical-6 bench retake on `bd7ae4b` post-Task-11 fix exposed an 18× decode-throughput regression on tinyllama. Path A investigation (P2.1.A — see [`POST-MIGRATION-BENCH.md`](POST-MIGRATION-BENCH.md)) localized the cost to per-WebGPU-dispatch JS↔WASM shim crossings under the emdawnwebgpu port — intrinsic to running `ggml-webgpu` inside WASM, not patchable in llama.cpp. P2.1.B section (same doc) reframes this as an architectural mismatch, not a perf-recovery problem, and surfaces a third path (JSEP-style: WASM scheduler + JS-side WebGPU kernels, the pattern transformers.js / ORT-Web ships).
+>
+> **Action taken (commit `0b57d41`):** partial revert of Tasks 5-11 + smoke-page port; bridge expansion (Tasks 1-4 + TS interface) kept as-is for the next-session JSEP-style architecture. `ModelInference` legacy path restored; throughput recovers to legacy baseline.
+>
+> **Read this report bottom-up.** The original "Outcome" / "LOC delta" / "Patches consumed" / "Test posture" sections below describe the v1 migration as it was attempted; they are accurate as a snapshot of `374cc46` but no longer describe the codebase. The follow-up sections in `POST-MIGRATION-BENCH.md` carry the load-bearing narrative.
 
 ## Outcome
 
@@ -165,6 +170,8 @@ Per spec design doc §P2 side-effects:
 
 ## Next phase
 
-**P3 — Encoder migration.** Goal: delete `src/inference/encoder-inference.ts` (~565 LOC); BERT / nomic / jina forward goes through `webllm_encode` (or `llama_decode` with `embeddings=true` + `pooling_type=MEAN/CLS` per arch). Spec §P3.
+**Superseded by partial revert.** P3 (Encoder migration) is **deferred indefinitely** because it would inherit the same per-dispatch shim cost ceiling that killed P2 v1 (encoder graphs issue the same hundreds of WebGPU commands per forward pass; the architectural mismatch is not specific to causal-LM decode).
 
-The bridge surface added in P2 (`webllm_get_embeddings`, `webllm_get_metadata`, `webllm_kv_*`, `webllm_state_seq_*`) covers most of P3's needs; expected new bridge work is `webllm_encode` (1 export) wrapping `llama_encode`. Per-encoder pooling dispatch becomes `llama_context_params.pooling_type`.
+**Next-session focus:** P2-v2 (JSEP-style architecture) — see [`POST-MIGRATION-BENCH.md` § P2.1.B](POST-MIGRATION-BENCH.md) for the architectural reframe and the recommended phasing. P3-P5 unblock once P2-v2 ships.
+
+The bridge surface from Tasks 1-4 + 5 (`webllm_get_embeddings`, `webllm_get_metadata`, `webllm_n_*`, `webllm_kv_*`, `webllm_state_seq_*`, `webllm_perf_counter`) is preserved across the partial revert and is directly usable from any JSEP-style backend that needs to expose WASM-side state to JS.

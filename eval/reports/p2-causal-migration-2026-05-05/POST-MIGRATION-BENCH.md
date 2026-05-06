@@ -133,3 +133,61 @@ The original A/B/C tree narrows. New options:
 - `~/Repos/llama.cpp/ggml/src/ggml-webgpu/CMakeLists.txt` + `ggml-webgpu.cpp`: JSPI `WaitAny` patch (13 lines). Correctness-preserving regardless of which path is chosen — should be committed (or upstreamed) under any path.
 - `src/wasm/webgpu-bridge.cpp` + `CMakeLists.txt`: `webllm_perf_counter` diagnostic export (~25 LOC). Useful for future perf probes; can be kept as-is or trimmed.
 - `src/inference/llama-decode-wrapper.ts`: `__mainCtxHandle` getter (`@internal`, 7 LOC). Same — keep or trim.
+
+---
+
+## P2.1.B — Architectural reframe: the JSEP pattern (2026-05-05)
+
+The framing of Path A/B/C/A.4 above misses a third real architecture. The original A/B/C tree implicitly assumed any GPU-accelerated path **must** route every WebGPU call through WASM; under that constraint, the per-dispatch shim cost is intrinsic. That assumption is wrong — there's a production existence proof to the contrary.
+
+### The existence proof: transformers.js + ONNX Runtime Web
+
+[transformers.js](https://huggingface.co/docs/transformers.js/index) ships browser-side LLM inference using ONNX Runtime Web (`onnxruntime-web`). Its WebGPU execution provider is implemented as **JSEP** — the JS Execution Provider — visible in the ORT-Web source tree at `onnxruntime/js/web/lib/wasm/jsep/`. The architecture:
+
+1. ORT-Web's WASM core handles model loading, graph optimization, and kernel-dispatch decisions.
+2. **WebGPU EP kernels are implemented in TypeScript, not C++** (`jsep/webgpu/ops/*.ts`).
+3. When the WASM scheduler picks a kernel, it calls back into JS via a registered callback table (Emscripten's `Module["jsepRunKernel"]`).
+4. The JS kernel records WebGPU dispatches **directly against `navigator.gpu`** — no Dawn, no `emdawnwebgpu`, no C++→JS shim.
+
+The WASM↔JS boundary in ORT-Web's WebGPU EP is at the **kernel** level (one crossing per op, ~20-50 per token), not the **WebGPU command** level (hundreds per token). The per-dispatch shim cost we hit in Tier 3 P2 v1 simply doesn't exist in their architecture.
+
+This is not theoretical. transformers.js + ORT-Web has been shipping JSEP for two years and is the de-facto template for browser GPU LLM inference.
+
+### Path 3 — JSEP-style architecture for webllm
+
+A faithful adaptation to the llama.cpp + ggml stack:
+
+- **WASM-side:** llama.cpp's tensor allocator, graph builder, scheduler, KV cache, sampler, tokenizer all stay. A new ggml backend (`ggml-jsep` or similar) replaces `ggml-webgpu` in the WASM build. Its kernel implementations don't issue Dawn/wgpu calls — they emit `EM_ASM` / Emscripten callbacks that hand the JS side a {op type, operand handles, dims, strides} descriptor and await a "kernel done" callback.
+- **JS-side:** a TS module implements the WebGPU recording for each ggml op (matmul, RMS norm, rotary, attention, MLP variants, quant-dequant, etc.). It speaks WebGPU directly via `navigator.gpu` — same model the legacy `ModelInference` uses, but driven by the WASM scheduler instead of a TS-side graph.
+- **Shared:** WGSL shaders are reused from `ggml-webgpu`'s shader directory (which is already pre-generated and string-embedded today).
+
+### Comparison table
+
+| Path | Architecture | Maintenance burden | 8B perf ceiling | Existence proof |
+|---|---|---|---|---|
+| Legacy `ModelInference` | TS-side WebGPU, hand-rolled per upstream shader change | High — manual port of every upstream `ggml-webgpu` change | Good (110 tok/s tinyllama observed; ~25-35 tok/s 8B Q4 expected) | webllm `model-inference.ts` itself |
+| Tier 3 P2 v1 (`ggml-webgpu` in WASM via Dawn) | C++ kernels in WASM, Dawn shim → JS WebGPU per call | Low — upstream rebases just work | **Capped by shim cost** (~6 tok/s tinyllama observed) | This report |
+| **Path 3 — JSEP-style** | WASM scheduler, TS kernels recording WebGPU directly | Medium — TS kernel ports per ggml op (smaller + more stable than full shaders) | Should match legacy (no shim cost; same JS WebGPU API surface) | **transformers.js + ORT-Web JSEP** |
+
+### Why this changes the recommendation
+
+Path 3 captures most of Tier 3's maintenance win (the load-bearing parts — graph builder, KV cache, sampler, tokenizer, ggml ops layout — stay upstream), without paying the per-dispatch shim cost. The cost is medium-effort: TS implementations of each ggml op the project actually uses. That's a finite, well-bounded surface (matmul + a handful of normalizations + rotary + attention + MLP variants) — not the open-ended "track every upstream shader change" burden that motivated Tier 3 in the first place.
+
+The legacy `ModelInference` is ~2890 LOC of TS that already does this for its hand-rolled graph. JSEP-style would reuse most of those shader recordings but drive them from a WASM scheduler instead of a TS one. **The legacy code becomes the kernel reference, not a dead artifact.**
+
+### Recommendation
+
+**Partial revert + plan P2-v2 around Path 3.**
+
+- Revert Tasks 5-11 (wrapper + dispatch flip + delete + smoke-page port) to restore working causal-LM throughput.
+- **Keep** Tasks 1-4 + 5 (bridge expansion: model metadata, KV cache mutation, state-seq, embeddings readback, TS bridge interface). These are additive C++ exports + TS wiring that any JSEP-style path will need to expose WASM-side state to JS.
+- **Keep** the `webllm_perf_counter` diagnostic — useful for verifying graph-reuse + dispatch counts under a JSEP-style backend.
+- **Keep** the JSPI `WaitAny` patch in llama.cpp (correctness, useful regardless).
+- File a fresh P2-v2 plan in TODO.md for the next session targeting JSEP-style architecture. Phase 1 of that work is a research probe: read ORT-Web's `jsep/` source to understand the kernel-dispatch ABI, then prototype a single op (matmul) end-to-end through the new path and measure tok/s.
+
+### Decision tree (refined)
+
+- **Path 3 (recommended):** Plan P2-v2 around JSEP-style architecture. Multi-week design + prototype phase before the implementation phases. Real existence proof reduces architectural risk.
+- **Path C (revert + accept indefinite Tier 3 deferral):** Lower upfront cost, higher long-term maintenance burden as upstream `ggml-webgpu` evolves. Reasonable fallback if Path 3's prototype phase reveals unexpected blockers.
+- **Path B (ship slow):** Still not recommended.
+- **Path A.4 (revert JSPI; restore ASYNCIFY):** Now clearly dominated. Same shim, same per-call cost. Drop.

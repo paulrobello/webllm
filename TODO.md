@@ -837,98 +837,62 @@ Prior cycle 2026-05-01 was §27 (mul-mat vectorize #22578 +
 upscale shader; tip `e29753286`); sweep matrix at
 [`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md).
 
-### Tier 3 migration to upstream `llama_decode` (NEW DIRECTION 2026-05-05)
+### Tier 3 migration to upstream `llama_decode` (REDIRECTED 2026-05-05)
 
-**Status: P0 + P1 + P2 CLOSED. Next phase = P3 (Encoder migration).**
+**Status: P0 + P1 closed. P2 v1 attempted then partially reverted (18× decode regression — architectural mismatch, not perf-tuning).** Next phase = **P2-v2 (JSEP-style architecture)**, design-and-prototype phase before any further migration work. P3-P5 deferred behind P2-v2.
+
+**Why redirected:** P2 v1 routed causal-LM through `ggml-webgpu` compiled inside WASM (Dawn / `emdawnwebgpu` port). Per-WebGPU-command JS↔WASM shim crossings under the emdawnwebgpu port dominated decode time. Path A investigation (commits `c8e1dc6` + `fe167aa`) ruled out graph caching, JSPI polling loops, and end-of-graph waits as bottlenecks; the cost is intrinsic to running `ggml-webgpu` inside WASM and not patchable in llama.cpp. The fix is architectural: route WebGPU calls from JS, not from WASM (the JSEP pattern that transformers.js + ORT-Web ships in production). Full reasoning: [`eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md`](eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md) §P2.1.A + §P2.1.B.
 
 **Spec:**
 [`docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md`](docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md)
-(see §P3 for the canonical step list).
+(needs an addendum for the P2-v2 architectural redirect — first task of next session).
 
-#### Next-session quickstart for P3 — Encoder migration
+#### Next-session quickstart for P2-v2 — JSEP-style architecture
 
-**Goal:** delete `src/inference/encoder-inference.ts` (~565 LOC).
-BERT / nomic / jina forward goes through a new `webllm_encode`
-bridge primitive (or `llama_decode` with `embeddings=true` +
-`pooling_type=MEAN/CLS` per arch). Encoder cosine parity vs HF
-reference vectors stays at C-strict.
+**Goal of next session: design + prototype, not implement.** Treat this as a multi-week phase that opens with a research probe, validates with a single-op prototype, then re-plans the implementation phase based on measurements.
 
-**State you can rely on (all on `main` as of 2026-05-05, post-P2):**
-- Bridge surface from P2 covers most of P3's needs:
-  `webllm_get_metadata`, `webllm_get_embeddings` (already JSPI-
-  wrapped), `webllm_n_ctx_train`, `webllm_n_embd`, `webllm_n_layer`,
-  `webllm_n_head`, `webllm_n_head_kv`, `webllm_n_ctx`,
-  `webllm_kv_seq_rm`, `webllm_kv_clear`, `webllm_state_seq_*`.
-- `LlamaDecodeWrapper` (`src/inference/llama-decode-wrapper.ts`)
-  already creates a side context with `embeddings=true` +
-  `pooling=LAST` for Bucket-D self-embed; encoder pooling
-  (`CLS=2` / `MEAN=1`) is the only new pooling-type wiring needed.
-- `loadModelMetadata` (`src/models/model-loader.ts`) already
-  surfaces encoder metadata (`isEncoderArchitecture(arch)` branch
-  reads `${arch}.pooling_type`, `${arch}.attention.causal`,
-  `${arch}.attention.alibi_bias_max`). No changes needed there.
-- `getRopeModeForArchitecture` lives in `src/inference/rope/rope-mode.ts`
-  — encoder-inference.ts still imports it for the legacy graph
-  builder. Deletes alongside encoder-inference.ts in P3 step 4.
+**Core architectural shift:** llama.cpp's tensor allocator + graph builder + scheduler + KV cache + sampler + tokenizer stay in WASM. A new ggml backend (`ggml-jsep` or similar) replaces `ggml-webgpu` in the WASM build. Its kernel implementations don't issue Dawn/wgpu calls — they emit `EM_ASM` / Emscripten callbacks that hand the JS side a {op type, operand handles, dims, strides} descriptor and await a "kernel done" callback. JS-side TS module implements WebGPU recording for each ggml op (matmul, RMS norm, rotary, attention variants, MLP variants, quant-dequant). It speaks WebGPU directly via `navigator.gpu` — same model as the legacy `ModelInference`, but driven by the WASM scheduler.
 
-**Steps (per spec §P3):**
-1. Add `webllm_encode` async wrapper using `llama_encode` (or
-   `llama_decode` with `embeddings=true` + `pooling_type=MEAN/CLS`
-   per arch). JSPI-wrap it.
-2. Add `src/inference/llama-encode-wrapper.ts` (~80 LOC) — likely
-   a thin extension of `LlamaDecodeWrapper`'s `embed()` path
-   that routes encoder-arch families through `llama_encode`.
-3. Update `engine.ts` encoder branch + `engine.embed` dispatch.
-4. Delete `src/inference/encoder-inference.ts`.
-5. Run encoder cosine parity vs HF reference vectors (existing
-   `eval/reports/<probe>/`-style ref capture pattern).
+**State you can rely on (all on `main` as of `0b57d41`, post-revert):**
+- Legacy `ModelInference` is restored (`src/inference/model-inference.ts`, ~2890 LOC) and runs at the canonical-6 baseline (110 tok/s tinyllama). It's the **kernel reference** — JSEP-style TS kernels can be ported from its hand-rolled WebGPU recording.
+- Bridge expansion from P2 Tasks 1-4 + 5 is **kept** across the revert. Useful for JSEP-style: any time the WASM scheduler needs to expose state to JS-side kernels (KV mutation, embeddings readback, model metadata), these exports already exist.
+  - C++ exports (`src/wasm/webgpu-bridge.cpp`): `webllm_get_metadata`, `webllm_n_ctx_train/n_embd/n_layer/n_head/n_head_kv/n_ctx`, `webllm_kv_seq_rm/kv_clear`, `webllm_state_seq_get_size/get_data/set_data`, `webllm_get_embeddings`, `webllm_perf_counter`.
+  - TS bindings (`src/inference/llama-bridge.ts`): typed wrappers for all of the above.
+- `webllm_perf_counter` (commit `fe167aa`) reads `llama_perf_context()` directly — useful for verifying graph-reuse engagement under any future backend.
+- llama.cpp local branch `webllm-browser-patches` has an uncommitted JSPI `WaitAny` patch in `ggml-webgpu` (correctness improvement, not perf-recovery). To be committed in the next session as a standalone patch.
 
-**Parity gate (C-strict):** cosine vs HF reference ≥ pre-migration
-value (currently 0.76 on arctic-embed-s synonym pair).
+**Phase 1 — Research probe (NEW SESSION OPENER):**
+1. Read ORT-Web `jsep/` source (https://github.com/microsoft/onnxruntime, `js/web/lib/wasm/jsep/`). Specifically: how does the WASM core call back into JS to execute a kernel? What's the shape of the descriptor passed across the boundary? How are GPU buffers referenced (handle vs pointer)? How does the scheduler decide which kernel to invoke? Aim: 1-page mental model of the JSEP ABI.
+2. Read ggml's backend interface (`ggml/src/ggml-backend-impl.h` + `ggml-cpu.cpp` as the reference implementation). Understand the contract a backend implements: tensor allocation, op dispatch, async work, queue waits. Aim: identify the minimum surface a JSEP-style backend needs to fill.
+3. Catalog ggml ops the project actually uses for the canonical 6 (run `webllm_perf_counter` + a small instrumentation patch on `ggml-webgpu` to log op kinds during a tinyllama decode). Aim: bounded list of TS kernels needed for v2 (likely ~20-30 ops).
 
-**Patch budget:** still in band B (3 reserved). P0 used 0; P1
-used 0; P2 used 0. P3 should also need 0 — additive bridge
-surface + TS rewrite.
+**Phase 2 — Single-op prototype:**
+4. Implement a stub JSEP-style backend in llama.cpp that supports exactly one op (matmul) — the rest fall through to CPU. Wire JS-side matmul kernel that records WebGPU dispatches for the same op the legacy `ModelInference` already handles.
+5. Build webllm WASM with the stub backend. Run a 1-token tinyllama decode and measure: total decode time, kernel-callback count, JS↔WASM crossing count.
+6. Compare against legacy `ModelInference` (same model, same hardware, same browser). Decision gate: per-token cost within ±2× of legacy → green-light Phase 3. Worse than 5× → re-evaluate (the JSEP pattern itself may be incompatible with our scheduler shape).
 
-#### Closure summaries
+**Phase 3+ (only after Phase 2 passes the gate):**
+7. Plan written for all needed ops. Effort scales with op count (~20-30 ops × small kernel each).
+8. Execute via subagent-driven-development on the new plan.
+9. Parity + perf gate: same canonical-6 sweep as legacy, ±10% throughput, accuracy within sampling noise.
 
-**P0 (CLOSED 2026-05-05).** TinyLlama Q4_0 → `webllm_decode` →
-top-1 = " Paris" id 3681. Plan
-[`docs/superpowers/plans/2026-05-05-tier3-p0-spike.md`](docs/superpowers/plans/2026-05-05-tier3-p0-spike.md);
-closure report
-[`eval/reports/p0-spike-2026-05-05/SUMMARY.md`](eval/reports/p0-spike-2026-05-05/SUMMARY.md).
-Three build-config deltas: `GGML_CPU=ON`, `WASM_BIGINT=1` on
-wasm32, `LLAMA_WASM_MEM64=OFF`.
+**Patch budget:** band B unchanged (3 reserved). P0 used 0; P1 used 0; P2 v1 used 0; expected P2-v2 budget: 1-2 patches (a JSEP-style backend in `ggml/`, possibly a hook in `llama-context.cpp` for the kernel-dispatch callback registration). Likely upstreamable to llama.cpp under a `GGML_BACKEND_JSEP` flag.
 
-**P2 (CLOSED 2026-05-05).** Causal-LM migration shipped. 11
-commits (`4bb644c..374cc46`); net **−2646 LOC** of TypeScript;
-0 llama.cpp patches consumed. `model-inference.ts` (~2890 LOC)
-deleted; new `LlamaDecodeWrapper` class drives the causal-LM
-forward path through `webllm_decode`. `make checkall` green
-(731/23/0 — 28 fewer tests after deleting 8 files that imported
-`ModelInference` directly to test internals of the deleted class;
-6 new fake-bridge unit tests added). Closure report
-[`eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md`](eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md).
-Plan [`docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md`](docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md).
-Side-effects: §1 "Decode graph reuse (deferred)" and §4 "Flash
-attention in browser" closed by P2 supersedence (TS-side graph
-optimization is moot under Tier 3).
+**Side-effects: items obviated.** P2 v1's "side-effects closed" claims for §1 (Decode graph reuse) and §4 (Flash attention in browser) are **withdrawn** with the revert. The legacy `ModelInference` retains its own graph caching + FA gating, and those remain live until P2-v2 ships its replacement.
 
-**P2 followups (open):**
-- **P2.1** — same-tip greedy bench retake on canonical 6 once
-  smoke-bench harness wedge is debugged. Goal: confirm accuracy
-  within sampling noise (±2/36) and decode tok/s within ±10%
-  vs the 2026-05-01 profile-mode pins. Same-tip control was
-  attempted 2026-05-05 but every canonical-6 model failed with
-  "no signal from page for 184s — `__benchStatus` never published";
-  this is a tooling-side wedge (smoke server up, agentchrome
-  reachable, dashboard up, but page can't load any model). Likely
-  candidates: stale agentchrome tab + GPU memory pressure from
-  142 prior runs. Restart browser + reset dashboard DB as first
-  step.
-- **P2.2** — Bucket-D distinguishability gate retake against the
-  wrapper-based embed path (16+16 mean-margin per 2026-04-30
-  doctrine; canonical embedder fleet outside the canonical 6).
+#### Closure stub: P2 v1 (REVERTED 2026-05-05)
+
+P2 v1 attempted the migration via `ggml-webgpu` + Dawn inside WASM (commits `4bb644c..bd7ae4b`). Code-level migration was structurally clean (`make checkall` green throughout the 11-commit chain, spec compliance + code quality reviews ✅ on every commit, 6 fake-bridge unit tests). The runtime regression was an **architectural mismatch**, not a code bug: the WebGPU dispatch model assumed by `ggml-webgpu` (issue calls from C++/WASM) is incompatible with browser perf characteristics under the current emscripten + Dawn stack (`emdawnwebgpu` per-call shim cost dominates decode time at single-token batch).
+
+- Closure report: [`eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md`](eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md) (with addenda)
+- Bench halt + Path A investigation: [`eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md`](eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md)
+- Architectural reframe: same doc §P2.1.B
+- Original plan: [`docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md`](docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md) (kept as historical record)
+- Partial revert commit: `0b57d41 revert(p2): roll back wrapper+dispatch+delete; keep bridge surface`
+
+**Withdrawn followups** (no longer applicable post-revert):
+- ~~P2.1 — same-tip greedy bench retake on canonical 6~~ (the regression itself is the conclusive measurement)
+- ~~P2.2 — Bucket-D distinguishability gate retake against the wrapper-based embed path~~ (wrapper deleted; legacy `embed()` remains via `ModelInference`)
 
 #### Closure summaries
 
