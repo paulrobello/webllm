@@ -627,4 +627,26 @@ int32_t webllm_n_ctx(void* ctx_handle) {
     return (int32_t) llama_n_ctx(static_cast<llama_context*>(ctx_handle));
 }
 
+// Drop tokens [p0, p1) for seq_id from the context's KV cache.
+// p1 = -1 means "to the end". Used by truncateKVCache and by
+// loadKVCache after a full state-set followed by truncation.
+// The bool return of llama_memory_seq_rm is intentionally discarded:
+// partial-removal failure is non-fatal for the wrapper's truncation
+// use-case (a partially-removed sequence still satisfies "tokens >=
+// keepLen are gone").
+void webllm_kv_seq_rm(void* ctx_handle, int32_t seq_id, int32_t p0, int32_t p1) {
+    if (!ctx_handle) return;
+    auto* ctx = static_cast<llama_context*>(ctx_handle);
+    llama_memory_t mem = llama_get_memory(ctx);
+    llama_memory_seq_rm(mem, (llama_seq_id) seq_id, (llama_pos) p0, (llama_pos) p1);
+}
+
+// Clear all sequences. Equivalent to a full resetKVCache.
+void webllm_kv_clear(void* ctx_handle) {
+    if (!ctx_handle) return;
+    auto* ctx = static_cast<llama_context*>(ctx_handle);
+    llama_memory_t mem = llama_get_memory(ctx);
+    llama_memory_clear(mem, /*data=*/true);
+}
+
 } // extern "C"

@@ -110,7 +110,8 @@ if(EMSCRIPTEN)
         "_webllm_token_bos,_webllm_token_eos,"
         "_webllm_get_metadata,"
         "_webllm_n_ctx_train,_webllm_n_embd,_webllm_n_layer,"
-        "_webllm_n_head,_webllm_n_head_kv,_webllm_n_ctx"
+        "_webllm_n_head,_webllm_n_head_kv,_webllm_n_ctx,"
+        "_webllm_kv_seq_rm,_webllm_kv_clear"
     )
 
     # JSPI requires explicit listing of exports that may transitively call
