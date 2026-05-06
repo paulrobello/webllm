@@ -851,7 +851,7 @@ upscale shader; tip `e29753286`); sweep matrix at
 - Spec: [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
 - Plan: [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
 
-#### Phase 2 prototype CLOSED 2026-05-06 — Outcome D (chat works, JSEP dormant) confirmed by Task 11/12, then **OUTCOME E** banked by Task 13/14 synthetic probe (routing-layer validated: scheduler routes MUL_MAT to JSEP via `offload_op` when src on host_buf, `runOp = 1`; execution-layer blocked by missing cross-backend tensor-import shim — Phase 3 path firmed to **Option A-prime / full JSEP residency**)
+#### Phase 2 prototype CLOSED 2026-05-06 — Outcome D (chat works, JSEP dormant) confirmed by Task 11/12, then **OUTCOME E** banked by Task 13/14 synthetic probe (routing-layer validated: scheduler routes MUL_MAT to JSEP via `offload_op` when src on host_buf, `runOp = 1`; execution-layer blocked by missing cross-backend tensor-import shim — Phase 3 path firmed to **Option A-prime / full JSEP residency**). **Phase 3 in progress 2026-05-06: Stages 0/1/1.5 closed; Stage 2 (descriptor ABI extension) queued for fresh session — see "Next session pickup — Phase 3 Stage 2" below.**
 
 - **Spec:** [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
 - **Plan:** [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
@@ -878,7 +878,66 @@ upscale shader; tip `e29753286`); sweep matrix at
 - **Patch stack:** llama.cpp `webllm-browser-patches` carries **+3 patches** (`48acb658d` Phase 2; `7919d1839` Task 9 metadata-op allowlist; `49413d8e9` Task 10 supports_buft + offload_op). **Phase 2 budget exhausted; Task 11 was zero-patch.**
 - **Build infra unchanged for production path:** `make wasm-build` legacy artifacts unaffected; canonical-6 baseline unchanged. `make wasm-build-jsep` produces `webllm-wasm-jsep.{js,wasm}` + `webllm-bundle-jsep.js` + the new `p2-v2-spike.js`. `make checkall` green post-Task-11.
 
-**Next session pickup — Phase 3 entry: Option A-prime (full JSEP residency). START HERE in a fresh session.**
+### Phase 3 progress (2026-05-06)
+
+**Stage 0 CLOSED 2026-05-06 — `b640d17` + llama.cpp on `webllm-browser-patches` (no patch — bridge change only).** Inverted device-hint via new `WEBLLM_PIN_TO_JSEP=1` build flag in `src/wasm/CMakeLists.txt` and the `webllm_load_model` block in `src/wasm/webgpu-bridge.cpp`. Spike at `?v=A-prime-stage0` confirmed JSEP hosts weights (455 MiB jsep_buf) + KV cache (11 MiB across 22 layers, all `dev = JSEP`). First scheduler abort: `SET_ROWS` on `cache_k_l0` view in `jsep_buf` — exactly as predicted. Op-ordering hypothesis validated. Closure: [`eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-0-PROBE.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-0-PROBE.md).
+
+**Stage 1 CLOSED 2026-05-06 — `e60a39e` + llama.cpp `d8b80dee2`.** Added `dispatchSetRows` (TS, ~330 LOC) with two WGSL pipelines:
+- F32→F16 atomic CAS per cell — required for the transposed V cache (`llama-kv-cache.cpp:1281`: `ggml_reshape_2d(v, 1, ggml_nelements(v))` puts ne[0]=1, adjacent indices share a u32 word).
+- F32→F32 plain write.
+Both paths support I64 + I32 indices. `supports_op` widened in companion llama.cpp commit. Spike at `?v=A-prime-stage1b` confirmed `sched_reserve` passes (798 nodes / 379 splits / 4.90 ms). Patch stack now +4. Closure: [`STAGE-1-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-1-RESULT.md).
+
+**Stage 1.5 CLOSED 2026-05-06 — `ef5ccac` + llama.cpp `d0075e9a6`.** Two follow-ons:
+- Phase 2 bug `dispatchRmsNorm` rewritten to **unary** signature (was nSrc=2 expecting input + weight; ggml `ggml_rms_norm` is unary, the per-channel weight multiply is a separate `GGML_OP_MUL` node). Test fixture updated.
+- `supports_buft` narrowed from {jsep_buft, host buft, WebGPU buft} → **jsep_buft only**. Phase 2 Task 10's host-buft acceptance caused the scheduler to dispatch ops with CPU-resident sources to JSEP without inserting CPY-to-jsep_buft, leaving `graph_compute` to deref CPU heap pointers as JSEP handles. The Phase 2 offload_op flow (Outcome E synthetic probe) is now dormant by design — Option A-prime supersedes that path.
+
+Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle" slot (`jsep_tensor_handle(t) = t->data − GGML_JSEP_PTR_BASE`) is actually the **offset within the buffer**, not a buffer handle. The Phase 2 synthetic offload probe never tripped this because each test tensor got its own `ggml_jsep_alloc` (offset 0). Under Option A-prime with a real model loaded, ~6 big JSEP buffers each contain 100+ tensors at distinct offsets; the dispatchers' `dataManager.get(handle)` rightly throws `invalid handle 0`. Closure: [`STAGE-1.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-1.5-RESULT.md).
+
+### Next session pickup — Phase 3 Stage 2: descriptor ABI extension. START HERE in a fresh session.
+
+**Goal:** fix the JSEP descriptor so `(buf_handle, offset)` is carried per tensor, not a single conflated "handle". After this lands, dispatchers can correctly bind any tensor regardless of its position within its parent JSEP buffer — every op kernel added in subsequent stages benefits for free, and the spike either completes (greedy "Paris" + tok/s readout) or surfaces the next missing op kernel (likely `MUL` or `ADD` per the Phase 3 op-surface table below).
+
+**Why this is its own stage.** It's not a new op kernel — it's an ABI fix touching multiple files. Bundling it into a kernel-stage commit muddles the diff. Keep it self-contained: zero new ops, zero new WGSL; just better descriptor packing.
+
+**Concrete edits (estimate ~150 LOC across 6-8 files):**
+
+1. **`~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp`** (companion patch on `webllm-browser-patches` — likely amend `48acb658d` Phase 2 skeleton in place; patch stack stays at +5 after Stage 1.5):
+   - Bump `GGML_JSEP_TENSOR_BLOCK_I32` from 18 to 19.
+   - Update `ggml_jsep_write_tensor_block`: emit `(buf_handle, offset)` at slots [0..1]; shift type to [2], ne_lo to [3..6], ne_hi to [7..10], nb_lo to [11..14], nb_hi to [15..18].
+   - `buf_handle` source: `((ggml_backend_jsep_buffer_context *) tensor->buffer->context)->handle` (when `tensor->buffer != nullptr`); fall back to `tensor->view_src->buffer` for views.
+   - `offset` source: keep `jsep_tensor_handle(t)` (already returns the within-buffer offset).
+   - Update top-of-file descriptor layout comment.
+
+2. **`src/inference/jsep/ops/matmul.ts`**:
+   - Bump `TENSOR_BLOCK_I32` to 19.
+   - `JsepTensorMeta` gains `bufHandle: number` + `offset: number`; remove or reinterpret `handle`.
+   - `readDescriptor` reads new slots and propagates.
+   - `dispatchMatmul`: replace `dataManager.get(src.handle).buffer` with `dataManager.get(src.bufHandle)` and bind via `{ buffer, offset: src.offset, size: <element-count * elem-bytes> }`.
+
+3. **`src/inference/jsep/ops/rms-norm.ts`** + **`set-rows.ts`**: same offset-aware binding rewrite.
+
+4. **`tests/jsep-rms-norm-golden.test.ts`** + any matmul/set-rows tests: update fixture to set `bufHandle = handle` + `offset = 0` (synthetic-probe-style).
+
+5. **`smoke-test/p2-v2-offload-probe.src.ts`**: update synthetic probe descriptor packing OR retire the probe entirely (it's already banked at Outcome E; Option A-prime supersedes its routing claim).
+
+6. **`src/wasm/webgpu-bridge.cpp::webllm_synthetic_offload_probe`**: same — update or retire alongside the harness.
+
+**Gate (run after the edit):**
+```bash
+make wasm-build-jsep && make checkall
+agentchrome --port 64702 navigate "http://localhost:8031/p2-v2-spike.html?v=A-prime-stage2" --tab <id>
+sleep 25
+agentchrome --port 64702 js exec --tab <id> 'document.getElementById("log").innerText'
+```
+
+Three possible outcomes (in order of likelihood):
+- **A. Spike completes** with greedy continuation of "The capital of France is" → "Paris" or similar. Captures `__spikeResult.perTokenMs` and `counters` deltas. Compare tok/s vs Outcome D's 81 tok/s baseline; ±20% is the gate (per the existing Suggested staging Stage 5 hypothesis). At this point Phase 3 has effectively reached parity with WebGPU-only and the next steps become perf characterization, not op-surface work.
+- **B. Next missing op kernel surfaces.** Likely candidates per the op table: `GET_ROWS` (token embedding lookup if it routed to JSEP), `ROPE`, `SOFT_MAX`, `MUL`, `ADD`. Document and queue Stage 3 for that op.
+- **C. Different ABI bug.** Treat as Stage 2.5 follow-on.
+
+**Patch budget tracker post Stage 1.5:**
+- llama.cpp `webllm-browser-patches`: 5 patches (`48acb658d`, `7919d1839`, `49413d8e9`, `d8b80dee2`, `d0075e9a6`). The TODO Phase 3 brief originally said "+3 — no new patch — amend in place"; that aspiration didn't survive Stages 1 + 1.5 because each Stage's `supports_op` / `supports_buft` change deserves its own commit message rather than amending a Phase 2 commit that has nothing to do with Phase 3. Keep one commit per stage; we can squash before any upstream submission.
+- webllm: 3 commits (`b640d17` Stage 0, `e60a39e` Stage 1, `ef5ccac` Stage 1.5).
 
 **Why Option A-prime (recap of Outcome D + E).** Task 12 (`?v=task11-1`) measured Outcome D: with the device-hint pinning libllama to WebGPU only, chat works correctly (`"Paris.\n\n2"`, 81 tok/s) but JSEP `runOp = 0` — JSEP is structurally dormant because weights+KV live in `webgpu_buf` (not host_buf), and the scheduler's `offload_op` path is gated on `ggml_backend_buffer_is_host(src->buffer)`. Task 14 (`?v=task14-3`) ran a synthetic probe that put src tensors on `ggml_backend_cpu_buffer_type()` and confirmed the routing works (`runOp = 1`, `sync = 1`); but execution fails in `dispatchMatmul → GpuDataManager.get(0xBE3000)` because JSEP can't read host-memory tensors without an import shim. **Option A-prime sidesteps both issues by inverting the device-hint** so libllama enumerates JSEP only — weights+KV then live in jsep_buf, every consumer op naturally targets JSEP, and JSEP's existing `GpuDataManager`-based dispatch path Just Works because all tensors are JSEP-owned.
 
@@ -915,14 +974,16 @@ Plus one bridge change:
 
 **Suggested staging (subagent-driven-development plan, dispatch immediately per CLAUDE.md "begin Task 1 immediately" rule):**
 
-1. **Stage 0 — pre-flight probe (~30 min).** Invert device-hint to JSEP-only, run `p2-v2-spike` at `?v=A-prime-stage0`, capture the first abort. Records the actual op-order needed.
-2. **Stage 1 — SET_ROWS kernel + supports_op case + smoke** (1 implementer + 2 reviewers). Gate: spike progresses past SET_ROWS abort to the next abort.
-3. **Stage 2 — next op revealed by Stage 0/1 (most likely GET_ROWS) + smoke**. Repeat.
-4. **Stage 3 — ROPE + SOFTMAX + smoke.**
-5. **Stage 4 — MUL + ADD (with broadcast) + Q4_K matmul + smoke.** Should reach end-to-end decode.
-6. **Stage 5 — gate measurement.** Compare tok/s vs Task 12's 81 tok/s baseline (Outcome D / WebGPU-only). Hypothesis: comparable (within ±20%) since identical compute, just different dispatch surface. Diverged outcome means kernel/dispatch overhead, not compute work.
+1. ~~Stage 0 — pre-flight probe.~~ **CLOSED 2026-05-06** (`b640d17`). Device-hint inverted via `WEBLLM_PIN_TO_JSEP=1`; first abort = `SET_ROWS` (predicted).
+2. ~~Stage 1 — SET_ROWS kernel + supports_op case + smoke.~~ **CLOSED 2026-05-06** (`e60a39e`, llama.cpp `d8b80dee2`). `sched_reserve` passes; surfaced Phase 2 RMS_NORM fused-signature bug (closed in 1.5).
+3. **Stage 1.5 — RMS_NORM unary fix + supports_buft narrowed to JSEP-only. CLOSED 2026-05-06** (`ef5ccac`, llama.cpp `d0075e9a6`). Next blocker = Phase 2 descriptor ABI bug (handle vs offset conflation).
+4. **Stage 2 — descriptor ABI extension (`buf_handle` + `offset` per tensor; bump `TENSOR_BLOCK_I32` 18→19). NEXT — START HERE.** Gate: spike either completes greedy "Paris" decode (target outcome) or surfaces the next missing op kernel (likely MUL / ADD / GET_ROWS / ROPE / SOFT_MAX). See "Next session pickup — Phase 3 Stage 2" above for concrete edit list.
+5. **Stage 3 — next op revealed by Stage 2 + smoke.** Repeat against the fresh abort.
+6. **Stage 4 — ROPE + SOFTMAX + smoke** (if not already shipped by Stage 3).
+7. **Stage 5 — MUL + ADD (with broadcast) + Q4_K matmul + smoke.** Should reach end-to-end decode if Stage 2 didn't already.
+8. **Stage 6 — gate measurement.** Compare tok/s vs Task 12's 81 tok/s baseline (Outcome D / WebGPU-only). Hypothesis: comparable (within ±20%) since identical compute, just different dispatch surface. Diverged outcome means kernel/dispatch overhead, not compute work.
 
-**Opening dispatch (Stage 0):** Modify `webgpu-bridge.cpp:411-435` to pin libllama to JSEP only when JSEP is registered (invert the existing detection). Rebuild `make wasm-build-jsep`, navigate `p2-v2-spike` at fresh `?v=A-prime-stage0`, capture stderr to identify the first scheduler abort. Document outcome in `eval/reports/p2-v2-option-a-prime-2026-05-XX/STAGE-0-PROBE.md`.
+**Opening dispatch (Stage 2 — fresh session):** Bump `GGML_JSEP_TENSOR_BLOCK_I32` to 19 in `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp` (commit on `webllm-browser-patches`). Update `src/inference/jsep/ops/matmul.ts` `TENSOR_BLOCK_I32`, `JsepTensorMeta`, and `readDescriptor`. Update `dispatchMatmul`, `dispatchRmsNorm`, `dispatchSetRows` to bind via `{ buffer, offset, size }` using the new `bufHandle`/`offset` fields. Update test fixtures + synthetic probe (or retire the probe). Rebuild `make wasm-build-jsep`, navigate `p2-v2-spike` at fresh `?v=A-prime-stage2`, capture stderr + `__spikeResult`. Document outcome in `eval/reports/p2-v2-option-a-prime-2026-05-XX/STAGE-2-RESULT.md`.
 
 **Concrete write-up + measurements** for Outcome D and E: [`SUMMARY.md`](eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md) (Task 11/12 + Task 13/14 sections). Patch budget at +3 (unchanged); Option A-prime is **zero-patch** (kernels live in webllm TS, supports_op cases amend the existing Phase 2 patch in place).
 
