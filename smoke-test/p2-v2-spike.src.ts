@@ -34,7 +34,13 @@ async function runSpike(): Promise<void> {
 		log("[1/8] Initializing JSEP WASM module...");
 		// @ts-ignore — Emscripten output, no .d.ts
 		const createModule = (await import("./webllm-wasm-jsep.js")).default;
-		const mod: any = await createModule();
+		(window as any).__stderrLines = [];
+		const mod: any = await createModule({
+			printErr: (s: string) => {
+				(window as any).__stderrLines.push(s);
+				console.error(s);
+			},
+		});
 
 		log("[2/8] Acquiring WebGPU device...");
 		const adapter = await navigator.gpu?.requestAdapter();

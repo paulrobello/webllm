@@ -1,10 +1,34 @@
 # P2-v2 Phase 2 Prototype — Closure Report
 
-**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike + Task 9 micro-cycle
-**webllm SHA:** Task 9 closure commit (this PR); predecessor Task 8 spike commit; predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
-**llama.cpp `webllm-browser-patches` SHA:** `7919d1839` (Task 9 metadata-op allowlist); predecessor `48acb658d` (Phase 2 Tasks 1+2+4)
+**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike + Task 9 + Task 10 micro-cycles
+**webllm SHA:** Task 10 closure commit (this PR); predecessor Task 9 closure commit; Task 8 spike commit; predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
+**llama.cpp `webllm-browser-patches` SHA:** `49413d8e9` (Task 10 offload_op + supports_buft); predecessor `7919d1839` (Task 9 metadata-op allowlist); predecessor `48acb658d` (Phase 2 Tasks 1+2+4)
 **Browser + GPU:** Chrome (agentchrome session 64702), Apple Metal-3
 **Prompt:** `"The capital of France is"` 6-token fixture, `max=5`, greedy (Task 8 spike harness)
+
+## TL;DR (Task 10 update)
+
+**Gate disposition: STILL-BLOCKED — Option B (narrow JSEP residency via `supports_buft` + `offload_op`) was insufficient. Same SET_ROWS abort persists, because the offload-routing path the patch enables is gated on weights living in CPU host memory — but in our build libllama places weights+KV directly into `jsep_buf`. Phase 3 must pivot to Option A-prime (broad op coverage starting with SET_ROWS) or solve the deeper "JSEP is the only enumerated GPU device" issue.**
+
+Task 10 broadened `ggml_backend_jsep_device_supports_buft` to accept CPU host bufts and ggml-webgpu's buft (named `"WebGPU"`), and added `ggml_backend_jsep_device_offload_op` returning true for MUL_MAT (F32/F16/Q4_0/Q4_K × F32 → F32) and RMS_NORM (F32 → F32). Together these advertise JSEP's interest in running its compute even when leaves live in another backend's buft.
+
+Spike harness behavior with the new patch: identical to Task 9 — same abort on `cache_k_l0 (view)` in `jsep_buf` cannot run `SET_ROWS`. The patch is correct per spec but does not change the failure path.
+
+**Root cause of Outcome C — different from spec's premise:**
+
+The spec's Option B assumed weights would land in CPU host_buf or webgpu_buf once JSEP advertised it could run ops on those bufts. In practice, `llama_prepare_model_devices` shows only ONE GPU device active: `using device JSEP (JSEP) (unknown id) - 128 MiB free`. WebGPU is registered but absent from `model->devices`. With only JSEP enumerated as GPU, libllama's GPU buft_list for JSEP-typed layers is `[jsep_buft, ...cpu_bufts]`. `select_buft` walks this list and picks the FIRST buft for which `buft_supported(buft, dev, ADD-fn)` returns true.
+
+The `offload_op` path at `ggml-backend.cpp:921` only fires when `src_backend_id == sched->n_backends - 1` AND `ggml_backend_buffer_is_host(src->buffer)` — i.e., when weights are on the CPU host backend. Our weights live in `jsep_buf` (a non-host GPU buft), so the offload path never triggers. JSEP runs MUL_MAT/RMS_NORM via direct backend assignment (not offload) in this configuration anyway, but the SET_ROWS leaf check fires before any compute runs.
+
+**Why WebGPU is absent from `model->devices`:** the dedup loop at `llama.cpp:195-202` uses uninitialized stack memory through `ggml_backend_dev_props props;` — `ggml_backend_dev_get_props` does memset the struct, but neither webgpu nor JSEP's `get_props` writes `device_id` (both leave it as nullptr after memset). Both null → dedup returns false → both should land in `gpus`. Empirically only one does. Possible explanations not yet confirmed: a third filter (e.g., props.memory_free comparison), an enumeration-order issue masking a logic bug, or webgpu's device_id being non-null via a path not visible in the source. Out of Phase-2 scope to chase; surfaces as a Phase 3 prerequisite.
+
+**Phase 3 disposition:** Option B alone cannot land the gate. Three remediation paths now identified:
+
+1. **Option A-prime** — kernel SET_ROWS, GET_ROWS, ROPE, SOFT_MAX, MUL, ADD, plus matmul dtype permutations. Effectively the back half of "full JSEP port". ~1k LOC.
+2. **Option B + reg-order swap** — register JSEP BEFORE webgpu in `ggml-backend-reg.cpp` so libllama's GPU enumeration prefers webgpu (lower index → main_gpu candidate). Combined with Task 10's broadened supports_buft + offload_op, weights would land in webgpu_buf and JSEP would offload-route MUL_MAT/RMS_NORM. **But** depends on first solving the "WebGPU absent from model->devices" puzzle.
+3. **Option B + explicit device hint** — pass `params.devices = {webgpu_dev}` to `llama_model_load_from_file` from `webllm_load_model` so JSEP is excluded from libllama's view entirely. JSEP still gets MUL_MAT/RMS_NORM via offload_op (the offload check is at scheduler level, not at libllama device-list level). Cleanest path; doesn't require investigating libllama's dedup bug.
+
+**Patch budget exhausted.** llama.cpp `webllm-browser-patches` is at +3 (Phase 2 base, Task 9 metadata, Task 10 supports_buft+offload_op). Phase 3 either negotiates +1 more or uses approach (3) above which requires no llama.cpp patches.
 
 ## TL;DR (Task 9 update)
 
