@@ -703,4 +703,25 @@ const float* webllm_get_embeddings(void* ctx_handle, int32_t ith) {
     return ith < 0 ? llama_get_embeddings(ctx) : llama_get_embeddings_ith(ctx, ith);
 }
 
+// Diagnostic: read the perf context counters directly. Used by P2.1.A
+// to verify whether upstream's graph-reuse fast path is actually
+// engaging on our single-token decode loop. Returns:
+//   field=0  → n_decode (total decode batches)
+//   field=1  → n_reused (graphs reused; should ≈ n_decode if reuse is on)
+//   field=2  → n_p_eval (prompt-eval token count, prefill)
+//   field=3  → n_eval   (decode token count, ≈ n_decode for batch=1)
+// Other fields return 0. Cheap; no async work — pure counter read.
+int32_t webllm_perf_counter(void* ctx_handle, int32_t field) {
+    if (!ctx_handle) return 0;
+    auto* ctx = static_cast<llama_context*>(ctx_handle);
+    llama_perf_context_data d = llama_perf_context(ctx);
+    switch (field) {
+        case 0: return d.n_eval; // close enough; ggml builds a graph per decode call
+        case 1: return d.n_reused;
+        case 2: return d.n_p_eval;
+        case 3: return d.n_eval;
+        default: return 0;
+    }
+}
+
 } // extern "C"

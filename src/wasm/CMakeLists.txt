@@ -113,7 +113,8 @@ if(EMSCRIPTEN)
         "_webllm_n_head,_webllm_n_head_kv,_webllm_n_ctx,"
         "_webllm_kv_seq_rm,_webllm_kv_clear,"
         "_webllm_state_seq_get_size,_webllm_state_seq_get_data,_webllm_state_seq_set_data,"
-        "_webllm_get_embeddings"
+        "_webllm_get_embeddings,"
+        "_webllm_perf_counter"
     )
 
     # JSPI requires explicit listing of exports that may transitively call
