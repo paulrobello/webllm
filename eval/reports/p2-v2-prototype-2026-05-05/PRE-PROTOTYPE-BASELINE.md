@@ -176,27 +176,109 @@ lives in **incomplete revert state** — either
 `model-inference.ts` (2890 LOC re-introduced), or the `model-loader.ts`
 delta (451 lines modified) — rather than in `b54503497`.
 
-## Suggested next-session triage
+## Bisect (2026-05-05 22:00 PT) — `b4d4b48` JSPI pivot is the regression
 
-1. **Quick bisect**: `git checkout 72cd44c` (the commit immediately
-   before P2 v1 plan-write — `docs(TODO): close P0+P1, surface P2
-   quickstart for next session`), rebuild WASM (still need to also
-   `git checkout webllm-browser-patches~N` on llama.cpp to pre-`b4d4b48`
-   JSPI pivot), run `make smoke-bench`. If green: confirms regression
-   landed during P2 v1 work and survived the revert. If still hangs:
-   look further back, possibly to the JSPI-pivot commit `b4d4b48`.
-2. **Targeted diff**: `git diff 72cd44c...0b57d41 -- src/core/engine.ts
-   src/inference/model-inference.ts src/inference/generation.ts
-   src/models/model-loader.ts` to surface the post-revert deltas
-   most likely to affect the chat-decode hot path.
-3. **Decide whether to keep `ffaa6ad4e` (the WaitAny revert)** — it
-   pollutes the patch stack one commit deep and was based on a
-   wrong hypothesis. Cleanup: `git revert HEAD` on
-   `webllm-browser-patches` (restores `b54503497` via a second
-   revert) **or** force-rebuild back to `b54503497` via
-   `git reset --hard b54503497` (destructive — flagged in CLAUDE.md
-   as needing explicit user authorization). The reflog still
-   contains `ffaa6ad4e` for ≥30 days regardless.
+User authorized "do 1 and 2": (1) drop `ffaa6ad4e` revert via
+`git reset --hard HEAD~1` on `webllm-browser-patches` (llama.cpp
+back at `b54503497`); (2) bisect through P2 v1 work.
+
+Bisect table (llama.cpp held at `b54503497` throughout):
+
+| webllm commit | Description | smoke-bench | tok/s | Notes |
+|---|---|---|---|---|
+| `72cd44c` | close P0+P1 doc | **HANG** | — | Rules out P2 v1 revert |
+| `b4d4b48` | **JSPI pivot** | **HANG** | — | First JSPI commit |
+| `b8cada0` | last ASYNCIFY (Reapply detokenize) | **GREEN** | 88.1 | 450 disp/tok, matmul 4.04 ms |
+| `9b5b362` | post-greedy-cutover docs | **GREEN** | 86.6 | Same kernel shape |
+
+**Single-commit regression at `b4d4b48 feat(wasm): pivot from
+-sASYNCIFY to -sJSPI to unblock P1 wasm exports`** (Tue May 5
+15:53 PT). The pivot only touches:
+`smoke-test/p0-spike.{src.ts,js}`,
+`smoke-test/p1-tokenizer-parity.js`,
+`src/inference/llama-bridge.ts`,
+`src/wasm/CMakeLists.txt`.
+**It does NOT touch the legacy chat-decode path
+(`src/inference/ggml-wasm.ts`,
+`src/inference/model-inference.ts`).** The build-flag flip
+alone — `GGML_WEBGPU_JSPI ON`, drop `-sASYNCIFY`, add
+`-sJSPI -fwasm-exceptions` — breaks legacy decode.
+
+## Refined root cause hypothesis
+
+Most likely cause: at `b4d4b48`, the in-tree
+`ggml-webgpu.cpp:wait_queue` and `map_buffer` were on the
+`emscripten_sleep(1)` polling loop (the WaitAny replacement at
+llama.cpp `b54503497` did not land until ~24 h later). Under
+`-sJSPI` **without** `-sASYNCIFY`, `emscripten_sleep` does not
+yield to the JS event loop the way Asyncify enables — the polling
+spin prevents the WebGPU `OnSubmittedWorkDone` callback from
+firing, so `done` is never set → infinite loop → hang.
+
+`b54503497` was supposed to fix this by switching to
+`wgpu::Instance::WaitAny` under JSPI, but the test at the
+current branch tip (with `b54503497` active) **also hangs**, so
+either:
+1. The `#if defined(__EMSCRIPTEN__) && !defined(GGML_WEBGPU_JSPI)`
+   guard at `ggml-webgpu.cpp:560` does not select the WaitAny
+   branch under our build configuration, OR
+2. `WaitAny` under JSPI has its own integration gap (e.g. the
+   wgpu-internal waitable's promise is not exposed to a
+   `JSPI_EXPORTS`-listed export).
+
+The TS-side `callWithAsyncify` at `ggml-wasm.ts:151` checks
+`this.m.Asyncify?.currData` — under JSPI, `Module.Asyncify` does
+not exist; the optional-chaining returns undefined and the check
+is a no-op. The wrapped fn() returns a JSPI-promised value
+which the async function auto-unwraps. That path is correct on
+inspection — the hang is likely in C++, not TS.
+
+## Suggested fix paths (user decision needed)
+
+**Path A — minimal: confirm `b54503497` actually engages.** Add
+a runtime trace to `wait_queue` / `map_buffer` to verify which
+branch executes under our JSPI build. If polling: the `#if`
+guard is wrong; fix to also exclude the JSPI build. If WaitAny
+and still hangs: escalate to Path B.
+
+**Path B — JSPI-promising-wrap the wgpu wait.** May require
+exposing `wgpu::Instance::WaitAny` (or an equivalent waitable
+trampoline) as a `JSPI_EXPORTS`-listed export so the suspend
+crosses the wasm/JS boundary correctly. Likely needs an upstream
+ggml-webgpu patch (count toward Phase 2 patch budget — currently
+0/3 used).
+
+**Path C — restore ASYNCIFY for legacy.** Build two WASM
+artifacts:
+- `webllm-wasm.{js,wasm}` (legacy, `-sASYNCIFY`) — current chat
+  path until P3 ports it.
+- `webllm-wasm-jsep.{js,wasm}` (P2-v2 prototype, `-sJSPI`) — new
+  jsep backend.
+
+Heavyweight but cleanly decouples the pivot's blast radius.
+P2-v2 Phase 2 is the natural vehicle since it already introduces
+the dual-artifact pattern (`wasm-build-jsep` Makefile target).
+However the pivot was justified by the
+`__wasm_call_ctors`-trap problem under ASYNCIFY + new exports;
+restoring ASYNCIFY for legacy reintroduces that constraint
+unless the new bridge exports are excluded from the legacy build.
+
+## Implication for Task 0 + Phase 2
+
+Legacy baseline cannot be captured on `main` until JSPI legacy
+decode works. **Workaround for the gate:** capture the baseline
+at `b8cada0` (pre-pivot, 88.1 tok/s) as a stale-but-known-good
+reference. Phase 2's gate becomes "jsep tok/s vs the b8cada0
+baseline" with explicit caveat that the JSPI build's intrinsic
+overhead (relative to ASYNCIFY) is folded into the comparison
+(both legacy-`b8cada0`-ASYNCIFY and jsep-JSPI carry their build's
+async-mechanism cost). This is acceptable for the prototype
+gate — the jsep test is "is the EM_ASM-per-node architecture
+viable", not "is JSPI overhead reasonable".
+
+`ffaa6ad4e` (WaitAny revert) was dropped from
+`webllm-browser-patches` per user authorization. llama.cpp tip
+restored to `b54503497`.
 
 ## Notes
 
