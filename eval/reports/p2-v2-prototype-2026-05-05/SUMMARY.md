@@ -1,12 +1,34 @@
 # P2-v2 Phase 2 Prototype — Closure Report
 
-**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike
-**webllm SHA:** Task 8 spike commit (this PR); predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
-**llama.cpp `webllm-browser-patches` SHA:** `48acb658d` (Phase 2 Tasks 1+2+4 amended)
+**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike + Task 9 micro-cycle
+**webllm SHA:** Task 9 closure commit (this PR); predecessor Task 8 spike commit; predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
+**llama.cpp `webllm-browser-patches` SHA:** `7919d1839` (Task 9 metadata-op allowlist); predecessor `48acb658d` (Phase 2 Tasks 1+2+4)
 **Browser + GPU:** Chrome (agentchrome session 64702), Apple Metal-3
 **Prompt:** `"The capital of France is"` 6-token fixture, `max=5`, greedy (Task 8 spike harness)
 
-## TL;DR
+## TL;DR (Task 9 update)
+
+**Gate disposition: STILL-BLOCKED — Option A (metadata-op allowlist) was insufficient. Task 9 unblocked the leaf check; abort moved to a real consumer op (SET_ROWS) on the KV cache. Phase 3 must broaden the op surface beyond MUL_MAT/RMS_NORM or pivot to Option B.**
+
+Task 9 broadened `ggml_backend_jsep_device_supports_op` to allowlist `NONE`, `VIEW`, `RESHAPE`, `PERMUTE`, `TRANSPOSE` (with a matching fast-path early-`continue` in `graph_compute` so `jsepRunOp` never sees them). This let `ggml_backend_sched_reserve` past the Task 8 abort point — the leaf weight check (`tensor->op == NONE` for `blk.0.attn_q.weight`) now passes.
+
+The spike progressed from "abort at first weight" all the way to **KV cache allocated + scheduler entered `graph_reserve`** before aborting on a different op:
+
+```
+llama_kv_cache:   jsep_buf KV buffer size =    11.00 MiB
+llama_context: backend_ptrs.size() = 2
+sched_reserve: max_nodes = 1608
+graph_reserve: reserving a graph for ubatch with n_tokens = 1, ...
+ggml-backend.cpp:898: pre-allocated tensor (cache_k_l0 (view)) in
+  a buffer (jsep_buf) that cannot run the operation (SET_ROWS)
+Aborted()
+```
+
+`SET_ROWS` is the KV-cache write op (not metadata) — it actually mutates K/V. Other unsupported real consumer ops will follow once SET_ROWS is unblocked: `GET_ROWS` (token embedding), `ROPE`, `SOFT_MAX`, `MUL`, `ADD`, etc. Each Phase-2-shipped JSEP-resident leaf (model weights + KV cache) is consumed by ops Phase 2 doesn't kernel.
+
+**Conclusion:** Option A alone is insufficient. The Phase-2-scoped MUL_MAT+RMS_NORM dispatch matrix cannot run a real model end-to-end. Phase 3 must either (a) widen the op kernel set materially (closer to "full JSEP port"), or (b) take **Option B** — narrow weight/KV residency so JSEP doesn't own those tensors and the scheduler routes consumer ops to ggml-webgpu/CPU.
+
+## Original TL;DR (pre-Task-9, retained for context)
 
 **Gate disposition: BLOCKED-on-scheduler-buft-routing.** The Task 8 follow-on spike (`smoke-test/p2-v2-spike.html`, drives `webllm_decode` directly — bypasses any "did engine route correctly?" question) **revised the Task 7 diagnosis**. The JSEP backend is **NOT dormant** — it is fully engaged at allocation time:
 
@@ -142,9 +164,10 @@ true and let `runOp` decline — is the pattern the upstream backends
 | 5 | `04a38cc` | rms_norm kernel (F32) |
 | 6 | `d1a8348f` | engine `backend: "jsep"` opt-in + bundle wiring + resource-leak fixes |
 | 7 | `0f1973e` | counter instrumentation + parallel `real-model-jsep.html` + closure stub |
-| 8 | this commit | `p2-v2-spike.{html,src.ts}` + `make wasm-build-jsep` wires bundle build; runs `webllm_decode` directly; SUMMARY.md revised with real failure mode |
+| 8 | Task 8 commit | `p2-v2-spike.{html,src.ts}` + `make wasm-build-jsep` wires bundle build; runs `webllm_decode` directly; SUMMARY.md revised with real failure mode |
+| 9 | `7919d1839` (llama.cpp) | `ggml-jsep`: metadata-op allowlist (NONE/VIEW/RESHAPE/PERMUTE/TRANSPOSE) in `supports_op` + matching `graph_compute` fast-path. Unblocks reserve-time leaf check; abort moves to SET_ROWS on KV cache (real op, not metadata). |
 
-llama.cpp `webllm-browser-patches` patch stack: **+1 commit since `b54503497`** (`48acb658d`) — Task 8 added no C++ patches. 2 patches reserved for Phase 3 unchanged.
+llama.cpp `webllm-browser-patches` patch stack: **+2 commits since `b54503497`** (`48acb658d` Phase 2; Task 9 metadata-op allowlist). **1 patch reserved for Phase 3.**
 
 ## Open questions surfaced during the prototype
 
@@ -164,45 +187,46 @@ llama.cpp `webllm-browser-patches` patch stack: **+1 commit since `b54503497`** 
 
 8. **Q4_K kernel deferral.** Currently throws `"matmul Q4_K kernel: deferred to Task 7"` if invoked. Tinyllama Q4_0 doesn't trigger it; once Phase 3 routes a Q4_K-using model through JSEP, the kernel needs to land. Hand-packing Q4_K test data is involved (256-elem super-blocks with 6-bit-quantized scales); plan for ~150 additional LOC.
 
-## Next-session disposition
+## Next-session disposition (revised post-Task-9)
 
-**Phase 2 follow-on micro-cycle (BLOCKING for Phase 3):** Apply
-**Option A** — broaden `supports_op` to return true for the ops
-libllama touches on JSEP-resident leaves, with `runOp` returning
-`STATUS_NOT_IMPLEMENTED` for the ones not yet kernelized. This is
-the upstream-backend pattern (BLAS/CPU) and the smallest delta to
-unblock scheduler reservation.
+**Phase 3 entry — Option A insufficient, choose A-prime or B.**
 
-Concrete plan:
-1. Inventory the ops tinyllama's first-layer graph touches on
-   `attn_q.weight` (and any other JSEP-resident leaf). The
-   `graph_reserve` log-flood after enabling `GGML_LOG_DEBUG` will
-   list them. Likely set: `GET_ROWS`, `VIEW`, `PERMUTE`, `RESHAPE`,
-   `TRANSPOSE`, plus matmul dtype permutations.
-2. Add those ops to `device_supports_op` returning `true` (gate
-   on cap + dtype where needed; otherwise unconditional).
-3. In `graph_compute`, for each unhandled op call ggml's CPU-
-   fallback path (`ggml_compute_forward_*`) with backed-up host
-   tensors, OR mark the op as not-our-problem and let the scheduler
-   route via a CPU buffer copy.
-4. Re-run the spike harness; capture `__jsep.counters` post-decode;
-   apply T3 gate (likely YELLOW per spec §risk register — high
-   crossing rate due to fallback round-trips).
+Task 9 took the **first-step** of Option A (metadata-op allowlist) and
+proved it unblocks the leaf check but **doesn't unblock inference** —
+the next abort is on `SET_ROWS` (a real KV-cache mutation op),
+followed by an open-ended tail of consumer ops (GET_ROWS, ROPE,
+SOFT_MAX, MUL, ADD, ...) that all touch JSEP-resident tensors.
 
-If Option A turns out to require non-trivial fallback wiring (more
-than ~50 LOC C++), pivot to Option B (narrow weight residency,
-JSEP only owns intermediates).
+**Two real-Phase-3 paths now:**
 
-**Expected outcome:** YELLOW band on per-token wall (2-5× legacy due
-to CPU↔GPU round-trips per fallback boundary), but green on byte-
-identical token output. The yellow-recovery lever (graph-once
-dispatch / batched JSEP allocation) becomes the natural follow-on
-micro-cycle.
+- **Option A-prime — broad op coverage.** Kernel SET_ROWS,
+  GET_ROWS, ROPE, SOFT_MAX, MUL, ADD, plus matmul dtype permutations
+  (F16-out, Q4_K). Each is a WGSL kernel + dispatch wiring + bind-
+  layout cache entry. Effectively the back half of "full JSEP port"
+  without the framework. Estimate: 6-10 ops × ~150 LOC each = ~1k
+  LOC C++/WGSL/TS. Patch budget: well within the remaining 1
+  reserved patch (all C++ changes are inside `ggml-jsep.cpp`; new
+  TS files add no patches).
+
+- **Option B — narrow weight residency.** Switch `device_supports_buft`
+  + `offload_op` so JSEP only owns intermediates produced by JSEP-
+  dispatched ops. Model weights stay in `ggml-webgpu` (or CPU); KV
+  cache stays in `ggml-webgpu`. JSEP becomes opt-in per-op rather
+  than backend-of-record for the whole partition. Smaller surface
+  but requires understanding ggml's `offload_op` semantics + handling
+  the cross-backend tensor handoff. Estimate: ~200-300 LOC C++.
+
+**Recommendation:** Option B is the lower-risk Phase 3 entry. It
+keeps JSEP a kernel-server rather than a backend-of-record,
+preserves the patch budget, and keeps the per-binding cap surface
+small. Option A-prime is the natural endpoint **if** the gate band
+on Option B comes back red (e.g., cross-backend handoff dominates).
 
 **Patch budget:** llama.cpp `webllm-browser-patches` patch stack is
-+1 (`48acb658d`); Option A is C++ only (`ggml-jsep.cpp` change),
-will add ~30-100 LOC and no new patch files. Estimate +1 patch
-commit. 2 patches remain reserved for the rest of Phase 3.
++2 (Phase 2 `48acb658d`; Task 9 metadata-op allowlist). **1 patch
+remains reserved for Phase 3.** Option B fits in 1 patch; Option
+A-prime would consume the remaining patch and likely require a
+second one if dtype permutations land separately.
 
 ## Bench artifacts (reproducibility)
 
