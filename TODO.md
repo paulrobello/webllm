@@ -901,7 +901,7 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 
 **Stage 4 partial — divert pattern landed for matmul + RMS_NORM.** When `dst.bufHandle` aliases any src `bufHandle`, allocate a fresh temp `GPUBuffer`, dispatch into it, then `copyBufferToBuffer` back to `dstRec.buffer` at `dst.offset`. The diverted dispatch lives in its own command-encoder (flush the batcher first) so it can't conflict with batched neighbours. Verified post-fix: 1068/1068 model matmuls divert without validation errors; 270/271 RMS_NORM dispatches divert. **But Outcome A "Paris" decode not yet achieved** — matmul `src1` (the activation feeding attn_q) is still corrupt with the same byte pattern as pre-fix (denormals + 1e+18-scale floats — uninitialized memory pattern). The matmul + RMS_NORM divert fixed those kernels but the **upstream producer** of `src1` (likely SET_ROWS for KV cache writes — `dst === view(src[2])` is definitionally aliased) is still failing silently and leaving the buffer untouched. **Stage 4 is incomplete; SET_ROWS divert (with read-modify-write semantics for partial updates) is required to flip Outcome.** Closure: [`STAGE-3.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md). Per-token decode 24-25 ms (Stage 3 baseline 23 ms; +8% from divert overhead — within noise). Patch stack: 6 (unchanged). RMS_NORM real-shape self-test (cols=2048) added to spike harness — permanent regression check.
 
-**Stage 4.1 CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch).** SET_ROWS divert with read-modify-write semantics landed in `src/inference/jsep/ops/set-rows.ts` (~80 LOC). Aliasing rate measurement confirmed the brief's hypothesis exactly: `SETROWS_STATS = {total:264, aliasesSrc0:0, aliasesSrc1:0, aliasesSrc2:264}` — 100% structural alias with src[2] (the destination buffer that dst is a view of, per ggml SET_ROWS semantics). Divert fires for every SET_ROWS call (`SETROWS_DIVERT_FIRES = 264`). **But Outcome A "Paris" decode not achieved** — `LOGIT_STATS_STEP0` still all-zero, `GENERATED_TOKENS = [0,0,0,0,0]`. Per-token decode 23.74 ms vs Stage-3.5 baseline 24.30 ms (within noise — divert overhead invisible). This is **exit criterion (b)** from the Stage 4.1 brief: SET_ROWS aliasing was a real latent bug worth fixing structurally, but it's *not* the load-bearing cause of the Outcome C all-zero collapse. Closure: [`STAGE-4.1-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md). Patch stack: 6 (unchanged). Next suspect: CPU-side writeback (`jsepWrite`) for unsupported ops — Stage 4.2 brief below.
+**Stage 4.1 CLOSED 2026-05-06 — `0161595` (no llama.cpp patch).** SET_ROWS divert with read-modify-write semantics landed in `src/inference/jsep/ops/set-rows.ts` (~80 LOC). Aliasing rate measurement confirmed the brief's hypothesis exactly: `SETROWS_STATS = {total:264, aliasesSrc0:0, aliasesSrc1:0, aliasesSrc2:264}` — 100% structural alias with src[2] (the destination buffer that dst is a view of, per ggml SET_ROWS semantics). Divert fires for every SET_ROWS call (`SETROWS_DIVERT_FIRES = 264`). **But Outcome A "Paris" decode not achieved** — `LOGIT_STATS_STEP0` still all-zero, `GENERATED_TOKENS = [0,0,0,0,0]`. Per-token decode 23.74 ms vs Stage-3.5 baseline 24.30 ms (within noise — divert overhead invisible). This is **exit criterion (b)** from the Stage 4.1 brief: SET_ROWS aliasing was a real latent bug worth fixing structurally, but it's *not* the load-bearing cause of the Outcome C all-zero collapse. Closure: [`STAGE-4.1-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md). Patch stack: 6 (unchanged). Next suspect: CPU-side writeback (`jsepWrite`) for unsupported ops — Stage 4.2 brief below.
 
 ### Next session pickup — Phase 3 Stage 4.2: jsepWrite byte-dump probe (CPU-side writeback audit). START HERE in a fresh session.
 
@@ -910,11 +910,12 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 **One-line context:** Stage 3.5 fixed matmul + RMS_NORM aliasing; Stage 4.1 fixed SET_ROWS aliasing. None of those flipped Outcome C. Per the brief's Step 4 fallback, the remaining suspect is CPU-side writeback for ops the JSEP backend doesn't support (`~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:584-650` lists the supports_op gate). Unsupported ops fall back to CPU; the scheduler issues `get_tensor` → `jsepRead` to fetch JSEP-resident inputs into CPU heap, runs the CPU op, then `set_tensor` → `jsepWrite` to push results back. A wrong offset in `jsepWrite` (or a stale read in `jsepRead`) corrupts whatever tensor lives at the targeted slot — most likely the activation feeding attn_q.
 
 **Files you'll touch:**
-- `src/inference/jsep/index.ts` — `module.jsepWrite` (and possibly `module.jsepRead`); add a temporary log of `(handle, offset, size, first8 bytes)` for the first 10-20 writes during prefill.
-- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md` — closure report (force-add).
+- `src/inference/jsep/index.ts:173-216` — `module.jsepWrite` (line 173) and `module.jsepRead` (line 192); add a temporary log of `(handle, offset, size, first8 bytes)` for the first 10-20 writes during prefill. Both helpers already call `encoderBatcher.flush()` before the queue op, so any race-vs-pending-dispatch ordering bugs are already ruled out — focus on the data + offsets.
+- `smoke-test/p2-v2-spike.src.ts` — add the `JSEPWRITE_LOG` readout near the existing `LOGIT_STATS_STEP0` line.
+- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md` — closure report (force-add per `eval/reports/` gitignore).
 - `TODO.md` — closure stub + queue next pickup (Stage 4.3 if more work needed, or Stage 5 if jsepWrite was the bug).
 
-**Likely no llama.cpp changes.** If the bug is in `jsep_buft`'s offset accounting, it might require a llama.cpp patch (cap stack +1).
+**Likely no llama.cpp changes.** If the bug is in `jsep_buft`'s offset accounting (the `tensor->data − GGML_JSEP_PTR_BASE` offset arithmetic that Stage 1.5 already touched once), it might require a llama.cpp patch (cap stack +1, currently at +6).
 
 #### Step 0 — verify state (5 min, no editing)
 
@@ -924,7 +925,11 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 #   → webllm-browser-patches
 
 git log --oneline -5
-#   → <pending Stage 4.1 commits — should include feat(jsep) SET_ROWS divert + docs(reports) Stage 4.1 closure + docs(TODO) Stage 4.1 closed>
+#   → b5298f7 docs(TODO): Stage 4.1 closed — queue Stage 4.2 jsepWrite byte-dump probe
+#   → 8b81ca7 docs(reports): Stage 4.1 closure — SET_ROWS divert lands; not the Outcome C cause
+#   → 0161595 feat(jsep): SET_ROWS divert for WebGPU sync-scope buffer aliasing (Stage 4.1)
+#   → 0b33b54 docs(TODO): archive completed work not relevant to Stage 4.1
+#   → 6007048 docs(TODO): expand Stage 4.1 brief into paste-and-go fresh-session checklist
 
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2
 #   → bun  ...  TCP *:8031 (LISTEN)
