@@ -1,10 +1,46 @@
 # P2-v2 Phase 2 Prototype — Closure Report
 
-**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike + Task 9 + Task 10 micro-cycles
-**webllm SHA:** Task 10 closure commit (this PR); predecessor Task 9 closure commit; Task 8 spike commit; predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
-**llama.cpp `webllm-browser-patches` SHA:** `49413d8e9` (Task 10 offload_op + supports_buft); predecessor `7919d1839` (Task 9 metadata-op allowlist); predecessor `48acb658d` (Phase 2 Tasks 1+2+4)
+**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike + Task 9 + Task 10 + Task 11/12 micro-cycles
+**webllm SHA:** `039f448` (Task 11 device-hint); predecessor `4ea3d39` (Task 10 closure); predecessor Task 9 closure; predecessor Task 8 spike; predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
+**llama.cpp `webllm-browser-patches` SHA:** `49413d8e9` (Task 10 offload_op + supports_buft); predecessor `7919d1839` (Task 9 metadata-op allowlist); predecessor `48acb658d` (Phase 2 Tasks 1+2+4) — **patch stack frozen at +3; Task 11 was zero-patch**
 **Browser + GPU:** Chrome (agentchrome session 64702), Apple Metal-3
 **Prompt:** `"The capital of France is"` 6-token fixture, `max=5`, greedy (Task 8 spike harness)
+
+## TL;DR (Task 11 + Task 12 update)
+
+**Gate disposition: PARTIAL-UNBLOCK / OUTCOME D — chat works correctly with JSEP registered, but JSEP runOp counters stay at zero (JSEP structurally dormant). Device-hint succeeded at its stated mechanical goal — libllama now enumerates only WebGPU as the GPU device, weights+KV land in `webgpu_buf`, scheduler routes ALL ops to ggml-webgpu, no abort. The kept invariant Phase 2 wanted to demonstrate (JSEP kernel running an op end-to-end inside a real chat decode) was not achieved this cycle.**
+
+**Concrete measurements (Task 12 spike, `?v=task11-1`):**
+
+| Metric | Value |
+|---|---|
+| Generated text (greedy 5 tokens after "The capital of France is") | `"Paris.\n\n2"` (semantically correct) |
+| Token IDs | `[3681, 29889, 13, 13, 29906]` |
+| Decode wall (5 tokens, per-token-decode loop with logits readback) | 61.5 ms total → 12.30 ms/token → ~81 tok/s |
+| Prefill wall (6 tokens) | 238 ms |
+| Model load (304 MiB Q4_0 → GPU) | 304 ms |
+| JSEP `runOp` deltas (decode window) | **0** (also `alloc/free/write/read/clear/sync` = 0) |
+| Stderr proof of device-hint firing | `[webllm] JSEP build detected: pinning libllama devices to WebGPU only` + `llama_prepare_model_devices: using device WebGPU (WebGPU) (unknown id) - 4095 MiB free` (cf. Task 10 stderr: `using device JSEP (JSEP) ... 128 MiB free`) |
+
+**Why JSEP is dormant in this configuration.** With JSEP excluded from `model->devices`, libllama's GPU buft_list contains only `[webgpu_buft, ...cpu_bufts]`. All weights+KV land in `webgpu_buf`. The scheduler's `offload_op` path (`ggml-backend.cpp:921`) is gated on `ggml_backend_buffer_is_host(src->buffer)` — webgpu_buf is not a host buffer, so the offload-to-JSEP path never fires. JSEP's broadened `supports_buft` (Task 10) accepts ggml-webgpu's buft as a runnable input, but the scheduler only checks `supports_buft` when it's actively considering a non-default backend for an op — and with WebGPU the only enumerated GPU backend, every op's natural assignment is webgpu.
+
+**This was the predicted side-effect of approach (3) ("Option B + explicit device hint") in Task 10's Phase 3 paths.** Task 10 listed it as the "cleanest" unblock path, but cleanest meant *unblocks the abort* — it explicitly did NOT mean *exercises JSEP*. Task 11's device-hint successfully accomplishes (1) and (2) below; (3) is the unmet Phase-2 ambition:
+
+1. ✅ **JSEP backend infrastructure verified.** Build, link, register, install JS callbacks, allocate buffers, run alongside ggml-webgpu without breaking inference. The descriptor ABI, encoder batcher, callback table, and per-binding cap discipline are all proven correct end-to-end.
+2. ✅ **Coexistence verified.** A JSEP-built WASM (registers BOTH JSEP and ggml-webgpu) produces identical chat output to a non-JSEP build (registers only ggml-webgpu). No regressions.
+3. ❌ **JSEP-resident kernel run inside chat decode** — not demonstrated. Would require either:
+   - **Forced JSEP residency**: weights+KV in jsep_buf, all consumer ops kernel'd in JSEP (Outcome A path before Task 9; needs ~1k LOC of additional kernels — SET_ROWS, GET_ROWS, ROPE, SOFT_MAX, MUL, ADD, etc.).
+   - **Mixed residency with active offload**: weights in CPU host_buf, JSEP picks up MUL_MAT/RMS_NORM via offload_op. Currently libllama doesn't produce this routing — `n_gpu_layers=999` always picks a GPU buft for tensors with GPU consumers, regardless of which GPU device is enumerated. Would need either `n_gpu_layers=0` (kills perf) or a probe with a small synthetic graph that puts weights on host_buf and verifies offload_op fires (separate measurement, not a chat-decode demonstration).
+
+**Phase 2 gate verdict.** Phase 2 set out to demonstrate JSEP's architectural viability by routing real chat ops through JSEP-side kernels. With Tasks 1-12 completed, the **architecture is proven viable** (JSEP can be registered alongside ggml-webgpu without breaking inference, the kernel dispatch path works in isolation per Task 11's spike harness building cleanly), but **end-to-end JSEP-routed chat was not achieved**. Phase 3 must own the kernel-coverage push if JSEP-routed inference is the actual goal.
+
+**Phase 3 entry recommendation.** Two paths remain:
+- **Option A-prime (full kernel port)**: SET_ROWS, GET_ROWS, ROPE, SOFT_MAX, MUL, ADD, plus matmul dtype permutations. ~1k LOC of WGSL + dispatch code. With device-hint reverted (or kept and inverted to pin libllama to JSEP), weights live in jsep_buf and JSEP runs the entire graph. This is the "full JSEP port" — the architectural endpoint Phase 2 was a stepping stone toward.
+- **Synthetic offload probe**: skip libllama entirely; build a tiny graph in raw ggml with weights on host_buf and a MUL_MAT consumer; verify the scheduler routes the MUL_MAT to JSEP via `offload_op`. Validates the Task 10 patch in its native habitat. ~100 LOC. Doesn't unblock real chat but proves the kernel dispatch path is exercised correctly — a credible smoke test for the Phase 2 work that exists.
+
+The user signaled (in archived plan) that the strategic value of JSEP is freedom from llama.cpp's WGSL surface as upstream evolves. Both Phase 3 paths preserve that value; Option A-prime cashes it in, the synthetic probe banks it.
+
+**Patch budget for Phase 3:** llama.cpp stack still at +3. Option A-prime would not require new patches (kernels live in JSEP backend). Synthetic probe also zero-patch.
 
 ## TL;DR (Task 10 update)
 
