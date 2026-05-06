@@ -899,294 +899,207 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 
 ### Next session pickup — Phase 3 Stage 3.5: localize the all-zero logits collapse. START HERE in a fresh session.
 
-**Goal:** root-cause why TinyLlama's full forward pass with the (kernel-correct) Q4_K matmul produces exactly-zero logits, and unblock the Outcome A "Paris" decode. Stage 3 shipped the Q4_K kernel and verified it correct in isolation (delta 4.5e-6 vs CPU reference); but the same kernel run inside the real model decode produces output that collapses to zero somewhere in the 22-layer pipeline. Stage 3.5 localizes the fault before adding any more kernels.
+**One-line goal:** find which op or transition first emits zero output in TinyLlama's forward pass, so Stage 4 can fix it (or ship the kernel/flush that completes Outcome A "Paris" decode).
 
-**Concrete pickup steps** (cheapest-first per Stage 3 closure §"Stage 3.5"):
+**One-line context:** Stage 3 shipped a Q4_K WGSL matmul kernel that is **proven correct in isolation** (`Q4K_SELFTEST` in the spike harness reports delta 4.5e-6 vs CPU reference). The same kernel runs ~134×/forward-pass in the real model without throwing, but all 32000 logits in step 0 come out exactly 0.0 (no NaN, no Inf, all finite, min=max=0). The bug is upstream of the Q4_K kernel.
 
-1. **RMS_NORM self-test** in the spike harness, modeled on the existing `runQ4KSelfTest` (`smoke-test/p2-v2-spike.src.ts`). Drive `dispatchRmsNorm` directly with a known F32 row, read back, compare against a JS `mean(x²) → inverseSqrt → multiply` reference. RMS_NORM was Phase 2 and unit-tested via synthetic harness only — never validated on real-model shapes.
-2. **First-model-matmul dst capture.** Add a one-shot probe in `dispatchMatmul` that records the first NON-self-test dispatch's dst metadata + first 8 f32 of dst (via follow-on `mapAsync`). Non-zero → kernel works in-context, bug is in the JSEP→CPU CPY path. Zero → src1 (the activation) is already zero when the kernel runs; bug is upstream.
-3. **First CPU→JSEP write byte dump.** If src1 turns out zero, instrument `jsepWrite` to log the first model write's first 8 bytes. Confirms whether CPU is producing zero before writing.
-4. **Pinning bisect.** Re-run with `WEBLLM_PIN_TO_JSEP=0` (Stage-0 / WebGPU-only) to confirm the same wasm build still produces "Paris" — rules out an orthogonal regression from the Stage 3 changes.
+#### Step 0 — verify state (5 min, no editing)
 
-**Working hypothesis to test first:** the JSEP backend's `cpy_tensor = NULL` forces every inter-split copy through a host-roundtrip via `set_tensor` / `get_tensor`. The Stage 3 flushes addressed WebGPU-side queue FIFO ordering on the JS side; but the C++ scheduler may itself be queuing a `set_tensor` before the previous backend's `graph_compute` has actually completed (rather than just returned). `ggml_backend_synchronize` is the contract for "wait for all queued work to complete"; if the scheduler doesn't call it in the inter-split copy path, the encoder-batcher state is irrelevant — the data simply isn't there yet for the read to capture. 612 `jsepSync` calls per token suggests the scheduler IS calling synchronize frequently, but maybe not at the right point.
+Paste-and-run; expected outputs in parens.
 
-**Fresh-session prerequisites (verify before editing):**
-
-- **llama.cpp checkout:** `cd ~/Repos/llama.cpp && git rev-parse --short HEAD` should report `53c66649f` on branch `webllm-browser-patches`. Stage 3 was zero-patch on the C++ side.
-- **Smoke server:** `lsof -nP -iTCP:8031 -sTCP:LISTEN` should show a `bun` process. If absent: `make smoke-serve`.
-- **agentchrome session:** `agentchrome connect --status` reports an active session. Note the port (currently 64702). Reuse the existing `p2-v2-spike.html` tab via `agentchrome --port <PORT> tabs list`.
-- **Spike model:** `smoke-test/models/tinyllama-1.1b-chat-q4_0.gguf` (637.8 MiB). Despite the `q4_0` filename, the GGUF contains Q4_K weights (file_type=15 = Q4_K_M) plus 21 q6_K tensors that fall back to CPU.
-
-**Opening sequence (read before editing):**
-
-1. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3-RESULT.md` — Stage 3 closure context, including the Stage 3.5 hypothesis register and full diagnostic data.
-2. `smoke-test/p2-v2-spike.src.ts::runQ4KSelfTest` — the pattern to copy for the Stage 3.5 RMS_NORM self-test.
-3. `src/inference/jsep/ops/rms-norm.ts` — the kernel that may or may not be the bug. F32 path only; one-thread-per-(row,col) with each thread independently recomputing the row sum. WG_X=1, WG_Y=256.
-4. `src/inference/jsep/index.ts:185-220` — `jsepRead` / `jsepWrite` / `jsepClear` with the Stage 3 flush calls.
-5. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:316-320` — `ggml_backend_jsep_synchronize`. Verify whether the inter-split CPY path actually calls this between backends, or whether `ggml_backend_jsep_buffer_get_tensor` is invoked without a prior `synchronize` on the JSEP backend.
-
-**Once Stage 3.5 lands the localization,** the next op kernel (or the missing flush) becomes Stage 4. If Outcome A "Paris" decode comes out at the end of Stage 3.5 (i.e., the bug was in the flush ordering and Stage 3's flush fix DID help, just not the right one), Phase 3 is at parity with WebGPU-only and the work shifts from op-surface to perf characterization.
-
-### Earlier Stage 3 brief (now historical) — Q4_K matmul kernel
-
-**Goal:** add a Q4_K dispatch path to `dispatchMatmul` so TinyLlama (and every other Q4_K-quantized model) can decode a token through the JSEP residency path. After Q4_K matmul lands, the spike either completes (greedy "Paris" + tok/s readout — Outcome A) or surfaces the next missing op kernel (Outcome B again, e.g. `GET_ROWS` for the token embedding lookup if it routes via JSEP, or `ROPE` / `SOFT_MAX` / `MUL` / `ADD`).
-
-**Why this is its own stage.** Q4_K matmul is a single new shader path; bundling it with a follow-on op (whatever Stage 4 reveals) makes the diff harder to revert if the dequant has a bit-pack bug. Keep it self-contained: one new shader case, zero new files, zero new patches.
-
-**Fresh-session prerequisites (verify before editing):**
-
-- **llama.cpp checkout:** `cd ~/Repos/llama.cpp && git rev-parse --short HEAD` should report `53c66649f` on branch `webllm-browser-patches`. Phase 3 builds against this branch via `src/wasm/CMakeLists.txt::FetchContent`. If the branch tip drifted, see `docs/LLAMA_CPP_PATCHES.md` for the rebase procedure.
-- **Smoke server:** `lsof -nP -iTCP:8031 -sTCP:LISTEN` should show a `bun` process. If absent: `make smoke-serve` (or `make smoke-restart` to recycle).
-- **agentchrome session:** `agentchrome connect --status` reports an active session. Note the `port` (currently 64702 in this repo's history; verify per session). `agentchrome --port <PORT> tabs list` shows the existing `p2-v2-spike.html` tab — reuse that tab id for navigation, do not open a new tab (CLAUDE.md "Reuse the existing tab when possible").
-- **Spike model:** `smoke-test/models/tinyllama-1.1b-chat-q4_0.gguf` (637.8 MiB; despite the `q4_0` filename suffix, the GGUF actually contains Q4_K-quantized weights — that's why Stage 2 surfaced "matmul Q4_K kernel: deferred"). If the file is missing: `hfdownloader download TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF --filters q4_K_M` and place the output at `smoke-test/models/`.
-- **Dashboard (optional):** Stage 3's spike does not auto-post to the dashboard, so port 8033 is irrelevant for the gate. Leave it as-is.
-
-**Opening sequence (read before editing):**
-
-1. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-2-RESULT.md` — Stage 2 closure context (5 min).
-2. `src/inference/jsep/ops/matmul.ts:259-322` — the existing Q4_0 case + the Q4_K throw it must replace (3 min).
-3. `~/Repos/llama.cpp/ggml/src/ggml-common.h` — search for `struct.*block_q4_K` (the canonical layout: `d`, `dmin`, `scales[12]`, `qs[QK_K/2]`).
-4. `~/Repos/llama.cpp/ggml/src/ggml-quants.c::get_scale_min_k4` — the 6-bit unpacking bit pattern. Three branches keyed on `j < 4` vs `j ≥ 4`. This is the only non-obvious part of the kernel.
-5. `~/Repos/llama.cpp/ggml/src/ggml-quants.c::dequantize_row_q4_K` — the CPU reference; copy its loop structure into WGSL.
-
-**Concrete edits (estimate ~150 LOC, all in webllm — zero new patches):**
-
-1. **`src/inference/jsep/ops/matmul.ts`**:
-   - Replace the `case GGML_TYPE_Q4_K:` `throw new Error("matmul Q4_K kernel: deferred to Task 7 ...")` at `matmul.ts:316` with a real WGSL kernel that mirrors the Q4_0 case structurally (HEADER + `load_q4_K(m, k, batch)` + the same per-thread accumulator loop).
-   - Q4_K block geometry per `ggml-common.h` (`block_q4_K`, `QK_K = 256`):
-     - 144 bytes per super-block of 256 elements (8 sub-blocks × 32):
-       - `d`: f16 super-block scale (2 B)
-       - `dmin`: f16 super-block min (2 B)
-       - `scales[12]`: 6-bit packed sub-block scales + mins (12 B)
-       - `qs[128]`: 4-bit quantized values, 2 nibbles per byte (128 B)
-   - Dequant for sub-block s ∈ [0,8) at element i ∈ [0,32):
-     ```
-     (sc, m) = unpack_6bit_scales(scales, s)   // see ggml-quants.c::get_scale_min_k4
-     idx = s*32 + i
-     nibble = (qs[idx/2] >> ((idx & 1) * 4)) & 0xF
-     x[idx] = d * sc * f32(nibble) - dmin * m
-     ```
-   - The 6-bit unpacking spreads 16 values (8 scales + 8 mins) across 12 bytes via a documented bit pattern (`get_scale_min_k4` in `ggml/src/ggml-quants.c` — three `if`-branches keyed on `s < 4`). Implement the same packing in WGSL — either as a `select`/branch tree or by computing into a uniform-pre-resolved table.
-   - Reuse the existing `buildPipeline` / cacheKey machinery (`mat-q4_k-f32-f32-{ndim}`).
-
-2. **`~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp`** — **likely no change.** `MUL_MAT` is already advertised in `supports_op`; the kernel-side dtype branch is what was missing. Verify the `case GGML_OP_MUL_MAT` branch in `supports_op` doesn't gate on src0 type (or if it does, widen to accept Q4_K alongside the existing F32/F16/Q4_0). Patch stack stays at +6.
-
-3. **No new tests** — the existing `tests/jsep-matmul-golden.test.ts` covers F32/F16/Q4_0 paths; Q4_K is exercised via the browser smoke (per the existing `Phase 2 ships F32 + F16 + Q4_0 goldens; Q4_K will be exercised via the real-model browser smoke in Task 7` note in `matmul.ts:312-315`). If a hand-coded golden is desired later, generate it from the CPU reference (`ggml-quants.c::dequantize_row_q4_K` + a CPU matmul) and add as a Stage 3.5 follow-up.
-
-**Gate (run after the edit):**
 ```bash
-make wasm-build-jsep && make checkall
-agentchrome --port 64702 navigate "http://localhost:8031/p2-v2-spike.html?v=A-prime-stage3" --tab <id>
-agentchrome --port 64702 js exec --tab <id> 'document.getElementById("log").innerText'
+# 1. llama.cpp tip — Stage 3 was zero-patch on the C++ side.
+( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
+#   → 53c66649f
+#   → webllm-browser-patches
+
+# 2. webllm tip — should include the two Stage-3 commits.
+git log --oneline -3
+#   → 127c2b8 docs(TODO): Stage 3 partially closed (Outcome C) — queue Stage 3.5
+#   → 4731dc1 feat(jsep): Stage 3 Q4_K matmul kernel — Phase 3 / Option A-prime
+#   → 885d1c6 docs(TODO): add fresh-session prerequisites + opening sequence to Stage 3 brief
+
+# 3. Smoke server (start if missing).
+lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2
+#   → bun  <pid>  ...  TCP *:8031 (LISTEN)
+# Missing? → make smoke-serve
+
+# 4. agentchrome session + spike tab id.
+agentchrome connect --status
+agentchrome --port <PORT_FROM_STATUS> tabs list
+#   → look for the entry whose url ends in p2-v2-spike.html?... ; reuse that tab id.
+
+# 5. Confirm Stage 3 baseline reproduces (Outcome C — all-zero logits).
+agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage3-replay" --tab <TAB_ID>
+# wait until #log contains DONE or FAIL, then:
+agentchrome --port <PORT> js exec --tab <TAB_ID> 'document.getElementById("log").innerText'
+# Expected lines (in order):
+#   Q4K_SELFTEST = {..., "delta":~4.5e-6, ...}                    ← kernel is correct
+#   LOGIT_STATS_STEP0 = {"first8":[0,0,0,0,0,0,0,0], "topVal":0,
+#                        "hasNaN":false, "hasInf":false,
+#                        "finiteCount":32000, "min":0, "max":0}    ← Outcome C reproduces
+#   GENERATED_TOKENS = [0,0,0,0,0]
 ```
 
-Three possible outcomes (in order of likelihood):
-- **A. Spike completes** with greedy continuation of "The capital of France is" → "Paris" or similar. Captures `__spikeResult.perTokenMs` and `counters` deltas. Compare tok/s vs Outcome D's 81 tok/s baseline; ±20% is the gate. At this point Phase 3 has effectively reached parity with WebGPU-only and the next steps become perf characterization, not op-surface work.
-- **B. Next missing op kernel surfaces.** Likely candidates: `GET_ROWS` (token embedding lookup), `ROPE`, `SOFT_MAX`, `MUL`, `ADD`, `SOFT_MAX_BACK`. Document and queue Stage 4 for that op.
-- **C. Q4_K dequant bug.** Numerical drift / NaN logits / nonsense token output. Compare CPU reference output for a known Q4_K weight tile against the WGSL output via a one-off probe; fix the bit-packing.
+If any of those don't match, stop and reconcile before doing Stage 3.5 work — the diagnostic plan below assumes this exact baseline.
 
-**Patch budget tracker post Stage 2:**
-- llama.cpp `webllm-browser-patches`: 6 patches (`48acb658d`, `7919d1839`, `49413d8e9`, `d8b80dee2`, `d0075e9a6`, `53c66649f`). Stage 3 is **zero-patch** (kernel lives in webllm TS only).
-- webllm: 4 commits (`b640d17` Stage 0, `e60a39e` Stage 1, `ef5ccac` Stage 1.5, `9406496` Stage 2).
+#### Step 1 — RMS_NORM self-test in the spike (cheapest, ~30 min)
 
-**Why Option A-prime (recap of Outcome D + E).** Task 12 (`?v=task11-1`) measured Outcome D: with the device-hint pinning libllama to WebGPU only, chat works correctly (`"Paris.\n\n2"`, 81 tok/s) but JSEP `runOp = 0` — JSEP is structurally dormant because weights+KV live in `webgpu_buf` (not host_buf), and the scheduler's `offload_op` path is gated on `ggml_backend_buffer_is_host(src->buffer)`. Task 14 (`?v=task14-3`) ran a synthetic probe that put src tensors on `ggml_backend_cpu_buffer_type()` and confirmed the routing works (`runOp = 1`, `sync = 1`); but execution fails in `dispatchMatmul → GpuDataManager.get(0xBE3000)` because JSEP can't read host-memory tensors without an import shim. **Option A-prime sidesteps both issues by inverting the device-hint** so libllama enumerates JSEP only — weights+KV then live in jsep_buf, every consumer op naturally targets JSEP, and JSEP's existing `GpuDataManager`-based dispatch path Just Works because all tensors are JSEP-owned.
+**Why first:** RMS_NORM was Phase 2 and only ever validated via the synthetic golden-test harness. It runs ~46 times per forward pass on real-model shapes (`pre_norm` + `pre_attn_norm` per layer × 22 + 2 final norms) and was never directly verified end-to-end. If it produces zero (or NaN, or wrong-magnitude) output for non-zero input, the residual stream collapses to zero on the FIRST layer's first norm and stays there — fully consistent with the observed symptom.
 
-**The Phase 3 work (~1k LOC, zero patches).**
+Pattern: copy `smoke-test/p2-v2-spike.src.ts::runQ4KSelfTest` to `runRmsNormSelfTest`. Skeleton:
 
-Op surface to add (each op = one new file in `src/inference/jsep/ops/`, follows the matmul.ts/rms-norm.ts pattern; descriptor ABI already shipped):
+```ts
+async function runRmsNormSelfTest(runtime: JsepRuntime): Promise<void> {
+    // Use a 1×2048 row mirroring the first model RMS_NORM shape.
+    const rows = 1;
+    const cols = 2048;
+    const eps = 1e-5;
+    const x = new Float32Array(rows * cols);
+    for (let i = 0; i < x.length; i++) x[i] = ((i % 17) - 8) * 0.1;  // non-zero pattern
+    // CPU reference: out[i] = x[i] / sqrt(mean(x²) + eps)
+    let sumSq = 0;
+    for (let i = 0; i < cols; i++) sumSq += x[i] * x[i];
+    const invRms = 1 / Math.sqrt(sumSq / cols + eps);
+    const reference = new Float32Array(cols);
+    for (let i = 0; i < cols; i++) reference[i] = x[i] * invRms;
 
-| Op | Reason | Rough sizing | Notes |
-|---|---|---|---|
-| `set-rows` | KV-cache write each decode step | ~150 LOC | F32 + F16 → F16. First abort point in Task 9's run; unblock = highest-priority |
-| `get-rows` | Token embedding lookup | ~120 LOC | Q-quant src → F32 dst (per-row gather; Q4_0 + Q4_K + F16) |
-| `rope` | Rotary positional encoding | ~180 LOC | F32 + freq-table → F32; per-pair rotation; supports neox vs gpt-j layouts |
-| `soft-max` | Row-wise softmax (+ scale + mask) | ~120 LOC | F32 → F32; workgroup reduction (mirror rms-norm.ts pattern) |
-| `mul` / `add` | Elementwise binary | ~80 LOC each | F32×F32; broadcast support over leading dims |
-| `matmul` Q4_K | Currently throws "deferred to Task 7" in matmul.ts | ~150 LOC | Add to existing matmul.ts dispatch matrix; Q4_K block layout: 32-element super-block w/ 8 6-bit scales |
+    // Allocate JSEP buffers.
+    const hX = runtime.dataManager.alloc(x.byteLength);
+    const hOut = runtime.dataManager.alloc(x.byteLength);
+    runtime.device.queue.writeBuffer(
+        runtime.dataManager.get(hX).buffer, 0,
+        new Uint8Array(x.buffer), 0, x.byteLength,
+    );
 
-Plus one bridge change:
-- `src/wasm/webgpu-bridge.cpp:411-435` — invert the device-hint. Current code (commit `039f448`) picks WebGPU as the GPU device. Add a build-time/runtime flag `WEBLLM_PIN_TO_JSEP` (default true for jsep build) that selects JSEP instead, so `params.devices = {jsep_dev, NULL}`. ~10 LOC.
+    // Build descriptor; eps lives in op_params[0] f32 — needs a heap slot.
+    // Easiest: allocate an op_params region by writing 4 bytes via a tiny
+    // wasm heap probe (or skip and pass a fixed eps via a captured uniform —
+    // see dispatchRmsNorm's signature: it expects opParamsPtr + heapBuffer).
+    // Cleanest: use the wasm module's HEAPU8 to allocate 4 bytes for eps.
+    // (See runtime.dataManager.write for the existing heap-write pattern.)
 
-**Pre-flight before kernel work — confirm the tinyllama op trace.** Before writing kernels speculatively, dispatch a 30-min probe: keep current matmul/rms_norm + device-hint pointing at WebGPU, log scheduler aborts as each new op kernel lands, and let the abort sequence dictate ordering. This is cheaper than the table above and matches **probe-first** doctrine. The abort sequence Task 9 already observed ended at SET_ROWS. After SET_ROWS lands, the next abort tells you the actual next op needed (might be GET_ROWS, might be ROPE, depending on graph traversal order).
+    const desc: JsepOpDescriptor = {
+        op: GGML_OP_RMS_NORM, nSrc: 1,
+        dst:  { bufHandle: hOut, offset: 0, type: GGML_TYPE_F32,
+                ne: [cols, rows, 1, 1], nb: [4, 4*cols, 4*cols*rows, 0] },
+        srcs: [{ bufHandle: hX,  offset: 0, type: GGML_TYPE_F32,
+                ne: [cols, rows, 1, 1], nb: [4, 4*cols, 4*cols*rows, 0] }],
+    };
 
-**Reusable infrastructure already shipped** (don't reinvent):
-- Kernel skeleton: `src/inference/jsep/ops/matmul.ts` (476 LOC, F32/F16/Q4_0 working), `rms-norm.ts` (226 LOC). Copy the descriptor-read + pipeline-cache + dispatch pattern.
-- Encoder batcher (`src/inference/jsep/encoder-batcher.ts`) batches dispatches to amortize EM_ASM crossings — call `ctx.encoderBatcher.record(...)` from each new kernel; do NOT flush per-op.
-- Pipeline cache + bind-group layout cache (`ctx.pipelineCache`, `ctx.bindGroupLayoutCache`) — pass through to every new kernel.
-- Descriptor ABI: 18-i32 flat tensor block `[handle, type, ne_lo[0..3], ne_hi[0..3], nb_lo[0..3], nb_hi[0..3]]`; descriptor = `[op, n_src, dst_block, src[0]_block, ...]`. `readDescriptor()` helper in matmul.ts.
-- JSEP callback table (`src/inference/jsep/index.ts`) — `installJsepCallbacks(module, device)` registers all 7 callbacks. `jsepRunOp` already dispatches by `descriptor[0]` (op enum); add cases for new ops.
-- Counter instrumentation — `module.__jsep.counters.{alloc,free,write,read,clear,runOp,sync}` already wired.
-- Spike harness: `smoke-test/p2-v2-spike.{html,src.ts}` drives `webllm_decode` directly, bypassing `engine.ts`. Reuse for stage gates.
-- JSPI exports already include `webllm_decode`, `webllm_create_context`, etc. — no new C++ exports needed for Option A-prime.
-- GGML_OP enum values: see `src/inference/jsep/index.ts` constants. Add `GGML_OP_SET_ROWS = ?`, etc. (look up in `ggml.h` — `MUL_MAT = 29`, `RMS_NORM = 25`, both already present).
+    // Dispatch + read back + compare. (See runQ4KSelfTest's read-back path.)
+    // Report: max|got - reference|, and got[0..4].
+}
+```
 
-**JSEP-side `supports_op` matrix** (in llama.cpp `webllm-browser-patches` `ggml-jsep.cpp:supports_op`): currently advertises only MUL_MAT + RMS_NORM (post-Task-9 metadata allowlist). Each new kernel needs a matching `case` in `supports_op`. If a kernel only supports a dtype subset, narrow there to avoid scheduler dispatching unsupported variants. **No new patch** — modify the existing Phase 2 patch in-place via amend or fast-forward; patch stack stays at +3.
+Add to the spike's import list: `dispatchRmsNorm` from `../src/inference/jsep/ops/rms-norm.js`, `GGML_OP_RMS_NORM` from `../src/inference/jsep/index.js`. Re-export both with `JSEP_` prefix from `src/index-jsep.ts` (mirror the existing Stage-3 re-exports).
 
-**Suggested staging (subagent-driven-development plan, dispatch immediately per CLAUDE.md "begin Task 1 immediately" rule):**
+**Decision rule from result:**
 
-1. ~~Stage 0 — pre-flight probe.~~ **CLOSED 2026-05-06** (`b640d17`). Device-hint inverted via `WEBLLM_PIN_TO_JSEP=1`; first abort = `SET_ROWS` (predicted).
-2. ~~Stage 1 — SET_ROWS kernel + supports_op case + smoke.~~ **CLOSED 2026-05-06** (`e60a39e`, llama.cpp `d8b80dee2`). `sched_reserve` passes; surfaced Phase 2 RMS_NORM fused-signature bug (closed in 1.5).
-3. ~~Stage 1.5 — RMS_NORM unary fix + supports_buft narrowed to JSEP-only.~~ **CLOSED 2026-05-06** (`ef5ccac`, llama.cpp `d0075e9a6`). Surfaced Phase 2 descriptor ABI bug (handle vs offset conflation).
-4. ~~Stage 2 — descriptor ABI extension (`buf_handle` + `offset` per tensor; bump `TENSOR_BLOCK_I32` 18→19).~~ **CLOSED 2026-05-06** (`9406496`, llama.cpp `53c66649f`). Outcome B per the original outcome table — `sched_reserve` passes, decode reaches `dispatchMatmul` with valid bufHandles, surfaces next missing kernel = **Q4_K matmul**.
-5. **Stage 3 — Q4_K matmul kernel + smoke. NEXT — START HERE.** Gate: spike either completes greedy "Paris" decode (Outcome A — Phase 3 effectively at parity with WebGPU-only) or surfaces the next missing op kernel (Outcome B — typically GET_ROWS / ROPE / SOFT_MAX). See "Next session pickup — Phase 3 Stage 3" above for concrete edit list.
-6. **Stage 4 — next op revealed by Stage 3 + smoke.** Repeat against the fresh abort.
-7. **Stage 5 — ROPE + SOFTMAX + MUL + ADD (whichever didn't ship in earlier stages) + smoke.** Should reach end-to-end decode if Stage 3 / 4 didn't already.
-8. **Stage 6 — gate measurement.** Compare tok/s vs Task 12's 81 tok/s baseline (Outcome D / WebGPU-only). Hypothesis: comparable (within ±20%) since identical compute, just different dispatch surface. Diverged outcome means kernel/dispatch overhead, not compute work.
+- **delta < 1e-3** → RMS_NORM kernel correct on real-model shapes; bug is elsewhere → go to Step 2.
+- **all output zero** (or NaN, or wildly wrong) → RMS_NORM kernel is the bug. Likely culprit candidates: shape uniform packing (rows/cols swapped? eps as u32 instead of f32?), bind group offset, or `inverseSqrt` overflow on large rows. Inspect `src/inference/jsep/ops/rms-norm.ts` lines 43-70 (kernel WGSL) and 167-182 (uniform packing).
 
-**Opening dispatch (Stage 3 — fresh session):** Replace the `case GGML_TYPE_Q4_K: throw new Error(...)` at `src/inference/jsep/ops/matmul.ts:316` with a real WGSL kernel mirroring the Q4_0 case (`load_q4_K(m, k, batch)` helper + super-block scale/min unpacking per `ggml-common.h::block_q4_K` + `ggml-quants.c::get_scale_min_k4`). Run `make wasm-build-jsep && make checkall`, navigate `p2-v2-spike` at fresh `?v=A-prime-stage3`, capture stderr + `__spikeResult`. Document outcome in `eval/reports/p2-v2-option-a-prime-2026-05-XX/STAGE-3-RESULT.md`.
+#### Step 2 — first-model-matmul dst capture (medium, ~45 min)
 
-**Concrete write-up + measurements** for Outcome D and E: [`SUMMARY.md`](eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md) (Task 11/12 + Task 13/14 sections). Patch budget at +3 (unchanged); Option A-prime is **zero-patch** (kernels live in webllm TS, supports_op cases amend the existing Phase 2 patch in place).
+**Goal:** determine whether the first attn_q matmul (M=2048, K=2048, N=6, batch=1) writes correct values to dst, or zeros. Disambiguates "kernel works but CPY-back is broken" from "kernel inputs were already zero".
 
-**Phase 1 closure links retained (still load-bearing for Phase 3):**
-- JSEP ABI: [`eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md`](eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md)
-- ggml backend contract: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md)
-- ggml op catalog: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md)
+Add a one-shot probe inside `dispatchMatmul` (`src/inference/jsep/ops/matmul.ts`) that, for the first dispatch matching `M >= 2048 && K >= 2048` (skips the self-test which uses K=256), records dst metadata and triggers a follow-on `mapAsync` readback of the first 8 f32 values of the kernel's output. Stash the result on `globalThis.__firstModelMatmulDst` for the spike harness to log alongside `LOGIT_STATS_STEP0`.
 
-**Side-effects: items obviated.** P2 v1's "side-effects closed" claims for §1 (Decode graph reuse) and §4 (Flash attention in browser) are **withdrawn** with the revert. The legacy `ModelInference` retains its own graph caching + FA gating, and those remain live until Phase 3 ships their replacement.
+Implementation sketch:
 
-#### Closure stub: P2 v1 (REVERTED 2026-05-05)
+```ts
+// At the end of dispatchMatmul, after ctx.encoderBatcher.record(...):
+const wAny = globalThis as { __firstModelMatmulCaptured?: boolean; __firstModelMatmulDst?: unknown };
+if (!wAny.__firstModelMatmulCaptured && M >= 2048 && K >= 2048) {
+    wAny.__firstModelMatmulCaptured = true;
+    ctx.encoderBatcher.flush();  // ensure the dispatch is on the queue
+    const staging = ctx.device.createBuffer({
+        size: 32, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const enc = ctx.device.createCommandEncoder();
+    enc.copyBufferToBuffer(dstRec.buffer, dst.offset, staging, 0, 32);
+    ctx.device.queue.submit([enc.finish()]);
+    void staging.mapAsync(GPUMapMode.READ, 0, 32).then(() => {
+        const got = new Float32Array(staging.getMappedRange().slice(0));
+        wAny.__firstModelMatmulDst = {
+            M, K, N, batch: batchCount,
+            src0Offset: src0.offset, src1Offset: src1.offset, dstOffset: dst.offset,
+            first8: Array.from(got),
+        };
+        staging.unmap(); staging.destroy();
+    });
+}
+```
 
-P2 v1 attempted the migration via `ggml-webgpu` + Dawn inside WASM (commits `4bb644c..bd7ae4b`). Code-level migration was structurally clean (`make checkall` green throughout the 11-commit chain, spec compliance + code quality reviews ✅ on every commit, 6 fake-bridge unit tests). The runtime regression was an **architectural mismatch**, not a code bug: the WebGPU dispatch model assumed by `ggml-webgpu` (issue calls from C++/WASM) is incompatible with browser perf characteristics under the current emscripten + Dawn stack (`emdawnwebgpu` per-call shim cost dominates decode time at single-token batch).
+**Decision rule:**
 
-- Closure report: [`eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md`](eval/reports/p2-causal-migration-2026-05-05/SUMMARY.md) (with addenda)
-- Bench halt + Path A investigation: [`eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md`](eval/reports/p2-causal-migration-2026-05-05/POST-MIGRATION-BENCH.md)
-- Architectural reframe: same doc §P2.1.B
-- Original plan: [`docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md`](docs/superpowers/plans/2026-05-05-tier3-p2-causal-lm.md) (kept as historical record)
-- Partial revert commit: `0b57d41 revert(p2): roll back wrapper+dispatch+delete; keep bridge surface`
+- **non-zero `first8`** → Q4_K kernel produces correct output in-context. Bug is in the JSEP→CPU CPY path (host-roundtrip via `get_tensor`/`set_tensor` between splits). Go to Step 4.
+- **all-zero `first8`** → kernel input (src1, the activation) was already zero when the kernel ran. Go to Step 3.
 
-**Withdrawn followups** (no longer applicable post-revert):
-- ~~P2.1 — same-tip greedy bench retake on canonical 6~~ (the regression itself is the conclusive measurement)
-- ~~P2.2 — Bucket-D distinguishability gate retake against the wrapper-based embed path~~ (wrapper deleted; legacy `embed()` remains via `ModelInference`)
+#### Step 3 — first CPU→JSEP write byte dump (only if Step 2 said zero; ~20 min)
 
-#### Closure summaries
+Instrument `jsepWrite` in `src/inference/jsep/index.ts` to log, on the FIRST call, the first 8 bytes from `module.HEAPU8` at `hostPtr`. If those bytes are zero, the CPU side produced zero before writing — fault is in the CPU backend's compute or the embedding lookup. If those bytes are non-zero but the matching JSEP buffer reads back as zero later, the `dataManager.write` → `device.queue.writeBuffer` path is the fault.
 
-**P0 (CLOSED 2026-05-05).** TinyLlama Q4_0 → `webllm_decode` →
-top-1 = " Paris" id 3681. Plan
-[`docs/superpowers/plans/2026-05-05-tier3-p0-spike.md`](docs/superpowers/plans/2026-05-05-tier3-p0-spike.md);
-closure report
-[`eval/reports/p0-spike-2026-05-05/SUMMARY.md`](eval/reports/p0-spike-2026-05-05/SUMMARY.md).
-Three build-config deltas: `GGML_CPU=ON`, `WASM_BIGINT=1` on
-wasm32, `LLAMA_WASM_MEM64=OFF`.
+#### Step 4 — pinning bisect sanity check (5 min, run any time)
 
-**P1 (CLOSED 2026-05-05).** 1000/1000 prompts byte-exact across
-all 5 vocabs (spm-llama, llama-bpe, qwen2, qwen3, wordpiece-bert)
-in a single-page parity run. Closure report
-[`eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md`](eval/reports/p1-tokenizer-2026-05-05/SUMMARY.md).
-Load-bearing commits:
-- `b4d4b48` JSPI pivot (drops `-sASYNCIFY` for `-sJSPI`,
-  sidesteps the Asyncify+exceptions+ctors `function signature
-  mismatch in __wasm_call_ctors` trap that blocked any new wasm
-  export under the prior build)
-- `f9b8b36` fixture regenerated from canonical `llama_tokenize`
-  (legacy encoder retained but no longer the parity reference;
-  deleted in P2)
-- `ab850cf` cross-model load fix (`use_mmap=false` +
-  `std::remove()` after load — closes the wasm32 4 GiB cap that
-  previously fired on the 2nd sequential model load)
-- `LlamaTokenizer` gained an `encoderOnly` option that flips
-  `addBos=true` for BERT-family vocabs ([CLS] is BERT's BOS)
+```bash
+# Rebuild with WEBLLM_PIN_TO_JSEP=0 to fall back to the Stage-0 baseline
+# (libllama pinned to WebGPU only). This must produce "Paris" — if it
+# doesn't, Stage 3 introduced an orthogonal regression independent of
+# the JSEP path being explored above.
+( cd src/wasm/build-jsep && cmake .. -DWEBLLM_PIN_TO_JSEP=0 && cmake --build . -j ) \
+  && cp src/wasm/build-jsep/webllm-wasm-jsep.{js,wasm} smoke-test/ \
+  && bun build src/index-jsep.ts --outfile smoke-test/webllm-bundle-jsep.js --target browser \
+  && bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
+agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage3-pin-off" --tab <TAB_ID>
+# Expected: GENERATED_TEXT ≈ "Paris" (Stage-0 / Outcome D baseline). If it
+# doesn't, stop and bisect Stage-3 changes against 9406496 (Stage-2 tip).
+# REMEMBER to re-build with -DWEBLLM_PIN_TO_JSEP=1 before resuming Stage 3.5.
+```
 
-**Decision summary.** Migrate the entire forward-pass surface
-(causal LM, encoder, embedder, tokenizer) off the hand-rolled TS
-graph builder onto upstream `llama_*` API surface. Code at risk of
-deletion: `src/inference/model-inference.ts` (~2890 LOC),
-`src/inference/encoder-inference.ts` (~565 LOC),
-`src/inference/causal-embedder-inference.ts`, the bulk of
-`src/inference/tokenizer.ts` (~1000 LOC of WordPiece + BPE +
-pre-tokenizer regex). Retained: `engine.ts` orchestration,
-`sampler.ts`, `generation.ts`, `chat-template.ts`, `stream-router.ts`,
-`speculative.ts` (rewired in P5).
+#### Working hypothesis (test if Steps 1-3 don't pinpoint)
 
-**Motivation.** Future-proof for any architecture llama.cpp
-supports (LFM2, Mamba, Qwen3-MoE, GLM, DeepSeek, hybrids) without
-TS-side reimplementation, and eliminate the maintenance burden of
-mirroring upstream graph builders. Triggered by an LFM2.5-350M
-support request 2026-05-05 — investigation revealed LFM2's hybrid
-short-conv + GQA layers would require ~500-1000 LOC of new TS
-graph code that already exists in upstream `src/models/lfm2.cpp`.
-Tier 3 makes LFM2 (and the next N hybrids) free.
+The JSEP backend's `cpy_tensor = NULL` forces every inter-split copy through a host-roundtrip via `set_tensor` / `get_tensor`. Stage 3 added `encoderBatcher.flush()` to `jsepRead`/`jsepWrite`/`jsepClear` to fix WebGPU-side queue FIFO ordering (verified empirically not to cure Outcome C — kept as a load-bearing protocol invariant). The remaining suspect: the C++ scheduler may queue a `set_tensor` from CPU into JSEP before the previous backend's `graph_compute` has actually completed on the GPU, not just returned from the wasm call. `ggml_backend_synchronize` is the contract for "wait for queued work to complete"; the inter-split CPY path may not invoke it.
 
-**Locked decisions (2026-05-05 brainstorm):**
+Files to read for this hypothesis:
 
-- **Tier 3** (full migration; not T1 trial, not T2 partial)
-- **Stage-aware parity bars** per phase (D): byte-exact tokenizer;
-  C-strict (accuracy ±sampling-noise, perf ±10% canonical 6,
-  embedder distinguishability gate strict) for causal/encoder/
-  embedder; perf-strict for spec-decode/KV; "it works" for spike
-  + LFM2.
-- **Pragmatic patch budget** (B): up to ~3 new core llama.cpp
-  patches with upstream-PR discipline; escalate to Liberal (C) if
-  P0 reveals ASYNCIFY blockers deeper than expected. Budgeted
-  patches: (1) `llama_decode` ASYNCIFY-aware suspend point,
-  (2) `llama_kv_cache_init` heap-pressure-aware sizing for the
-  WASM-32 ceiling, (3) reserve 1 for unknowns.
-- **Pragmatic tap preservation** (B): Bucket-D self-embed survives
-  natively via `llama_get_embeddings_ith` (load-bearing per
-  CLAUDE.md); speculative-decode rewired in P5 via two
-  `llama_context`s sharing one `llama_model`; `debugLayerOutput`
-  deleted (parity tests rewritten against logits / public
-  embeddings); per-op timing simplified to `llama_perf_*`; custom
-  FA gating + prefill tiling deleted (subsumed by
-  `llama_context_params`).
-- **Bridge structure** (A3 hybrid): one async `webllm_decode`
-  wrapper for the hot decode path (single ASYNCIFY round trip per
-  token) + direct cwrap bindings for stateless ops (kv reset,
-  logits/embedding readback, batch construction, model load).
+- `~/Repos/llama.cpp/ggml/src/ggml-backend.cpp` — search for `set_tensor` / `cpy_tensor_async` in the `ggml_backend_sched_compute_splits` function (or its modern equivalent). Verify the call sequence between consecutive splits.
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:316-320` — `ggml_backend_jsep_synchronize` is correctly wired to `ggml_jsep_sync` → JS `module.jsepSync` → `encoderBatcher.flush()`. The question is whether the scheduler INVOKES it at the right point.
 
-**Phase order (A — tokenizer-first, LFM2 last):**
+If this hypothesis confirms, the fix is either:
+- **(a) C++ patch** — add explicit `ggml_backend_synchronize` calls in the JSEP backend's `set_tensor`/`get_tensor` if a graph compute is pending. +1 patch.
+- **(b) JS-side defensive flush** — already done for `jsepRead`/`jsepWrite`/`jsepClear`; but `device.queue.writeBuffer` is async on the GPU side. Might need to additionally `await staging.mapAsync` in `jsepRead` flow to BLOCK until prior work completes. (`encoderBatcher.flush` only enqueues; it doesn't wait.)
 
-1. **P0 Spike** — TinyLlama or smollm2-360m generates "Paris"
-   through `llama_decode`. Validates ABI + ASYNCIFY patch + heap-
-   aware load. Parity bar: it works.
-2. **P1 Tokenizer** — replace BPE / WordPiece in `tokenizer.ts`
-   with `llama_tokenize`. Byte-exact gate on the existing fixture
-   set (wordpiece-golden, Mistral trailing-space, chat-template
-   stop-token suite).
-3. **P2 Causal-LM** — `ModelInference` → `webllm_decode` wrapper.
-   Delete `model-inference.ts`. C-strict bar.
-4. **P3 Encoder** — `EncoderInference` → `llama_encode` + pooling.
-   Delete `encoder-inference.ts`. C-strict + cosine parity vs HF
-   reference vectors.
-5. **P4 Embedder** — `CausalLMEmbedder` →
-   `llama_get_embeddings_ith`. C-strict + Bucket-D distinguishability
-   gate strict (16+16 mean-margin per 2026-04-30 doctrine).
-6. **P5 Spec-decode + KV** — two-context spec-decode rewire; KV
-   cache lifecycle moves under `llama_kv_cache`. Perf-strict
-   (this path is perf-load-bearing).
-7. **P6 LFM2** — `eval/models.ts` registration + ChatML stop tokens
-   + smoke test. Trivial; victory lap.
+#### Files to read first (reading order, ~15 min)
 
-**Side-effects: deferred items obviated.** Mark closed-by-
-superseded once spec lands: §1 "Decode graph reuse (deferred)" —
-TS-side optimization moot under Tier 3 (upstream handles graph
-caching internally). §4 "Flash attention in browser" — gating
-becomes `llama_context_params.flash_attn`; per-arch heuristics
-delete with `model-inference.ts`.
+1. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3-RESULT.md` — Stage 3 closure with full diagnostic data and hypothesis register.
+2. `smoke-test/p2-v2-spike.src.ts::runQ4KSelfTest` (function around line 50) — pattern to copy for `runRmsNormSelfTest`.
+3. `src/inference/jsep/ops/rms-norm.ts` — RMS_NORM kernel (the Step-1 candidate).
+4. `src/inference/jsep/index.ts:163-220` — `jsepWrite` / `jsepRead` / `jsepClear` with the Stage-3 flush calls + `installJsepCallbacks` shape.
+5. `src/inference/jsep/ops/matmul.ts:381-512` (`dispatchMatmul`) — where the Step-2 probe gets inserted.
+6. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:200-320` — buffer interface (`set_tensor`/`get_tensor`/`cpy_tensor=NULL`) + `synchronize` wiring.
 
-**Risk register (high-level — full register lives in spec):**
+#### Spike state cheat sheet
 
-- **R1 ASYNCIFY blocker.** P0 may reveal `llama_decode`'s compute
-  path needs deeper restructuring than a single suspend-point
-  patch. Escape valve: escalate to Liberal patch budget (C).
-- **R2 P2 perf regression > 10%.** llama.cpp's prefill scheduler
-  may behave differently than the project's hand-tuned tiling.
-  Stage D allows perf-recovery sub-phase before merge.
-- **R3 Tokenizer fixture mismatch in P1.** Edge cases (chatml
-  `<|im_end|>` lookup, Mistral trailing-space, WordPiece phantom-
-  space) may diverge from `llama_tokenize`. Byte-exact gate
-  exposes this on a fixture set, not mid-decode.
+- **Spike URL:** `http://localhost:8031/p2-v2-spike.html?v=stage3.5-<probe-name>`
+- **Spike entry point:** `smoke-test/p2-v2-spike.src.ts::runSpike`
+- **Tab reuse:** existing `p2-v2-spike.html` tab — `agentchrome --port <PORT> tabs list` then re-navigate that tab id.
+- **Bundle build:** `bun build src/index-jsep.ts --outfile smoke-test/webllm-bundle-jsep.js --target browser && bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser`. WASM rebuild only needed for C++ changes.
+- **Spike output to read:** `agentchrome --port <PORT> js exec --tab <TAB_ID> 'document.getElementById("log").innerText'`. Wait for `DONE` or `FAIL` in the log first.
+- **Counter snapshot per token (Stage 3 baseline):** runOp 320, write 241, read 211, sync 612, clear 0, alloc 0, free 0. Total crossings/token = 1549.
+- **Existing diagnostic captures:** `globalThis.__q4kSelfTest` (Q4_K kernel correctness) and `LOGIT_STATS_STEP0` (logit values + NaN/Inf/finite split). Add Step-1's `__rmsNormSelfTest` and Step-2's `__firstModelMatmulDst` next to these.
 
-**MEMORY64 full bridge migration — CLOSED 2026-04-29.** All 8
-phases shipped + all three closure follow-ups landed (Q5_K_M
-decode validated, Q5_K canonical-6 row, Emscripten port bumped
-past `8d78be5` and shim patch deleted). Production wasm64 ships
-end-to-end on Mistral-Nemo Q4_K_S (72% eval / 19.3 tok/s
-gate-passing) and Mistral-7B Q5_K_M (26.7 tok/s, kernel-coverage
-probe). Closure report at
-[`eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md`](eval/reports/memory64-migration-2026-04-28/PHASE-7-VALIDATION.md);
-Phase 5 parity sweep with Q5_K addendum at
-[`eval/reports/memory64-migration-2026-04-28/PHASE-5-PARITY.md`](eval/reports/memory64-migration-2026-04-28/PHASE-5-PARITY.md);
-full migration history archived to `TODO_ARCHIVE.md`.
+#### Exit criteria
+
+Stage 3.5 closes when ONE of the following holds and is documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md`:
+
+- **Identified op/transition is the fault** → Stage 4 fixes it (kernel rewrite, missing flush, scheduler patch). Closure stub queues Stage 4 with the specific fix.
+- **`WEBLLM_PIN_TO_JSEP=0` rebuild fails to produce "Paris"** → Stage 3 introduced an orthogonal regression. Closure stub bisects from `9406496` (Stage 2 tip) against `4731dc1` (Stage 3 tip) and identifies the offending hunk.
+- **Outcome A "Paris" decode achieved** → Phase 3 effectively at parity with WebGPU-only. Work shifts from op-surface to perf characterization (compare ~24 ms/token Stage-3 baseline vs Outcome D's 12 ms/token).
+
+### Earlier Stage 3 brief — collapsed (full text in closure report)
+
+Full rationale, phasing, file list, and Q4_K kernel design notes for the original Stage 3 brief live in [`STAGE-3-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3-RESULT.md). The brief was inlined here through Stage 3 execution; collapsed at Stage 3.5 queue time to keep the active surface focused. The kernel landed in `4731dc1` and is verified correct in isolation.
 
 ### 13B target registration (CLOSED 2026-04-29; archived from TODO.md)
 
