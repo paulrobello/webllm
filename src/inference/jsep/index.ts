@@ -24,6 +24,7 @@
 import { CommandEncoderBatcher } from "./command-encoder.js";
 import { GpuDataManager } from "./gpu-data-manager.js";
 import { dispatchMatmul, readDescriptor } from "./ops/matmul.js";
+import { dispatchRmsNorm } from "./ops/rms-norm.js";
 import { PipelineCache } from "./pipeline-cache.js";
 
 export const STATUS_OK = 0;
@@ -36,6 +37,7 @@ export const STATUS_FAILED = -1;
 // CUMSUM=16, MEAN=17, ARGMAX=18, COUNT_EQUAL=19, REPEAT=20, REPEAT_BACK=21,
 // CONCAT=22, SILU_BACK=23, NORM=24, RMS_NORM=25, RMS_NORM_BACK=26,
 // GROUP_NORM=27, L2_NORM=28, MUL_MAT=29).
+export const GGML_OP_RMS_NORM = 25;
 export const GGML_OP_MUL_MAT = 29;
 
 /**
@@ -164,7 +166,7 @@ export function installJsepCallbacks(
 	module.jsepRunOp = (
 		descriptorPtr: number,
 		_descriptorWords: number,
-		_opParamsPtr: number,
+		opParamsPtr: number,
 		_opParamsLen: number,
 	): number => {
 		// Re-derive HEAP32 each call — the WASM heap may have grown
@@ -172,19 +174,20 @@ export function installJsepCallbacks(
 		const buf = module.HEAPU8.buffer;
 		const heap32 = new Int32Array(buf, 0, buf.byteLength >>> 2);
 		const desc = readDescriptor(heap32, descriptorPtr);
+		const ctx = {
+			device,
+			dataManager,
+			encoderBatcher,
+			pipelineCache,
+			bindGroupLayoutCache,
+		};
 		if (desc.op === GGML_OP_MUL_MAT) {
-			return dispatchMatmul(
-				{
-					device,
-					dataManager,
-					encoderBatcher,
-					pipelineCache,
-					bindGroupLayoutCache,
-				},
-				desc,
-			);
+			return dispatchMatmul(ctx, desc);
 		}
-		// Other ops (RMS_NORM in Task 5, etc.) stay NOT_IMPLEMENTED.
+		if (desc.op === GGML_OP_RMS_NORM) {
+			return dispatchRmsNorm(ctx, desc, opParamsPtr, buf);
+		}
+		// Other ops stay NOT_IMPLEMENTED — C++ side falls back to CPU.
 		return STATUS_NOT_IMPLEMENTED;
 	};
 
