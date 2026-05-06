@@ -372,6 +372,21 @@ async function runSpike(): Promise<void> {
 			return;
 		}
 		const device = await adapter.requestDevice();
+		// Stage 4.2 — capture WebGPU validation/internal errors so silent
+		// dispatch failures show up in the log instead of surfacing only
+		// as zero/NaN dst.
+		const gpuErrLog: Array<{ kind: string; msg: string }> = [];
+		device.addEventListener("uncapturederror", (ev) => {
+			const e = ev as unknown as { error: GPUError };
+			const kind =
+				e.error instanceof GPUValidationError
+					? "validation"
+					: e.error instanceof GPUOutOfMemoryError
+						? "oom"
+						: "internal";
+			gpuErrLog.push({ kind, msg: e.error.message });
+		});
+		(window as any).__gpuErrLog = gpuErrLog;
 
 		log("[3/8] Installing JSEP callbacks (must precede webllm_load_model)...");
 		const runtime = installJsepCallbacks(mod, device);
@@ -418,6 +433,200 @@ async function runSpike(): Promise<void> {
 		};
 		log(`     counters@load = ${JSON.stringify(counter0)}`);
 
+		// Stage 4.2 — pre-prefill GPU buffer dump. Establishes the
+		// "initial state" of buf 11 at known JSEP offsets BEFORE any
+		// JSEP ops dispatch, so we can compare to the post-prefill state.
+		async function dumpBuf11Pre(off: number, size: number): Promise<number[]> {
+			const rec = runtime.dataManager.get(11);
+			const staging = runtime.device.createBuffer({
+				size,
+				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+			});
+			const enc = runtime.device.createCommandEncoder();
+			enc.copyBufferToBuffer(rec.buffer, off, staging, 0, size);
+			runtime.device.queue.submit([enc.finish()]);
+			await staging.mapAsync(GPUMapMode.READ, 0, size);
+			const data = new Float32Array(staging.getMappedRange().slice(0));
+			staging.unmap();
+			staging.destroy();
+			return Array.from(data.slice(0, 8));
+		}
+		const preProbeOffsets = [0, 524288, 2101248, 4194304, 6295552];
+		const preProbe: Record<string, number[]> = {};
+		for (const off of preProbeOffsets) {
+			preProbe[String(off)] = await dumpBuf11Pre(off, 32);
+		}
+		log(`PREPREFILL_BUF11 = ${JSON.stringify(preProbe)}`);
+
+		// Stage 4.2 Step 1 diagnostic — wrap jsepWrite/jsepRead to capture
+		// (handle, offset, size, first8 f32, first16 raw u8) for the first
+		// MAX_LOG calls AFTER model load (so weight uploads don't dominate).
+		// Goal: identify which CPU-fallback op is writing the corruption
+		// signature ([-5e-5, 142.08, ..., -7.4e+18]) into attn_q.src1.
+		// Remove before commit.
+		const MAX_LOG = 30;
+		type WrEntry = {
+			i: number;
+			handle: number;
+			offset: number;
+			size: number;
+			first8: number[];
+			firstBytes: number[];
+		};
+		const writeLog: WrEntry[] = [];
+		const readLog: WrEntry[] = [];
+		const writeOrig = mod.jsepWrite as (
+			h: number,
+			o: number,
+			p: number,
+			s: number,
+		) => void;
+		const readOrig = mod.jsepRead as (
+			h: number,
+			o: number,
+			p: number,
+			s: number,
+		) => Promise<void>;
+		mod.jsepWrite = (h: number, o: number, p: number, s: number): void => {
+			if (writeLog.length < MAX_LOG) {
+				const n = Math.min(8, Math.floor(s / 4));
+				const first8 =
+					n > 0
+						? Array.from(new Float32Array(mod.HEAPU8.buffer, p, n))
+						: [];
+				const firstBytes = Array.from(
+					new Uint8Array(mod.HEAPU8.buffer, p, Math.min(16, s)),
+				);
+				writeLog.push({
+					i: writeLog.length,
+					handle: h,
+					offset: o,
+					size: s,
+					first8,
+					firstBytes,
+				});
+			}
+			writeOrig(h, o, p, s);
+		};
+		mod.jsepRead = (
+			h: number,
+			o: number,
+			p: number,
+			s: number,
+		): Promise<void> => {
+			const idx = readLog.length < MAX_LOG ? readLog.length : -1;
+			if (idx >= 0) {
+				readLog.push({
+					i: idx,
+					handle: h,
+					offset: o,
+					size: s,
+					first8: [-1] /* sentinel: pre-await placeholder */,
+					firstBytes: [-1],
+				});
+			}
+			return readOrig(h, o, p, s).then(() => {
+				if (idx >= 0) {
+					try {
+						const heap = mod.HEAPU8.buffer as ArrayBuffer;
+						const n = Math.min(8, Math.floor(s / 4));
+						const first8 =
+							n > 0
+								? Array.from(new Float32Array(heap, p, n))
+								: [];
+						const firstBytes = Array.from(
+							new Uint8Array(heap, p, Math.min(16, s)),
+						);
+						readLog[idx].first8 = first8;
+						readLog[idx].firstBytes = firstBytes;
+					} catch (e) {
+						readLog[idx].first8 = [-99];
+						readLog[idx].firstBytes = [
+							-99,
+							(e as Error).message.length,
+						];
+					}
+				}
+			});
+		};
+		(window as any).__jsepWriteLog = writeLog;
+		(window as any).__jsepReadLog = readLog;
+
+		// Instrument jsepRunOp: record (op, dst.handle, dst.offset, src
+		// offsets/types) per dispatch so we can correlate "buffer at offset X
+		// is NaN" with "what JSEP op (if any) dispatched into X". The
+		// descriptor word layout matches readDescriptor in matmul.ts —
+		// op at [0], n_src at [1], 19-i32 dst block at [2..20], 19-i32 src
+		// blocks starting at [21], [40], etc.
+		const TBLK = 19;
+		type RunOpEntry = {
+			i: number;
+			op: number;
+			nSrc: number;
+			dstH: number;
+			dstO: number;
+			srcs: Array<{ h: number; o: number; t: number }>;
+			status: number;
+			divert: boolean;
+		};
+		const runLog: RunOpEntry[] = [];
+		const RUN_MAX = 30;
+		const runOpOrig = mod.jsepRunOp as (
+			d: number,
+			dw: number,
+			pp: number,
+			pl: number,
+		) => number;
+		mod.jsepRunOp = (
+			descriptorPtr: number,
+			descriptorWords: number,
+			opParamsPtr: number,
+			opParamsLen: number,
+		): number => {
+			let entry: RunOpEntry | null = null;
+			if (runLog.length < RUN_MAX) {
+				const buf = mod.HEAPU8.buffer as ArrayBuffer;
+				const heap32 = new Int32Array(buf, 0, buf.byteLength >>> 2);
+				const op = heap32[descriptorPtr >>> 2];
+				const nSrc = heap32[(descriptorPtr >>> 2) + 1];
+				const baseW = descriptorPtr >>> 2;
+				const dstH = heap32[baseW + 2 + 0];
+				const dstO = heap32[baseW + 2 + 1];
+				const srcs: Array<{ h: number; o: number; t: number }> = [];
+				for (let s = 0; s < nSrc; s++) {
+					const sw = baseW + 2 + TBLK + s * TBLK;
+					srcs.push({
+						h: heap32[sw + 0],
+						o: heap32[sw + 1],
+						t: heap32[sw + 2],
+					});
+				}
+				const divert = srcs.some(
+					(sr) => sr.h === dstH && srcs.length > 0,
+				);
+				entry = {
+					i: runLog.length,
+					op,
+					nSrc,
+					dstH,
+					dstO,
+					srcs,
+					status: -777,
+					divert,
+				};
+				runLog.push(entry);
+			}
+			const status = runOpOrig(
+				descriptorPtr,
+				descriptorWords,
+				opParamsPtr,
+				opParamsLen,
+			);
+			if (entry) entry.status = status;
+			return status;
+		};
+		(window as any).__jsepRunLog = runLog;
+
 		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
 		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
 		const tPrefillStart = performance.now();
@@ -430,6 +639,48 @@ async function runSpike(): Promise<void> {
 			return;
 		}
 		log(`     prefill ${tPrefillMs.toFixed(0)} ms`);
+
+		// Stage 4.2 Step 2 — manual GPU read of buf 11 at the offsets that
+		// jsepRead reported as NaN. If these reads return the SAME NaN, the
+		// JSEP-supported ops (MUL_MAT/RMS_NORM/SET_ROWS) genuinely failed
+		// to write valid data. If they return real data, the bug is in
+		// jsepRead synchronization (e.g., reading before the producing op
+		// dispatched).
+		async function dumpBuf11(off: number, size: number): Promise<number[]> {
+			const rec = runtime.dataManager.get(11);
+			const staging = runtime.device.createBuffer({
+				size,
+				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+			});
+			const enc = runtime.device.createCommandEncoder();
+			enc.copyBufferToBuffer(rec.buffer, off, staging, 0, size);
+			runtime.device.queue.submit([enc.finish()]);
+			await staging.mapAsync(GPUMapMode.READ, 0, size);
+			const data = new Float32Array(staging.getMappedRange().slice(0));
+			staging.unmap();
+			staging.destroy();
+			return Array.from(data.slice(0, 8));
+		}
+		const probeOffsets = [
+			0, 524288, 528384, 1052672, 2101248, 4194304, 6295552, 17829888,
+			35655680,
+		];
+		const probeResults: Record<string, number[]> = {};
+		for (const off of probeOffsets) {
+			probeResults[String(off)] = await dumpBuf11(off, 32);
+		}
+		log(`POSTPREFILL_BUF11 = ${JSON.stringify(probeResults)}`);
+		// Dump all live buffers + their sizes (private fields via reflection)
+		const dmAny = runtime.dataManager as unknown as {
+			handles: Map<number, { size: number; bucket: number }>;
+		};
+		const liveBufs: Array<{ h: number; size: number; bucket: number }> = [];
+		for (const [h, rec] of dmAny.handles.entries()) {
+			liveBufs.push({ h, size: rec.size, bucket: rec.bucket });
+		}
+		log(`LIVE_BUFFERS = ${JSON.stringify(liveBufs)}`);
+		log(`GPU_ERR_LOG = ${JSON.stringify(gpuErrLog.slice(0, 8))}`);
+		log(`GPU_ERR_COUNT = ${gpuErrLog.length}`);
 
 		log(`[8/8] Greedy decoding ${N_GENERATE} tokens...`);
 		const generatedIds: number[] = [];
@@ -522,6 +773,9 @@ async function runSpike(): Promise<void> {
 			generatedText = `<detokenize failed: ${(e as Error).message}>`;
 		}
 
+		log(`JSEPRUN_LOG = ${JSON.stringify(runLog)}`);
+		log(`JSEPWRITE_LOG = ${JSON.stringify(writeLog)}`);
+		log(`JSEPREAD_LOG = ${JSON.stringify(readLog)}`);
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`GENERATED_TEXT = ${JSON.stringify(generatedText)}`);
