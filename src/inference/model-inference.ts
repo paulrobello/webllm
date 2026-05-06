@@ -564,13 +564,14 @@ export class ModelInference {
 		const out = new Uint8Array(total);
 		const fullKBytes = wasm.tensorNbytes(this.kvLayers[0].k); // == fullVBytes in FA
 
-		// Phase 1: pipeline-launch all readbacks. Each call is sync and just
-		// queues a GPU readback command; no ASYNCIFY suspension yet.
+		// Phase 1: pipeline-launch all readbacks. Each call queues a GPU
+		// readback command. Under JSPI the queue dispatch is awaited per
+		// call (returns a request with a resolved integer requestId).
 		const requests: TensorDownloadRequest[] = [];
 		for (let il = 0; il < hp.layerCount; il++) {
 			const kv = this.kvLayers[il];
-			requests.push(wasm.beginDownloadFromTensor(kv.k, fullKBytes, 0));
-			requests.push(wasm.beginDownloadFromTensor(kv.v, fullKBytes, 0));
+			requests.push(await wasm.beginDownloadFromTensor(kv.k, fullKBytes, 0));
+			requests.push(await wasm.beginDownloadFromTensor(kv.v, fullKBytes, 0));
 		}
 
 		// Phase 2: finish each in order. The GPU is processing all of them

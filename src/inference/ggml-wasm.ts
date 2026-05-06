@@ -573,11 +573,11 @@ export class GgmlWasm {
 		}
 	}
 
-	beginDownloadFromTensor(
+	async beginDownloadFromTensor(
 		tensor: TensorPtr,
 		byteLength: number,
 		offset = 0,
-	): TensorDownloadRequest {
+	): Promise<TensorDownloadRequest> {
 		this.installAsyncTensorGetNotifier();
 		const ptr = this.malloc(byteLength);
 		const timings: TensorDownloadTimings = {
@@ -587,7 +587,7 @@ export class GgmlWasm {
 			copyMs: 0,
 		};
 		const beginStart = this.now();
-		const requestId = this.backendTensorGetAsyncBegin(
+		const requestId = await this.backendTensorGetAsyncBegin(
 			tensor,
 			offset,
 			byteLength,
@@ -612,13 +612,12 @@ export class GgmlWasm {
 				requestId,
 				new Error(`Tensor download request ${requestId} was cancelled`),
 			);
-			try {
-				this.backendTensorGetAsyncCancel(requestId);
-			} catch {
-				// Best effort cancellation only.
-			} finally {
-				releaseHeap();
-			}
+			// Cancel returns a Promise under JSPI; fire-and-forget is fine
+			// here since cancellation is best-effort and we don't block on it.
+			this.backendTensorGetAsyncCancel(requestId).catch(() => {
+				/* ignore */
+			});
+			releaseHeap();
 		};
 
 		const ensureActive = () => {
@@ -638,7 +637,7 @@ export class GgmlWasm {
 				if (this.usesAsyncTensorGetCallbacks()) {
 					await this.waitForAsyncTensorGetCompletion(requestId);
 				} else {
-					while (this.backendTensorGetAsyncPoll(requestId) === 0) {
+					while ((await this.backendTensorGetAsyncPoll(requestId)) === 0) {
 						await new Promise<void>((resolve) => setTimeout(resolve, 1));
 					}
 				}
@@ -663,7 +662,7 @@ export class GgmlWasm {
 					await wait();
 					ensureActive();
 					const finishStart = this.now();
-					this.backendTensorGetAsyncFinish(requestId, ptr, byteLength);
+					await this.backendTensorGetAsyncFinish(requestId, ptr, byteLength);
 					timings.finishMs = this.now() - finishStart;
 					const copyStart = this.now();
 					result = new Uint8Array(this.heapU8.buffer, ptr, byteLength).slice();
@@ -688,7 +687,11 @@ export class GgmlWasm {
 		byteLength: number,
 		offset = 0,
 	): Promise<Uint8Array> {
-		const request = this.beginDownloadFromTensor(tensor, byteLength, offset);
+		const request = await this.beginDownloadFromTensor(
+			tensor,
+			byteLength,
+			offset,
+		);
 		try {
 			return await request.finish();
 		} catch (error) {
@@ -1166,45 +1169,55 @@ export class GgmlWasm {
 		);
 	}
 
-	backendTensorGetAsyncBegin(
+	async backendTensorGetAsyncBegin(
 		tensor: TensorPtr,
 		offset: number,
 		size: number,
-	): number {
-		// requestId return is int32_t; tensor/offset/size are ptr/size_t.
+	): Promise<number> {
+		// Under JSPI (b4d4b48), this export is in JSPI_EXPORTS and returns
+		// a Promise<int32_t>. Callers store the resolved integer requestId
+		// as a Map key in asyncTensorGetWaiters / asyncTensorGetStates;
+		// without await, the Promise object is keyed instead and the
+		// C++ notifier (which carries the integer id) never finds the
+		// waiter — silent hang on first decode.
 		if (this.is64) {
-			return this.m._backend_tensor_get_async_begin(
-				BigInt(tensor),
-				BigInt(offset),
-				BigInt(size),
+			return Number(
+				await this.m._backend_tensor_get_async_begin(
+					BigInt(tensor),
+					BigInt(offset),
+					BigInt(size),
+				),
 			);
 		}
-		return this.m._backend_tensor_get_async_begin(tensor, offset, size);
+		return await this.m._backend_tensor_get_async_begin(tensor, offset, size);
 	}
 
-	backendTensorGetAsyncPoll(requestId: number): number {
-		return this.m._backend_tensor_get_async_poll(requestId);
+	async backendTensorGetAsyncPoll(requestId: number): Promise<number> {
+		return await this.m._backend_tensor_get_async_poll(requestId);
 	}
 
-	backendTensorGetAsyncFinish(
+	async backendTensorGetAsyncFinish(
 		requestId: number,
 		dstHeapPtr: number,
 		size: number,
-	): void {
-		// requestId stays int32_t; dstHeapPtr is void*, size is size_t.
+	): Promise<void> {
 		if (this.is64) {
-			this.m._backend_tensor_get_async_finish(
+			await this.m._backend_tensor_get_async_finish(
 				requestId,
 				BigInt(dstHeapPtr),
 				BigInt(size),
 			);
 			return;
 		}
-		this.m._backend_tensor_get_async_finish(requestId, dstHeapPtr, size);
+		await this.m._backend_tensor_get_async_finish(
+			requestId,
+			dstHeapPtr,
+			size,
+		);
 	}
 
-	backendTensorGetAsyncCancel(requestId: number): void {
-		this.m._backend_tensor_get_async_cancel(requestId);
+	async backendTensorGetAsyncCancel(requestId: number): Promise<void> {
+		await this.m._backend_tensor_get_async_cancel(requestId);
 	}
 
 	backendTensorGetAsyncCallbackSupport(): number {

@@ -169,7 +169,7 @@ describe("GgmlWasm.malloc/free routes through bridge_malloc/bridge_free", () => 
 });
 
 describe("GgmlWasm async readback wrappers", () => {
-	test("forwards async readback wrapper calls to wasm exports", () => {
+	test("forwards async readback wrapper calls to wasm exports", async () => {
 		const calls: string[] = [];
 		const { wasm } = createWasm({
 			_backend_tensor_get_async_begin: (tensor, offset, size) => {
@@ -188,10 +188,10 @@ describe("GgmlWasm async readback wrappers", () => {
 			},
 		});
 
-		expect(wasm.backendTensorGetAsyncBegin(7, 12, 16)).toBe(41);
-		expect(wasm.backendTensorGetAsyncPoll(41)).toBe(1);
-		wasm.backendTensorGetAsyncFinish(41, 24, 16);
-		wasm.backendTensorGetAsyncCancel(41);
+		expect(await wasm.backendTensorGetAsyncBegin(7, 12, 16)).toBe(41);
+		expect(await wasm.backendTensorGetAsyncPoll(41)).toBe(1);
+		await wasm.backendTensorGetAsyncFinish(41, 24, 16);
+		await wasm.backendTensorGetAsyncCancel(41);
 
 		expect(calls).toEqual([
 			"begin:7:12:16",
@@ -369,7 +369,7 @@ describe("GgmlWasm.downloadFromTensor", () => {
 		}) as typeof globalThis.setTimeout;
 
 		try {
-			const request = wasm.beginDownloadFromTensor(7, 4, 12);
+			const request = await wasm.beginDownloadFromTensor(7, 4, 12);
 			queueMicrotask(() => {
 				(wasm as unknown as { m: MockModule }).m.__webllmNotifyAsyncTensorGet?.(
 					77,
