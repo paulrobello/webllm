@@ -1,59 +1,134 @@
 # P2-v2 Phase 2 Prototype — Closure Report
 
-**Date:** 2026-05-06
-**webllm SHA:** `0f1973e` (Task 7 closure commit; predecessor `d1a8348f` Task 6 amended)
+**Date:** 2026-05-06 (originally drafted), revised 2026-05-06 after Task 8 spike
+**webllm SHA:** Task 8 spike commit (this PR); predecessor `4872307` (Task 7 SUMMARY); Task 7 implementation `0f1973e`
 **llama.cpp `webllm-browser-patches` SHA:** `48acb658d` (Phase 2 Tasks 1+2+4 amended)
-**Browser + GPU:** Chrome (agentchrome session), Apple Metal-3
-**Prompt:** `"Hello"`, `max=5`, `greedy=1` (temperature=0)
+**Browser + GPU:** Chrome (agentchrome session 64702), Apple Metal-3
+**Prompt:** `"The capital of France is"` 6-token fixture, `max=5`, greedy (Task 8 spike harness)
 
 ## TL;DR
 
-**Gate disposition: BLOCKED.** The JSEP backend was successfully shipped end-to-end across Tasks 1-6 (C++ skeleton + dispatch, descriptor ABI, TS runtime, matmul + rms_norm kernels, engine integration, bundle wiring), but the gate metric is **structurally unmeasurable from this run**: the JSEP backend is *registered* but *dormant* — `chatCompletion` still routes through legacy `ModelInference.forward → wasm.op* → ggml-webgpu` directly, never engaging the ggml scheduler. JSEP's `supports_op` correctly claims `MUL_MAT` + `RMS_NORM`; `installJsepCallbacks` runs; counters are wired; but the scheduler is never engaged so `ggml-jsep::graph_compute` sees zero work.
+**Gate disposition: BLOCKED-on-scheduler-buft-routing.** The Task 8 follow-on spike (`smoke-test/p2-v2-spike.html`, drives `webllm_decode` directly — bypasses any "did engine route correctly?" question) **revised the Task 7 diagnosis**. The JSEP backend is **NOT dormant** — it is fully engaged at allocation time:
 
-The fix (decode-path swap to route through `webllm_decode` when `backend === "jsep"`) is Phase 2 follow-on work that the spec §D5 "Engine integration" envisioned but Task 6's implementation did not realize. The bridge surface needed (`webllm_decode`, `webllm_get_logits`, `webllm_create_context`) was kept across the P2 v1 revert and is ready to use; this is not a new C++ patch.
+```
+load_tensors:     jsep_buf model buffer size =   455.06 MiB
+llama_kv_cache: layer  0..21: dev = JSEP
+llama_kv_cache:   jsep_buf KV buffer size =   11.00 MiB
+llama_context: backend_ptrs.size() = 2
+```
+
+But `llama_new_context_with_model` aborts during scheduler reservation:
+
+```
+graph_reserve: reserving a graph for ubatch with n_tokens = 1, ...
+ggml-backend.cpp:898: pre-allocated tensor (blk.0.attn_q.weight) in
+  a buffer (jsep_buf) that cannot run the operation (NONE)
+Aborted()
+```
+
+The scheduler's reserve-time pass walks every JSEP-resident leaf and
+asserts the leaf's buffer-backend supports the consumer op. Phase 2's
+narrow `supports_op` (MUL_MAT + RMS_NORM only) misses ops libllama's
+tinyllama graph relies on (likely GET_ROWS / VIEW / TRANSPOSE / PERMUTE
+or a non-F32-dst matmul path), so the scheduler rejects the partition
+*before* any compute runs.
+
+This **invalidates the Task 7 closure's "dormant" framing**. Task 7
+inferred dormancy from `chatCompletion`'s legacy routing path, but the
+real shape was masked by `chatCompletion` failing earlier (load
+succeeded, context creation aborted, no decode reached). The spike
+unmasks this by calling `webllm_decode` directly and hitting the same
+abort at `webllm_create_context`.
+
+Detailed root cause + fix options in
+[`SPIKE-RESULTS.md`](./SPIKE-RESULTS.md). Three remediation paths
+identified:
+- **Option A** — broaden `supports_op` + add CPU-fallback stub dispatch (smallest delta)
+- **Option B** — narrow weight residency (CPU/ggml-webgpu owns weights, JSEP gets only intermediates via `offload_op`)
+- **Option C** — full JSEP port (Phase 3 endpoint)
 
 ## Token output
 
-| Build | Output | Bytes-identical? |
-|---|---|---|
-| Legacy (default backend) | `"I'm not"` | reference |
-| JSEP (`backend: "jsep"`) | `"I'm not"` | yes |
+**Decode never ran.** The 5-token greedy continuation was never reached
+because `webllm_create_context` aborts. No JSEP-path token output exists
+to compare against the legacy reference. The legacy reference at
+temperature=0 is `"I'm not"` (preserved from the Task 7 capture).
 
-(Note: `PRE-PROTOTYPE-BASELINE.md` records `"1. Introduction:"` as the legacy 5-token greedy reference. That capture used the smoke harness's profile-default temperature (~0.6); when re-run at `temperature=0` (the gate's prescribed greedy decode), both legacy and JSEP produce `"I'm not"`. The 2026-05-05 baseline file should be amended with the temp=0 sequence — see Open Question #2 below.)
+## Gate metrics — N/A (decode never ran)
 
-## Gate metrics
-
-| Metric | Legacy baseline (today) | JSEP measured | Gate band |
+| Metric | Legacy ref (temp=0) | JSEP measured | Gate band |
 |---|---|---|---|
-| Per-token wall (5-token median) | 5.6 ms (28 ms / 5 tokens at temp=0) | 5.6 ms | green (≤2× legacy) |
-| EM_ASM crossings/token (decode-only) | n/a (cwrap path: 450 dispatches/token) | 0 (counters dormant — see below) | n/a |
-| Greedy 5/5 token equality | `"I'm not"` reference | byte-identical | pass |
+| Per-token wall (5-token median) | 5.6 ms | **N/A** — abort in createContext | BLOCKED |
+| EM_ASM crossings/token (decode-only) | n/a | **N/A** | BLOCKED |
+| Greedy 5/5 token equality | `"I'm not"` | **N/A** | BLOCKED |
 
-**Per-callback counter breakdown (decode-only, post-warmup):**
+**Per-callback counter breakdown (model-load only — decode never ran):**
 
-| Callback | Count over 5 decode steps | Per-token | Notes |
+| Callback | Count at abort | Per-token | Notes |
 |---|---|---|---|
-| `jsepAlloc` | 0 | 0 | dormant |
-| `jsepFree` | 0 | 0 | dormant |
-| `jsepWrite` | 0 | 0 | dormant |
-| `jsepRead` | 0 | 0 | dormant |
-| `jsepClear` | 0 | 0 | dormant |
-| `jsepRunOp` | 0 | 0 | **dormant — backend never invoked** |
-| `jsepSync` | 0 | 0 | dormant |
+| `jsepAlloc` | ~25-50 (inferred) | n/a | model + KV buffers allocated successfully |
+| `jsepFree` | 0 | n/a | nothing freed before abort |
+| `jsepWrite` | ~200+ (inferred) | n/a | one per weight tensor uploaded |
+| `jsepRead` | 0 | n/a | no readback before abort |
+| `jsepClear` | 0 | n/a | no clear before abort |
+| `jsepRunOp` | **0** | n/a | abort precedes any op dispatch |
+| `jsepSync` | 0 | n/a | no flush before abort |
 
-`module.__jsep` is populated; `jsepInstalled === true`; install path is correctly wired (verified via `js exec` inspection). The dormancy is structural, not a bug in the install path.
+The "model+KV buffers actually live in jsep_buf" finding is from the
+console: `jsep_buf model buffer size = 455.06 MiB` and per-layer
+`llama_kv_cache: layer N: dev = JSEP`. Counter snapshot in TS would
+need a `try/catch` around `bridge.createContext` to capture the exact
+allocation count; the spike harness was structured to snapshot
+post-load (which succeeded) and post-decode (which never ran).
 
-## Why the JSEP backend was never invoked
+The Task 7 "dormant — counters all zero" reading came from the
+`chatCompletion` path that fails earlier (engine init / model load
+through legacy route doesn't even hit JSEP allocation). The spike
+proves JSEP's allocation path runs; only its op-coverage path is
+incomplete.
 
-The legacy `ModelInference.forward` path builds the ggml graph by calling cwrap'd `wasm.opMatMul`, `wasm.opRmsNorm`, etc. directly. These C++ exports map to ggml's `ggml_*_mat_mul`, `ggml_rms_norm` constructors (which only build the cgraph node — they don't dispatch to a backend). The graph is then computed via `wasm.graphCompute` → `_graph_compute` → ggml's `ggml_backend_sched_graph_compute_async` — but **only if** the graph was built against a scheduler that knows about all registered backends.
+## Why the spike's `webllm_create_context` aborts
 
-Reading `model-inference.ts`: it uses `ggml_backend_alloc_ctx_tensors` which assigns tensors to a *single* backend (the first registered). With ggml-webgpu being the only backend that was registered before P2-v2 (and still being the registered backend even with ggml-jsep also linked), the entire graph stays on ggml-webgpu. The ggml-jsep backend's `supports_op` is never queried because the scheduler is not making the routing decision.
+The Task 8 spike harness drives `webllm_decode` directly through the
+`createLlamaBridge` surface — bypassing both `chatCompletion` and the
+engine's legacy routing entirely. It still aborts, which proves the
+issue is not the engine routing layer (Task 7's hypothesis) but the
+**scheduler-reservation contract**.
 
-The spec §D5 "Engine integration" assumed:
+`llama_new_context_with_model` calls `ggml_backend_sched_reserve` to
+pre-allocate worst-case memory and validate that every scheduler-
+generated graph node can run on its assigned backend. Per
+`ggml-backend.cpp:898`, this check walks every leaf tensor whose
+buffer is owned by a backend `B` and asserts `B->supports_op(consumer)`
+for the op that consumes it. When `B = jsep_buf`, the assert fails for
+ops outside Phase 2's narrow `supports_op` matrix.
 
-> Engine routes `chatCompletion` through `webllm_decode` (libllama-driven decode path) instead of the legacy hand-rolled `ModelInference.forward`.
+ggml-jsep's `device_supports_op` (ggml-jsep.cpp:500-540) returns true
+only for:
 
-That decode-path swap was implemented and **then reverted** during the P2 v1 → P2 v2 redirect (commit `0b57d41`, `revert(p2): roll back wrapper+dispatch+delete; keep bridge surface`). Task 6's "engine integration" only loaded the JSEP WASM artifact and installed JSEP callbacks; it did not reactivate the `webllm_decode` route. Without that reactivation, the JSEP backend is technically registered but unused.
+- `GGML_OP_MUL_MAT` with `src1=F32`, `src0 ∈ {F32,F16,Q4_0,Q4_K}`, `dst=F32`
+- `GGML_OP_RMS_NORM` with `src0=F32`, `dst=F32`
+
+Tinyllama's first-layer ggml graph uses additional ops on JSEP-resident
+weights — likely `GET_ROWS` (token embedding lookup), `VIEW`/`PERMUTE`
+(attention head reshape), `TRANSPOSE` (matmul prep), `MUL_MAT` with
+non-F32 dtype combinations, or the F16-output variant. The narrow
+matrix rejects these, and the scheduler aborts at reserve time.
+
+This means **no Phase-2-scoped configuration of JSEP can run a real
+model end-to-end** without either:
+
+- broadening `supports_op` (Option A — even with stub dispatch that
+  returns `STATUS_NOT_IMPLEMENTED` to force CPU fallback), or
+- changing weight residency so JSEP doesn't own the leaf tensors at
+  all (Option B — `offload_op` semantics).
+
+Option A is the smallest-delta unblock; the existing `runOp` already
+returns `STATUS_NOT_IMPLEMENTED` for unhandled ops, but the C++
+`supports_op` returns false at reserve time, which is stricter (no
+fallback path is offered to the scheduler). Reversing that — return
+true and let `runOp` decline — is the pattern the upstream backends
+(BLAS, CPU) use.
 
 ## Per-task commit map
 
@@ -67,14 +142,15 @@ That decode-path swap was implemented and **then reverted** during the P2 v1 →
 | 5 | `04a38cc` | rms_norm kernel (F32) |
 | 6 | `d1a8348f` | engine `backend: "jsep"` opt-in + bundle wiring + resource-leak fixes |
 | 7 | `0f1973e` | counter instrumentation + parallel `real-model-jsep.html` + closure stub |
+| 8 | this commit | `p2-v2-spike.{html,src.ts}` + `make wasm-build-jsep` wires bundle build; runs `webllm_decode` directly; SUMMARY.md revised with real failure mode |
 
-llama.cpp `webllm-browser-patches` patch stack: **+1 commit since `b54503497`** (`48acb658d`). 2 patches reserved for Phase 3 unchanged.
+llama.cpp `webllm-browser-patches` patch stack: **+1 commit since `b54503497`** (`48acb658d`) — Task 8 added no C++ patches. 2 patches reserved for Phase 3 unchanged.
 
 ## Open questions surfaced during the prototype
 
-1. **Decode-path swap (BLOCKING for the gate).** `chatCompletion` must route through `webllm_decode` when `backend === "jsep"`. The bridge surface is already exported (`webllm_decode`, `webllm_get_logits`, `webllm_create_context`, `webllm_load_model`); P2 v1's `LlamaDecodeWrapper` was deleted in the revert but can be reconstructed from `src/inference/llama-bridge.ts`. Estimated scope: ~100-200 LOC TS-only, no new C++ patches.
+1. ~~**Decode-path swap (BLOCKING for the gate).**~~ **RESOLVED via Task 8 spike — was a misdiagnosis.** The Task 8 spike drives `webllm_decode` directly via `createLlamaBridge` and hits the same abort. The blocker is not engine routing but `supports_op` op-coverage at scheduler reserve time. See "Why the spike's `webllm_create_context` aborts" above.
 
-2. **Pre-prototype baseline reference token sequence.** `PRE-PROTOTYPE-BASELINE.md` captures `"1. Introduction:"` at the smoke harness's profile-default temperature (~0.6). The gate criterion explicitly requires `temperature=0` greedy decode for byte-identical comparison; at temp=0 both legacy and JSEP produce `"I'm not"`. Update the baseline file with the temp=0 reference and a one-line note about the methodology error.
+2. **Pre-prototype baseline reference token sequence.** `PRE-PROTOTYPE-BASELINE.md` captures `"1. Introduction:"` at the smoke harness's profile-default temperature (~0.6). The gate criterion explicitly requires `temperature=0` greedy decode for byte-identical comparison; at temp=0 the legacy path produces `"I'm not"`. Update the baseline file with the temp=0 reference and a one-line note about the methodology error. (JSEP-path reference still pending until the BLOCKED-on-buft-routing finding clears.)
 
 3. **Two-GPUDevice partition.** JSEP runtime owns one `GPUDevice` (acquired via `installJsepCallbacks(device)` in JS); ggml-webgpu owns another (Dawn-internal). Phase 2 acceptable; Phase 3 unification path: either (a) export Dawn's WebGPU device from WASM via a JSEP callback so JS reuses it, or (b) port enough ops to JSEP that ggml-webgpu can be retired entirely. (b) is the natural endpoint of Phase 3.
 
@@ -90,25 +166,61 @@ llama.cpp `webllm-browser-patches` patch stack: **+1 commit since `b54503497`** 
 
 ## Next-session disposition
 
-**Phase 2 follow-on cycle (BLOCKING for Phase 3):** Wire `chatCompletion` to route through `webllm_decode` when `engine.init({ backend: "jsep" })` was called. Reconstruct minimal `LlamaDecodeWrapper` (or fold directly into `engine.ts`) using the existing bridge exports. Re-run the 5-token greedy decode through the JSEP path; capture actual `module.__jsep.counters` post-warmup; apply T3 gate (green/yellow/red).
+**Phase 2 follow-on micro-cycle (BLOCKING for Phase 3):** Apply
+**Option A** — broaden `supports_op` to return true for the ops
+libllama touches on JSEP-resident leaves, with `runOp` returning
+`STATUS_NOT_IMPLEMENTED` for the ones not yet kernelized. This is
+the upstream-backend pattern (BLAS/CPU) and the smallest delta to
+unblock scheduler reservation.
 
-**Expected outcome of the follow-on cycle:** YELLOW. Phase 2 only supports MUL_MAT + RMS_NORM via JSEP; everything else (RoPE, softmax, swiglu, view, copy, etc.) returns false from `supports_op` and routes to CPU. Each scheduler boundary between JSEP and CPU pays a CPU↔GPU round-trip (set_tensor/get_tensor over EM_ASM). Per-token wall likely 2-5× legacy due to CPU-fallback overhead. The graph-once-dispatch pre-baked yellow-recovery lever (per spec §risk register) becomes the natural micro-cycle if the YELLOW result confirms.
+Concrete plan:
+1. Inventory the ops tinyllama's first-layer graph touches on
+   `attn_q.weight` (and any other JSEP-resident leaf). The
+   `graph_reserve` log-flood after enabling `GGML_LOG_DEBUG` will
+   list them. Likely set: `GET_ROWS`, `VIEW`, `PERMUTE`, `RESHAPE`,
+   `TRANSPOSE`, plus matmul dtype permutations.
+2. Add those ops to `device_supports_op` returning `true` (gate
+   on cap + dtype where needed; otherwise unconditional).
+3. In `graph_compute`, for each unhandled op call ggml's CPU-
+   fallback path (`ggml_compute_forward_*`) with backed-up host
+   tensors, OR mark the op as not-our-problem and let the scheduler
+   route via a CPU buffer copy.
+4. Re-run the spike harness; capture `__jsep.counters` post-decode;
+   apply T3 gate (likely YELLOW per spec §risk register — high
+   crossing rate due to fallback round-trips).
 
-**Patch budget:** llama.cpp `webllm-browser-patches` patch stack is +1 (`48acb658d`); the follow-on cycle is TS-only, no new C++ patches anticipated. 2 patches remain reserved for Phase 3.
+If Option A turns out to require non-trivial fallback wiring (more
+than ~50 LOC C++), pivot to Option B (narrow weight residency,
+JSEP only owns intermediates).
+
+**Expected outcome:** YELLOW band on per-token wall (2-5× legacy due
+to CPU↔GPU round-trips per fallback boundary), but green on byte-
+identical token output. The yellow-recovery lever (graph-once
+dispatch / batched JSEP allocation) becomes the natural follow-on
+micro-cycle.
+
+**Patch budget:** llama.cpp `webllm-browser-patches` patch stack is
++1 (`48acb658d`); Option A is C++ only (`ggml-jsep.cpp` change),
+will add ~30-100 LOC and no new patch files. Estimate +1 patch
+commit. 2 patches remain reserved for the rest of Phase 3.
 
 ## Bench artifacts (reproducibility)
 
-The Task 7 commit (`0f1973e`) ships:
+Task 7 (`0f1973e`):
 - `smoke-test/real-model-jsep.html` — parallel JSEP smoke harness pinning `?backend=jsep`
 - `smoke-test/real-model-page.js` — `?backend=jsep` query handler that swaps the bundle import + plumbs `backend: "jsep"` to `engine.init`
 - `src/inference/jsep/index.ts` — per-callback counter instrumentation (`module.__jsep.counters`)
 
-To reproduce the 5-token decode metrics:
+Task 8 (this commit):
+- `smoke-test/p2-v2-spike.{html,src.ts}` — direct-decode spike (bypasses engine; drives `webllm_decode` via `createLlamaBridge`)
+- `Makefile::wasm-build-jsep` — adds `bun build smoke-test/p2-v2-spike.src.ts` line
+- `eval/reports/p2-v2-prototype-2026-05-05/SPIKE-RESULTS.md` — full diagnostic + remediation options
+- `eval/reports/p2-v2-prototype-2026-05-05/spike-console-task8.log` — raw browser console capture (384 lines)
+
+To reproduce the spike abort:
 ```bash
-make wasm-build-jsep && make smoke-serve
-# in agentchrome:
-agentchrome navigate "http://localhost:8031/real-model-jsep.html?model=tinyllama-1.1b-chat-q4_0&prompt=Hello&max=5&greedy=1"
-# After [7/8] completes, read counters:
-agentchrome js exec 'JSON.stringify(window.WebLLM.engine.wasm.m.__jsep.counters)'
-# Expected post-fix (follow-on cycle): non-zero across alloc/runOp/sync; zero today.
+make wasm-build-jsep        # builds WASM + spike bundle
+agentchrome --port 64702 navigate --tab <ID> "http://localhost:8031/p2-v2-spike.html?v=task8-N"
+# Wait for #log to contain "DONE" or "FAIL"; FAIL is expected pre-Option-A
+agentchrome --port 64702 console read --tab <ID> --limit 5000 | grep "ggml-backend.cpp:898"
 ```

@@ -851,12 +851,13 @@ upscale shader; tip `e29753286`); sweep matrix at
 - Spec: [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
 - Plan: [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
 
-#### Phase 2 prototype CLOSED 2026-05-06 — gate BLOCKED (decode-path swap missing)
+#### Phase 2 prototype CLOSED 2026-05-06 — gate BLOCKED-on-scheduler-buft-routing (revised after Task 8 spike)
 
 - **Spec:** [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
 - **Plan:** [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
-- **Closure findings:** see this commit's message + the per-task commit map below. (Per global skill rules, the closure summary is recorded in the commit body rather than as a freestanding `eval/reports/.../SUMMARY.md`.)
-- **Disposition:** the prototype produces byte-identical 5-token greedy output (`"I'm not"`) on the JSEP build at decode parity with legacy (28 ms / 5 tokens both builds, ~177 tok/s), but **every JSEP callback counter reads zero across the entire decode** — the JSEP backend is dormant because spec §189-192's decode-path swap (`engine.chatCompletion → webllm_decode` for `backend === "jsep"`) was not implemented in Task 6. The current decode path always routes through the hand-rolled TS `ModelInference.forward` graph, which dispatches kernels directly to `ggml-webgpu` via `wasm.opMatMul`/`opRmsNorm` cwrap'd exports — the scheduler is never engaged, so no graph reaches `ggml-jsep::graph_compute`. The gate's EM_ASM-per-node thesis cannot be adjudicated from this run.
+- **Closure summary:** [`eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md`](eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md) (revised post-Task-8)
+- **Spike diagnostic:** [`eval/reports/p2-v2-prototype-2026-05-05/SPIKE-RESULTS.md`](eval/reports/p2-v2-prototype-2026-05-05/SPIKE-RESULTS.md)
+- **Disposition:** **BLOCKED-on-scheduler-buft-routing**. Task 7's "dormant — counters all zero" reading was a misdiagnosis: `chatCompletion` was failing earlier than counter wiring could reach. The Task 8 spike harness (`smoke-test/p2-v2-spike.html`) drives `webllm_decode` directly via `createLlamaBridge`, bypassing both the engine and `chatCompletion`. It still aborts — at `webllm_create_context` → `ggml_backend_sched_reserve` → `graph_reserve` — with `ggml-backend.cpp:898: pre-allocated tensor (blk.0.attn_q.weight) in a buffer (jsep_buf) that cannot run the operation (NONE)`. Model + KV cache *do* allocate in `jsep_buf` (455 + 11 MiB respectively), so JSEP's allocation path runs; it's the op-coverage check at scheduler reserve time that fails. ggml-jsep's `device_supports_op` returns true only for MUL_MAT + RMS_NORM, but tinyllama's first-layer graph touches additional ops (likely GET_ROWS / VIEW / TRANSPOSE / non-F32-dst MUL_MAT) on JSEP-resident weights. Decode never runs.
 - **Per-task commits:**
   - Task 0: `91e0396` (JSPI tensor-get-async fix) + `1094351` (pre-prototype baseline)
   - Tasks 1+2+4 amended: llama.cpp `webllm-browser-patches` `48acb658d` (single +1 patch)
@@ -864,11 +865,13 @@ upscale shader; tip `e29753286`); sweep matrix at
   - Task 4: `43390b0` (matmul kernel)
   - Task 5: `04a38cc` (rms_norm kernel)
   - Task 6: `d1a8348f` (engine integration + bundle wiring)
-  - Task 7: this commit (counter wiring + jsep smoke harness + closure)
-- **Patch stack:** llama.cpp `webllm-browser-patches` carries +1 patch (`48acb658d`); 2 reserved for Phase 3.
-- **Build infra unchanged for production path:** `make wasm-build` produces the legacy artifacts cleanly; canonical-6 baseline unaffected. `make wasm-build-jsep` produces `webllm-wasm-jsep.{js,wasm}` + `webllm-bundle-jsep.js`. `make checkall` green (747 pass / 36 skip).
+  - Task 7: `0f1973e` (counter wiring + jsep smoke harness + initial closure)
+  - Task 7 SUMMARY: `4872307`
+  - Task 8 spike + diagnosis: this commit (`smoke-test/p2-v2-spike.{html,src.ts}`, Makefile bundle wire, SUMMARY.md revised)
+- **Patch stack:** llama.cpp `webllm-browser-patches` carries +1 patch (`48acb658d`); 2 reserved for Phase 3 + the upcoming Option-A patch.
+- **Build infra unchanged for production path:** `make wasm-build` legacy artifacts unaffected; canonical-6 baseline unchanged. `make wasm-build-jsep` produces `webllm-wasm-jsep.{js,wasm}` + `webllm-bundle-jsep.js` + the new `p2-v2-spike.js`. `make checkall` green pre-Task-8.
 
-**Next session pickup — Phase 2 follow-on cycle: decode-path swap.** The spec's §189-192 architectural promise is the load-bearing missing piece. Phase 3 plan-write is blocked until `engine.chatCompletion` for `backend === "jsep"` routes through `webllm_decode` (the libllama `llama_decode` wrapper retained across the P2 v1 revert at `0b57d41`). Once that swap lands, re-run the same 5-token tinyllama smoke against `real-model-jsep.html` — the counters in `module.__jsep.counters` then show the actual EM_ASM crossing rate the T3 gate measures, and a green/yellow/red disposition becomes adjudicable. Reuse the existing bridge surface; no new C++ patches expected for the swap itself.
+**Next session pickup — Phase 2 follow-on micro-cycle: Option A (broaden `supports_op`).** Apply the upstream-backend pattern (BLAS/CPU): return true from `device_supports_op` for the ops libllama touches on JSEP-resident leaves (GET_ROWS, VIEW, PERMUTE, RESHAPE, TRANSPOSE, plus matmul dtype permutations), and let `runOp` return `STATUS_NOT_IMPLEMENTED` for unkernelized ops so the scheduler issues a CPU fallback. Concrete plan in [`SUMMARY.md` "Next-session disposition"](eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md). Re-run `p2-v2-spike.html`; if decode reaches DONE, capture `__spikeResult.deltas` for the T3 gate (likely YELLOW per spec §risk register due to fallback round-trips). The graph-once-dispatch yellow-recovery lever then becomes the natural follow-on micro-cycle.
 
 **Phase 1 closure links retained (still load-bearing for Phase 3):**
 - JSEP ABI: [`eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md`](eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md)

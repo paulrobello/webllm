@@ -153,6 +153,9 @@ wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → w
 	# Bundle that pulls in src/inference/jsep/** so the runtime is reachable
 	# from a smoke harness via plain `import "./webllm-bundle-jsep.js"`.
 	bun run build:jsep
+	# Build the P2-v2 spike harness (Phase 2 follow-on cycle, Task 8) —
+	# exercises ggml-jsep end-to-end via webllm_decode + counter snapshot.
+	bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
 	# Co-locate the JSEP WASM artifacts next to the bundle so the smoke
 	# page's relative `./webllm-wasm-jsep.js` resolves cleanly. Mirrors the
 	# default `smoke-test` target's layout.
