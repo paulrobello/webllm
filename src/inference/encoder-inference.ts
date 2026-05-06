@@ -11,7 +11,7 @@ import {
 	type GgmlWasm,
 	type TensorPtr,
 } from "./ggml-wasm.js";
-import { getRopeModeForArchitecture } from "./rope/rope-mode.js";
+import { getRopeModeForArchitecture } from "./model-inference.js";
 
 interface EncoderLayerWeights {
 	// QKV — exactly one path is populated per arch:

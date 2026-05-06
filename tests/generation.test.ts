@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-	type DecodeMode,
 	type GenerationConfig,
 	type GenerationResult,
 	Generator,
 	type InternalGenerationOptions,
 } from "../src/inference/generation.js";
+import type { DecodeMode } from "../src/inference/model-inference.js";
 import { Sampler } from "../src/inference/sampler.js";
 import {
 	TokenAttribute,

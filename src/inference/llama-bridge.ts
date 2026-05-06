@@ -271,27 +271,6 @@ export function createLlamaBridge(mod: RawLlamaModule): LlamaBridge {
 
 	return {
 		async loadModel(buf: Uint8Array): Promise<number> {
-			// Heap-grow detachment guard: if `buf` already lives in the WASM
-			// heap (e.g. the smoke-test page streams the GGUF directly into
-			// wasm.heapU8 to avoid V8's per-allocation cap on big models),
-			// the bridge_malloc below would grow the heap and detach `buf`,
-			// breaking the subsequent `HEAPU8.set(buf, ptr)`. In that case
-			// the bytes are already at `buf.byteOffset` — pass that pointer
-			// directly to webllm_load_model and skip the redundant copy.
-			// Same-buffer detection is byte-identical to Emscripten's own
-			// "is this view into our heap?" check.
-			if (buf.buffer === mod.HEAPU8.buffer) {
-				const offset = buf.byteOffset;
-				const handle = from64(
-					await mod._webllm_load_model(to64(offset), to64(buf.byteLength)),
-				);
-				if (handle === 0) {
-					throw new Error("webllm: webllm_load_model returned null");
-				}
-				return handle;
-			}
-			// JS-heap path: caller supplied a Uint8Array independent of the
-			// WASM heap. bridge_malloc + copy is required.
 			const ptr = malloc(buf.byteLength);
 			if (ptr === 0) {
 				throw new Error("webllm: bridge_malloc failed for GGUF buffer");

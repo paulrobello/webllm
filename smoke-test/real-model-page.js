@@ -83,16 +83,13 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		EncoderInference,
 		GgufParser,
 		GgmlWasm,
-		LlamaDecodeWrapper,
-		LlamaTokenizer,
+		ModelInference,
 		ModelLoader,
 		Tokenizer,
 		WebLLM,
 		collectBrowserSystemProfile,
-		createLlamaBridge,
 		detectChatTemplate,
 		encodeChatPrompt,
-		loadModelMetadata,
 		runTasks,
 		score,
 	} = await import(`./webllm-bundle.js${assetSuffix}`);
@@ -633,52 +630,30 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				setProgress(35);
 				if (isEncoderModel) {
 					inference = new EncoderInference(wasm, parsed.hyperparams);
-					const t1 = performance.now();
-					inference.loadWeights(ggufCtx, modelDataAt);
-					const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
-					log("pass", `[4/8] Weights loaded in ${weightTime}s`);
-					setProgress(80);
 				} else if (isCausalEmbedderModel) {
 					inference = new CausalLMEmbedder(wasm, parsed.hyperparams);
-					const t1 = performance.now();
-					inference.loadWeights(ggufCtx, modelDataAt);
-					const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
-					log("pass", `[4/8] Weights loaded in ${weightTime}s`);
-					setProgress(80);
 				} else {
-					// Tier 3 P2: causal LM goes through LlamaDecodeWrapper +
-					// bridge.loadModel instead of the legacy graph builder.
-					// The full GGUF bytes are already in the WASM heap at
-					// modelPtr; bridge.loadModel internally bridge_malloc's a
-					// copy and writes it to MEMFS for llama_model_load_from_file.
-					const t1 = performance.now();
-					const bridge = createLlamaBridge(wasm.module);
-					const dataView = modelDataAt(0, modelByteLength);
-					const meta = await loadModelMetadata(bridge, dataView);
-					inference = new LlamaDecodeWrapper(bridge, meta.model, {
+					inference = new ModelInference(wasm, parsed.hyperparams, {
 						flashAttn: flashAttnEnabled,
+						prefillTileSize: prefillTileOverride,
 					});
-					inference.loadWeights(); // no-op stub (weights already on GPU)
-					// Stash bridge-derived metadata for downstream steps that
-					// previously read parsed.{hyperparams, kvCacheConfig}.
-					parsed = {
-						hyperparams: meta.hyperparams,
-						tokenizerConfig: parsed.tokenizerConfig,
-						kvCacheConfig: meta.kvCacheConfig,
-					};
-					// Stash the bridge + LlamaTokenizer so [6/8] / [7/8] can
-					// reach them. The legacy Tokenizer (parsed.tokenizerConfig)
-					// path is no longer used for causal LMs in P2.
-					inference.__bridge = bridge;
-					inference.__llamaTokenizer = new LlamaTokenizer(
-						bridge,
-						meta.model,
-						{ chatTemplate: meta.chatTemplate },
-					);
-					const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
-					log("pass", `[4/8] Weights loaded in ${weightTime}s`);
-					setProgress(80);
+					if (profileMode) {
+						inference.traceEnabled = true;
+						window.__decodeTraces = [];
+					}
+					const resolvedTile = inference.prefillTileSize;
+					if (resolvedTile > 0) {
+						const tilePill = document.createElement("span");
+						tilePill.className = "mode-pill on";
+						tilePill.textContent = `tile: ${resolvedTile}`;
+						modeBar.appendChild(tilePill);
+					}
 				}
+				const t1 = performance.now();
+				inference.loadWeights(ggufCtx, modelDataAt);
+				const weightTime = ((performance.now() - t1) / 1000).toFixed(1);
+				log("pass", `[4/8] Weights loaded in ${weightTime}s`);
+				setProgress(80);
 			} catch (e) {
 				loadFailed = true;
 				log("fail", `[4/8] Load failed: ${e.message}\n${e.stack || ""}`);
