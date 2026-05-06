@@ -903,101 +903,243 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 
 ### Next session pickup — Phase 3 Stage 4.1: SET_ROWS divert + upstream-producer audit. START HERE in a fresh session.
 
-**One-line goal:** make the matmul `src1` post-RMS_NORM-times-gain values sensible (~[-3, +3] range), so the first attn_q matmul produces real activations and the forward pass progresses to non-zero logits.
+**One-line goal:** flip Outcome C → Outcome A by fixing the WebGPU buffer-aliasing bug for SET_ROWS (KV cache writes), so prefill produces real activations and "The capital of France is" decodes "Paris".
 
-**One-line context:** Stage 3.5 identified WebGPU sync-scope buffer aliasing as the root cause and landed divert fixes for matmul + RMS_NORM. SET_ROWS likely has the same bug (KV cache writes are definitionally `view(src[2])` aliased) — when those silently fail, KV cache stays at zero, attention reads zero, forward pass collapses despite the matmul/RMS_NORM kernels now running correctly. Spike at `?v=stage3.5-final-clean` confirms the post-cleanup state: all-zero logits reproducible, no validation errors from matmul/RMS_NORM dispatches.
+**One-line context:** Stage 3.5 identified WebGPU sync-scope buffer aliasing as the Outcome-C root cause and landed divert fixes for matmul + RMS_NORM. SET_ROWS almost certainly has the same bug (KV cache writes are definitionally `view(src[2])` aliased — `dst.bufHandle === src[2].bufHandle`). When those silently fail, the KV cache stays at zero, attention reads zero, the forward pass collapses despite the matmul/RMS_NORM kernels now running correctly.
+
+**Files you'll touch:**
+- `src/inference/jsep/ops/set-rows.ts` — add the divert path (mirrors matmul/RMS_NORM pattern, but with read-modify-write because SET_ROWS is a partial update).
+- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md` — closure report (force-add).
+- `TODO.md` — closure stub + queue next pickup.
+
+**No llama.cpp changes expected.** Patch stack stays at +6.
 
 #### Step 0 — verify state (5 min, no editing)
 
-```bash
-( cd ~/Repos/llama.cpp && git rev-parse --short HEAD )         # → 53c66649f
-git log --oneline -3                                           # → top of webllm with Stage 3.5 commits
-lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2                     # smoke server up?  → make smoke-serve if not
-agentchrome connect --status && agentchrome --port <PORT> tabs list  # find p2-v2-spike.html tab id
+Paste-and-run; expected outputs in parens. If anything diverges, stop and reconcile before doing Stage 4.1 work.
 
-# Confirm Stage 3.5 post-cleanup baseline reproduces:
-agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.1-replay" --tab <TAB_ID>
-# Expected:
-#   Q4K_SELFTEST    delta ~4.5e-6
-#   RMSNORM_SELFTEST maxAbsDelta ~8.3e-7
-#   LOGIT_STATS_STEP0 first8=[0,0,0,0,0,0,0,0], all-zero (Outcome C still in effect)
-#   GENERATED_TOKENS [0,0,0,0,0]
+```bash
+# 1. llama.cpp tip — Stage 3.5 was zero-patch on the C++ side.
+( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
+#   → 53c66649f
+#   → webllm-browser-patches
+
+# 2. webllm tip — should include the three Stage-3.5 commits.
+git log --oneline -5
+#   → 3409e30 docs(TODO): Stage 3.5 closed — queue Stage 4.1 SET_ROWS divert
+#   → 4470cb1 docs(reports): Stage 3.5 closure — root cause + Stage 4 partial fix
+#   → 393033e feat(jsep): Stage 4 partial — divert WebGPU sync-scope buffer aliasing
+#   → f281cb4 docs(TODO): rewrite Stage 3.5 brief as paste-and-go fresh-session checklist
+#   → 127c2b8 docs(TODO): Stage 3 partially closed (Outcome C) — queue Stage 3.5
+
+# 3. Smoke server (start if missing).
+lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2
+#   → bun  <pid>  ...  TCP *:8031 (LISTEN)
+# Missing? → make smoke-serve   (in a separate terminal, or as a background bun proc)
+
+# 4. Discover agentchrome port and the existing p2-v2-spike tab id.
+PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
+TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))')
+echo "PORT=$PORT TAB=$TAB"
+#   → PORT=<5-digit>  TAB=<32 hex>
+# If TAB is empty: the tab was closed. Open one with:
+#   agentchrome --port "$PORT" tabs open "http://localhost:8031/p2-v2-spike.html?v=baseline"
+#   then re-run the TAB= line.
+
+# 5. Confirm Stage 3.5 post-cleanup baseline reproduces (Outcome C still in effect).
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.1-replay" --tab "$TAB"
+until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 \
+  | grep -qE "(DONE|FAIL)"; do sleep 3; done
+agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText'
+# Expected lines (in order):
+#   Q4K_SELFTEST = {..., "delta":~4.5e-6, ...}
+#   RMSNORM_SELFTEST = {..., "maxAbsDelta":~8.3e-7, ...}
+#   LOGIT_STATS_STEP0 = {"first8":[0,0,0,0,0,0,0,0], ..., "min":0, "max":0}
+#   GENERATED_TOKENS = [0,0,0,0,0]
 #   PER_TOKEN_MS ~24-25
 ```
 
-#### Step 1 — confirm SET_ROWS aliasing rate (5 min)
+#### Step 1 — confirm SET_ROWS aliasing rate (~10 min)
 
-Add a per-call counter to `dispatchSetRows` (mirror the matmul/RMS_NORM pattern from the closed Stage-3.5 work — see `git show <stage3.5 commit> -- src/inference/jsep/ops/rms-norm.ts` for the small `__rmsNormStats` snippet that lived there briefly). Rebuild spike, navigate, confirm aliasing rate is ~100% as expected.
+Add a temporary aliasing counter to `dispatchSetRows` (`src/inference/jsep/ops/set-rows.ts`, just above the existing bind-group construction at ~line 386). Mirrors the small `__rmsNormStats` snippet that lived briefly during Stage 3.5 (now removed):
+
+```ts
+// TEMP — Stage 4.1 Step 1 diagnostic. Remove before commit.
+{
+    const wAny = globalThis as {
+        __setRowsStats?: { total: number; aliasesSrc0: number; aliasesSrc1: number };
+    };
+    if (!wAny.__setRowsStats) {
+        wAny.__setRowsStats = { total: 0, aliasesSrc0: 0, aliasesSrc1: 0 };
+    }
+    wAny.__setRowsStats.total++;
+    if (dst.bufHandle === src0.bufHandle) wAny.__setRowsStats.aliasesSrc0++;
+    if (dst.bufHandle === src1.bufHandle) wAny.__setRowsStats.aliasesSrc1++;
+}
+```
+
+Add a readout to `smoke-test/p2-v2-spike.src.ts` right after `LOGIT_STATS_STEP0` is logged:
+
+```ts
+log(`SETROWS_STATS = ${JSON.stringify((window as any).__setRowsStats ?? null)}`);
+```
+
+Rebuild + run:
+
+```bash
+bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.1-setrows-stats" --tab "$TAB"
+until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
+agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' | grep SETROWS_STATS
+# Expected:  SETROWS_STATS = {"total":<~135 for prefill+5 decode steps>, "aliasesSrc0":~135, "aliasesSrc1":0}
+# (src[2] is the destination buffer in ggml SET_ROWS semantics; in the JS descriptor
+#  that maps to dst.bufHandle === src0.bufHandle most commonly. If the descriptor
+#  layout differs, aliasesSrc1 may be the non-zero one — either way confirm the rate
+#  is ~100%.)
+```
+
+If aliasing rate is ~100%, proceed to Step 2. If ~0%, the SET_ROWS hypothesis is wrong — go to Step 4 (CPU-side writeback audit).
 
 #### Step 2 — implement SET_ROWS divert with read-modify-write (~60 min)
 
-SET_ROWS is a *partial* update — it only writes specific row indices (the new tokens being added to KV cache). A naive temp-buffer divert (allocate temp, dispatch, copy temp → dst) would clobber the unwritten rows with uninitialized tempDst data, corrupting the KV cache.
+SET_ROWS is a **partial** update — the kernel writes only specific row indices (the new tokens being appended to KV cache). A naive temp-buffer divert (allocate temp, dispatch, copy temp → dst) would clobber the unwritten rows with uninitialized data and corrupt the cache.
 
-Correct pattern (read-modify-write):
+**Correct pattern: read-modify-write.** Pre-copy the real dst into temp, dispatch (kernel modifies its rows in temp), then copy temp → real dst.
+
+Implementation sketch — insert into `dispatchSetRows` *before* the existing `const bindGroup = ctx.device.createBindGroup({...})` (around line 386 of `set-rows.ts`). Mirror the matmul divert structure:
 
 ```ts
+const dstAliasesSrc =
+    dst.bufHandle === src0.bufHandle || dst.bufHandle === src1.bufHandle;
+
 if (dstAliasesSrc) {
-    const dstSize = ggml_nbytes_for_dst(dst);  // total dst region size
-    const tempDst = device.createBuffer({
+    // Total bytes spanned by dst — handles strided cache_v transposed view
+    // (ne[0]=1, indices land in adjacent f16 cells) by taking the max over
+    // all dims of (ne[d] * nb[d]).
+    let dstSize = dst.ne[0] * dst.nb[0];
+    for (let d = 1; d < 4; d++) {
+        if (dst.ne[d] > 0) dstSize = Math.max(dstSize, dst.ne[d] * dst.nb[d]);
+    }
+    // Validate the temp + offset both fit within the source buffer; the
+    // pre-copy below reads dstSize bytes starting at dst.offset.
+    if (dst.offset + dstSize > dstRec.size) {
+        console.error(
+            `dispatchSetRows: divert would read past dst buffer end ` +
+                `(offset=${dst.offset} + size=${dstSize} > ${dstRec.size})`,
+        );
+        return -1;
+    }
+
+    const tempDst = ctx.device.createBuffer({
         size: dstSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        usage:
+            GPUBufferUsage.STORAGE |
+            GPUBufferUsage.COPY_SRC |
+            GPUBufferUsage.COPY_DST,
     });
-    encoderBatcher.flush();
-    const enc = device.createCommandEncoder();
-    // 1. Pre-copy real dst → temp so unwritten rows have their pre-existing values
+    const divertBindGroup = ctx.device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+            { binding: 0, resource: { buffer: src0Rec.buffer, offset: src0.offset, size: src0Rec.size - src0.offset } },
+            { binding: 1, resource: { buffer: src1Rec.buffer, offset: src1.offset, size: src1Rec.size - src1.offset } },
+            { binding: 2, resource: { buffer: tempDst, offset: 0, size: dstSize } },
+            { binding: 3, resource: { buffer: paramsBuf } },
+        ],
+    });
+
+    // Flush the batcher; the diverted dispatch + its pre/post copies live in
+    // a self-contained encoder.
+    ctx.encoderBatcher.flush();
+    const enc = ctx.device.createCommandEncoder();
+    // Pre-copy real dst → temp so unwritten rows + the F16 atomic-CAS path
+    // both see the correct prior state.
     enc.copyBufferToBuffer(dstRec.buffer, dst.offset, tempDst, 0, dstSize);
     const pass = enc.beginComputePass();
-    pass.setPipeline(...); pass.setBindGroup(0, divertBindGroup);  // tempDst at offset 0
-    pass.dispatchWorkgroups(...); pass.end();
-    // 2. Post-copy temp → real dst (now contains unmodified rows + the kernel's
-    //    partial update merged in)
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, divertBindGroup);
+    pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+    pass.end();
+    // Post-copy temp → real dst.
     enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstSize);
-    device.queue.submit([enc.finish()]);
+    ctx.device.queue.submit([enc.finish()]);
     tempDst.destroy();
     return 0;
 }
 ```
 
-`dstSize` calculation: SET_ROWS dst type is F16 or F32 with shape `[ne0, ne1, ne2, ne3]`. Total bytes = `dst.nb[3] || dst.nb[2] * ne[3] || dst.nb[1] * ne[2] * ne[3]` — careful with the strided cache_v case (`ne[0] = 1` reshape — see the kernel comment block at the top of `set-rows.ts:30-40`).
+**F16 atomic CAS gotcha:** The F16 dst path uses `atomicCompareExchangeWeak` which is read-modify-write on dst (pack 16-bit halves into a u32, CAS, retry). The pre-copy makes those CAS reads see the correct prior data — should be correct without further changes. If decode ends up with corrupted KV cache (manifests as garbled text after the first few tokens), self-test the F16 path with a known fixture.
 
-Watch out for the F16 atomic CAS path: that kernel does read-modify-write on dst. The pre-copy already makes those reads see the right pre-existing data, so it should be correct, but worth a self-test of the F16 path with a known fixture.
+**Strided cache_v gotcha** (`set-rows.ts:30-40` comment): when FA is disabled, cache_v writes go through the transposed view `ggml_reshape_2d(v, 1, ggml_nelements(v))` with `ne[0]=1`. The dstSize formula above handles this because `ne[1]*nb[1]` dominates over `ne[0]*nb[0]=2`.
 
 #### Step 3 — re-run spike and verify Outcome A
 
 ```bash
-agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.1-setrows" --tab <TAB_ID>
+bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.1-setrows-divert" --tab "$TAB"
+until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
+agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText'
 ```
 
-Expected:
-- `LOGIT_STATS_STEP0 first8` non-zero (real f32 logit distribution)
-- `GENERATED_TOKENS` includes the BPE id for "Paris" or close-by token
-- `GENERATED_TEXT` ≈ "Paris" (the Stage-0 / Outcome D semantic continuation of "The capital of France is")
+**Pass signals:**
+- `LOGIT_STATS_STEP0 first8` non-zero (real f32 logits, range ~[-15, +20])
+- `topId` matches the BPE id for " Paris" (TinyLlama tokenizer: token id around 29886-ish — verify in spike output via detokenize)
+- `GENERATED_TEXT` ≈ `"Paris"` (or close: `"Paris."`, `"Paris\n"`, etc.)
 
-If still all-zero: re-add a one-shot probe to `dispatchMatmul` capturing the FIRST attn_q matmul `src1` (16 bytes via `pushErrorScope` + `mapAsync`). Compare bytes against pre-Stage-4.1 baseline. If still the `[-5e-5, 142.08, -4.48, -7.4e+18, ...]` byte pattern, SET_ROWS divert isn't the only producer of corrupt activations — investigate CPU-side MUL/ADD writeback path (next: instrument `jsepWrite` to dump first 8 bytes from HEAPU8 on the FIRST call to verify CPU produces sensible bytes).
+If pass: remove the Step 1 SETROWS_STATS counter, run `make checkall`, write `STAGE-4.1-RESULT.md` (force-add), commit in the docs-feat-TODO sequence, update TODO with closure stub + perf characterization queued as Stage 5.
+
+#### Step 4 — fallback if Step 3 still produces all-zero logits
+
+The remaining suspect is **CPU-side writeback** for unsupported ops (MUL, ADD, SCALE, ROPE, SOFT_MAX, GET_ROWS — they all fall back to CPU per `supports_op` in `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:584-650`). The CPU path produces output in CPU memory; the scheduler then `set_tensor`s the result back into JSEP via `jsepWrite`. If those writes target wrong offsets, downstream JSEP ops read garbage.
+
+Diagnostic: dump first 8 bytes from `module.HEAPU8` at `hostPtr` on the FIRST few `jsepWrite` calls. Add to `module.jsepWrite` in `src/inference/jsep/index.ts`:
+
+```ts
+{
+    const wAny = globalThis as { __jsepWriteLog?: Array<{handle:number;offset:number;size:number;first8: number[]}> };
+    if (!wAny.__jsepWriteLog) wAny.__jsepWriteLog = [];
+    if (wAny.__jsepWriteLog.length < 10) {
+        const first8 = Array.from(new Float32Array(module.HEAPU8.buffer, hostPtr, 2));
+        // ^ 2 f32 = 8 bytes. (Or use Uint8Array for raw bytes.)
+        wAny.__jsepWriteLog.push({ handle, offset, size, first8 });
+    }
+}
+```
+
+Log via spike. If first writes show legit f32 magnitudes (e.g. `[-0.01, 0.02]`), CPU side is fine and the bug is JSEP-side (less likely after Step 2 lands). If they show denormals/1e+18, CPU side is corrupt — bisect by adding asserts on `get_tensor` reads (the inputs to CPU MUL/ADD).
 
 #### Files to read first (reading order, ~15 min)
 
-1. [`eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md) — Stage 3.5 closure with the divert pattern + diagnostic data.
-2. `src/inference/jsep/ops/matmul.ts` — divert pattern landed for matmul (the template for SET_ROWS).
-3. `src/inference/jsep/ops/rms-norm.ts` — divert pattern landed for RMS_NORM (simpler 2-binding template).
-4. `src/inference/jsep/ops/set-rows.ts` — kernel + bind group; understand the partial-update semantics before extending the divert.
-5. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:200-275` — buffer interface; `set_tensor`/`get_tensor` host-roundtrip mechanics.
+1. [`eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md) — Stage 3.5 closure with the divert pattern + diagnostic data + the byte-pattern signature to recognize.
+2. `src/inference/jsep/ops/matmul.ts:564-700` — divert pattern landed for matmul (the simple-update template). Note the `dstAliasesSrc` check + `encoderBatcher.flush()` + own command encoder + `tempDst.destroy()` after submit.
+3. `src/inference/jsep/ops/rms-norm.ts:135-200` — divert pattern landed for RMS_NORM (2-binding variant).
+4. `src/inference/jsep/ops/set-rows.ts:1-70` — kernel comment block; understand cache_k vs cache_v transposed view + the F16 atomic-CAS path.
+5. `src/inference/jsep/ops/set-rows.ts:386-432` — bind-group construction; this is what the divert needs to mirror.
+6. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:567-651` — `supports_op` (which ops route to JSEP vs CPU); helps reason about who writes what during prefill.
 
 #### Spike state cheat sheet
 
-- **Spike URL:** `http://localhost:8031/p2-v2-spike.html?v=stage4.1-<probe-name>`
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.1-<probe>`
 - **Spike entry point:** `smoke-test/p2-v2-spike.src.ts::runSpike`
-- **Built-in self-tests:** `runQ4KSelfTest` and `runRmsNormSelfTest` run on every spike load — both must pass before reading model-decode results.
-- **Counter snapshot per token (post-Stage-3.5):** runOp 320, write 241, read 211, sync 612, clear 0. Total crossings/token = 1549. Divert path is invisible to JSEP counters (own encoder, doesn't touch `__jsep` state).
-- **Build:** `bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser` (TS-only). WASM rebuild only if you change `src/wasm/*.cpp` or `~/Repos/llama.cpp/ggml/src/ggml-jsep/*.cpp`.
+- **Built-in self-tests** (no extra setup needed): `runQ4KSelfTest` (Q4_K matmul, 1 super-block) + `runRmsNormSelfTest` (RMS_NORM at TinyLlama cols=2048). Both must pass before reading model-decode results — if either fails, the regression is in your changes, not in SET_ROWS.
+- **Counter snapshot per token (post-Stage-3.5 baseline):** `runOp 320, write 241, read 211, sync 612, clear 0`. Total crossings/token = 1549. Divert path is invisible to JSEP counters (own encoder, doesn't touch `__jsep` state) — don't be alarmed if counters look unchanged after Step 2.
+- **Per-token decode (post-Stage-3.5):** ~24-25 ms. Stage 4.1 is expected to add a small RMW divert overhead (pre-copy + post-copy per SET_ROWS); budget +5-10% per-token. If Step 3 lands at ~28-30 ms with Outcome A, ship it; perf optimization (temp buffer pooling) is Stage 5.
+- **Build:** `bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser` (TS-only). WASM rebuild only if you change `src/wasm/*.cpp` or `~/Repos/llama.cpp/ggml/src/ggml-jsep/*.cpp` — Stage 4.1 should not need it.
+- **`make checkall` must be green** before committing. The Stage 3.5 cleanup commit pattern is the template: feat → docs(reports) → docs(TODO).
 
 #### Exit criteria
 
-Stage 4.1 closes when ONE of the following holds, documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md`:
+Stage 4.1 closes when ONE of the following holds, documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md` (force-add):
 
-- **Outcome A "Paris" decode achieved** → Phase 3 effectively at parity with WebGPU-only. Work shifts to perf characterization (compare ~25 ms/token Stage-4 baseline vs Outcome D's 12 ms/token).
-- **SET_ROWS divert lands cleanly but logits still zero** → CPU-side MUL/ADD writeback is the next suspect. Closure stub queues `jsepWrite` byte-dump probe.
-- **Read-modify-write divert breaks F16 atomic CAS path** → KV cache writes corrupt. Closure stub bisects which dst type triggered the regression and adjusts the per-type divert variant.
+- **Outcome A "Paris" decode achieved** — Phase 3 effectively at parity with WebGPU-only. Closure stub queues Stage 5 (perf characterization: compare ~25-30 ms/token Stage-4.1 baseline vs Outcome D's 12 ms/token; investigate temp-buffer pooling).
+- **SET_ROWS divert lands cleanly but logits still zero** — CPU-side MUL/ADD writeback is the next suspect. Closure stub queues Step 4 jsepWrite byte-dump probe as Stage 4.2.
+- **Read-modify-write divert breaks F16 atomic CAS path** — KV cache writes corrupt; manifests as decode that produces non-zero logits for token 0 but garbles after. Closure stub bisects which dst type triggered the regression and adjusts the per-type divert variant.
+
+#### Operational tips
+
+- **Don't kill the dashboard** if you have committed-bench traffic running. The spike posts to `localhost:8033` only when `?ingest=...` is set; default is off for the spike URL.
+- **Cache-bust every navigate:** always change the `?v=` query param when re-testing. The smoke-test page propagates the query suffix to imported `webllm-bundle-jsep.js` and `webllm-wasm-jsep.js` to defeat browser caching.
+- **Reuse the same spike tab** so console history + `__stderrLines` persist. `agentchrome console read --tab "$TAB" --errors-only --limit 30` dumps recent llama.cpp stderr if a kernel asserts during decode.
+- **If checkall lints flag `noExplicitAny` in your divert code:** type the `dstAliasesSrc` block strictly — `globalThis as {...}` with explicit field types, not `as any`. The matmul/RMS_NORM diverts already pass lint cleanly; copy that exact style.
 
 ### Earlier Stage 3 brief — collapsed (full text in closure report)
 
