@@ -4959,3 +4959,338 @@ worker host, proxy, surface mirror sentinel, async-ify conversation methods,
 6. `eval/causal-embedder-parity.ts` and `eval/browser-eval.ts` lack `--worker`
    flag — adding it is mechanical and would let accuracy-pass A/B runs
    validate worker mode on the 36-prompt eval suite.
+
+---
+
+## Chat-template family dispatch hardening (closed 2026-05-04; archived from TODO.md)
+
+Three-layer fix for the chat-template family dispatch (sampling
+profile + chat-stop registration + template formatter must all agree,
+or the model wanders past end-of-turn). Triggered by interactive
+smoke-test session debugging Mistral 7B Instruct v0.3 multi-turn
+self-dialogue, generalized to a fleet-wide audit + engine widening.
+
+**Layer 1 smoke (`tests/chat-template-special-tokens.test.ts`):**
+expanded from 4 → 19 chat-capable GGUFs with a per-model
+`chatStopTokens` audit asserting `tokenizer.getId(stopLiteral)` (the
+exact API `engine.ts:addChatStopToken` calls) resolves for every
+registered family. 92 tests / 0 fail. Header-only progressive read
+(2 → 16 → 64 MiB) avoids `readFileSync` ENOMEM on multi-GB fixtures.
+Commit `da720a6`.
+
+**Engine chat-stop registration widened (commit `c3d8261`):**
+- Non-Qwen ChatML (Hermes-3 + SmolLM2) — register `<|im_end|>`
+  explicitly. `<|endoftext|>` deliberately *not* registered for
+  non-Qwen chatml because in SmolLM2's vocab it aliases id 0 (unk/pad
+  slot).
+- Gemma — register `<end_of_turn>`. Was the only family genuinely
+  broken pre-fix: eosId=1 is `<eos>`, not the chat turn-end token at
+  id 107.
+- Detection now template-string-driven via `detectChatTemplate`, not
+  architecture flag, so SmolLM2/Hermes-3 (registered as
+  `architecture: "llama"` but chatml-templated) get correct
+  registration.
+
+**Mistral-Instruct family handling (commits `dafe4b4` + `27aacef`
++ `1f064e9`):**
+- `formatLlama2` differentiates Mistral-Instruct from true Llama-2
+  via `<<SYS>>` envelope presence: Llama-2 keeps `<<SYS>>...<</SYS>>`
+  + trailing space after `[/INST]`; Mistral merges system into first
+  user message + omits trailing space (matches official Jinja).
+- `</s>` registered as runtime chat-stop for `llama2`/`mistral-v7`
+  template families (Mistral GGUFs sometimes ship wrong eos id).
+- `MISTRAL_DEFAULTS` sampling profile (T=0.7 / top-p=0.95, official
+  MistralAI rec) added with auto-dispatch when
+  `detectChatTemplate(...) === "llama2" && !template.includes("<<SYS>>")`.
+  At T=1.0 unconstrained, Mistral skips `</s>` for higher-probability
+  prose continuations and fabricates multi-turn dialogue.
+- Chat-page UI (`smoke-test/chat-settings.js`) mirrors the new
+  defaults via `family =~ /^mistral/i`.
+
+**Memory note:** `feedback_chat_template_family_dispatch.md` —
+"chat-template family dispatch needs three signals, not one"
+(stop tokens + sampling profile + formatter must all agree;
+covers the Mistral-v0.3 three-round debug pattern as the canonical
+near-miss).
+
+---
+
+## Next-session pickup batch (queued 2026-04-29; closed 2026-05-03; archived from TODO.md)
+
+Captures the eleven-item pickup queue active 2026-04-29 → 2026-05-03,
+between the §31b/§32 perf-cycle close and the start of the
+P2-v2 / Phase 3 JSEP work. Items 1-11 are all closed unless
+explicitly noted; deferred follow-ups (Storage B GPU-resident KV,
+concurrent in-flight per conversation) carry forward in TODO.md's
+External-trigger candidates section.
+
+**Status pre-archive:** algorithmic-perf backlog cleared (§17-§29 +
+Phi-3 support shipped). TS API audit (a)-(f) closed 2026-04-29.
+Embedding bucket C closed 2026-04-29. Embedding bucket D closed
+2026-04-30; Phi-3.5-mini bucket D extension §28 NEGATIVE 2026-04-30.
+First-class frame-probe mode shipped 2026-05-01; 4 NPC scenario
+sizing probes closed 2026-05-01. Dual-mode deployment shipped
+2026-05-02. Prefix-cache mechanism + persistence shipped 2026-05-02
+to 2026-05-03.
+
+1. **Daily upstream cadence check (REQUIRED, ~30s).** Procedure:
+   `cd ~/Repos/llama.cpp && git fetch origin && git log
+   webllm-browser-patches..origin/master --oneline --
+   ggml/src/ggml-webgpu/ ggml/include/`. **If non-empty:** apply
+   §32 procedure (rebase, sweep, classify per §27/§28/§32
+   templates). **If empty:** log and skip. Last fired: 2026-05-06
+   (empty — no upstream activity in `ggml/src/ggml-webgpu/` or
+   `ggml/include/` since 2026-05-04 `fc1f81242`; cadence noop).
+   Prior fire: 2026-05-04 (§27 hybrid — drop local LayerNorm
+   patches subsumed by upstream `d4b0c22f9`; encoder parity PASS,
+   perf neutral vs 2026-05-01 cross-day baseline; tip `fc1f81242`).
+   [Cadence policy continues active in TODO.md "Watch list /
+   optional cadence work" section.]
+
+2. **Phi-3 closure follow-ups.**
+   - ~~(a) Runtime contiguous-tensor assertion in fused helpers.~~
+     **CLOSED 2026-04-29** — commit `dc441ce`. Added
+     `assertContiguousF32(wasm, tensor, label)`; wired into
+     `buildQKV` / `buildFFNGateUp` fused branches gated on
+     `ModelInference.assertFusedContiguity` (default true).
+     8-case helper unit test in `tests/fused-contiguity-assert.test.ts`.
+     Cost <1% of graph-build wall time on Phi-3.5-mini.
+
+   - ~~(b) Chat-template special-token literal audit.~~ **CLOSED
+     2026-04-29** — commit `2d65082`.
+     `tests/chat-template-special-tokens.test.ts` audits 13 special-
+     token literals across formatPhi3 / formatLlama3 / formatChatml /
+     formatLlama2-via-Mistral-v3 (4 + 4 + 2 + 3 = 13 single-token
+     assertions + 4 round-trip assertions = 17 tests). **Deferred:**
+     mistral-v7 (Mistral-Nemo 6.6 GiB too heavy for unit test) and
+     gemma (no Gemma GGUF in fleet).
+
+   - (c) **Path A vs Path B A/B measurement on Phi-3.** Loader-only
+     views (Path A) vs the shipped Path B fused-forward. Predicted
+     Path B win: ~96 dispatches saved per token; observed cost: -6%
+     throughput from opCont copies. **Informational only**; closure
+     report already recommends evaluating Path A first for the next
+     fused-projection architecture (Phi-4, Granite). **Skip until a
+     next fused architecture is queued.**
+
+3. **Pre-rebase baseline freshness.** Matrix at
+   `eval/reports/pre-rebase-baselines-2026-04-28/` is fresh until
+   ~2026-05-28 (~1-month window). [Cadence policy continues active
+   in TODO.md "Watch list" section.]
+
+4. **TS API audit follow-ups (CLOSED 2026-04-29).** Phase 1 audit
+   + Phase 2 (a-e) + Phase 3 (a-f) all shipped 2026-04-29.
+   Net: 14 exports trimmed from public surface, `WebLLMError`
+   taxonomy exposed, `GenerationConfig` split, `WebLLMConfig.device`
+   removed, `CompletionConfig.sampling` flag added,
+   `Character.setTools`, engine accessors migrated to properties,
+   `ChatToolSchema` literal union. Spec
+   `docs/superpowers/specs/2026-04-29-ts-api-audit-followups-design.md`;
+   plan `docs/superpowers/plans/2026-04-29-ts-api-audit-followups.md`.
+
+5. **Embedding bucket C — causal-LM-derived embedders. CLOSED
+   2026-04-29.** Qwen3-Embedding-0.6B-hyb shipped (commits
+   `deab38a` BPE tokenizer fix → `e2fa58b` bucket C bundle →
+   `2724b02` embed-perf bench coverage). Hybrid GGUF (`token_embd`
+   Q4_K = 83 MiB + f16 elsewhere) clears the WebGPU 128 MiB
+   per-binding cap that blocked the f16 path. Parity 10/10 at
+   `cos >= 0.995` (hybrid-tier gate) — cosines 0.996-0.9996,
+   magnitudes 1.000 ± 1e-6. Bench: 77 ms / 114 ms p50 single
+   short/long, 10.4 texts/sec batch. Closure report
+   `eval/reports/bucket-c-parity-2026-04-29/SUMMARY.md`.
+
+6. **Embedding bucket D — chat-model self-embedding. CLOSED 2026-04-30.**
+   `ModelInference.embed(tokenIds)` shipped; `engine.embed` dispatches
+   through `inferenceEngines` for chat models with `embeddingCapable:
+   true`. **`qwen3-8b-iq3m`** is the single registered bucket D model
+   at v1. Parity 10/10 PASS at `cos >= 0.90` (IQ3_M-calibrated gate).
+   4-pair cosine distinguishability sanity passes with clean margin
+   (min paraphrase 0.918 > max unrelated 0.777). Closure report
+   `eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md`.
+
+7. **Bucket D Phi-3.5-mini extension — §28 NEGATIVE 2026-04-30.**
+   Parity 10/10 PASS at `cos >= 0.91`, but distinguishability mean-
+   margin gate **FAILS** both pooling modes (last-token −0.006,
+   mean-pool −0.027 — paraphrase cosines lower than unrelated).
+   Demoted (`embeddingCapable: false`); no follow-on cycle queued.
+   Cycle keeper infra: `embeddingPooling` field, 16+16 cross-domain
+   pair harness, mean-margin gate `mean(P) − mean(U) ≥ 0.05`.
+
+8. **Frame-probe coexistence baseline — CLOSED 2026-05-01.**
+   `?frameProbe=1` mode shipped on the smoke page; multi-call probe
+   on `qwen3-8b-iq3m` established 8.3 ms median render-loop, 25 tok/s
+   decode, and the **deterministic per-call ~49 ms decode hitch** that
+   triggered probes 9c (warmup) and 9d (worker).
+
+9. **NPC scenario sizing probes — ALL FOUR CLOSED 2026-05-01.**
+   Downstream decisions all consumed:
+   - **9a (PASS):** prefill 89.7% prefix → KV-cache-per-conversation
+     load-bearing → drove item 11 prefix cache (shipped 2026-05-02).
+   - **9b (PARTIAL):** batched/sequential 0.72 wall ratio at N=4 →
+     sequential is canonical agent-tick pattern.
+   - **9c (FAIL):** warmup does NOT reduce call-0 decode_max → do
+     not bake warmup into engine init.
+   - **9d (PASS, 5.5× hitch reduction):** worker absorbs hitch
+     (49.8 → 9.1 ms decode_max) → drove item 10 dual-mode (shipped
+     2026-05-02).
+
+10. **Dual-mode deployment (main-thread + worker) — CLOSED 2026-05-02.**
+    `WebLLM.init({ worker: true })` ships; same TS surface both modes;
+    worker frame-probe **8.3 ms median, 0 drops** (gate <15 ms);
+    cross-mode A/B perf **+15.6% to +34.2% faster** in worker; greedy
+    token-identical 5/5. Closure report
+    `eval/reports/dual-mode-worker-2026-05-02/SUMMARY.md`.
+
+11. **Prefix cache via per-conversation KV snapshots — CLOSED
+    2026-05-02 (mechanism) + 2026-05-03 (persistence + worker
+    migration).** Mechanism: `createConversation` /
+    `disposeConversation` / `chatCompletion(conv, ...)` /
+    `forkConversation`, with LRU eviction on the pool. Headline
+    wins: **interleaved 84% wall savings** (Pattern B tick-2 2702 ms
+    vs A's 15853 ms on qwen3-8b-iq3m;
+    `eval/reports/prefix-cache-interleaved-2026-05-02/SUMMARY.md`)
+    and **fork 72% per-NPC savings / 17.2 s net at N=4 NPCs**
+    (`eval/reports/prefix-cache-fork-2026-05-02/SUMMARY.md`). Side-
+    finding: engine session-tracker delta-encoding bug fixed in
+    `c8d1530` — conv-handle mode is now required for correctness in
+    interleaved workloads, not just performance.
+
+    Sub-follow-ups:
+    - **#3 Storage B (GPU-resident KV)** — DEFERRED. Requires
+      `ggml-webgpu` patches. [Carried forward in TODO.md
+      "External-trigger candidates" section.]
+    - **#4 Concurrent in-flight per conversation** — DEFERRED.
+      Requires KV cloning at concurrency request time. [Carried
+      forward in TODO.md "External-trigger candidates" section.]
+    - **#5 Persistence across reloads — CLOSED 2026-05-03.** Two-tier
+      design: engine primitives `exportConversation(conv)` /
+      `importConversation(modelId, blob, options?)` ship in core;
+      `IndexedDBConversationStore` ships behind the
+      `@paulrobello/webllm/persistence` subpath. Five new error
+      classes (`IncompatibleConversationError` / `CorruptBlobError`
+      / `PersistenceUnavailableError` / `PersistenceQuotaError` /
+      `PersistenceIOError`); model-fingerprint + tokenizer-hash gate
+      refuses cross-quant or cross-tokenizer loads; integer
+      `schemaVersion`; per-method transfer-allowlist on the worker
+      bridge. Spec
+      `docs/superpowers/specs/2026-05-03-prefix-cache-persistence-design.md`;
+      plan `docs/superpowers/plans/2026-05-03-prefix-cache-persistence.md`.
+    - **#6 Worker migration (item 10) — CLOSED 2026-05-03 (probe
+      outcome (a): wiring already correct).** `WebLLMProxy` already
+      mirrors all four conv methods; worker host reflect-dispatches
+      them; `ConversationHandle` is plain data and structured-clones
+      cleanly; `ConversationPool` lives engine-side. Gap was test
+      coverage, not behavior. Lifecycle regression test added in
+      `tests/webllm-proxy-integration.test.ts`.
+
+---
+
+## Embedding-model expansion campaign (closed 2026-04-28; archived from TODO.md)
+
+User-driven scope: extend embedding fleet beyond the two registered
+Arctic-Embed entries. Three candidate buckets, in increasing scope.
+**Buckets A and B closed 2026-04-28;** C closed 2026-04-29 (full
+detail in the Next-session pickup batch above under item 5).
+
+**A. Register more BERT-arch embedders. DONE 2026-04-28**
+(commit `41b27bd`). Confirmed cleanly: the encoder forward path,
+WordPiece tokenizer, F16 / F32 dtypes, and CLS pooling (read from
+GGUF metadata) all already work for BGE out of the box — zero code
+changes outside `eval/models.ts`, `eval/smoke-profiles.ts`,
+`eval/embed-perf.ts`.
+- `bge-small-en-v1.5-q0f16` (~33M, 384-dim): 17.0 ms p50 single-
+  text short / 91% on 8-task cosine eval. Apples-to-apples with
+  arctic-embed-s.
+- `bge-large-en-v1.5-q0f16` (~335M, 1024-dim): 59.3 ms p50
+  single-text short / 89% on 8-task cosine eval. **First 335M
+  encoder in fleet** — 3.5× latency for 10× params consistent with
+  bandwidth-bound encoder behavior.
+
+GGUF source: `ChristianAzinn/bge-{small,large}-en-v1.5-gguf` mirror.
+File-name pattern: `_fp16` (`bge-{small,large}-en-v1.5_fp16.gguf`).
+
+**Net learning:** the BERT-arch lever is effectively free for any
+future ask — no loader changes were required. Stretch picks
+(`bge-base-en-v1.5`, `mxbai-embed-large-v1`, `snowflake-arctic-
+embed-l`) are register-and-run candidates with high confidence.
+
+**B. Extend `EncoderInference` to non-BERT arch. DONE 2026-04-28.**
+Both `jina-embeddings-v2-base-en` (ALiBi, GeGLU, no FFN biases) and
+`nomic-embed-text-v1.5` (NEOX RoPE, fused QKV, SwiGLU, no biases)
+landed with 5/5 reference-vector parity each at cosine ≥ 0.999999.
+Plan v2 in `docs/superpowers/plans/2026-04-28-encoder-non-bert-arch.md`
+guided 5 phases (probe / types / forward / registration / closure);
+spec v2 at
+`docs/superpowers/specs/2026-04-28-encoder-non-bert-arch-design.md`.
+
+Commit ledger (10 commits):
+
+| Phase | SHA | Subject |
+|---|---|---|
+| Plan v1 | `4c4cd4c` | bucket B plan v1 (preserved as artifact) |
+| Spec v2 | `bf51912` | post-Phase-0 spec rewrite |
+| Plan v2 | `61b8309` | post-Phase-0 plan rewrite |
+| 0 (probe) | `43df996` | GGUF discovery probe |
+| 1 (types) | `7a41f79` | ModelArchitecture widening |
+| 2a (forward) | `7a18074` | bert + jina forward + engine routing |
+| 2b (forward) | `3982af9` | nomic fused-QKV + RoPE |
+| 2b (review) | `31d6ac2` | view3d offset coverage + F32_BYTES |
+| 3a (refs) | `5e85db8` | sentence-transformers reference vectors |
+| 3 (jina) | `d16b5b1` | jina registration + 5/5 parity (1.000000) |
+| 4 (nomic) | `709511e` | nomic registration + 5/5 parity |
+
+Latent bugs surfaced and fixed during integration:
+1. Phase 1/2a: encoder routing in `smoke-test/real-model-page.js`
+   only matched `architecture === "bert"`, so jina + nomic loads
+   silently fell through to the causal path. Fixed in Phase 3.
+2. Phase 2a: `ggml_soft_max_ext` requires a non-NULL mask when
+   `max_bias > 0` (`ggml.c:4012`). Phase 3 added the mask leaf
+   populated with `-|i - j|` per `llama-graph.cpp:411`.
+3. Spec v2 wrong on jina activation: spec said SwiGLU, llama.cpp
+   uses GeGLU (`bert.cpp:122-130`). Fixed in Phase 3.
+4. Spec v2 + plan wrong on nomic RoPE mode: said NORMAL, llama.cpp
+   uses NEOX (`llama-model.cpp:9266`). Fixed in Phase 4.
+5. Phase 1: nomic GGUF omits `tokenizer.ggml.cls_token_id` /
+   `mask_token_id`. Phase 4 added bos/eos fallback for WordPiece.
+
+Dashboard now shows **6 embedding rows** (arctic-embed-s,
+arctic-embed-m, bge-small-en-v1.5, bge-large-en-v1.5,
+jina-embeddings-v2-base-en, nomic-embed-text-v1.5) — the full
+BERT-family encoder lever portfolio: split QKV, fused QKV, NEOX
+RoPE, ALiBi, GeLU, GeGLU, SwiGLU, full biases, no biases, mixed
+biases. Parity artifacts at
+`eval/reports/encoder-parity-2026-04-28/`.
+
+Net learning: the non-BERT encoder lever is now exhausted for the
+two named families. Remaining encoder asks are register-and-run on
+top of this foundation if they share an arch tag already on file
+(`bert` / `jina-bert-v2` / `nomic-bert-moe`); novel arch tags would
+re-open Phase 0/1.
+
+**C. Causal-LM-derived embedders (`Qwen3-Embedding-0.6B`)** — closed
+2026-04-29 as bucket C; see Next-session pickup batch above for full
+closure detail (item 5).
+
+**Encoder fixed-cost-per-dispatch observation (2026-04-28):**
+encoder overhead (`backendEncodeOverheadMs` per step) is a fixed
+per-dispatch cost of ~5.2-5.7 µs, remarkably flat across the
+450 → 805 dispatch/token range:
+
+| Model            | Dispatches | Encoder (median, ms) | µs/dispatch |
+|---|---:|---:|---:|
+| tinyllama-q4_0   | 450 | 2.40 | 5.3 |
+| qwen3-0.6b-q8    | 629 | 3.30 | 5.2 |
+| qwen3-1.7b-q8    | 629 | 3.60 | 5.7 |
+| mistral-7b-q4ks  | 650 | 3.60 | 5.5 |
+| llama-3.1-8b-iq3m| 652 | 3.40 | 5.2 |
+| qwen3-8b-iq3m    | 805 | 4.40 | 5.5 |
+
+Implication: encoder share scales inversely with model size because
+matmul shrinks at small models, not because encoder grows. Encoder
+is 24-30% at tiny models where matmul is 33-38%; drops to 9-11% at
+7-8B where matmul is 49-58%. Reducing per-dispatch encode cost would
+yield ~26% relative speedup at TinyLlama scale (87.9 → 111.1 tok/s).
+Lever wasn't load-bearing under the prior 30B ceiling; promoted to
+"watch list" under the new 8B ceiling for agent latency goals.
+Captured as memory note
+`Knowledge/wasm-webgpu-encoder-fixed-cost-per-dispatch.md`.
