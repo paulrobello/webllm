@@ -580,4 +580,51 @@ int32_t webllm_token_eos(void* model_handle) {
     return llama_vocab_eos(vocab);
 }
 
+// Get a metadata string by key. Mirrors llama_model_meta_val_str:
+// returns the length of the string on success, -1 on missing key.
+// The output buffer must be sized for the value + null terminator.
+// Caller-side retry-on-truncation uses the upstream pattern (call
+// once with a small buffer to read the required length, then again
+// with the right size).
+int32_t webllm_get_metadata(
+    void* model_handle,
+    const char* key,
+    char* buf,
+    int32_t buf_size)
+{
+    if (!model_handle || !key || !buf || buf_size <= 0) return -1;
+    auto* model = static_cast<llama_model*>(model_handle);
+    return llama_model_meta_val_str(model, key, buf, (size_t) buf_size);
+}
+
+// Typed hyperparam accessors. Each returns an int32_t; -1 on
+// missing model handle. These read from llama.cpp's parsed
+// hyperparams (faster than meta_val_str, no string round-trip).
+int32_t webllm_n_ctx_train(void* model_handle) {
+    if (!model_handle) return -1;
+    return llama_model_n_ctx_train(static_cast<llama_model*>(model_handle));
+}
+int32_t webllm_n_embd(void* model_handle) {
+    if (!model_handle) return -1;
+    return llama_model_n_embd(static_cast<llama_model*>(model_handle));
+}
+int32_t webllm_n_layer(void* model_handle) {
+    if (!model_handle) return -1;
+    return llama_model_n_layer(static_cast<llama_model*>(model_handle));
+}
+int32_t webllm_n_head(void* model_handle) {
+    if (!model_handle) return -1;
+    return llama_model_n_head(static_cast<llama_model*>(model_handle));
+}
+int32_t webllm_n_head_kv(void* model_handle) {
+    if (!model_handle) return -1;
+    return llama_model_n_head_kv(static_cast<llama_model*>(model_handle));
+}
+// Per-context KV-cache size in tokens (= the n_ctx the wrapper passed
+// to webllm_create_context, possibly clamped to model's n_ctx_train).
+int32_t webllm_n_ctx(void* ctx_handle) {
+    if (!ctx_handle) return 0;
+    return (int32_t) llama_n_ctx(static_cast<llama_context*>(ctx_handle));
+}
+
 } // extern "C"
