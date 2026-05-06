@@ -383,16 +383,37 @@ export function dispatchSetRows(
 	params[15] = isI64;
 	ctx.device.queue.writeBuffer(paramsBuf, 0, params);
 
-	const src0Buf = ctx.dataManager.get(src0.handle).buffer;
-	const src1Buf = ctx.dataManager.get(src1.handle).buffer;
-	const dstBuf = ctx.dataManager.get(dst.handle).buffer;
+	const src0Rec = ctx.dataManager.get(src0.bufHandle);
+	const src1Rec = ctx.dataManager.get(src1.bufHandle);
+	const dstRec = ctx.dataManager.get(dst.bufHandle);
 
 	const bindGroup = ctx.device.createBindGroup({
 		layout: bindGroupLayout,
 		entries: [
-			{ binding: 0, resource: { buffer: src0Buf } },
-			{ binding: 1, resource: { buffer: src1Buf } },
-			{ binding: 2, resource: { buffer: dstBuf } },
+			{
+				binding: 0,
+				resource: {
+					buffer: src0Rec.buffer,
+					offset: src0.offset,
+					size: src0Rec.size - src0.offset,
+				},
+			},
+			{
+				binding: 1,
+				resource: {
+					buffer: src1Rec.buffer,
+					offset: src1.offset,
+					size: src1Rec.size - src1.offset,
+				},
+			},
+			{
+				binding: 2,
+				resource: {
+					buffer: dstRec.buffer,
+					offset: dst.offset,
+					size: dstRec.size - dst.offset,
+				},
+			},
 			{ binding: 3, resource: { buffer: paramsBuf } },
 		],
 	});

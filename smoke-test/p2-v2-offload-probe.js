@@ -183,7 +183,7 @@ var GGML_TYPE_F32 = 0;
 var GGML_TYPE_F16 = 1;
 var GGML_TYPE_Q4_0 = 2;
 var GGML_TYPE_Q4_K = 12;
-var TENSOR_BLOCK_I32 = 18;
+var TENSOR_BLOCK_I32 = 19;
 var TILE_M = 16;
 var TILE_N = 16;
 var QK4_0 = 32;
@@ -194,14 +194,15 @@ function readDescriptor(heap32, byteOffset) {
   const readBlock = (slot) => {
     const off = base + slot;
     return {
-      handle: heap32[off],
-      type: heap32[off + 1],
-      ne: [heap32[off + 2], heap32[off + 3], heap32[off + 4], heap32[off + 5]],
+      bufHandle: heap32[off],
+      offset: heap32[off + 1],
+      type: heap32[off + 2],
+      ne: [heap32[off + 3], heap32[off + 4], heap32[off + 5], heap32[off + 6]],
       nb: [
-        heap32[off + 10],
         heap32[off + 11],
         heap32[off + 12],
-        heap32[off + 13]
+        heap32[off + 13],
+        heap32[off + 14]
       ]
     };
   };
@@ -456,15 +457,36 @@ function dispatchMatmul(ctx, desc) {
   shapeData[10] = 0;
   shapeData[11] = 0;
   ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeData);
-  const src0Buf = ctx.dataManager.get(src0.handle).buffer;
-  const src1Buf = ctx.dataManager.get(src1.handle).buffer;
-  const dstBuf = ctx.dataManager.get(dst.handle).buffer;
+  const src0Rec = ctx.dataManager.get(src0.bufHandle);
+  const src1Rec = ctx.dataManager.get(src1.bufHandle);
+  const dstRec = ctx.dataManager.get(dst.bufHandle);
   const bindGroup = ctx.device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
-      { binding: 0, resource: { buffer: src0Buf } },
-      { binding: 1, resource: { buffer: src1Buf } },
-      { binding: 2, resource: { buffer: dstBuf } },
+      {
+        binding: 0,
+        resource: {
+          buffer: src0Rec.buffer,
+          offset: src0.offset,
+          size: src0Rec.size - src0.offset
+        }
+      },
+      {
+        binding: 1,
+        resource: {
+          buffer: src1Rec.buffer,
+          offset: src1.offset,
+          size: src1Rec.size - src1.offset
+        }
+      },
+      {
+        binding: 2,
+        resource: {
+          buffer: dstRec.buffer,
+          offset: dst.offset,
+          size: dstRec.size - dst.offset
+        }
+      },
       { binding: 3, resource: { buffer: shapeBuffer } }
     ]
   });
@@ -494,9 +516,8 @@ struct Params {
 };
 
 @group(0) @binding(0) var<storage, read> x: array<f32>;
-@group(0) @binding(1) var<storage, read> weight: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
-@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> out: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
 
 @compute @workgroup_size(${WG_X}, ${WG_Y})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -511,11 +532,255 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let inv_rms: f32 = inverseSqrt(sum_sq / f32(params.cols) + params.eps);
     let idx: u32 = row * params.cols + col;
-    out[idx] = x[idx] * weight[col] * inv_rms;
+    out[idx] = x[idx] * inv_rms;
 }
 `;
 function buildPipeline2(device) {
   const shaderModule = device.createShaderModule({ code: RMS_NORM_WGSL });
+  const layout = device.createBindGroupLayout({
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" }
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "uniform" }
+      }
+    ]
+  });
+  const pipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [layout]
+  });
+  return device.createComputePipeline({
+    layout: pipelineLayout,
+    compute: { module: shaderModule, entryPoint: "main" }
+  });
+}
+function dispatchRmsNorm(ctx, desc, opParamsPtr, heapBuffer) {
+  if (desc.nSrc !== 1) {
+    console.error(`dispatchRmsNorm: expected 1 src, got ${desc.nSrc}`);
+    return -1;
+  }
+  const src0 = desc.srcs[0];
+  const dst = desc.dst;
+  if (src0.type !== GGML_TYPE_F32 || dst.type !== GGML_TYPE_F32) {
+    console.error(`dispatchRmsNorm: only F32 path supported in Phase 2 ` + `(got src0=${src0.type}, dst=${dst.type})`);
+    return -1;
+  }
+  const eps = new Float32Array(heapBuffer, opParamsPtr, 1)[0];
+  const cols = src0.ne[0];
+  const rows = src0.ne[1] * Math.max(1, src0.ne[2]) * Math.max(1, src0.ne[3]);
+  if (dst.ne[0] !== src0.ne[0] || dst.ne[1] !== src0.ne[1] || dst.ne[2] !== src0.ne[2] || dst.ne[3] !== src0.ne[3]) {
+    console.error(`dispatchRmsNorm: shape mismatch — src0=[${src0.ne.join(",")}], ` + `dst=[${dst.ne.join(",")}]`);
+    return -1;
+  }
+  const cacheKey = "rms-norm-f32";
+  const pipeline = ctx.pipelineCache.getOrCreate(cacheKey, (device) => {
+    const p = buildPipeline2(device);
+    ctx.bindGroupLayoutCache.set(cacheKey, p.getBindGroupLayout(0));
+    return p;
+  });
+  const bindGroupLayout = ctx.bindGroupLayoutCache.get(cacheKey);
+  if (!bindGroupLayout) {
+    console.error(`dispatchRmsNorm: missing bindGroupLayout for ${cacheKey}`);
+    return -1;
+  }
+  const shapeBuffer = ctx.device.createBuffer({
+    size: SHAPE_UNIFORM_BYTES2,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  const shapeU32 = new Uint32Array(SHAPE_UNIFORM_BYTES2 / 4);
+  shapeU32[0] = rows;
+  shapeU32[1] = cols;
+  shapeU32[3] = 0;
+  new Float32Array(shapeU32.buffer)[2] = eps;
+  ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeU32);
+  const src0Rec = ctx.dataManager.get(src0.bufHandle);
+  const dstRec = ctx.dataManager.get(dst.bufHandle);
+  const bindGroup = ctx.device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      {
+        binding: 0,
+        resource: {
+          buffer: src0Rec.buffer,
+          offset: src0.offset,
+          size: src0Rec.size - src0.offset
+        }
+      },
+      {
+        binding: 1,
+        resource: {
+          buffer: dstRec.buffer,
+          offset: dst.offset,
+          size: dstRec.size - dst.offset
+        }
+      },
+      { binding: 2, resource: { buffer: shapeBuffer } }
+    ]
+  });
+  const dispatchX = Math.ceil(rows / WG_X);
+  const dispatchY = Math.ceil(cols / WG_Y);
+  const dispatchZ = 1;
+  ctx.encoderBatcher.record({
+    pipeline,
+    bindGroup,
+    dispatchX,
+    dispatchY,
+    dispatchZ
+  });
+  return 0;
+}
+
+// src/inference/jsep/ops/set-rows.ts
+var GGML_TYPE_I32 = 26;
+var GGML_TYPE_I64 = 27;
+var WG_X2 = 64;
+var PARAMS_U32 = 16;
+var PARAMS_BYTES = PARAMS_U32 * 4;
+function shaderCommon() {
+  return `
+struct Params {
+    ne0:        u32, // dst inner dim (== src0 ne[0])
+    nr:         u32, // src0 ne[1] = number of source rows
+    ne02:       u32,
+    ne03:       u32,
+    ne11:       u32,
+    ne12:       u32,
+    src0_s1_f:  u32, // src0 stride[1] in F32 elements
+    src0_s2_f:  u32,
+    src0_s3_f:  u32,
+    src1_s0_p:  u32, // src1 stride[0] in u32 pairs (i64) / u32 (i32)
+    src1_s1_p:  u32,
+    src1_s2_p:  u32,
+    dst_s1_e:   u32, // dst stride[1] in dst-element units
+    dst_s2_e:   u32,
+    dst_s3_e:   u32,
+    idx_is_i64: u32, // 1 if src1 is i64 (read low half of pairs), 0 if i32
+};
+`;
+}
+var SET_ROWS_F32_TO_F16_WGSL = `${shaderCommon()}
+@group(0) @binding(0) var<storage, read> src0_f: array<f32>;
+@group(0) @binding(1) var<storage, read> src1_u: array<u32>;
+@group(0) @binding(2) var<storage, read_write> dst_a: array<atomic<u32>>;
+@group(0) @binding(3) var<uniform> p: Params;
+
+fn write_f16_atomic(cell_idx: u32, value_f16_lo: u32) {
+    let word_idx: u32 = cell_idx >> 1u;
+    let half: u32 = cell_idx & 1u;
+    var mask: u32 = 0xFFFF0000u;
+    var shifted: u32 = value_f16_lo;
+    if (half == 1u) {
+        mask = 0x0000FFFFu;
+        shifted = value_f16_lo << 16u;
+    }
+    loop {
+        let old: u32 = atomicLoad(&dst_a[word_idx]);
+        let nv: u32 = (old & mask) | shifted;
+        let r = atomicCompareExchangeWeak(&dst_a[word_idx], old, nv);
+        if (r.exchanged) { break; }
+    }
+}
+
+@compute @workgroup_size(${WG_X2}, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let col: u32       = gid.x; // ∈ [0, ne0)
+    let row_idx: u32   = gid.y; // i (∈ [0, nr))
+    let batch_lin: u32 = gid.z; // i02 + i03 * ne02
+
+    if (col >= p.ne0) { return; }
+    if (row_idx >= p.nr) { return; }
+    let total_batches: u32 = p.ne02 * p.ne03;
+    if (batch_lin >= total_batches) { return; }
+
+    let i02: u32 = batch_lin % p.ne02;
+    let i03: u32 = batch_lin / p.ne02;
+    let i11: u32 = i02 % p.ne11;
+    let i12: u32 = i03 % p.ne12;
+
+    let idx_pair_off: u32 = row_idx * p.src1_s0_p
+                          + i11     * p.src1_s1_p
+                          + i12     * p.src1_s2_p;
+    var i1: u32;
+    if (p.idx_is_i64 == 1u) {
+        i1 = src1_u[idx_pair_off * 2u];
+    } else {
+        i1 = src1_u[idx_pair_off];
+    }
+
+    let s_off: u32 = col
+                   + row_idx * p.src0_s1_f
+                   + i02     * p.src0_s2_f
+                   + i03     * p.src0_s3_f;
+    let v: f32 = src0_f[s_off];
+
+    // pack2x16float(v, 0) → low 16 bits = f16(v); high 16 bits = f16(0).
+    let packed_pair: u32 = pack2x16float(vec2<f32>(v, 0.0));
+    let v_f16_lo: u32 = packed_pair & 0xFFFFu;
+
+    let cell_idx: u32 = col
+                      + i1  * p.dst_s1_e
+                      + i02 * p.dst_s2_e
+                      + i03 * p.dst_s3_e;
+    write_f16_atomic(cell_idx, v_f16_lo);
+}
+`;
+var SET_ROWS_F32_TO_F32_WGSL = `${shaderCommon()}
+@group(0) @binding(0) var<storage, read> src0_f: array<f32>;
+@group(0) @binding(1) var<storage, read> src1_u: array<u32>;
+@group(0) @binding(2) var<storage, read_write> dst_f: array<f32>;
+@group(0) @binding(3) var<uniform> p: Params;
+
+@compute @workgroup_size(${WG_X2}, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let col: u32       = gid.x;
+    let row_idx: u32   = gid.y;
+    let batch_lin: u32 = gid.z;
+
+    if (col >= p.ne0) { return; }
+    if (row_idx >= p.nr) { return; }
+    let total_batches: u32 = p.ne02 * p.ne03;
+    if (batch_lin >= total_batches) { return; }
+
+    let i02: u32 = batch_lin % p.ne02;
+    let i03: u32 = batch_lin / p.ne02;
+    let i11: u32 = i02 % p.ne11;
+    let i12: u32 = i03 % p.ne12;
+
+    let idx_pair_off: u32 = row_idx * p.src1_s0_p
+                          + i11     * p.src1_s1_p
+                          + i12     * p.src1_s2_p;
+    var i1: u32;
+    if (p.idx_is_i64 == 1u) {
+        i1 = src1_u[idx_pair_off * 2u];
+    } else {
+        i1 = src1_u[idx_pair_off];
+    }
+
+    let s_off: u32 = col
+                   + row_idx * p.src0_s1_f
+                   + i02     * p.src0_s2_f
+                   + i03     * p.src0_s3_f;
+    let v: f32 = src0_f[s_off];
+
+    let d_off: u32 = col
+                   + i1  * p.dst_s1_e
+                   + i02 * p.dst_s2_e
+                   + i03 * p.dst_s3_e;
+    dst_f[d_off] = v;
+}
+`;
+function buildPipeline3(device, wgsl) {
+  const shaderModule = device.createShaderModule({ code: wgsl });
   const layout = device.createBindGroupLayout({
     entries: [
       {
@@ -548,65 +813,136 @@ function buildPipeline2(device) {
     compute: { module: shaderModule, entryPoint: "main" }
   });
 }
-function dispatchRmsNorm(ctx, desc, opParamsPtr, heapBuffer) {
-  if (desc.nSrc !== 2) {
-    console.error(`dispatchRmsNorm: expected 2 srcs, got ${desc.nSrc}`);
+function dispatchSetRows(ctx, desc) {
+  if (desc.nSrc !== 3) {
+    console.error(`dispatchSetRows: expected 3 srcs, got ${desc.nSrc}`);
     return -1;
   }
   const src0 = desc.srcs[0];
   const src1 = desc.srcs[1];
   const dst = desc.dst;
-  if (src0.type !== GGML_TYPE_F32 || src1.type !== GGML_TYPE_F32 || dst.type !== GGML_TYPE_F32) {
-    console.error(`dispatchRmsNorm: only F32 path supported in Phase 2 ` + `(got src0=${src0.type}, src1=${src1.type}, dst=${dst.type})`);
+  if (src0.type !== GGML_TYPE_F32) {
+    console.error(`dispatchSetRows: src0 must be F32 (got type=${src0.type})`);
     return -1;
   }
-  const eps = new Float32Array(heapBuffer, opParamsPtr, 1)[0];
-  const cols = src0.ne[0];
-  const rows = src0.ne[1] * Math.max(1, src0.ne[2]) * Math.max(1, src0.ne[3]);
-  if (src1.ne[0] !== cols) {
-    console.error(`dispatchRmsNorm: weight length ${src1.ne[0]} != cols ${cols}`);
+  if (src1.type !== GGML_TYPE_I64 && src1.type !== GGML_TYPE_I32) {
+    console.error(`dispatchSetRows: src1 must be I64 or I32 (got type=${src1.type})`);
     return -1;
   }
-  if (dst.ne[0] !== src0.ne[0] || dst.ne[1] !== src0.ne[1] || dst.ne[2] !== src0.ne[2] || dst.ne[3] !== src0.ne[3]) {
-    console.error(`dispatchRmsNorm: shape mismatch — src0=[${src0.ne.join(",")}], ` + `dst=[${dst.ne.join(",")}]`);
+  if (dst.type !== GGML_TYPE_F16 && dst.type !== GGML_TYPE_F32) {
+    console.error(`dispatchSetRows: dst must be F16 or F32 (got type=${dst.type})`);
     return -1;
   }
-  const cacheKey = "rms-norm-f32";
+  const ne0 = src0.ne[0];
+  const nr = src0.ne[1];
+  const ne02 = Math.max(1, src0.ne[2]);
+  const ne03 = Math.max(1, src0.ne[3]);
+  const ne11 = Math.max(1, src1.ne[1]);
+  const ne12 = Math.max(1, src1.ne[2]);
+  if (dst.ne[0] !== ne0) {
+    console.error(`dispatchSetRows: dst ne[0]=${dst.ne[0]} != src0 ne[0]=${ne0}`);
+    return -1;
+  }
+  const f32Bytes = 4;
+  const idxStride0Bytes = src1.type === GGML_TYPE_I64 ? 8 : 4;
+  const dstElemBytes = dst.type === GGML_TYPE_F16 ? 2 : 4;
+  const isI64 = src1.type === GGML_TYPE_I64 ? 1 : 0;
+  const isF16Dst = dst.type === GGML_TYPE_F16;
+  const src0_s1_f = src0.nb[1] / f32Bytes;
+  const src0_s2_f = src0.nb[2] / f32Bytes;
+  const src0_s3_f = src0.nb[3] / f32Bytes;
+  const src1_s0_p = src1.nb[0] / idxStride0Bytes;
+  const src1_s1_p = src1.nb[1] / idxStride0Bytes;
+  const src1_s2_p = src1.nb[2] / idxStride0Bytes;
+  const dst_s1_e = dst.nb[1] / dstElemBytes;
+  const dst_s2_e = dst.nb[2] / dstElemBytes;
+  const dst_s3_e = dst.nb[3] / dstElemBytes;
+  for (const [name, val] of [
+    ["src0_s1_f", src0_s1_f],
+    ["src0_s2_f", src0_s2_f],
+    ["src0_s3_f", src0_s3_f],
+    ["src1_s0_p", src1_s0_p],
+    ["src1_s1_p", src1_s1_p],
+    ["src1_s2_p", src1_s2_p],
+    ["dst_s1_e", dst_s1_e],
+    ["dst_s2_e", dst_s2_e],
+    ["dst_s3_e", dst_s3_e]
+  ]) {
+    if (!Number.isInteger(val) || val < 0) {
+      console.error(`dispatchSetRows: non-integer or negative stride ${name}=${val} ` + `(src0.nb=[${src0.nb.join(",")}] src1.nb=[${src1.nb.join(",")}] ` + `dst.nb=[${dst.nb.join(",")}] dstElemBytes=${dstElemBytes})`);
+      return -1;
+    }
+  }
+  const cacheKey = isF16Dst ? "set-rows-f32-to-f16" : "set-rows-f32-to-f32";
+  const wgsl = isF16Dst ? SET_ROWS_F32_TO_F16_WGSL : SET_ROWS_F32_TO_F32_WGSL;
   const pipeline = ctx.pipelineCache.getOrCreate(cacheKey, (device) => {
-    const p = buildPipeline2(device);
+    const p = buildPipeline3(device, wgsl);
     ctx.bindGroupLayoutCache.set(cacheKey, p.getBindGroupLayout(0));
     return p;
   });
   const bindGroupLayout = ctx.bindGroupLayoutCache.get(cacheKey);
   if (!bindGroupLayout) {
-    console.error(`dispatchRmsNorm: missing bindGroupLayout for ${cacheKey}`);
+    console.error(`dispatchSetRows: missing bindGroupLayout for ${cacheKey}`);
     return -1;
   }
-  const shapeBuffer = ctx.device.createBuffer({
-    size: SHAPE_UNIFORM_BYTES2,
+  const paramsBuf = ctx.device.createBuffer({
+    size: PARAMS_BYTES,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   });
-  const shapeU32 = new Uint32Array(SHAPE_UNIFORM_BYTES2 / 4);
-  shapeU32[0] = rows;
-  shapeU32[1] = cols;
-  shapeU32[3] = 0;
-  new Float32Array(shapeU32.buffer)[2] = eps;
-  ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeU32);
-  const xBuf = ctx.dataManager.get(src0.handle).buffer;
-  const wBuf = ctx.dataManager.get(src1.handle).buffer;
-  const outBuf = ctx.dataManager.get(dst.handle).buffer;
+  const params = new Uint32Array(PARAMS_U32);
+  params[0] = ne0;
+  params[1] = nr;
+  params[2] = ne02;
+  params[3] = ne03;
+  params[4] = ne11;
+  params[5] = ne12;
+  params[6] = src0_s1_f;
+  params[7] = src0_s2_f;
+  params[8] = src0_s3_f;
+  params[9] = src1_s0_p;
+  params[10] = src1_s1_p;
+  params[11] = src1_s2_p;
+  params[12] = dst_s1_e;
+  params[13] = dst_s2_e;
+  params[14] = dst_s3_e;
+  params[15] = isI64;
+  ctx.device.queue.writeBuffer(paramsBuf, 0, params);
+  const src0Rec = ctx.dataManager.get(src0.bufHandle);
+  const src1Rec = ctx.dataManager.get(src1.bufHandle);
+  const dstRec = ctx.dataManager.get(dst.bufHandle);
   const bindGroup = ctx.device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
-      { binding: 0, resource: { buffer: xBuf } },
-      { binding: 1, resource: { buffer: wBuf } },
-      { binding: 2, resource: { buffer: outBuf } },
-      { binding: 3, resource: { buffer: shapeBuffer } }
+      {
+        binding: 0,
+        resource: {
+          buffer: src0Rec.buffer,
+          offset: src0.offset,
+          size: src0Rec.size - src0.offset
+        }
+      },
+      {
+        binding: 1,
+        resource: {
+          buffer: src1Rec.buffer,
+          offset: src1.offset,
+          size: src1Rec.size - src1.offset
+        }
+      },
+      {
+        binding: 2,
+        resource: {
+          buffer: dstRec.buffer,
+          offset: dst.offset,
+          size: dstRec.size - dst.offset
+        }
+      },
+      { binding: 3, resource: { buffer: paramsBuf } }
     ]
   });
-  const dispatchX = Math.ceil(rows / WG_X);
-  const dispatchY = Math.ceil(cols / WG_Y);
-  const dispatchZ = 1;
+  const dispatchX = Math.ceil(ne0 / WG_X2);
+  const dispatchY = nr;
+  const dispatchZ = ne02 * ne03;
   ctx.encoderBatcher.record({
     pipeline,
     bindGroup,
@@ -641,6 +977,7 @@ class PipelineCache {
 var STATUS_NOT_IMPLEMENTED = 1;
 var GGML_OP_RMS_NORM = 25;
 var GGML_OP_MUL_MAT = 29;
+var GGML_OP_SET_ROWS = 42;
 function installJsepCallbacks(module, device) {
   if (module.__jsep) {
     throw new Error("installJsepCallbacks: callbacks already installed on this module. " + "Call destroyJsepCallbacks(module) first if you need to re-install.");
@@ -704,6 +1041,9 @@ function installJsepCallbacks(module, device) {
     }
     if (desc.op === GGML_OP_RMS_NORM) {
       return dispatchRmsNorm(ctx, desc, opParamsPtr, buf);
+    }
+    if (desc.op === GGML_OP_SET_ROWS) {
+      return dispatchSetRows(ctx, desc);
     }
     return STATUS_NOT_IMPLEMENTED;
   };

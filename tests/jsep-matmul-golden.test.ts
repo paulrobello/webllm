@@ -226,7 +226,9 @@ function makeMeta(
 	nb[1] = (ne[0] / elemsPerBlock) * bytesPerElem;
 	nb[2] = nb[1] * ne[1];
 	nb[3] = nb[2] * ne[2];
-	return { handle, type, ne, nb };
+	// Stage 2 ABI: each test tensor lives at offset 0 in its own dataManager
+	// allocation, so bufHandle=handle and offset=0.
+	return { bufHandle: handle, offset: 0, type, ne, nb };
 }
 
 describe("JSEP matmul golden", () => {

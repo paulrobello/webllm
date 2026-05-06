@@ -104,7 +104,9 @@ function makeF32Meta(
 	nb[1] = nb[0] * ne[0];
 	nb[2] = nb[1] * ne[1];
 	nb[3] = nb[2] * ne[2];
-	return { handle, type: GGML_TYPE_F32, ne, nb };
+	// Stage 2 ABI: each test tensor lives at offset 0 in its own dataManager
+	// allocation, so bufHandle=handle and offset=0.
+	return { bufHandle: handle, offset: 0, type: GGML_TYPE_F32, ne, nb };
 }
 
 // Run a single rms_norm test for given (rows, cols, eps).

@@ -19,22 +19,24 @@
  * Phase 2 covers the 2D (B = batch product = 1) cases plus a defensive
  * batch loop for 3D when ne[2] > 1.
  *
- * Descriptor layout (must match `ggml-jsep.cpp` — see top of that file):
+ * Descriptor layout (Phase 3 Stage 2 — must match `ggml-jsep.cpp` — see
+ * top of that file):
  *
- *   per-tensor block (18 i32 = 72 bytes):
- *     [0]      handle             (i32; from jsep_tensor_handle())
- *     [1]      type               (i32; ggml_type enum value)
- *     [2..5]   ne[0..3] low half  (i32; ne is int64_t)
- *     [6..9]   ne[0..3] high half (i32; zero on wasm32 with sub-2GB tensors)
- *     [10..13] nb[0..3] low half  (i32; nb is size_t)
- *     [14..17] nb[0..3] high half (i32; zero on wasm32)
+ *   per-tensor block (19 i32 = 76 bytes):
+ *     [0]      buf_handle         (i32; jsep buffer handle — keys dataManager.get)
+ *     [1]      offset             (i32; byte offset of tensor->data within buffer)
+ *     [2]      type               (i32; ggml_type enum value)
+ *     [3..6]   ne[0..3] low half  (i32; ne is int64_t)
+ *     [7..10]  ne[0..3] high half (i32; zero on wasm32 with sub-2GB tensors)
+ *     [11..14] nb[0..3] low half  (i32; nb is size_t)
+ *     [15..18] nb[0..3] high half (i32; zero on wasm32)
  *
  *   descriptor (offset 0 in i32 words):
  *     [0]      op                 (i32; ggml_op enum)
  *     [1]      n_src              (i32)
- *     [2..19]  dst block          (18 i32)
- *     [20..37] src[0] block       (18 i32)
- *     [38..55] src[1] block       (18 i32)
+ *     [2..20]  dst block          (19 i32)
+ *     [21..39] src[0] block       (19 i32)
+ *     [40..58] src[1] block       (19 i32)
  *     ...
  */
 
@@ -49,7 +51,7 @@ export const GGML_TYPE_Q4_0 = 2;
 export const GGML_TYPE_Q4_K = 12;
 
 // Per-tensor block size in i32 slots (must match C++ side).
-const TENSOR_BLOCK_I32 = 18;
+const TENSOR_BLOCK_I32 = 19;
 
 // Workgroup tile size for the matmul kernel: TILE_M output rows × TILE_N
 // output cols per workgroup. Each invocation computes one output element.
@@ -60,7 +62,13 @@ const TILE_N = 16;
 const QK4_0 = 32;
 
 export interface JsepTensorMeta {
-	handle: number;
+	// JSEP buffer-level handle (resolves to a GPUBuffer via dataManager.get).
+	bufHandle: number;
+	// Byte offset of tensor->data within the buffer. Aligned to
+	// GGML_JSEP_BUFFER_ALIGN (256B) by ggml allocation, which is also
+	// ≥ minStorageBufferOffsetAlignment so it can be used directly as a
+	// bind-group entry `offset` without further rounding.
+	offset: number;
 	type: number;
 	ne: [number, number, number, number];
 	nb: [number, number, number, number];
@@ -100,15 +108,16 @@ export function readDescriptor(
 	const readBlock = (slot: number): JsepTensorMeta => {
 		const off = base + slot;
 		return {
-			handle: heap32[off],
-			type: heap32[off + 1],
+			bufHandle: heap32[off],
+			offset: heap32[off + 1],
+			type: heap32[off + 2],
 			// We use the low half; high half should be zero on wasm32.
-			ne: [heap32[off + 2], heap32[off + 3], heap32[off + 4], heap32[off + 5]],
+			ne: [heap32[off + 3], heap32[off + 4], heap32[off + 5], heap32[off + 6]],
 			nb: [
-				heap32[off + 10],
 				heap32[off + 11],
 				heap32[off + 12],
 				heap32[off + 13],
+				heap32[off + 14],
 			],
 		};
 	};
@@ -451,16 +460,37 @@ export function dispatchMatmul(
 	shapeData[11] = 0;
 	ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeData);
 
-	const src0Buf = ctx.dataManager.get(src0.handle).buffer;
-	const src1Buf = ctx.dataManager.get(src1.handle).buffer;
-	const dstBuf = ctx.dataManager.get(dst.handle).buffer;
+	const src0Rec = ctx.dataManager.get(src0.bufHandle);
+	const src1Rec = ctx.dataManager.get(src1.bufHandle);
+	const dstRec = ctx.dataManager.get(dst.bufHandle);
 
 	const bindGroup = ctx.device.createBindGroup({
 		layout: bindGroupLayout,
 		entries: [
-			{ binding: 0, resource: { buffer: src0Buf } },
-			{ binding: 1, resource: { buffer: src1Buf } },
-			{ binding: 2, resource: { buffer: dstBuf } },
+			{
+				binding: 0,
+				resource: {
+					buffer: src0Rec.buffer,
+					offset: src0.offset,
+					size: src0Rec.size - src0.offset,
+				},
+			},
+			{
+				binding: 1,
+				resource: {
+					buffer: src1Rec.buffer,
+					offset: src1.offset,
+					size: src1Rec.size - src1.offset,
+				},
+			},
+			{
+				binding: 2,
+				resource: {
+					buffer: dstRec.buffer,
+					offset: dst.offset,
+					size: dstRec.size - dst.offset,
+				},
+			},
 			{ binding: 3, resource: { buffer: shapeBuffer } },
 		],
 	});

@@ -181,14 +181,28 @@ export function dispatchRmsNorm(
 	new Float32Array(shapeU32.buffer)[2] = eps;
 	ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeU32);
 
-	const xBuf = ctx.dataManager.get(src0.handle).buffer;
-	const outBuf = ctx.dataManager.get(dst.handle).buffer;
+	const src0Rec = ctx.dataManager.get(src0.bufHandle);
+	const dstRec = ctx.dataManager.get(dst.bufHandle);
 
 	const bindGroup = ctx.device.createBindGroup({
 		layout: bindGroupLayout,
 		entries: [
-			{ binding: 0, resource: { buffer: xBuf } },
-			{ binding: 1, resource: { buffer: outBuf } },
+			{
+				binding: 0,
+				resource: {
+					buffer: src0Rec.buffer,
+					offset: src0.offset,
+					size: src0Rec.size - src0.offset,
+				},
+			},
+			{
+				binding: 1,
+				resource: {
+					buffer: dstRec.buffer,
+					offset: dst.offset,
+					size: dstRec.size - dst.offset,
+				},
+			},
 			{ binding: 2, resource: { buffer: shapeBuffer } },
 		],
 	});
