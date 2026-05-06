@@ -157,8 +157,14 @@ const WASM32_HEAP_MARGIN = 3.5 * 1024 * 1024 * 1024;
 export function pickWasmUrl(
 	modelByteLength: number,
 	override?: string,
+	backend: "default" | "jsep" = "default",
 ): string {
 	if (override) return override;
+	// JSEP variant ships a single artifact (no wasm32/wasm64 split for
+	// the prototype — Phase 2 targets sub-3.5 GiB models only).
+	if (backend === "jsep") {
+		return "./webllm-wasm-jsep.js";
+	}
 	// Relative-path default: dynamic `import()` inside the bundle
 	// resolves this against the bundle's own URL, so consumers who
 	// drop `webllm-wasm.js` / `webllm-wasm-mem64.js` next to their
@@ -220,6 +226,35 @@ export class WebLLM {
 	// interleave. Calls await the prior call's chainTail before entering
 	// their load phase.
 	private modelChatChains = new Map<string, Promise<void>>();
+
+	/**
+	 * Install JSEP callbacks on a freshly-initialized `GgmlWasm` if the
+	 * engine was constructed with `backend: "jsep"`. Must be called AFTER
+	 * `wasm.init()` (the module exists) and BEFORE the first model load
+	 * (so the C++ side's `EM_ASM_INT(Module.jsepAlloc, ...)` finds a real
+	 * callback rather than `undefined`).
+	 *
+	 * Acquires a JS-side `GPUDevice` via the standard
+	 * `navigator.gpu.requestAdapter() → adapter.requestDevice()` path.
+	 * The C++ ggml-webgpu backend inside the WASM owns its own (separate)
+	 * device — the prototype's two backends partition ops via the
+	 * scheduler and do not share GPU buffers.
+	 */
+	private async maybeInstallJsep(wasm: GgmlWasm): Promise<void> {
+		if (this._config.backend !== "jsep") return;
+		const gpu = (navigator as Navigator & { gpu?: GPU | undefined }).gpu;
+		if (!gpu) {
+			throw new Error(
+				"backend: 'jsep' requires WebGPU; navigator.gpu is unavailable",
+			);
+		}
+		const adapter = await gpu.requestAdapter();
+		if (!adapter) {
+			throw new Error("backend: 'jsep' could not acquire a GPUAdapter");
+		}
+		const device = await adapter.requestDevice();
+		await wasm.installJsepCallbacks(device);
+	}
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
@@ -1407,9 +1442,31 @@ export class WebLLM {
 		const parsed = ModelLoader.parseModel(view);
 		const ggufCtx = GgufParser.parse(view) as GgufContext;
 
-		const resolvedWasmUrl = pickWasmUrl(view.byteLength, wasmUrl);
+		const resolvedWasmUrl = pickWasmUrl(
+			view.byteLength,
+			wasmUrl,
+			this._config.backend ?? "default",
+		);
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl: resolvedWasmUrl });
+		// JSEP callbacks must land BEFORE _buildInferenceAndRegister kicks
+		// off model load — `ggml_backend_jsep_alloc_buffer` is invoked
+		// during weight upload and reads `Module.jsepAlloc` synchronously.
+		// If JSEP install throws (e.g., `navigator.gpu` undefined,
+		// `requestAdapter()` returns null, `requestDevice()` rejects), the
+		// freshly-`init`ed `wasm` would otherwise be orphaned, leaking the
+		// in-WASM GPUDevice + pipeline state. Mirror the staging-failure
+		// shutdown pattern below.
+		try {
+			await this.maybeInstallJsep(wasm);
+		} catch (err) {
+			try {
+				await wasm.shutdown();
+			} catch {
+				// Best effort — don't mask the original install error.
+			}
+			throw err;
+		}
 
 		// `view` lives in the JS heap (not the WASM heap), so there is no
 		// staging pointer to free — pass `undefined`. `_buildInferenceAndRegister`
@@ -1473,9 +1530,31 @@ export class WebLLM {
 			throw new Error(`loadModelFromUrl: response body unavailable for ${url}`);
 		}
 
-		const resolvedWasmUrl = pickWasmUrl(total, wasmUrl);
+		const resolvedWasmUrl = pickWasmUrl(
+			total,
+			wasmUrl,
+			this._config.backend ?? "default",
+		);
 		const wasm = new GgmlWasm();
 		await wasm.init({ wasmUrl: resolvedWasmUrl });
+		// JSEP callbacks must land BEFORE the first weight upload. The
+		// `try` block below malloc's the staging region and streams bytes,
+		// then hands the staging ptr to `_buildInferenceAndRegister` which
+		// invokes `webllm_load_model` (the JSEP `alloc_buffer` trigger).
+		// If JSEP install throws BEFORE we enter the staging try/catch
+		// below, the freshly-`init`ed `wasm` would be orphaned (no
+		// `wasm.shutdown()` runs, leaking the in-WASM GPUDevice + pipeline
+		// state). Mirror the staging-failure shutdown pattern below.
+		try {
+			await this.maybeInstallJsep(wasm);
+		} catch (err) {
+			try {
+				await wasm.shutdown();
+			} catch {
+				// Best effort — don't mask the original install error.
+			}
+			throw err;
+		}
 
 		// Post-init cleanup: if any of malloc / fetch / parse / build fails,
 		// we own the `wasm` (it has constructed a WebGPU device + pipeline

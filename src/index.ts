@@ -60,6 +60,7 @@ export {
 } from "./core/sampling-profiles.js";
 export { Scheduler } from "./core/scheduler.js";
 export type {
+	Backend,
 	EventHandler,
 	GgmlType,
 	LoadedModelMetadata,

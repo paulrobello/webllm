@@ -90,6 +90,7 @@ export class GgmlWasm {
 	// biome-ignore lint/suspicious/noExplicitAny: Emscripten module has dynamic shape
 	private m: any = null;
 	private initialized = false;
+	private jsepInstalled = false;
 	private readonly asyncTensorGetWaiters = new Map<
 		number,
 		{
@@ -291,6 +292,24 @@ export class GgmlWasm {
 
 	async shutdown(): Promise<void> {
 		if (!this.initialized) return;
+		// Tear down JSEP callbacks (if installed) before nulling the module
+		// so the GpuDataManager can destroy its GPUBuffer pool.
+		if (this.jsepInstalled) {
+			try {
+				const { destroyJsepCallbacks } = await import("./jsep/index.js");
+				destroyJsepCallbacks(this.m);
+			} catch (err) {
+				// Don't let a JSEP teardown failure (e.g., dataManager.destroy()
+				// throwing) skip the rest of shutdown — _webgpu_shutdown,
+				// waiter rejection, and `m = null` must always run so a
+				// re-`init` cycle works regardless of teardown success.
+				console.error(
+					"ggml-wasm: destroyJsepCallbacks failed during shutdown",
+					err,
+				);
+			}
+			this.jsepInstalled = false;
+		}
 		this.m._webgpu_shutdown();
 		for (const [requestId, waiter] of this.asyncTensorGetWaiters) {
 			waiter.reject(
@@ -303,6 +322,33 @@ export class GgmlWasm {
 		this.asyncTensorGetStates.clear();
 		this.initialized = false;
 		this.m = null;
+	}
+
+	/**
+	 * Install JSEP callback hooks (`Module.jsep*`) for the JSEP-style
+	 * backend variant. Must be called AFTER {@link init} (the module
+	 * exists) and BEFORE the first model load (so
+	 * `ggml_backend_jsep_alloc_buffer`'s `EM_ASM_INT(Module.jsepAlloc, ...)`
+	 * sees a real callback rather than `undefined`).
+	 *
+	 * Idempotent guard: throws if invoked twice without an intervening
+	 * `shutdown()`. The `device` is the JS-side `GPUDevice` whose buffers
+	 * back JSEP allocations; ggml-webgpu inside the WASM still owns its
+	 * own (separate) device — the two backends partition ops via the
+	 * scheduler and do not share buffers in the prototype.
+	 */
+	async installJsepCallbacks(device: GPUDevice): Promise<void> {
+		if (!this.initialized) {
+			throw new Error("GgmlWasm.installJsepCallbacks: call init() first");
+		}
+		if (this.jsepInstalled) {
+			throw new Error(
+				"GgmlWasm.installJsepCallbacks: already installed; call shutdown() to re-install",
+			);
+		}
+		const { installJsepCallbacks } = await import("./jsep/index.js");
+		installJsepCallbacks(this.m, device);
+		this.jsepInstalled = true;
 	}
 
 	// ── Memory helpers ─────────────────────────────────────────────────

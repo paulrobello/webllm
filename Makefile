@@ -127,7 +127,7 @@ wasm-build-mem64: ## Build only the wasm64 (MEMORY64) production binary
 		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --target webllm-wasm-mem64 --config Release -j
 
-wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → webllm-wasm-jsep.{js,wasm}
+wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → webllm-wasm-jsep.{js,wasm} + webllm-bundle-jsep.js
 	cd src/wasm && mkdir -p build-jsep && cd build-jsep && \
 	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
 	emcmake cmake .. \
@@ -150,6 +150,13 @@ wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → w
 		-DGGML_BACKEND_DL=OFF \
 		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --config Release -j
+	# Bundle that pulls in src/inference/jsep/** so the runtime is reachable
+	# from a smoke harness via plain `import "./webllm-bundle-jsep.js"`.
+	bun run build:jsep
+	# Co-locate the JSEP WASM artifacts next to the bundle so the smoke
+	# page's relative `./webllm-wasm-jsep.js` resolves cleanly. Mirrors the
+	# default `smoke-test` target's layout.
+	cp src/wasm/build-jsep/webllm-wasm-jsep.js src/wasm/build-jsep/webllm-wasm-jsep.wasm smoke-test/
 
 wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
 wasm-build-debug: wasm-clean wasm-build

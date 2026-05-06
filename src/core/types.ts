@@ -1,3 +1,16 @@
+/**
+ * Inference backend selector for {@link WebLLMConfig}.
+ *
+ * - `"default"` — the canonical ASYNCIFY-era ggml-webgpu path
+ *   (`webllm-wasm.{js,wasm}` / `webllm-wasm-mem64.{js,wasm}`).
+ * - `"jsep"` — the experimental JSEP-style backend (P2-v2 prototype) where
+ *   MUL_MAT and RMS_NORM ops are dispatched into TS via `Module.jsep*`
+ *   callbacks; everything else falls back to the CPU backend. Loads
+ *   `webllm-wasm-jsep.{js,wasm}`. See
+ *   `docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`.
+ */
+export type Backend = "default" | "jsep";
+
 /** Configuration for initializing a WebLLM engine instance. */
 export interface WebLLMConfig {
 	cacheDir?: string;
@@ -12,6 +25,12 @@ export interface WebLLMConfig {
 	 * WebLLM is a proxy. All public methods retain their signatures.
 	 */
 	worker?: boolean;
+	/**
+	 * Inference backend variant. Defaults to `"default"` (canonical
+	 * ggml-webgpu path). `"jsep"` opts into the P2-v2 JSEP-style
+	 * prototype (single-op MUL_MAT + RMS_NORM dispatch via TS callbacks).
+	 */
+	backend?: Backend;
 }
 
 /** Options passed when loading a model into the engine. */

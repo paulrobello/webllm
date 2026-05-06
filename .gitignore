@@ -52,6 +52,9 @@ smoke-test/webllm-wasm.js
 smoke-test/webllm-wasm.wasm
 smoke-test/webllm-wasm-mem64.js
 smoke-test/webllm-wasm-mem64.wasm
+smoke-test/webllm-bundle-jsep.js
+smoke-test/webllm-wasm-jsep.js
+smoke-test/webllm-wasm-jsep.wasm
 
 # Downloaded model files
 smoke-test/models/
