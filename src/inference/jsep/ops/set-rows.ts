@@ -387,6 +387,113 @@ export function dispatchSetRows(
 	const src1Rec = ctx.dataManager.get(src1.bufHandle);
 	const dstRec = ctx.dataManager.get(dst.bufHandle);
 
+	const dispatchX = Math.ceil(ne0 / WG_X);
+	const dispatchY = nr;
+	const dispatchZ = ne02 * ne03;
+
+	// WebGPU sync-scope rule: a single GPUBuffer bound as both read-only
+	// storage and writable storage in the same compute pass is rejected
+	// at buffer granularity (see matmul.ts:564 for the long form).
+	//
+	// SET_ROWS structurally aliases dst with src[2] — `dst = view(src[2])`
+	// is the ggml semantics of the op, so dstRec.buffer always equals
+	// the GPUBuffer that holds src[2]. src[2] is descriptor-only (not
+	// bound to this kernel's bind group), so the within-kernel bind group
+	// is conflict-free. The conflict instead happens within the batched
+	// pass: neighbouring batched dispatches read other tensors that share
+	// dstRec.buffer (cache_k / cache_v lives in jsep_buf alongside many
+	// activations), so SET_ROWS' read_write binding of dstRec.buffer
+	// trips the validator at encoder.finish().
+	//
+	// Divert (read-modify-write): allocate a temp dst, pre-copy real dst
+	// into temp so unwritten rows + the F16 atomic-CAS path see the
+	// correct prior state, dispatch into temp, then copy temp back into
+	// real dst. Live in own command encoder (flush batcher first) so the
+	// diverted dispatch can't conflict with batched neighbours.
+	//
+	// Aliasing rate measured 2026-05-06 on TinyLlama Q4_0 prefill+5
+	// decode: 264/264 = 100% on src[2] (0% on src0/src1). The check
+	// below covers all three to remain robust if a future caller ever
+	// passes a kernel-bound aliased src.
+	const src2BufHandle = desc.srcs.length > 2 ? desc.srcs[2].bufHandle : -1;
+	const dstAliasesSrc =
+		dst.bufHandle === src0.bufHandle ||
+		dst.bufHandle === src1.bufHandle ||
+		(src2BufHandle >= 0 && dst.bufHandle === src2BufHandle);
+
+	if (dstAliasesSrc) {
+		// Total bytes spanned by dst — handles the strided cache_v
+		// transposed view (ne[0]=1, indices land in adjacent f16 cells)
+		// by taking the max over all dims of (ne[d] * nb[d]).
+		let dstSize = dst.ne[0] * dst.nb[0];
+		for (let d = 1; d < 4; d++) {
+			if (dst.ne[d] > 0) dstSize = Math.max(dstSize, dst.ne[d] * dst.nb[d]);
+		}
+		if (dst.offset + dstSize > dstRec.size) {
+			console.error(
+				`dispatchSetRows: divert would read past dst buffer end ` +
+					`(offset=${dst.offset} + size=${dstSize} > ${dstRec.size})`,
+			);
+			return -1;
+		}
+
+		const tempDst = ctx.device.createBuffer({
+			size: dstSize,
+			usage:
+				GPUBufferUsage.STORAGE |
+				GPUBufferUsage.COPY_SRC |
+				GPUBufferUsage.COPY_DST,
+		});
+		const divertBindGroup = ctx.device.createBindGroup({
+			layout: bindGroupLayout,
+			entries: [
+				{
+					binding: 0,
+					resource: {
+						buffer: src0Rec.buffer,
+						offset: src0.offset,
+						size: src0Rec.size - src0.offset,
+					},
+				},
+				{
+					binding: 1,
+					resource: {
+						buffer: src1Rec.buffer,
+						offset: src1.offset,
+						size: src1Rec.size - src1.offset,
+					},
+				},
+				{
+					binding: 2,
+					resource: { buffer: tempDst, offset: 0, size: dstSize },
+				},
+				{ binding: 3, resource: { buffer: paramsBuf } },
+			],
+		});
+
+		// Flush any pending batched dispatches — the diverted SET_ROWS +
+		// its pre/post copies must live in a self-contained encoder.
+		ctx.encoderBatcher.flush();
+
+		const enc = ctx.device.createCommandEncoder();
+		// Pre-copy real dst → temp so unwritten rows + the F16 atomic CAS
+		// path both see the correct prior state.
+		enc.copyBufferToBuffer(dstRec.buffer, dst.offset, tempDst, 0, dstSize);
+		const pass = enc.beginComputePass();
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, divertBindGroup);
+		pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+		pass.end();
+		// Post-copy temp → real dst.
+		enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstSize);
+		ctx.device.queue.submit([enc.finish()]);
+		// destroy() after submit is documented-safe — pending GPU work is
+		// allowed to complete using the destroyed buffer's underlying
+		// memory.
+		tempDst.destroy();
+		return 0;
+	}
+
 	const bindGroup = ctx.device.createBindGroup({
 		layout: bindGroupLayout,
 		entries: [
@@ -417,10 +524,6 @@ export function dispatchSetRows(
 			{ binding: 3, resource: { buffer: paramsBuf } },
 		],
 	});
-
-	const dispatchX = Math.ceil(ne0 / WG_X);
-	const dispatchY = nr;
-	const dispatchZ = ne02 * ne03;
 
 	ctx.encoderBatcher.record({
 		pipeline,
