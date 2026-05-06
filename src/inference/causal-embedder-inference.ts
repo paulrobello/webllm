@@ -10,7 +10,7 @@ import {
 	type GgmlWasm,
 	type TensorPtr,
 } from "./ggml-wasm.js";
-import { getRopeModeForArchitecture } from "./model-inference.js";
+import { getRopeModeForArchitecture } from "./rope/rope-mode.js";
 
 /**
  * Per-layer weight tensors for a Qwen3-style causal LM. Mirrors the chat

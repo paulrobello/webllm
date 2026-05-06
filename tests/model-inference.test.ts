@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { RopeMode } from "../src/inference/ggml-wasm.js";
-import { getRopeModeForArchitecture } from "../src/inference/model-inference.js";
+import { getRopeModeForArchitecture } from "../src/inference/rope/rope-mode.js";
 
 describe("getRopeModeForArchitecture", () => {
 	test("uses NEOX rope for qwen-family architectures", () => {

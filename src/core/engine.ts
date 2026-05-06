@@ -24,11 +24,6 @@ import {
 } from "../inference/llama-bridge.js";
 import { LlamaDecodeWrapper } from "../inference/llama-decode-wrapper.js";
 import { LlamaTokenizer } from "../inference/llama-tokenizer.js";
-import {
-	type DecodeMode,
-	type DecodeResult,
-	ModelInference,
-} from "../inference/model-inference.js";
 import { Sampler } from "../inference/sampler.js";
 import { Tokenizer } from "../inference/tokenizer.js";
 import { GgufParser } from "../models/gguf-parser.js";
@@ -216,10 +211,7 @@ export class WebLLM {
 	private characterManager: CharacterManager;
 	private eventHandlers = new Map<string, Set<EventHandler>>();
 	private wasmModules = new Map<string, GgmlWasm>();
-	private inferenceEngines = new Map<
-		string,
-		ModelInference | LlamaDecodeWrapper
-	>();
+	private inferenceEngines = new Map<string, LlamaDecodeWrapper>();
 	private encoderEngines = new Map<string, EncoderInference>();
 	private causalEmbedderEngines = new Map<string, CausalLMEmbedder>();
 	private sessions = new Map<string, ConversationSession>();
@@ -611,27 +603,10 @@ export class WebLLM {
 			return await inf.forward(new Int32Array(ids), new Int32Array(positions));
 		};
 
-		// forwardDecode is the legacy ModelInference-only fast path used
-		// by speculative decoding's verify pass. LlamaDecodeWrapper has no
-		// equivalent — falls through to the CPU sampling path. P3 / P4
+		// forwardDecode was the legacy ModelInference-only GPU fast path
+		// used by speculative decoding's verify pass. LlamaDecodeWrapper
+		// has no equivalent — sampling stays in JS. P5's spec-decode rewire
 		// re-introduces a bridge-side decode primitive if needed.
-		const forwardDecode =
-			inf instanceof ModelInference && typeof inf.forwardDecode === "function"
-				? async (
-						ids: number[],
-						positions: number[],
-						mode: DecodeMode,
-						topK?: number,
-					): Promise<DecodeResult> => {
-						return await inf.forwardDecode(
-							new Int32Array(ids),
-							new Int32Array(positions),
-							mode,
-							topK,
-						);
-					}
-				: undefined;
-
 		yield* generateTextStream({
 			promptTokenIds: promptTokens,
 			sampler,
@@ -640,7 +615,6 @@ export class WebLLM {
 			tokenizer,
 			forwardPass,
 			config: genConfig,
-			forwardDecode,
 		});
 	}
 
@@ -1057,27 +1031,10 @@ export class WebLLM {
 					new Int32Array(positions),
 				);
 			};
-			// forwardDecode is the legacy ModelInference-only fast path
-			// used by speculative decoding's verify pass.
-			// LlamaDecodeWrapper has no equivalent — falls through to the
-			// CPU sampling path. P3 / P4 re-introduces a bridge-side
-			// decode primitive if needed.
-			const forwardDecode =
-				inf instanceof ModelInference && typeof inf.forwardDecode === "function"
-					? async (
-							ids: number[],
-							positions: number[],
-							mode: DecodeMode,
-							topK?: number,
-						): Promise<DecodeResult> => {
-							return await inf.forwardDecode(
-								new Int32Array(ids),
-								new Int32Array(positions),
-								mode,
-								topK,
-							);
-						}
-					: undefined;
+			// forwardDecode was the legacy ModelInference-only GPU fast path
+			// used by speculative decoding's verify pass. LlamaDecodeWrapper
+			// has no equivalent — sampling stays in JS. P5's spec-decode
+			// rewire re-introduces a bridge-side decode primitive if needed.
 
 			// InferenceSession's constructor signature is (config, sequenceId);
 			// the second arg is a sequence id, NOT the starting position
@@ -1107,7 +1064,6 @@ export class WebLLM {
 				tokenizer,
 				forwardPass,
 				config: genConfig,
-				forwardDecode,
 			})) {
 				if (chunk.tokenId !== undefined) {
 					generatedIds.push(chunk.tokenId);
@@ -1162,11 +1118,9 @@ export class WebLLM {
 	/**
 	 * @internal — for unit tests only. Returns the inference engine for a
 	 * model id so tests can spy on its KV-cache primitives. Not a stable
-	 * API; the field type is the public {@link ModelInference}.
+	 * API; the field type is the public {@link LlamaDecodeWrapper}.
 	 */
-	__debugInferenceForModel(
-		modelId: string,
-	): ModelInference | LlamaDecodeWrapper | undefined {
+	__debugInferenceForModel(modelId: string): LlamaDecodeWrapper | undefined {
 		return this.inferenceEngines.get(modelId);
 	}
 
@@ -1248,7 +1202,7 @@ export class WebLLM {
 		modelId: string,
 		messages: ChatMessage[],
 		tokenizer: Tokenizer,
-		inf: ModelInference | LlamaDecodeWrapper,
+		inf: LlamaDecodeWrapper,
 		config?: StreamConfig,
 	): number[] {
 		const sessionInfo = this.getOrCreateSession(modelId);
@@ -1333,11 +1287,7 @@ export class WebLLM {
 		name: string,
 		pipeline: {
 			wasm: GgmlWasm;
-			inference:
-				| ModelInference
-				| LlamaDecodeWrapper
-				| EncoderInference
-				| CausalLMEmbedder;
+			inference: LlamaDecodeWrapper | EncoderInference | CausalLMEmbedder;
 			parsed: ParsedModel;
 		},
 		options?: {
@@ -1353,9 +1303,7 @@ export class WebLLM {
 		// existing state. Encoder and causal-embedder pipelines have no
 		// KV cache to reset.
 		if (!isEncoder && !isCausalEmbedder) {
-			(
-				pipeline.inference as ModelInference | LlamaDecodeWrapper
-			).resetKVCache();
+			(pipeline.inference as LlamaDecodeWrapper).resetKVCache();
 		}
 
 		const handle = this.registerModelHandle(name, { priority: 0 });
@@ -1396,7 +1344,7 @@ export class WebLLM {
 		} else {
 			this.inferenceEngines.set(
 				handle.id,
-				pipeline.inference as ModelInference | LlamaDecodeWrapper,
+				pipeline.inference as LlamaDecodeWrapper,
 			);
 		}
 		return handle;
@@ -1426,11 +1374,7 @@ export class WebLLM {
 		options?: Partial<ModelLoadOptions>,
 	): Promise<{
 		handle: ModelHandle;
-		inference:
-			| ModelInference
-			| LlamaDecodeWrapper
-			| EncoderInference
-			| CausalLMEmbedder;
+		inference: LlamaDecodeWrapper | EncoderInference | CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const view = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -1486,11 +1430,7 @@ export class WebLLM {
 		onProgress?: (received: number, total: number) => void,
 	): Promise<{
 		handle: ModelHandle;
-		inference:
-			| ModelInference
-			| LlamaDecodeWrapper
-			| EncoderInference
-			| CausalLMEmbedder;
+		inference: LlamaDecodeWrapper | EncoderInference | CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const resp = await fetch(url);
@@ -1630,11 +1570,7 @@ export class WebLLM {
 		stagingPtr?: number,
 	): Promise<{
 		handle: ModelHandle;
-		inference:
-			| ModelInference
-			| LlamaDecodeWrapper
-			| EncoderInference
-			| CausalLMEmbedder;
+		inference: LlamaDecodeWrapper | EncoderInference | CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const freeStaging = (): void => {
@@ -1664,11 +1600,7 @@ export class WebLLM {
 			const arch = parsed.hyperparams.architecture;
 			const isEncoder = isEncoderArchitecture(arch);
 			const isCausalEmbedder = isCausalEmbedderArchitecture(arch);
-			let inference:
-				| ModelInference
-				| LlamaDecodeWrapper
-				| EncoderInference
-				| CausalLMEmbedder;
+			let inference: LlamaDecodeWrapper | EncoderInference | CausalLMEmbedder;
 			if (isEncoder) {
 				const enc = new EncoderInference(wasm, parsed.hyperparams);
 				enc.loadWeights(ggufCtx, dataSrc);
@@ -1810,11 +1742,7 @@ export class WebLLM {
 	): Promise<{
 		handle: ModelHandle;
 		engine: WebLLM;
-		inference:
-			| ModelInference
-			| LlamaDecodeWrapper
-			| EncoderInference
-			| CausalLMEmbedder;
+		inference: LlamaDecodeWrapper | EncoderInference | CausalLMEmbedder;
 		metadata: LoadedModelMetadata;
 	}> {
 		const engine = await WebLLM.init(config);

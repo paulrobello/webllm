@@ -132,7 +132,7 @@ export type {
 	LightweightWeights,
 } from "./inference/lightweight.js";
 export { LightweightModel } from "./inference/lightweight.js";
-export { ModelInference } from "./inference/model-inference.js";
+export { LlamaDecodeWrapper } from "./inference/llama-decode-wrapper.js";
 export type { SamplerConfig } from "./inference/sampler.js";
 export { Sampler } from "./inference/sampler.js";
 export { StreamRouter } from "./inference/stream-router.js";

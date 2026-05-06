@@ -1,11 +1,36 @@
 import type { InferenceSession } from "../models/inference-session.js";
-import type { DecodeMode, DecodeResult } from "./model-inference.js";
 import type { Sampler } from "./sampler.js";
 import {
 	StreamingDecoder,
 	TokenAttribute,
 	type Tokenizer,
 } from "./tokenizer.js";
+
+/**
+ * GPU-side decode-mode selector for the optional `forwardDecode`
+ * callback. The legacy `ModelInference.forwardDecode` implemented
+ * "full" / "greedy" / "topk" / "verify" paths; the new
+ * `LlamaDecodeWrapper` does not — sampling stays in JS. This type
+ * stays with `generation.ts` because it describes the callback
+ * shape `runGeneration` accepts. P5's spec-decode rewire may
+ * extend it.
+ */
+export type DecodeMode = "full" | "greedy" | "topk" | "verify";
+
+/**
+ * Result shape from a `forwardDecode` callback. Different fields
+ * are populated depending on `mode`.
+ */
+export interface DecodeResult {
+	/** Full logits (mode='full'). */
+	logits?: Float32Array;
+	/** Greedy argmax token ID (mode='greedy'). */
+	tokenId?: number;
+	/** Top-K indices (mode='topk'). */
+	topKIndices?: Int32Array;
+	/** Top-K logit values (mode='topk'). */
+	topKValues?: Float32Array;
+}
 
 /** Configuration for a single generation request. Public API surface. */
 export interface GenerationConfig {
