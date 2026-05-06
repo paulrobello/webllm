@@ -13,11 +13,192 @@
 
 import { installJsepCallbacks } from "../src/inference/jsep/index.js";
 import { createLlamaBridge } from "../src/inference/llama-bridge.js";
+import {
+	dispatchMatmul,
+	GGML_TYPE_F32,
+	GGML_TYPE_Q4_K,
+	type JsepOpDescriptor,
+} from "../src/inference/jsep/ops/matmul.js";
+import { GGML_OP_MUL_MAT } from "../src/inference/jsep/index.js";
 
 // Same fixture as p0-spike.src.ts — "The capital of France is".
 const PROMPT_TOKEN_IDS = [1, 450, 7483, 310, 3444, 338];
 const N_GENERATE = 5;
 const GGUF_URL = "/models/tinyllama-1.1b-chat-q4_0.gguf";
+
+// ----- Q4_K kernel self-test ------------------------------------------------
+
+function f32ToF16Bits(f: number): number {
+	const buf = new ArrayBuffer(4);
+	new Float32Array(buf)[0] = f;
+	const u32 = new Uint32Array(buf)[0];
+	const sign = (u32 >> 31) & 0x1;
+	const expF32 = (u32 >> 23) & 0xff;
+	const mantF32 = u32 & 0x7fffff;
+	if (expF32 === 0xff) return (sign << 15) | 0x7c00 | (mantF32 ? 1 : 0);
+	const expF16 = expF32 - 127 + 15;
+	if (expF16 >= 0x1f) return (sign << 15) | 0x7c00;
+	if (expF16 <= 0) return sign << 15;
+	return (sign << 15) | (expF16 << 10) | (mantF32 >> 13);
+}
+
+function f16BitsToF32(bits: number): number {
+	const sign = (bits >> 15) & 0x1;
+	const exp = (bits >> 10) & 0x1f;
+	const mant = bits & 0x3ff;
+	if (exp === 0) {
+		if (mant === 0) return sign ? -0 : 0;
+		const v = 2 ** -14 * (mant / 1024);
+		return sign ? -v : v;
+	}
+	if (exp === 0x1f) return mant ? NaN : sign ? -Infinity : Infinity;
+	const val = 2 ** (exp - 15) * (1 + mant / 1024);
+	return sign ? -val : val;
+}
+
+// Pack a single Q4_K super-block (256 elems / 144 bytes) given explicit
+// (d, dmin, sc[8], m[8], nibbles[256]).
+function packQ4_KSingle(
+	d: number,
+	dmin: number,
+	sc: Uint8Array,
+	m: Uint8Array,
+	nibbles: Uint8Array,
+): { bytes: Uint8Array; dequant: Float32Array } {
+	const bytes = new Uint8Array(144);
+	const view = new DataView(bytes.buffer);
+	view.setUint16(0, f32ToF16Bits(d), true);
+	view.setUint16(2, f32ToF16Bits(dmin), true);
+	for (let j = 0; j < 4; j++) {
+		bytes[4 + j] = (sc[j] & 0x3f) | (((sc[j + 4] >> 4) & 0x3) << 6);
+		bytes[4 + j + 4] = (m[j] & 0x3f) | (((m[j + 4] >> 4) & 0x3) << 6);
+		bytes[4 + j + 8] = (sc[j + 4] & 0xf) | ((m[j + 4] & 0xf) << 4);
+	}
+	for (let pair = 0; pair < 4; pair++) {
+		for (let l = 0; l < 32; l++) {
+			const lo = nibbles[pair * 64 + l] & 0xf;
+			const hi = nibbles[pair * 64 + 32 + l] & 0xf;
+			bytes[16 + pair * 32 + l] = lo | (hi << 4);
+		}
+	}
+	const dequant = new Float32Array(256);
+	const decodedD = f16BitsToF32(f32ToF16Bits(d));
+	const decodedDmin = f16BitsToF32(f32ToF16Bits(dmin));
+	for (let pair = 0; pair < 4; pair++) {
+		const is0 = pair * 2;
+		const is1 = pair * 2 + 1;
+		const d1 = decodedD * sc[is0];
+		const m1 = decodedDmin * m[is0];
+		const d2 = decodedD * sc[is1];
+		const m2 = decodedDmin * m[is1];
+		for (let l = 0; l < 32; l++) {
+			dequant[pair * 64 + l] = d1 * nibbles[pair * 64 + l] - m1;
+			dequant[pair * 64 + 32 + l] = d2 * nibbles[pair * 64 + 32 + l] - m2;
+		}
+	}
+	return { bytes, dequant };
+}
+
+async function runQ4KSelfTest(
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+): Promise<void> {
+	const M = 1;
+	const K = 256;
+	const N = 1;
+	const sc = new Uint8Array([5, 12, 19, 26, 33, 40, 47, 54]);
+	const m = new Uint8Array([3, 7, 11, 15, 19, 23, 27, 31]);
+	const nibbles = new Uint8Array(256);
+	for (let i = 0; i < 256; i++) nibbles[i] = i & 0xf;
+	const { bytes: q4Bytes, dequant: src0Dequant } = packQ4_KSingle(
+		0.05,
+		0.01,
+		sc,
+		m,
+		nibbles,
+	);
+	const src1 = new Float32Array(N * K);
+	for (let i = 0; i < src1.length; i++) src1[i] = ((i % 13) - 6) * 0.15;
+
+	let reference = 0;
+	for (let k = 0; k < K; k++) reference += src0Dequant[k] * src1[k];
+
+	const h0 = runtime.dataManager.alloc(q4Bytes.byteLength);
+	const h1 = runtime.dataManager.alloc(src1.byteLength);
+	const hd = runtime.dataManager.alloc(M * N * 4);
+	const rec0 = runtime.dataManager.get(h0);
+	const rec1 = runtime.dataManager.get(h1);
+	runtime.device.queue.writeBuffer(
+		rec0.buffer,
+		0,
+		q4Bytes,
+		0,
+		q4Bytes.byteLength,
+	);
+	runtime.device.queue.writeBuffer(
+		rec1.buffer,
+		0,
+		new Uint8Array(src1.buffer),
+		0,
+		src1.byteLength,
+	);
+
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_MUL_MAT,
+		nSrc: 2,
+		dst: {
+			bufHandle: hd,
+			offset: 0,
+			type: GGML_TYPE_F32,
+			ne: [M, N, 1, 1],
+			nb: [4, 4, 4 * M, 4 * M * N],
+		},
+		srcs: [
+			{
+				bufHandle: h0,
+				offset: 0,
+				type: GGML_TYPE_Q4_K,
+				ne: [K, M, 1, 1],
+				nb: [144, 144 * (K / 256), 144 * (K / 256) * M, 0],
+			},
+			{
+				bufHandle: h1,
+				offset: 0,
+				type: GGML_TYPE_F32,
+				ne: [K, N, 1, 1],
+				nb: [4, 4 * K, 4 * K * N, 0],
+			},
+		],
+	};
+	const status = dispatchMatmul(runtime, desc);
+	runtime.encoderBatcher.flush();
+
+	const recd = runtime.dataManager.get(hd);
+	const staging = runtime.device.createBuffer({
+		size: M * N * 4,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	const enc = runtime.device.createCommandEncoder();
+	enc.copyBufferToBuffer(recd.buffer, 0, staging, 0, M * N * 4);
+	runtime.device.queue.submit([enc.finish()]);
+	await staging.mapAsync(GPUMapMode.READ, 0, M * N * 4);
+	const got = new Float32Array(staging.getMappedRange().slice(0));
+	staging.unmap();
+	staging.destroy();
+	const passLog = {
+		status,
+		got: got[0],
+		reference,
+		delta: Math.abs(got[0] - reference),
+		dequantFirst4: Array.from(src0Dequant.slice(0, 4)),
+		dequantLast4: Array.from(src0Dequant.slice(-4)),
+	};
+	log(`Q4K_SELFTEST = ${JSON.stringify(passLog)}`);
+	(window as any).__q4kSelfTest = passLog;
+
+	runtime.dataManager.free(h0);
+	runtime.dataManager.free(h1);
+	runtime.dataManager.free(hd);
+}
 
 function log(msg: string, cls = ""): void {
 	const el = document.getElementById("log");
@@ -51,7 +232,12 @@ async function runSpike(): Promise<void> {
 		const device = await adapter.requestDevice();
 
 		log("[3/8] Installing JSEP callbacks (must precede webllm_load_model)...");
-		installJsepCallbacks(mod, device);
+		const runtime = installJsepCallbacks(mod, device);
+
+		// Stage 3 self-test: hand-crafted Q4_K matmul against a CPU reference
+		// to localize whether the all-zeros logits chain comes from the Q4_K
+		// kernel or from elsewhere (RMS_NORM, splits, CPY).
+		await runQ4KSelfTest(runtime);
 
 		log("[4/8] Initializing ggml-webgpu backend...");
 		const initStatus = await mod._webgpu_init();
@@ -102,15 +288,54 @@ async function runSpike(): Promise<void> {
 		const generatedIds: number[] = [];
 		let nPast = PROMPT_TOKEN_IDS.length;
 		const tDecodeStart = performance.now();
+		const logitStats: Array<{
+			step: number;
+			first8: number[];
+			topVal: number;
+			topId: number;
+			hasNaN: boolean;
+			hasInf: boolean;
+			finiteCount: number;
+			minFinite: number;
+			maxFinite: number;
+		}> = [];
 		for (let step = 0; step < N_GENERATE; step++) {
 			const logits = await bridge.getLogits(ctx, model);
 			let topId = 0;
 			let topVal = -Infinity;
+			let hasNaN = false;
+			let hasInf = false;
+			let finiteCount = 0;
+			let minFinite = Infinity;
+			let maxFinite = -Infinity;
 			for (let i = 0; i < logits.length; i++) {
-				if (logits[i] > topVal) {
-					topVal = logits[i];
+				const v = logits[i];
+				if (Number.isNaN(v)) {
+					hasNaN = true;
+				} else if (!Number.isFinite(v)) {
+					hasInf = true;
+				} else {
+					finiteCount++;
+					if (v < minFinite) minFinite = v;
+					if (v > maxFinite) maxFinite = v;
+				}
+				if (v > topVal) {
+					topVal = v;
 					topId = i;
 				}
+			}
+			if (step === 0) {
+				logitStats.push({
+					step,
+					first8: Array.from(logits.slice(0, 8)),
+					topVal,
+					topId,
+					hasNaN,
+					hasInf,
+					finiteCount,
+					minFinite,
+					maxFinite,
+				});
 			}
 			generatedIds.push(topId);
 			const single = new Int32Array([topId]);
@@ -150,6 +375,7 @@ async function runSpike(): Promise<void> {
 			generatedText = `<detokenize failed: ${(e as Error).message}>`;
 		}
 
+		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`GENERATED_TEXT = ${JSON.stringify(generatedText)}`);
 		log(`PER_TOKEN_MS = ${perTokenMs.toFixed(2)}`);

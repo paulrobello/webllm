@@ -177,6 +177,13 @@ export function installJsepCallbacks(
 		size: number,
 	): void => {
 		counters.write++;
+		// Submit any pending compute dispatches before queuing the
+		// writeBuffer. WebGPU queue ops are FIFO and `device.queue.writeBuffer`
+		// is enqueued immediately, so without this flush a write would slip
+		// ahead of dispatches that were recorded earlier and depend on the
+		// pre-write contents — a write meant to feed dispatch N+1 would
+		// silently overwrite the data that dispatch N still needed to read.
+		encoderBatcher.flush();
 		// Re-derive the heap buffer each call — the WASM heap may have
 		// grown between EM_ASM frames, detaching prior views.
 		dataManager.write(handle, offset, hostPtr, size, module.HEAPU8.buffer);
@@ -189,6 +196,16 @@ export function installJsepCallbacks(
 		size: number,
 	): Promise<void> => {
 		counters.read++;
+		// Submit any pending compute dispatches before issuing the staging
+		// copy. WebGPU queue operations are FIFO; without this flush, a
+		// readAsync that follows a recorded-but-unsubmitted compute dispatch
+		// reads the pre-dispatch buffer state (zeros). The scheduler's
+		// JSEP→CPU split copies use this path, so without the flush every
+		// activation propagated to a subsequent CPU split is zero — which
+		// collapses the entire forward pass to all-zero logits. Diagnosed
+		// via Stage 3 self-test (Q4_K kernel correct in isolation; bug
+		// reproduced as zero logits for whole-model decode).
+		encoderBatcher.flush();
 		return dataManager.readAsync(
 			handle,
 			offset,
@@ -205,6 +222,10 @@ export function installJsepCallbacks(
 		size: number,
 	): void => {
 		counters.clear++;
+		// Same FIFO ordering concern as jsepWrite — clear is implemented
+		// via writeBuffer-of-zeros and would jump ahead of pending compute
+		// dispatches without a flush.
+		encoderBatcher.flush();
 		dataManager.clear(handle, value, offset, size);
 	};
 

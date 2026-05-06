@@ -25,6 +25,7 @@ import {
 	GGML_TYPE_F16,
 	GGML_TYPE_F32,
 	GGML_TYPE_Q4_0,
+	GGML_TYPE_Q4_K,
 	type JsepOpDescriptor,
 	type JsepTensorMeta,
 } from "../src/inference/jsep/ops/matmul.js";
@@ -186,6 +187,69 @@ function packQ4_0(values: Float32Array): {
 				(nibbles[i] & 0xf) | ((nibbles[i + 16] & 0xf) << 4);
 		}
 	}
+	return { bytes, dequant };
+}
+
+// Q4_K super-block: 256 elements / 144 bytes:
+//   d (f16, 2B) + dmin (f16, 2B) + scales[12] (6-bit packed) + qs[128]
+// Sub-blocks: 8 of 32 elements; pairs share a 32-byte qs slice.
+// Reference packer: build a block from explicit (d, dmin, sc[8], m[8],
+// nibbles[256]) and emit the 144-byte block plus the dequantized values
+// produced by the inverse of get_scale_min_k4 (so the golden test checks
+// kernel ↔ reference, not packer ↔ kernel).
+function packQ4_K(
+	d: number,
+	dmin: number,
+	sc: Uint8Array, // length 8, values 0..63
+	m: Uint8Array, // length 8, values 0..63
+	nibbles: Uint8Array, // length 256, values 0..15
+): { bytes: Uint8Array; dequant: Float32Array } {
+	if (sc.length !== 8 || m.length !== 8 || nibbles.length !== 256) {
+		throw new Error("packQ4_K: bad input lengths");
+	}
+	const bytes = new Uint8Array(144);
+	const view = new DataView(bytes.buffer);
+	view.setUint16(0, f32ToF16Bits(d), true);
+	view.setUint16(2, f32ToF16Bits(dmin), true);
+
+	// scales[0..3]: low 6 bits = sc[j], high 2 bits = sc[j+4][5:4]
+	// scales[4..7]: low 6 bits = m[j], high 2 bits = m[j+4][5:4]
+	// scales[8..11]: low 4 = sc[j+4][3:0], high 4 = m[j+4][3:0]
+	for (let j = 0; j < 4; j++) {
+		bytes[4 + j] = (sc[j] & 0x3f) | (((sc[j + 4] >> 4) & 0x3) << 6);
+		bytes[4 + j + 4] = (m[j] & 0x3f) | (((m[j + 4] >> 4) & 0x3) << 6);
+		bytes[4 + j + 8] = (sc[j + 4] & 0xf) | ((m[j + 4] & 0xf) << 4);
+	}
+
+	// qs: 8 sub-blocks of 32 nibbles, packed in pairs (32 bytes per 64
+	// elements). Nibble for element idx in [pair*64, pair*64+32) goes in
+	// the low nibble of qs[pair*32 + (idx % 32)]; idx in [pair*64+32,
+	// pair*64+64) goes in the high nibble.
+	for (let pair = 0; pair < 4; pair++) {
+		for (let l = 0; l < 32; l++) {
+			const lo = nibbles[pair * 64 + l] & 0xf;
+			const hi = nibbles[pair * 64 + 32 + l] & 0xf;
+			bytes[16 + pair * 32 + l] = lo | (hi << 4);
+		}
+	}
+
+	// Reference dequant — mirrors ggml-quants.c::dequantize_row_q4_K.
+	const dequant = new Float32Array(256);
+	const decodedD = f16BitsToF32(f32ToF16Bits(d));
+	const decodedDmin = f16BitsToF32(f32ToF16Bits(dmin));
+	for (let pair = 0; pair < 4; pair++) {
+		const is0 = pair * 2;
+		const is1 = pair * 2 + 1;
+		const d1 = decodedD * sc[is0];
+		const m1 = decodedDmin * m[is0];
+		const d2 = decodedD * sc[is1];
+		const m2 = decodedDmin * m[is1];
+		for (let l = 0; l < 32; l++) {
+			dequant[pair * 64 + l] = d1 * nibbles[pair * 64 + l] - m1;
+			dequant[pair * 64 + 32 + l] = d2 * nibbles[pair * 64 + 32 + l] - m2;
+		}
+	}
+
 	return { bytes, dequant };
 }
 
@@ -448,6 +512,87 @@ describe("JSEP matmul golden", () => {
 		// Reference uses *dequantized* src0, so kernel and reference should
 		// match to f32 round-off — but Q4_0 stride encoding has more room
 		// for off-by-one bugs, so allow a generous tolerance.
+		expect(delta).toBeLessThan(1e-2);
+
+		ctx.dataManager.destroy();
+		device.destroy();
+	});
+
+	test("Q4_K × F32 → F32 — 1×256 × 1×256 → 1×1 (single super-block)", async () => {
+		const device = await getDevice();
+		if (!device) return;
+		const ctx = makeCtx(device);
+
+		const M = 1;
+		const K = 256; // one Q4_K super-block per row
+		const N = 1;
+
+		// Build a deterministic, distinguishable single super-block. sc[i]
+		// and m[i] vary across sub-blocks so an off-by-one in the 6-bit
+		// unpack flips the output dramatically. Values stay in 6-bit range.
+		const sc = new Uint8Array([5, 12, 19, 26, 33, 40, 47, 54]);
+		const m = new Uint8Array([3, 7, 11, 15, 19, 23, 27, 31]);
+		const nibbles = new Uint8Array(256);
+		for (let i = 0; i < 256; i++) nibbles[i] = i & 0xf;
+		const d = 0.05;
+		const dmin = 0.01;
+
+		const { bytes: q4Bytes, dequant: src0Dequant } = packQ4_K(
+			d,
+			dmin,
+			sc,
+			m,
+			nibbles,
+		);
+
+		const src1 = new Float32Array(N * K);
+		for (let i = 0; i < src1.length; i++) src1[i] = ((i % 13) - 6) * 0.15;
+
+		const reference = cpuMatmul(src0Dequant, src1, M, K, N);
+
+		const src1Bytes = new Uint8Array(src1.buffer.slice(0));
+		const dstBytes = M * N * 4;
+
+		const h0 = ctx.dataManager.alloc(q4Bytes.byteLength);
+		const h1 = ctx.dataManager.alloc(src1Bytes.byteLength);
+		const hd = ctx.dataManager.alloc(dstBytes);
+
+		device.queue.writeBuffer(
+			ctx.dataManager.get(h0).buffer,
+			0,
+			q4Bytes,
+			0,
+			q4Bytes.byteLength,
+		);
+		device.queue.writeBuffer(
+			ctx.dataManager.get(h1).buffer,
+			0,
+			src1Bytes,
+			0,
+			src1Bytes.byteLength,
+		);
+
+		// Q4_K stride: row of K elems = (K/QK_K) blocks * 144 bytes/block.
+		const desc: JsepOpDescriptor = {
+			op: GGML_OP_MUL_MAT,
+			nSrc: 2,
+			dst: makeMeta(hd, GGML_TYPE_F32, [M, N, 1, 1], 4, 1),
+			srcs: [
+				makeMeta(h0, GGML_TYPE_Q4_K, [K, M, 1, 1], 144, 256),
+				makeMeta(h1, GGML_TYPE_F32, [K, N, 1, 1], 4, 1),
+			],
+		};
+
+		const status = dispatchMatmul(ctx, desc);
+		expect(status).toBe(0);
+
+		ctx.encoderBatcher.flush();
+
+		const heap = new ArrayBuffer(dstBytes);
+		await ctx.dataManager.readAsync(hd, 0, 0, dstBytes, heap);
+		const got = new Float32Array(heap.slice(0));
+
+		const delta = maxAbsDelta(got, reference);
 		expect(delta).toBeLessThan(1e-2);
 
 		ctx.dataManager.destroy();

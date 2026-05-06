@@ -61,6 +61,15 @@ const TILE_N = 16;
 // Q4_0 block geometry (must match ggml-common.h; QK4_0 == 32).
 const QK4_0 = 32;
 
+// Q4_K super-block geometry (must match ggml-common.h::block_q4_K):
+//   - QK_K = 256 elements per super-block
+//   - 144 bytes per super-block:
+//       d (f16, 2B) + dmin (f16, 2B) + scales[12] (6-bit packed) + qs[128]
+//   - 8 sub-blocks of 32 elements each; sub-blocks come in pairs sharing a
+//     32-byte qs region (low nibble = first 32, high nibble = second 32).
+const QK_K = 256;
+const Q4_K_BYTES_PER_BLOCK = 144;
+
 export interface JsepTensorMeta {
 	// JSEP buffer-level handle (resolves to a GPUBuffer via dataManager.get).
 	bufHandle: number;
@@ -318,13 +327,97 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 		case GGML_TYPE_Q4_K:
-			// Q4_K hand-packing is significantly more involved
-			// (super-block of 256 elems with 6-bit quantized scales + mins
-			// per sub-block). Phase 2 ships F32 + F16 + Q4_0 goldens; Q4_K
-			// will be exercised via the real-model browser smoke in Task 7.
-			throw new Error(
-				"matmul Q4_K kernel: deferred to Task 7 (browser smoke covers via real weights)",
-			);
+			// Q4_K: 256-elem super-blocks; 144 bytes per super-block layout
+			// (matches ggml-common.h::block_q4_K):
+			//   bytes [0..2]   d     (f16 super-block scale)
+			//   bytes [2..4]   dmin  (f16 super-block min)
+			//   bytes [4..16]  scales[12] (6-bit packed sc + m for 8 sub-blocks)
+			//   bytes [16..144] qs[128]   (4-bit nibbles, 2/byte)
+			// 8 sub-blocks of 32 elements; pairs share a 32-byte qs slice
+			// (low nibble = first 32, high nibble = second 32). Per element
+			//   value = d * sc[is] * nibble - dmin * m[is]
+			// where (sc[is], m[is]) come from get_scale_min_k4 (6-bit unpack).
+			return `${HEADER}
+const QK_K: u32 = ${QK_K}u;
+const Q4_K_BYTES_PER_BLOCK: u32 = ${Q4_K_BYTES_PER_BLOCK}u;
+
+fn q4k_byte_at(byte_off: u32) -> u32 {
+    let word_idx: u32 = byte_off / 4u;
+    let lane: u32 = byte_off & 3u;
+    return (src0[word_idx] >> (lane * 8u)) & 0xffu;
+}
+
+// Mirrors ggml-quants.c::get_scale_min_k4. Returns (sc, m) for sub-block
+// index "is" in [0, 8). "scales_byte_base" points to scales[0].
+fn q4k_unpack_scale_min(scales_byte_base: u32, is: u32) -> vec2<u32> {
+    if (is < 4u) {
+        let sc: u32 = q4k_byte_at(scales_byte_base + is) & 63u;
+        let m: u32 = q4k_byte_at(scales_byte_base + is + 4u) & 63u;
+        return vec2<u32>(sc, m);
+    }
+    // is in [4, 8): pull lower 4 bits from q[is+4]/q[is+4]>>4 and high 2
+    // bits from q[is-4]/q[is] respectively.
+    let q_a: u32 = q4k_byte_at(scales_byte_base + is + 4u);
+    let q_b: u32 = q4k_byte_at(scales_byte_base + is - 4u);
+    let q_c: u32 = q4k_byte_at(scales_byte_base + is);
+    let sc: u32 = (q_a & 0xfu) | ((q_b >> 6u) << 4u);
+    let m: u32 = (q_a >> 4u) | ((q_c >> 6u) << 4u);
+    return vec2<u32>(sc, m);
+}
+
+fn load_q4_K(m: u32, k: u32, batch: u32) -> f32 {
+    let row_bytes: u32 = shape.src0_row_bytes;
+    let batch_bytes: u32 = shape.src0_batch_bytes;
+    let row_byte_base: u32 = batch * batch_bytes + m * row_bytes;
+    let super_block_idx: u32 = k / QK_K;
+    let in_super: u32 = k % QK_K;
+    let block_byte_base: u32 = row_byte_base + super_block_idx * Q4_K_BYTES_PER_BLOCK;
+
+    // d (f16) + dmin (f16) live in the first 4 bytes of the super-block.
+    // block_byte_base is 4-aligned (rows hold whole 144-byte blocks; row
+    // and batch strides are byte-multiples of 144, hence of 4).
+    let dm: vec2<f32> = unpack2x16float(src0[block_byte_base / 4u]);
+    let d: f32 = dm.x;
+    let dmin: f32 = dm.y;
+
+    let scales_byte_base: u32 = block_byte_base + 4u;
+    let qs_byte_base: u32 = block_byte_base + 16u;
+
+    // Sub-block addressing — see ggml-quants.c::dequantize_row_q4_K.
+    let pair: u32 = in_super / 64u;            // 0..3
+    let within_pair: u32 = in_super % 64u;     // 0..63
+    let l: u32 = within_pair % 32u;            // element within half-pair
+    let is: u32 = pair * 2u + select(0u, 1u, within_pair >= 32u);
+    let q_byte_idx: u32 = pair * 32u + l;
+
+    let raw_byte: u32 = q4k_byte_at(qs_byte_base + q_byte_idx);
+    let nibble: u32 = select(raw_byte >> 4u, raw_byte & 0xfu, within_pair < 32u);
+
+    let scm: vec2<u32> = q4k_unpack_scale_min(scales_byte_base, is);
+    let sc: f32 = f32(scm.x);
+    let m_min: f32 = f32(scm.y);
+
+    return d * sc * f32(nibble) - dmin * m_min;
+}
+
+@compute @workgroup_size(${TILE_M}, ${TILE_N}, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let m: u32 = gid.x;
+    let n: u32 = gid.y;
+    let batch: u32 = gid.z;
+    if (m >= shape.M || n >= shape.N || batch >= shape.batch_count) {
+        return;
+    }
+    var acc: f32 = 0.0;
+    for (var k: u32 = 0u; k < shape.K; k = k + 1u) {
+        let a: f32 = load_q4_K(m, k, batch);
+        let b: f32 = src1[(batch * shape.src1_batch_bytes + n * shape.src1_row_bytes) / 4u + k];
+        acc = acc + a * b;
+    }
+    let dst_idx: u32 = (batch * shape.dst_batch_bytes + n * shape.dst_row_bytes) / 4u + m;
+    dst[dst_idx] = acc;
+}
+`;
 
 		default:
 			throw new Error(`matmul: unsupported src0 type ${src0Type}`);
