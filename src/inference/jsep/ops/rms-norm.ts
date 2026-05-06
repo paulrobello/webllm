@@ -1,26 +1,29 @@
 /**
- * JSEP rms_norm kernel — F32 path.
+ * JSEP rms_norm kernel — F32 path, unary.
  *
  * Reads the per-op descriptor packed C++-side in
  * `ggml/src/ggml-jsep/ggml-jsep.cpp::ggml_backend_jsep_graph_compute`
  * and dispatches a single compute pass via the `CommandEncoderBatcher`.
- * Pipelines are cached on dtype (single key for Phase 2 since only F32
- * is supported).
  *
- * ggml RMS_NORM semantics:
- *   src0:    [last_dim, n_rows, ...]  — input.
- *   src1:    [last_dim]               — per-channel weight (gain).
- *   dst:     same shape as src0.
- *   op_params[0] (f32): eps.
+ * ggml RMS_NORM semantics (`ggml/src/ggml.c::ggml_rms_norm_impl`,
+ * line 3117) — UNARY op:
+ *   src0:    [last_dim, n_rows, ...]  — input
+ *   dst:     same shape as src0
+ *   op_params[0] (f32): eps
  *
- *   per-row formula: out[j] = (x[j] / sqrt(mean(x²) + eps)) * w[j]
+ *   per-row formula: out[j] = x[j] / sqrt(mean(x²) + eps)
  *                    where mean(x²) = sum_j(x[j]²) / last_dim
  *
- * Phase 2 ships the F32→F32 path only. The kernel mirrors
- * `SHADER_RMS_NORM` from `wgsl-shaders.ts` faithfully (each thread
- * recomputes the row sum independently — wasteful but correct, matches
- * the existing canonical implementation). A future phase can add a
- * shared-memory tree reduction.
+ * The per-channel weight (gain) is a SEPARATE GGML_OP_MUL node in the
+ * graph — not bundled into this op. The original Phase 2 kernel
+ * incorrectly assumed a fused signature with a weight binding; that
+ * bug was invisible until Option A-prime Stage 1 made JSEP active in
+ * the real chat decode path. Fixed in Stage 1.5.
+ *
+ * Phase 2 ships the F32→F32 path only. The kernel uses one thread per
+ * (row, col) and each thread independently recomputes the row sum —
+ * wasteful but correct. A future stage can add a shared-memory tree
+ * reduction.
  */
 
 import {
@@ -29,8 +32,7 @@ import {
 	type JsepOpDescriptor,
 } from "./matmul.js";
 
-// Workgroup geometry: 1 row × 256 cols per workgroup. Mirrors
-// `SHADER_RMS_NORM` in `src/inference/wgsl-shaders.ts`. For typical
+// Workgroup geometry: 1 row × 256 cols per workgroup. For typical
 // last_dim values (≤ 8192) this dispatches at most 32 workgroups along
 // the column axis per row — fine.
 const WG_X = 1;
@@ -47,9 +49,8 @@ struct Params {
 };
 
 @group(0) @binding(0) var<storage, read> x: array<f32>;
-@group(0) @binding(1) var<storage, read> weight: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
-@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> out: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
 
 @compute @workgroup_size(${WG_X}, ${WG_Y})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -64,7 +65,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let inv_rms: f32 = inverseSqrt(sum_sq / f32(params.cols) + params.eps);
     let idx: u32 = row * params.cols + col;
-    out[idx] = x[idx] * weight[col] * inv_rms;
+    out[idx] = x[idx] * inv_rms;
 }
 `;
 
@@ -80,15 +81,10 @@ function buildPipeline(device: GPUDevice): GPUComputePipeline {
 			{
 				binding: 1,
 				visibility: GPUShaderStage.COMPUTE,
-				buffer: { type: "read-only-storage" },
-			},
-			{
-				binding: 2,
-				visibility: GPUShaderStage.COMPUTE,
 				buffer: { type: "storage" },
 			},
 			{
-				binding: 3,
+				binding: 2,
 				visibility: GPUShaderStage.COMPUTE,
 				buffer: { type: "uniform" },
 			},
@@ -116,23 +112,18 @@ export function dispatchRmsNorm(
 	opParamsPtr: number,
 	heapBuffer: ArrayBufferLike,
 ): number {
-	if (desc.nSrc !== 2) {
-		console.error(`dispatchRmsNorm: expected 2 srcs, got ${desc.nSrc}`);
+	if (desc.nSrc !== 1) {
+		console.error(`dispatchRmsNorm: expected 1 src, got ${desc.nSrc}`);
 		return -1;
 	}
 
 	const src0 = desc.srcs[0];
-	const src1 = desc.srcs[1];
 	const dst = desc.dst;
 
-	if (
-		src0.type !== GGML_TYPE_F32 ||
-		src1.type !== GGML_TYPE_F32 ||
-		dst.type !== GGML_TYPE_F32
-	) {
+	if (src0.type !== GGML_TYPE_F32 || dst.type !== GGML_TYPE_F32) {
 		console.error(
 			`dispatchRmsNorm: only F32 path supported in Phase 2 ` +
-				`(got src0=${src0.type}, src1=${src1.type}, dst=${dst.type})`,
+				`(got src0=${src0.type}, dst=${dst.type})`,
 		);
 		return -1;
 	}
@@ -144,12 +135,6 @@ export function dispatchRmsNorm(
 	const cols = src0.ne[0];
 	const rows = src0.ne[1] * Math.max(1, src0.ne[2]) * Math.max(1, src0.ne[3]);
 
-	if (src1.ne[0] !== cols) {
-		console.error(
-			`dispatchRmsNorm: weight length ${src1.ne[0]} != cols ${cols}`,
-		);
-		return -1;
-	}
 	if (
 		dst.ne[0] !== src0.ne[0] ||
 		dst.ne[1] !== src0.ne[1] ||
@@ -197,16 +182,14 @@ export function dispatchRmsNorm(
 	ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeU32);
 
 	const xBuf = ctx.dataManager.get(src0.handle).buffer;
-	const wBuf = ctx.dataManager.get(src1.handle).buffer;
 	const outBuf = ctx.dataManager.get(dst.handle).buffer;
 
 	const bindGroup = ctx.device.createBindGroup({
 		layout: bindGroupLayout,
 		entries: [
 			{ binding: 0, resource: { buffer: xBuf } },
-			{ binding: 1, resource: { buffer: wBuf } },
-			{ binding: 2, resource: { buffer: outBuf } },
-			{ binding: 3, resource: { buffer: shapeBuffer } },
+			{ binding: 1, resource: { buffer: outBuf } },
+			{ binding: 2, resource: { buffer: shapeBuffer } },
 		],
 	});
 

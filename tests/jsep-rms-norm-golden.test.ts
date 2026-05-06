@@ -8,13 +8,13 @@
  * Bun has no WebGPU; without it the suite skips. Browser smoke covers
  * the WebGPU path against the patched WASM build.
  *
- * RMS norm semantics:
+ * RMS norm semantics (unary; ggml RMS_NORM is `out[j] = x[j]/rms` only.
+ * The per-channel weight multiply is a separate GGML_OP_MUL node):
  *   src0: [last_dim, n_rows, ...]   input.
- *   src1: [last_dim]                per-channel weight.
  *   dst:  same shape as src0.
  *   eps:  op_params[0] (f32).
  *
- *   per-row: out[j] = (x[j] / sqrt(mean(x²) + eps)) * w[j]
+ *   per-row: out[j] = x[j] / sqrt(mean(x²) + eps)
  */
 
 import { describe, expect, test } from "bun:test";
@@ -62,12 +62,10 @@ function makeCtx(device: GPUDevice): Ctx {
 	};
 }
 
-// CPU reference rms_norm: per-row independently.
+// CPU reference rms_norm: per-row independently. Unary — no weight.
 //   x:  [rows, cols] flat row-major (row r, col c → x[r*cols + c]).
-//   w:  [cols].
 function cpuRmsNorm(
 	x: Float32Array,
-	w: Float32Array,
 	rows: number,
 	cols: number,
 	eps: number,
@@ -81,7 +79,7 @@ function cpuRmsNorm(
 		}
 		const inv = 1 / Math.sqrt(sumSq / cols + eps);
 		for (let c = 0; c < cols; c++) {
-			out[r * cols + c] = x[r * cols + c] * w[c] * inv;
+			out[r * cols + c] = x[r * cols + c] * inv;
 		}
 	}
 	return out;
@@ -123,21 +121,17 @@ async function runRmsNormGolden(
 	}
 	const ctx = makeCtx(device);
 
-	// Deterministic input + weight; spread across a sensible range so the
-	// rms is not tiny (which would inflate the post-scale error).
+	// Deterministic input; spread across a sensible range so the rms is
+	// not tiny (which would inflate the post-scale error).
 	const x = new Float32Array(rows * cols);
-	const w = new Float32Array(cols);
 	for (let i = 0; i < x.length; i++) x[i] = ((i * 7) % 31) * 0.05 - 0.7;
-	for (let i = 0; i < w.length; i++) w[i] = ((i * 5) % 13) * 0.1 + 0.3;
 
-	const reference = cpuRmsNorm(x, w, rows, cols, eps);
+	const reference = cpuRmsNorm(x, rows, cols, eps);
 
 	const xBytes = new Uint8Array(x.buffer.slice(0));
-	const wBytes = new Uint8Array(w.buffer.slice(0));
 	const dstBytes = rows * cols * 4;
 
 	const hX = ctx.dataManager.alloc(xBytes.byteLength);
-	const hW = ctx.dataManager.alloc(wBytes.byteLength);
 	const hD = ctx.dataManager.alloc(dstBytes);
 
 	device.queue.writeBuffer(
@@ -146,13 +140,6 @@ async function runRmsNormGolden(
 		xBytes,
 		0,
 		xBytes.byteLength,
-	);
-	device.queue.writeBuffer(
-		ctx.dataManager.get(hW).buffer,
-		0,
-		wBytes,
-		0,
-		wBytes.byteLength,
 	);
 
 	// op_params block: 16 f32 in ggml. Lay it down in a host-side buffer
@@ -163,12 +150,9 @@ async function runRmsNormGolden(
 
 	const desc: JsepOpDescriptor = {
 		op: GGML_OP_RMS_NORM,
-		nSrc: 2,
+		nSrc: 1,
 		dst: makeF32Meta(hD, [cols, rows, 1, 1]),
-		srcs: [
-			makeF32Meta(hX, [cols, rows, 1, 1]),
-			makeF32Meta(hW, [cols, 1, 1, 1]),
-		],
+		srcs: [makeF32Meta(hX, [cols, rows, 1, 1])],
 	};
 
 	const status = dispatchRmsNorm(ctx, desc, 0, opParamsHost);
