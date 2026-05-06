@@ -416,6 +416,70 @@ void* webllm_load_model(const void* buf, size_t n_bytes) {
     mparams.n_gpu_layers = 999;
     mparams.use_mmap = false;
 
+    // Phase 2 (P2-v2) JSEP-build device-hint unblock.
+    //
+    // When BOTH the WebGPU and JSEP backends are registered (the
+    // wasm-build-jsep build), libllama enumerates only ONE GPU device
+    // by default and picks JSEP — so weights+KV land in jsep_buf and
+    // the scheduler's offload_op path never fires (it requires src
+    // tensors on host memory; jsep_buf is GPU memory). The Phase 2
+    // matmul/rms_norm kernels stay dormant.
+    //
+    // The zero-patch fix: explicitly hand libllama a NULL-terminated
+    // device array containing ONLY the WebGPU device, so weights+KV
+    // are owned by ggml-webgpu and any JSEP-eligible op can be
+    // offloaded by the scheduler. JSEP stays registered as a
+    // CPU-class extension that offload_op can target.
+    //
+    // The non-JSEP build (only WebGPU registered) is unchanged —
+    // mparams.devices stays NULL and libllama uses default discovery.
+    //
+    // See: eval/reports/p2-v2-prototype-2026-05-05/SUMMARY.md
+    //      ("Outcome C" + "TL;DR (Task 10 update)")
+    {
+        ggml_backend_reg_t webgpu_reg = nullptr;
+        bool jsep_present = false;
+        const size_t n_reg = ggml_backend_reg_count();
+        for (size_t i = 0; i < n_reg; ++i) {
+            ggml_backend_reg_t reg = ggml_backend_reg_get(i);
+            if (!reg) continue;
+            const char* name = ggml_backend_reg_name(reg);
+            if (!name) continue;
+            if (std::strcmp(name, "WebGPU") == 0) {
+                webgpu_reg = reg;
+            } else if (std::strcmp(name, "JSEP") == 0) {
+                jsep_present = true;
+            }
+        }
+
+        if (webgpu_reg && jsep_present) {
+            ggml_backend_dev_t webgpu_dev = ggml_backend_reg_dev_get(webgpu_reg, 0);
+            if (webgpu_dev) {
+                static ggml_backend_dev_t selected_devs[2];
+                selected_devs[0] = webgpu_dev;
+                selected_devs[1] = nullptr;
+                mparams.devices = selected_devs;
+                fprintf(stderr,
+                        "[webllm] JSEP build detected: pinning libllama "
+                        "devices to WebGPU only (JSEP excluded from "
+                        "model->devices, remains available for offload_op)\n");
+            } else {
+                fprintf(stderr,
+                        "[webllm] warning: WebGPU reg found but no device "
+                        "at index 0; falling back to default device "
+                        "discovery\n");
+            }
+        } else if (!webgpu_reg) {
+            fprintf(stderr,
+                    "[webllm] warning: WebGPU backend not registered "
+                    "(jsep_present=%d); falling back to default device "
+                    "discovery\n",
+                    jsep_present ? 1 : 0);
+        }
+        // else: only WebGPU registered (non-JSEP build) — leave
+        // mparams.devices = NULL for default behavior.
+    }
+
     llama_model* model = llama_model_load_from_file(path, mparams);
     // Drop the MEMFS file regardless of load outcome — weights are
     // either on GPU (model != nullptr) or the load failed and the
