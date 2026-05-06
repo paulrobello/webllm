@@ -23,11 +23,20 @@
 
 import { CommandEncoderBatcher } from "./command-encoder.js";
 import { GpuDataManager } from "./gpu-data-manager.js";
+import { dispatchMatmul, readDescriptor } from "./ops/matmul.js";
 import { PipelineCache } from "./pipeline-cache.js";
 
 export const STATUS_OK = 0;
 export const STATUS_NOT_IMPLEMENTED = 1;
 export const STATUS_FAILED = -1;
+
+// ggml_op enum values (subset; see ggml/include/ggml.h:479).
+// MUL_MAT = 29 (0=NONE, DUP=1, ADD=2, ADD_ID=3, ADD1=4, ACC=5, SUB=6, MUL=7,
+// DIV=8, SQR=9, SQRT=10, LOG=11, SIN=12, COS=13, SUM=14, SUM_ROWS=15,
+// CUMSUM=16, MEAN=17, ARGMAX=18, COUNT_EQUAL=19, REPEAT=20, REPEAT_BACK=21,
+// CONCAT=22, SILU_BACK=23, NORM=24, RMS_NORM=25, RMS_NORM_BACK=26,
+// GROUP_NORM=27, L2_NORM=28, MUL_MAT=29).
+export const GGML_OP_MUL_MAT = 29;
 
 /**
  * Minimal Emscripten module shape the JSEP scaffold needs. The real
@@ -56,12 +65,18 @@ export interface JsepModule {
 		offset: number,
 		size: number,
 	) => void;
+	/**
+	 * Task 4 signature — descriptor-based:
+	 *   (descriptorPtr, descriptorWords, opParamsPtr, opParamsLen) → status
+	 *
+	 * The descriptor packs op + n_src + (dst block) + (src blocks). See
+	 * `src/inference/jsep/ops/matmul.ts::readDescriptor` for the layout.
+	 */
 	jsepRunOp?: (
-		op: number,
-		srcHandlesPtr: number,
-		dstHandle: number,
+		descriptorPtr: number,
+		descriptorWords: number,
 		opParamsPtr: number,
-		paramsLen: number,
+		opParamsLen: number,
 	) => number;
 	jsepSync?: () => void;
 	__jsep?: JsepRuntime;
@@ -72,6 +87,11 @@ export interface JsepRuntime {
 	dataManager: GpuDataManager;
 	encoderBatcher: CommandEncoderBatcher;
 	pipelineCache: PipelineCache;
+	// Bind-group layouts memoized per pipeline cache key. Lives on the
+	// runtime (not module scope) so each `GPUDevice` owns its own cache —
+	// reusing a layout from a destroyed device is a WebGPU validation
+	// error.
+	bindGroupLayoutCache: Map<string, GPUBindGroupLayout>;
 }
 
 /**
@@ -96,12 +116,14 @@ export function installJsepCallbacks(
 	const dataManager = new GpuDataManager(device);
 	const encoderBatcher = new CommandEncoderBatcher(device);
 	const pipelineCache = new PipelineCache(device);
+	const bindGroupLayoutCache = new Map<string, GPUBindGroupLayout>();
 
 	const runtime: JsepRuntime = {
 		device,
 		dataManager,
 		encoderBatcher,
 		pipelineCache,
+		bindGroupLayoutCache,
 	};
 	module.__jsep = runtime;
 
@@ -140,14 +162,29 @@ export function installJsepCallbacks(
 	};
 
 	module.jsepRunOp = (
-		_op: number,
-		_srcHandlesPtr: number,
-		_dstHandle: number,
+		descriptorPtr: number,
+		_descriptorWords: number,
 		_opParamsPtr: number,
-		_paramsLen: number,
+		_opParamsLen: number,
 	): number => {
-		// No op kernels installed in Task 3. Tasks 4+5 wire matmul +
-		// RMS_NORM through a dispatch table keyed on `op`.
+		// Re-derive HEAP32 each call — the WASM heap may have grown
+		// between EM_ASM frames, detaching prior views.
+		const buf = module.HEAPU8.buffer;
+		const heap32 = new Int32Array(buf, 0, buf.byteLength >>> 2);
+		const desc = readDescriptor(heap32, descriptorPtr);
+		if (desc.op === GGML_OP_MUL_MAT) {
+			return dispatchMatmul(
+				{
+					device,
+					dataManager,
+					encoderBatcher,
+					pipelineCache,
+					bindGroupLayoutCache,
+				},
+				desc,
+			);
+		}
+		// Other ops (RMS_NORM in Task 5, etc.) stay NOT_IMPLEMENTED.
 		return STATUS_NOT_IMPLEMENTED;
 	};
 

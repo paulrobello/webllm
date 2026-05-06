@@ -186,8 +186,14 @@ describe("JSEP buffer roundtrip", () => {
 		const handle = stub.jsepAlloc?.(256) ?? 0;
 		expect(handle).toBeGreaterThanOrEqual(1);
 
-		// jsepRunOp returns NOT_IMPLEMENTED for any op kind in Task 3.
-		const status = stub.jsepRunOp?.(0, 0, handle, 0, 0);
+		// jsepRunOp returns NOT_IMPLEMENTED for any non-matmul op in Task 4.
+		// Build a tiny descriptor with op=GGML_OP_NONE (=0) at byte 0 of the
+		// HEAPU8-backed buffer; remainder doesn't matter because we bail
+		// before reading any tensor block.
+		const descView = new Int32Array(heap, 0, 2);
+		descView[0] = 0; // GGML_OP_NONE
+		descView[1] = 0; // n_src
+		const status = stub.jsepRunOp?.(0, 2, 0, 0);
 		expect(status).toBe(STATUS_NOT_IMPLEMENTED);
 
 		// jsepRead must return a Promise (JSPI relies on the thenable shape).
