@@ -1,5 +1,5 @@
 .PHONY: build test lint lint-fix fmt typecheck checkall clean install deps \
-        wasm-build wasm-build-wasm32 wasm-build-mem64 wasm-clean \
+        wasm-build wasm-build-wasm32 wasm-build-mem64 wasm-build-jsep wasm-clean \
         bench bench-perf bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full \
         smoke-test smoke-serve smoke-stop smoke-restart smoke-open smoke-run smoke-bench mem64-probe \
@@ -126,6 +126,30 @@ wasm-build-mem64: ## Build only the wasm64 (MEMORY64) production binary
 		-DCMAKE_CXX_FLAGS="-sMEMORY64=1" \
 		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --target webllm-wasm-mem64 --config Release -j
+
+wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → webllm-wasm-jsep.{js,wasm}
+	cd src/wasm && mkdir -p build-jsep && cd build-jsep && \
+	source ~/emsdk/emsdk_env.sh 2>/dev/null; \
+	emcmake cmake .. \
+		-DWEBLLM_BACKEND=jsep \
+		-DGGML_WEBGPU=ON \
+		-DGGML_WEBGPU_JSPI=OFF \
+		-DEMDAWNWEBGPU_DIR=$(CURDIR)/vendor/emdawnwebgpu \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DGGML_CPU=OFF \
+		-DGGML_BLAS=OFF \
+		-DGGML_METAL=OFF \
+		-DGGML_ACCELERATE=OFF \
+		-DGGML_CUDA=OFF \
+		-DGGML_OPENMP=OFF \
+		-DGGML_NATIVE=OFF \
+		-DGGML_LLAMAFILE=OFF \
+		-DGGML_BUILD_TESTS=OFF \
+		-DGGML_BUILD_EXAMPLES=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DGGML_BACKEND_DL=OFF \
+		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
+	cmake --build . --config Release -j
 
 wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
 wasm-build-debug: wasm-clean wasm-build

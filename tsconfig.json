@@ -22,5 +22,5 @@
     "exactOptionalPropertyTypes": false
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "src/wasm/build", "src/wasm/build-mem64"]
+  "exclude": ["node_modules", "dist", "src/wasm/build", "src/wasm/build-mem64", "src/wasm/build-jsep"]
 }

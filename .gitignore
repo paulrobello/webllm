@@ -8,6 +8,7 @@ dist/
 *.wasm
 src/wasm/build/
 src/wasm/build-mem64/
+src/wasm/build-jsep/
 
 # Evaluation reports (generated at runtime)
 eval/reports/

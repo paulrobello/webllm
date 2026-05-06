@@ -18,8 +18,26 @@ option(WEBLLM_ASSERTIONS "Enable Emscripten -sASSERTIONS=1 in the WASM build" OF
 
 option(WEBLLM_BUILD_MEM64 "Build the wasm64 webllm-wasm-mem64 target instead of webllm-wasm. Set ON in src/wasm/build-mem64/ for the MEMORY64 cap probe (see docs/superpowers/specs/2026-04-28-memory64-cap-probe-design.md). Must be combined with -DCMAKE_C_FLAGS=-sMEMORY64=1 -DCMAKE_CXX_FLAGS=-sMEMORY64=1 so ggml is also built as wasm64." OFF)
 
+# WEBLLM_BACKEND selects the ggml backend mix wired into the WASM artifact.
+#   "default" (or unset): ggml-webgpu only — the canonical Tier 3 build.
+#   "jsep":               ggml-webgpu + ggml-jsep — the P2-v2 JSEP-style
+#                         prototype. Output basename gains a "-jsep" suffix
+#                         (webllm-wasm-jsep.{js,wasm}). Spec:
+#                         docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md
+set(WEBLLM_BACKEND "default" CACHE STRING "Backend variant: 'default' or 'jsep'")
+set_property(CACHE WEBLLM_BACKEND PROPERTY STRINGS "default" "jsep")
+
+if(WEBLLM_BACKEND STREQUAL "jsep")
+    set(WEBLLM_BACKEND_JSEP ON)
+else()
+    set(WEBLLM_BACKEND_JSEP OFF)
+endif()
+
 # Disable everything we don't need
 set(GGML_WEBGPU ON CACHE BOOL "" FORCE)
+if(WEBLLM_BACKEND_JSEP)
+    set(GGML_JSEP ON CACHE BOOL "" FORCE)
+endif()
 # JSPI replaces ASYNCIFY for WebGPU async readback. Flipped ON 2026-05-05
 # to unblock Tier 3 P1 — adding any new wasm export under -sASYNCIFY +
 # -exceptions + libllama static initializers traps in __wasm_call_ctors
@@ -180,7 +198,12 @@ if(EMSCRIPTEN)
         )
     else()
         add_executable(webllm-wasm webgpu-bridge.cpp)
-        target_link_libraries(webllm-wasm PRIVATE llama ggml-base ggml-webgpu)
+        if(WEBLLM_BACKEND_JSEP)
+            target_link_libraries(webllm-wasm PRIVATE llama ggml-base ggml-webgpu ggml-jsep)
+            set_target_properties(webllm-wasm PROPERTIES OUTPUT_NAME "webllm-wasm-jsep")
+        else()
+            target_link_libraries(webllm-wasm PRIVATE llama ggml-base ggml-webgpu)
+        endif()
         target_include_directories(webllm-wasm PRIVATE
             ${LLAMA_CPP_DIR}/include
             ${LLAMA_CPP_DIR}/ggml/include
