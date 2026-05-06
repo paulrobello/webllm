@@ -132,7 +132,17 @@ export type {
 	LightweightWeights,
 } from "./inference/lightweight.js";
 export { LightweightModel } from "./inference/lightweight.js";
-export { LlamaDecodeWrapper } from "./inference/llama-decode-wrapper.js";
+export type {
+	LlamaBridge,
+	LlamaContextParams,
+} from "./inference/llama-bridge.js";
+export { createLlamaBridge } from "./inference/llama-bridge.js";
+export {
+	type EmbedOptions,
+	LlamaDecodeWrapper,
+	type LlamaDecodeWrapperOptions,
+} from "./inference/llama-decode-wrapper.js";
+export { LlamaTokenizer } from "./inference/llama-tokenizer.js";
 export type { SamplerConfig } from "./inference/sampler.js";
 export { Sampler } from "./inference/sampler.js";
 export { StreamRouter } from "./inference/stream-router.js";
@@ -154,7 +164,7 @@ export { InferenceSession } from "./models/inference-session.js";
 export type { KVCacheConfig, KVCell } from "./models/kv-cache.js";
 export { KVCache } from "./models/kv-cache.js";
 export type { ParsedModel } from "./models/model-loader.js";
-export { ModelLoader } from "./models/model-loader.js";
+export { loadModelMetadata, ModelLoader } from "./models/model-loader.js";
 
 // ─── Worker bundle re-entry ──────────────────────────────────
 //
