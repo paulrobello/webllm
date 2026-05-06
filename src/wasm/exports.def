@@ -12,4 +12,6 @@ _exports: [
   "webllm_detokenize",
   "webllm_token_bos",
   "webllm_token_eos",
+  "webllm_synthetic_offload_probe",
+  "webllm_synthetic_probe_log",
 ]

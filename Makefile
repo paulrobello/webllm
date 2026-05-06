@@ -156,6 +156,12 @@ wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → w
 	# Build the P2-v2 spike harness (Phase 2 follow-on cycle, Task 8) —
 	# exercises ggml-jsep end-to-end via webllm_decode + counter snapshot.
 	bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
+	# Build the P2-v2 synthetic offload probe (Phase 2 follow-on Task 13) —
+	# tiny MUL_MAT graph with host-buft inputs to validate the Task 10
+	# offload_op patch in its native habitat. PASS condition (status=0 +
+	# JSEP runOp delta ≥ 1) confirms the scheduler routes MUL_MAT to JSEP
+	# when src->buffer is host memory.
+	bun build smoke-test/p2-v2-offload-probe.src.ts --outfile smoke-test/p2-v2-offload-probe.js --target browser
 	# Co-locate the JSEP WASM artifacts next to the bundle so the smoke
 	# page's relative `./webllm-wasm-jsep.js` resolves cleanly. Mirrors the
 	# default `smoke-test` target's layout.
