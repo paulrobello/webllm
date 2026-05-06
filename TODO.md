@@ -901,6 +901,22 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 
 **Why this is its own stage.** Q4_K matmul is a single new shader path; bundling it with a follow-on op (whatever Stage 4 reveals) makes the diff harder to revert if the dequant has a bit-pack bug. Keep it self-contained: one new shader case, zero new files, zero new patches.
 
+**Fresh-session prerequisites (verify before editing):**
+
+- **llama.cpp checkout:** `cd ~/Repos/llama.cpp && git rev-parse --short HEAD` should report `53c66649f` on branch `webllm-browser-patches`. Phase 3 builds against this branch via `src/wasm/CMakeLists.txt::FetchContent`. If the branch tip drifted, see `docs/LLAMA_CPP_PATCHES.md` for the rebase procedure.
+- **Smoke server:** `lsof -nP -iTCP:8031 -sTCP:LISTEN` should show a `bun` process. If absent: `make smoke-serve` (or `make smoke-restart` to recycle).
+- **agentchrome session:** `agentchrome connect --status` reports an active session. Note the `port` (currently 64702 in this repo's history; verify per session). `agentchrome --port <PORT> tabs list` shows the existing `p2-v2-spike.html` tab — reuse that tab id for navigation, do not open a new tab (CLAUDE.md "Reuse the existing tab when possible").
+- **Spike model:** `smoke-test/models/tinyllama-1.1b-chat-q4_0.gguf` (637.8 MiB; despite the `q4_0` filename suffix, the GGUF actually contains Q4_K-quantized weights — that's why Stage 2 surfaced "matmul Q4_K kernel: deferred"). If the file is missing: `hfdownloader download TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF --filters q4_K_M` and place the output at `smoke-test/models/`.
+- **Dashboard (optional):** Stage 3's spike does not auto-post to the dashboard, so port 8033 is irrelevant for the gate. Leave it as-is.
+
+**Opening sequence (read before editing):**
+
+1. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-2-RESULT.md` — Stage 2 closure context (5 min).
+2. `src/inference/jsep/ops/matmul.ts:259-322` — the existing Q4_0 case + the Q4_K throw it must replace (3 min).
+3. `~/Repos/llama.cpp/ggml/src/ggml-common.h` — search for `struct.*block_q4_K` (the canonical layout: `d`, `dmin`, `scales[12]`, `qs[QK_K/2]`).
+4. `~/Repos/llama.cpp/ggml/src/ggml-quants.c::get_scale_min_k4` — the 6-bit unpacking bit pattern. Three branches keyed on `j < 4` vs `j ≥ 4`. This is the only non-obvious part of the kernel.
+5. `~/Repos/llama.cpp/ggml/src/ggml-quants.c::dequantize_row_q4_K` — the CPU reference; copy its loop structure into WGSL.
+
 **Concrete edits (estimate ~150 LOC, all in webllm — zero new patches):**
 
 1. **`src/inference/jsep/ops/matmul.ts`**:
