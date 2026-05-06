@@ -897,205 +897,107 @@ Stage 1.5 surfaced a deeper Phase 2 ABI bug: the descriptor's per-tensor "handle
 
 **Stage 2 CLOSED 2026-05-06 — `9406496` + llama.cpp `53c66649f`.** Bumped `GGML_JSEP_TENSOR_BLOCK_I32` 18→19 and split the conflated slot into `(buf_handle, offset)`. JS-side `JsepTensorMeta` now exposes both fields; `dispatchMatmul` / `dispatchRmsNorm` / `dispatchSetRows` bind via `{buffer, offset, size: rec.size - offset}` using the buffer handle as the dataManager key. Buffer handle source: `tensor->buffer->context->handle` (safe post-Stage-1.5 since `supports_buft = jsep_buft only`). Spike at `?v=A-prime-stage2` progressed past the "invalid handle 0" wall: model loads end-to-end into JSEP (455 MiB jsep_buf weights + 11 MiB KV across 22 layers, all `dev = JSEP`), `sched_reserve` passes (798 nodes / 379 splits / 5.00 ms), then decode failed at the next missing kernel — **Q4_K matmul** (`matmul.ts:316`: `"matmul Q4_K kernel: deferred to Task 7"`). **Outcome B** per the original Stage 2 outcome table. Closure: [`STAGE-2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-2-RESULT.md). Patch stack +5 → +6.
 
-### Next session pickup — Phase 3 Stage 3.5: localize the all-zero logits collapse. START HERE in a fresh session.
+**Stage 3.5 CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch).** Root cause localized: WebGPU compute pass synchronization-scope rule. The libllama scheduler packs matmul activation `src1` and matmul output `dst` into a single `jsep_buf` at different byte offsets; WebGPU validates bind-group buffer usage at *buffer granularity* (not sub-range), so binding the same `GPUBuffer` as both read-only-storage and read-write-storage fails encoder.finish() with `"usage (Storage(read-write)|Storage(read-only)) includes writable usage and another usage in the same synchronization scope"`. The dispatch was silently rejected; dst stayed at zero; forward pass collapsed.
 
-**One-line goal:** find which op or transition first emits zero output in TinyLlama's forward pass, so Stage 4 can fix it (or ship the kernel/flush that completes Outcome A "Paris" decode).
+**Stage 4 partial — divert pattern landed for matmul + RMS_NORM.** When `dst.bufHandle` aliases any src `bufHandle`, allocate a fresh temp `GPUBuffer`, dispatch into it, then `copyBufferToBuffer` back to `dstRec.buffer` at `dst.offset`. The diverted dispatch lives in its own command-encoder (flush the batcher first) so it can't conflict with batched neighbours. Verified post-fix: 1068/1068 model matmuls divert without validation errors; 270/271 RMS_NORM dispatches divert. **But Outcome A "Paris" decode not yet achieved** — matmul `src1` (the activation feeding attn_q) is still corrupt with the same byte pattern as pre-fix (denormals + 1e+18-scale floats — uninitialized memory pattern). The matmul + RMS_NORM divert fixed those kernels but the **upstream producer** of `src1` (likely SET_ROWS for KV cache writes — `dst === view(src[2])` is definitionally aliased) is still failing silently and leaving the buffer untouched. **Stage 4 is incomplete; SET_ROWS divert (with read-modify-write semantics for partial updates) is required to flip Outcome.** Closure: [`STAGE-3.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md). Per-token decode 24-25 ms (Stage 3 baseline 23 ms; +8% from divert overhead — within noise). Patch stack: 6 (unchanged). RMS_NORM real-shape self-test (cols=2048) added to spike harness — permanent regression check.
 
-**One-line context:** Stage 3 shipped a Q4_K WGSL matmul kernel that is **proven correct in isolation** (`Q4K_SELFTEST` in the spike harness reports delta 4.5e-6 vs CPU reference). The same kernel runs ~134×/forward-pass in the real model without throwing, but all 32000 logits in step 0 come out exactly 0.0 (no NaN, no Inf, all finite, min=max=0). The bug is upstream of the Q4_K kernel.
+### Next session pickup — Phase 3 Stage 4.1: SET_ROWS divert + upstream-producer audit. START HERE in a fresh session.
+
+**One-line goal:** make the matmul `src1` post-RMS_NORM-times-gain values sensible (~[-3, +3] range), so the first attn_q matmul produces real activations and the forward pass progresses to non-zero logits.
+
+**One-line context:** Stage 3.5 identified WebGPU sync-scope buffer aliasing as the root cause and landed divert fixes for matmul + RMS_NORM. SET_ROWS likely has the same bug (KV cache writes are definitionally `view(src[2])` aliased) — when those silently fail, KV cache stays at zero, attention reads zero, forward pass collapses despite the matmul/RMS_NORM kernels now running correctly. Spike at `?v=stage3.5-final-clean` confirms the post-cleanup state: all-zero logits reproducible, no validation errors from matmul/RMS_NORM dispatches.
 
 #### Step 0 — verify state (5 min, no editing)
 
-Paste-and-run; expected outputs in parens.
-
 ```bash
-# 1. llama.cpp tip — Stage 3 was zero-patch on the C++ side.
-( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → 53c66649f
-#   → webllm-browser-patches
+( cd ~/Repos/llama.cpp && git rev-parse --short HEAD )         # → 53c66649f
+git log --oneline -3                                           # → top of webllm with Stage 3.5 commits
+lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2                     # smoke server up?  → make smoke-serve if not
+agentchrome connect --status && agentchrome --port <PORT> tabs list  # find p2-v2-spike.html tab id
 
-# 2. webllm tip — should include the two Stage-3 commits.
-git log --oneline -3
-#   → 127c2b8 docs(TODO): Stage 3 partially closed (Outcome C) — queue Stage 3.5
-#   → 4731dc1 feat(jsep): Stage 3 Q4_K matmul kernel — Phase 3 / Option A-prime
-#   → 885d1c6 docs(TODO): add fresh-session prerequisites + opening sequence to Stage 3 brief
-
-# 3. Smoke server (start if missing).
-lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2
-#   → bun  <pid>  ...  TCP *:8031 (LISTEN)
-# Missing? → make smoke-serve
-
-# 4. agentchrome session + spike tab id.
-agentchrome connect --status
-agentchrome --port <PORT_FROM_STATUS> tabs list
-#   → look for the entry whose url ends in p2-v2-spike.html?... ; reuse that tab id.
-
-# 5. Confirm Stage 3 baseline reproduces (Outcome C — all-zero logits).
-agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage3-replay" --tab <TAB_ID>
-# wait until #log contains DONE or FAIL, then:
-agentchrome --port <PORT> js exec --tab <TAB_ID> 'document.getElementById("log").innerText'
-# Expected lines (in order):
-#   Q4K_SELFTEST = {..., "delta":~4.5e-6, ...}                    ← kernel is correct
-#   LOGIT_STATS_STEP0 = {"first8":[0,0,0,0,0,0,0,0], "topVal":0,
-#                        "hasNaN":false, "hasInf":false,
-#                        "finiteCount":32000, "min":0, "max":0}    ← Outcome C reproduces
-#   GENERATED_TOKENS = [0,0,0,0,0]
+# Confirm Stage 3.5 post-cleanup baseline reproduces:
+agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.1-replay" --tab <TAB_ID>
+# Expected:
+#   Q4K_SELFTEST    delta ~4.5e-6
+#   RMSNORM_SELFTEST maxAbsDelta ~8.3e-7
+#   LOGIT_STATS_STEP0 first8=[0,0,0,0,0,0,0,0], all-zero (Outcome C still in effect)
+#   GENERATED_TOKENS [0,0,0,0,0]
+#   PER_TOKEN_MS ~24-25
 ```
 
-If any of those don't match, stop and reconcile before doing Stage 3.5 work — the diagnostic plan below assumes this exact baseline.
+#### Step 1 — confirm SET_ROWS aliasing rate (5 min)
 
-#### Step 1 — RMS_NORM self-test in the spike (cheapest, ~30 min)
+Add a per-call counter to `dispatchSetRows` (mirror the matmul/RMS_NORM pattern from the closed Stage-3.5 work — see `git show <stage3.5 commit> -- src/inference/jsep/ops/rms-norm.ts` for the small `__rmsNormStats` snippet that lived there briefly). Rebuild spike, navigate, confirm aliasing rate is ~100% as expected.
 
-**Why first:** RMS_NORM was Phase 2 and only ever validated via the synthetic golden-test harness. It runs ~46 times per forward pass on real-model shapes (`pre_norm` + `pre_attn_norm` per layer × 22 + 2 final norms) and was never directly verified end-to-end. If it produces zero (or NaN, or wrong-magnitude) output for non-zero input, the residual stream collapses to zero on the FIRST layer's first norm and stays there — fully consistent with the observed symptom.
+#### Step 2 — implement SET_ROWS divert with read-modify-write (~60 min)
 
-Pattern: copy `smoke-test/p2-v2-spike.src.ts::runQ4KSelfTest` to `runRmsNormSelfTest`. Skeleton:
+SET_ROWS is a *partial* update — it only writes specific row indices (the new tokens being added to KV cache). A naive temp-buffer divert (allocate temp, dispatch, copy temp → dst) would clobber the unwritten rows with uninitialized tempDst data, corrupting the KV cache.
+
+Correct pattern (read-modify-write):
 
 ```ts
-async function runRmsNormSelfTest(runtime: JsepRuntime): Promise<void> {
-    // Use a 1×2048 row mirroring the first model RMS_NORM shape.
-    const rows = 1;
-    const cols = 2048;
-    const eps = 1e-5;
-    const x = new Float32Array(rows * cols);
-    for (let i = 0; i < x.length; i++) x[i] = ((i % 17) - 8) * 0.1;  // non-zero pattern
-    // CPU reference: out[i] = x[i] / sqrt(mean(x²) + eps)
-    let sumSq = 0;
-    for (let i = 0; i < cols; i++) sumSq += x[i] * x[i];
-    const invRms = 1 / Math.sqrt(sumSq / cols + eps);
-    const reference = new Float32Array(cols);
-    for (let i = 0; i < cols; i++) reference[i] = x[i] * invRms;
-
-    // Allocate JSEP buffers.
-    const hX = runtime.dataManager.alloc(x.byteLength);
-    const hOut = runtime.dataManager.alloc(x.byteLength);
-    runtime.device.queue.writeBuffer(
-        runtime.dataManager.get(hX).buffer, 0,
-        new Uint8Array(x.buffer), 0, x.byteLength,
-    );
-
-    // Build descriptor; eps lives in op_params[0] f32 — needs a heap slot.
-    // Easiest: allocate an op_params region by writing 4 bytes via a tiny
-    // wasm heap probe (or skip and pass a fixed eps via a captured uniform —
-    // see dispatchRmsNorm's signature: it expects opParamsPtr + heapBuffer).
-    // Cleanest: use the wasm module's HEAPU8 to allocate 4 bytes for eps.
-    // (See runtime.dataManager.write for the existing heap-write pattern.)
-
-    const desc: JsepOpDescriptor = {
-        op: GGML_OP_RMS_NORM, nSrc: 1,
-        dst:  { bufHandle: hOut, offset: 0, type: GGML_TYPE_F32,
-                ne: [cols, rows, 1, 1], nb: [4, 4*cols, 4*cols*rows, 0] },
-        srcs: [{ bufHandle: hX,  offset: 0, type: GGML_TYPE_F32,
-                ne: [cols, rows, 1, 1], nb: [4, 4*cols, 4*cols*rows, 0] }],
-    };
-
-    // Dispatch + read back + compare. (See runQ4KSelfTest's read-back path.)
-    // Report: max|got - reference|, and got[0..4].
+if (dstAliasesSrc) {
+    const dstSize = ggml_nbytes_for_dst(dst);  // total dst region size
+    const tempDst = device.createBuffer({
+        size: dstSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    encoderBatcher.flush();
+    const enc = device.createCommandEncoder();
+    // 1. Pre-copy real dst → temp so unwritten rows have their pre-existing values
+    enc.copyBufferToBuffer(dstRec.buffer, dst.offset, tempDst, 0, dstSize);
+    const pass = enc.beginComputePass();
+    pass.setPipeline(...); pass.setBindGroup(0, divertBindGroup);  // tempDst at offset 0
+    pass.dispatchWorkgroups(...); pass.end();
+    // 2. Post-copy temp → real dst (now contains unmodified rows + the kernel's
+    //    partial update merged in)
+    enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstSize);
+    device.queue.submit([enc.finish()]);
+    tempDst.destroy();
+    return 0;
 }
 ```
 
-Add to the spike's import list: `dispatchRmsNorm` from `../src/inference/jsep/ops/rms-norm.js`, `GGML_OP_RMS_NORM` from `../src/inference/jsep/index.js`. Re-export both with `JSEP_` prefix from `src/index-jsep.ts` (mirror the existing Stage-3 re-exports).
+`dstSize` calculation: SET_ROWS dst type is F16 or F32 with shape `[ne0, ne1, ne2, ne3]`. Total bytes = `dst.nb[3] || dst.nb[2] * ne[3] || dst.nb[1] * ne[2] * ne[3]` — careful with the strided cache_v case (`ne[0] = 1` reshape — see the kernel comment block at the top of `set-rows.ts:30-40`).
 
-**Decision rule from result:**
+Watch out for the F16 atomic CAS path: that kernel does read-modify-write on dst. The pre-copy already makes those reads see the right pre-existing data, so it should be correct, but worth a self-test of the F16 path with a known fixture.
 
-- **delta < 1e-3** → RMS_NORM kernel correct on real-model shapes; bug is elsewhere → go to Step 2.
-- **all output zero** (or NaN, or wildly wrong) → RMS_NORM kernel is the bug. Likely culprit candidates: shape uniform packing (rows/cols swapped? eps as u32 instead of f32?), bind group offset, or `inverseSqrt` overflow on large rows. Inspect `src/inference/jsep/ops/rms-norm.ts` lines 43-70 (kernel WGSL) and 167-182 (uniform packing).
-
-#### Step 2 — first-model-matmul dst capture (medium, ~45 min)
-
-**Goal:** determine whether the first attn_q matmul (M=2048, K=2048, N=6, batch=1) writes correct values to dst, or zeros. Disambiguates "kernel works but CPY-back is broken" from "kernel inputs were already zero".
-
-Add a one-shot probe inside `dispatchMatmul` (`src/inference/jsep/ops/matmul.ts`) that, for the first dispatch matching `M >= 2048 && K >= 2048` (skips the self-test which uses K=256), records dst metadata and triggers a follow-on `mapAsync` readback of the first 8 f32 values of the kernel's output. Stash the result on `globalThis.__firstModelMatmulDst` for the spike harness to log alongside `LOGIT_STATS_STEP0`.
-
-Implementation sketch:
-
-```ts
-// At the end of dispatchMatmul, after ctx.encoderBatcher.record(...):
-const wAny = globalThis as { __firstModelMatmulCaptured?: boolean; __firstModelMatmulDst?: unknown };
-if (!wAny.__firstModelMatmulCaptured && M >= 2048 && K >= 2048) {
-    wAny.__firstModelMatmulCaptured = true;
-    ctx.encoderBatcher.flush();  // ensure the dispatch is on the queue
-    const staging = ctx.device.createBuffer({
-        size: 32, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-    const enc = ctx.device.createCommandEncoder();
-    enc.copyBufferToBuffer(dstRec.buffer, dst.offset, staging, 0, 32);
-    ctx.device.queue.submit([enc.finish()]);
-    void staging.mapAsync(GPUMapMode.READ, 0, 32).then(() => {
-        const got = new Float32Array(staging.getMappedRange().slice(0));
-        wAny.__firstModelMatmulDst = {
-            M, K, N, batch: batchCount,
-            src0Offset: src0.offset, src1Offset: src1.offset, dstOffset: dst.offset,
-            first8: Array.from(got),
-        };
-        staging.unmap(); staging.destroy();
-    });
-}
-```
-
-**Decision rule:**
-
-- **non-zero `first8`** → Q4_K kernel produces correct output in-context. Bug is in the JSEP→CPU CPY path (host-roundtrip via `get_tensor`/`set_tensor` between splits). Go to Step 4.
-- **all-zero `first8`** → kernel input (src1, the activation) was already zero when the kernel ran. Go to Step 3.
-
-#### Step 3 — first CPU→JSEP write byte dump (only if Step 2 said zero; ~20 min)
-
-Instrument `jsepWrite` in `src/inference/jsep/index.ts` to log, on the FIRST call, the first 8 bytes from `module.HEAPU8` at `hostPtr`. If those bytes are zero, the CPU side produced zero before writing — fault is in the CPU backend's compute or the embedding lookup. If those bytes are non-zero but the matching JSEP buffer reads back as zero later, the `dataManager.write` → `device.queue.writeBuffer` path is the fault.
-
-#### Step 4 — pinning bisect sanity check (5 min, run any time)
+#### Step 3 — re-run spike and verify Outcome A
 
 ```bash
-# Rebuild with WEBLLM_PIN_TO_JSEP=0 to fall back to the Stage-0 baseline
-# (libllama pinned to WebGPU only). This must produce "Paris" — if it
-# doesn't, Stage 3 introduced an orthogonal regression independent of
-# the JSEP path being explored above.
-( cd src/wasm/build-jsep && cmake .. -DWEBLLM_PIN_TO_JSEP=0 && cmake --build . -j ) \
-  && cp src/wasm/build-jsep/webllm-wasm-jsep.{js,wasm} smoke-test/ \
-  && bun build src/index-jsep.ts --outfile smoke-test/webllm-bundle-jsep.js --target browser \
-  && bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
-agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage3-pin-off" --tab <TAB_ID>
-# Expected: GENERATED_TEXT ≈ "Paris" (Stage-0 / Outcome D baseline). If it
-# doesn't, stop and bisect Stage-3 changes against 9406496 (Stage-2 tip).
-# REMEMBER to re-build with -DWEBLLM_PIN_TO_JSEP=1 before resuming Stage 3.5.
+agentchrome --port <PORT> navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.1-setrows" --tab <TAB_ID>
 ```
 
-#### Working hypothesis (test if Steps 1-3 don't pinpoint)
+Expected:
+- `LOGIT_STATS_STEP0 first8` non-zero (real f32 logit distribution)
+- `GENERATED_TOKENS` includes the BPE id for "Paris" or close-by token
+- `GENERATED_TEXT` ≈ "Paris" (the Stage-0 / Outcome D semantic continuation of "The capital of France is")
 
-The JSEP backend's `cpy_tensor = NULL` forces every inter-split copy through a host-roundtrip via `set_tensor` / `get_tensor`. Stage 3 added `encoderBatcher.flush()` to `jsepRead`/`jsepWrite`/`jsepClear` to fix WebGPU-side queue FIFO ordering (verified empirically not to cure Outcome C — kept as a load-bearing protocol invariant). The remaining suspect: the C++ scheduler may queue a `set_tensor` from CPU into JSEP before the previous backend's `graph_compute` has actually completed on the GPU, not just returned from the wasm call. `ggml_backend_synchronize` is the contract for "wait for queued work to complete"; the inter-split CPY path may not invoke it.
-
-Files to read for this hypothesis:
-
-- `~/Repos/llama.cpp/ggml/src/ggml-backend.cpp` — search for `set_tensor` / `cpy_tensor_async` in the `ggml_backend_sched_compute_splits` function (or its modern equivalent). Verify the call sequence between consecutive splits.
-- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:316-320` — `ggml_backend_jsep_synchronize` is correctly wired to `ggml_jsep_sync` → JS `module.jsepSync` → `encoderBatcher.flush()`. The question is whether the scheduler INVOKES it at the right point.
-
-If this hypothesis confirms, the fix is either:
-- **(a) C++ patch** — add explicit `ggml_backend_synchronize` calls in the JSEP backend's `set_tensor`/`get_tensor` if a graph compute is pending. +1 patch.
-- **(b) JS-side defensive flush** — already done for `jsepRead`/`jsepWrite`/`jsepClear`; but `device.queue.writeBuffer` is async on the GPU side. Might need to additionally `await staging.mapAsync` in `jsepRead` flow to BLOCK until prior work completes. (`encoderBatcher.flush` only enqueues; it doesn't wait.)
+If still all-zero: re-add a one-shot probe to `dispatchMatmul` capturing the FIRST attn_q matmul `src1` (16 bytes via `pushErrorScope` + `mapAsync`). Compare bytes against pre-Stage-4.1 baseline. If still the `[-5e-5, 142.08, -4.48, -7.4e+18, ...]` byte pattern, SET_ROWS divert isn't the only producer of corrupt activations — investigate CPU-side MUL/ADD writeback path (next: instrument `jsepWrite` to dump first 8 bytes from HEAPU8 on the FIRST call to verify CPU produces sensible bytes).
 
 #### Files to read first (reading order, ~15 min)
 
-1. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3-RESULT.md` — Stage 3 closure with full diagnostic data and hypothesis register.
-2. `smoke-test/p2-v2-spike.src.ts::runQ4KSelfTest` (function around line 50) — pattern to copy for `runRmsNormSelfTest`.
-3. `src/inference/jsep/ops/rms-norm.ts` — RMS_NORM kernel (the Step-1 candidate).
-4. `src/inference/jsep/index.ts:163-220` — `jsepWrite` / `jsepRead` / `jsepClear` with the Stage-3 flush calls + `installJsepCallbacks` shape.
-5. `src/inference/jsep/ops/matmul.ts:381-512` (`dispatchMatmul`) — where the Step-2 probe gets inserted.
-6. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:200-320` — buffer interface (`set_tensor`/`get_tensor`/`cpy_tensor=NULL`) + `synchronize` wiring.
+1. [`eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md) — Stage 3.5 closure with the divert pattern + diagnostic data.
+2. `src/inference/jsep/ops/matmul.ts` — divert pattern landed for matmul (the template for SET_ROWS).
+3. `src/inference/jsep/ops/rms-norm.ts` — divert pattern landed for RMS_NORM (simpler 2-binding template).
+4. `src/inference/jsep/ops/set-rows.ts` — kernel + bind group; understand the partial-update semantics before extending the divert.
+5. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:200-275` — buffer interface; `set_tensor`/`get_tensor` host-roundtrip mechanics.
 
 #### Spike state cheat sheet
 
-- **Spike URL:** `http://localhost:8031/p2-v2-spike.html?v=stage3.5-<probe-name>`
+- **Spike URL:** `http://localhost:8031/p2-v2-spike.html?v=stage4.1-<probe-name>`
 - **Spike entry point:** `smoke-test/p2-v2-spike.src.ts::runSpike`
-- **Tab reuse:** existing `p2-v2-spike.html` tab — `agentchrome --port <PORT> tabs list` then re-navigate that tab id.
-- **Bundle build:** `bun build src/index-jsep.ts --outfile smoke-test/webllm-bundle-jsep.js --target browser && bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser`. WASM rebuild only needed for C++ changes.
-- **Spike output to read:** `agentchrome --port <PORT> js exec --tab <TAB_ID> 'document.getElementById("log").innerText'`. Wait for `DONE` or `FAIL` in the log first.
-- **Counter snapshot per token (Stage 3 baseline):** runOp 320, write 241, read 211, sync 612, clear 0, alloc 0, free 0. Total crossings/token = 1549.
-- **Existing diagnostic captures:** `globalThis.__q4kSelfTest` (Q4_K kernel correctness) and `LOGIT_STATS_STEP0` (logit values + NaN/Inf/finite split). Add Step-1's `__rmsNormSelfTest` and Step-2's `__firstModelMatmulDst` next to these.
+- **Built-in self-tests:** `runQ4KSelfTest` and `runRmsNormSelfTest` run on every spike load — both must pass before reading model-decode results.
+- **Counter snapshot per token (post-Stage-3.5):** runOp 320, write 241, read 211, sync 612, clear 0. Total crossings/token = 1549. Divert path is invisible to JSEP counters (own encoder, doesn't touch `__jsep` state).
+- **Build:** `bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser` (TS-only). WASM rebuild only if you change `src/wasm/*.cpp` or `~/Repos/llama.cpp/ggml/src/ggml-jsep/*.cpp`.
 
 #### Exit criteria
 
-Stage 3.5 closes when ONE of the following holds and is documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3.5-RESULT.md`:
+Stage 4.1 closes when ONE of the following holds, documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.1-RESULT.md`:
 
-- **Identified op/transition is the fault** → Stage 4 fixes it (kernel rewrite, missing flush, scheduler patch). Closure stub queues Stage 4 with the specific fix.
-- **`WEBLLM_PIN_TO_JSEP=0` rebuild fails to produce "Paris"** → Stage 3 introduced an orthogonal regression. Closure stub bisects from `9406496` (Stage 2 tip) against `4731dc1` (Stage 3 tip) and identifies the offending hunk.
-- **Outcome A "Paris" decode achieved** → Phase 3 effectively at parity with WebGPU-only. Work shifts from op-surface to perf characterization (compare ~24 ms/token Stage-3 baseline vs Outcome D's 12 ms/token).
+- **Outcome A "Paris" decode achieved** → Phase 3 effectively at parity with WebGPU-only. Work shifts to perf characterization (compare ~25 ms/token Stage-4 baseline vs Outcome D's 12 ms/token).
+- **SET_ROWS divert lands cleanly but logits still zero** → CPU-side MUL/ADD writeback is the next suspect. Closure stub queues `jsepWrite` byte-dump probe.
+- **Read-modify-write divert breaks F16 atomic CAS path** → KV cache writes corrupt. Closure stub bisects which dst type triggered the regression and adjusts the per-type divert variant.
 
 ### Earlier Stage 3 brief — collapsed (full text in closure report)
 
