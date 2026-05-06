@@ -78,6 +78,16 @@ async function runEmbedPerfHook(engine, handleId, mode, reps, fixture, log) {
 
 export async function runRealModelPage({ debugMode = false } = {}) {
 	const assetSuffix = window.location.search || "";
+	// `?backend=jsep` (P2-v2 prototype) swaps the bundle + WASM artifacts
+	// to the JSEP-style variant. Default is the production legacy backend.
+	// The flag also threads through to `WebLLM.init({ backend })` below so
+	// `engine.maybeInstallJsep()` wires the seven `Module.jsep*` callbacks
+	// onto the freshly-initialized `GgmlWasm`.
+	const _earlyParams = new URLSearchParams(window.location.search);
+	const useJsepBackend = _earlyParams.get("backend") === "jsep";
+	const bundleName = useJsepBackend
+		? "webllm-bundle-jsep.js"
+		: "webllm-bundle.js";
 	const {
 		CausalLMEmbedder,
 		EncoderInference,
@@ -92,7 +102,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		encodeChatPrompt,
 		runTasks,
 		score,
-	} = await import(`./webllm-bundle.js${assetSuffix}`);
+	} = await import(`./${bundleName}${assetSuffix}`);
 	const { runInteractiveChatTurn } = await import(
 		`./real-model-runtime.js${assetSuffix}`
 	);
@@ -125,8 +135,11 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	// mirrors `pickWasmUrl` in `src/core/engine.ts` (the canonical
 	// modelByteLength-driven decision used by the public `WebLLM.from*`
 	// constructors at runtime).
-	const wasmVariant =
-		params.get("wasm") === "mem64" ? "webllm-wasm-mem64.js" : "webllm-wasm.js";
+	const wasmVariant = useJsepBackend
+		? "webllm-wasm-jsep.js"
+		: params.get("wasm") === "mem64"
+			? "webllm-wasm-mem64.js"
+			: "webllm-wasm.js";
 	const thinkingEnabled = getThinkingModeFromParams(params);
 	const maxTokensParam = Number(params.get("max"));
 	const maxTokensOverride =
@@ -376,6 +389,29 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				wasm = new GgmlWasm();
 				wasmInstance = wasm;
 				await wasm.init({ wasmUrl: `./${wasmVariant}${assetSuffix}` });
+				// JSEP callback wiring (P2-v2 prototype). Must land BEFORE the
+				// first model load — `ggml_backend_jsep_alloc_buffer` reads
+				// `Module.jsepAlloc` at weight-upload time. The smoke page
+				// owns the externally-constructed `GgmlWasm` and uses
+				// `engine.adoptPreloadedModel`, which bypasses the engine's
+				// internal `maybeInstallJsep` (only `loadModelFromBuffer` /
+				// `loadModelFromUrl` invoke it). Install the callbacks here
+				// so the JSEP backend's `Module.jsep*` hooks are wired
+				// before [4/8] weight upload.
+				if (useJsepBackend) {
+					if (!navigator.gpu) {
+						throw new Error(
+							"backend=jsep requires WebGPU; navigator.gpu is unavailable",
+						);
+					}
+					const jsepAdapter = await navigator.gpu.requestAdapter();
+					if (!jsepAdapter) {
+						throw new Error("backend=jsep could not acquire a GPUAdapter");
+					}
+					const jsepDevice = await jsepAdapter.requestDevice();
+					await wasm.installJsepCallbacks(jsepDevice);
+					log("pass", "[1/8] JSEP callbacks installed");
+				}
 				log("pass", "[1/8] WebGPU backend initialized");
 			} catch (e) {
 				log(
@@ -440,6 +476,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					memoryBudget: 2_000_000_000,
 					maxConversations: 8,
 					worker: true,
+					...(useJsepBackend ? { backend: "jsep" } : {}),
 				});
 				const result = await smokeEngine.loadModelFromUrl(
 					modelUrl,
@@ -739,6 +776,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					// + 4 forks = 5 concurrent conversations.
 					maxConversations: 8,
 					worker: false,
+					...(useJsepBackend ? { backend: "jsep" } : {}),
 				});
 				const smokeEngineHandle = await smokeEngine.adoptPreloadedModel(
 					modelId,

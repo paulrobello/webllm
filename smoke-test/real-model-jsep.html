@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebLLM Real Model Test (JSEP backend)</title>
+<link rel="stylesheet" href="./real-model.css">
+<script type="module">
+// P2-v2 Phase 2 prototype harness — closure-only smoke surface.
+//
+// Pre-pins `backend=jsep` on the URL via `URLSearchParams` so the
+// shared `runRealModelPage` swaps `webllm-bundle-jsep.js` /
+// `webllm-wasm-jsep.js` and threads `backend: "jsep"` into
+// `WebLLM.init`. Other query params (`model`, `prompt`, `max`,
+// `temp`, `ingest`, …) flow through unchanged.
+const params = new URLSearchParams(window.location.search);
+if (params.get("backend") !== "jsep") {
+	params.set("backend", "jsep");
+	const next = `${window.location.pathname}?${params.toString()}${window.location.hash || ""}`;
+	window.location.replace(next);
+}
+const { runRealModelPage } = await import(`./real-model-page.js${window.location.search}`);
+await runRealModelPage({ debugMode: false });
+</script>
+</head>
+<body></body>
+</html>

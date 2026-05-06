@@ -851,38 +851,29 @@ upscale shader; tip `e29753286`); sweep matrix at
 - Spec: [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
 - Plan: [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
 
-#### Next-session opener — execute P2-v2 Phase 2 (matmul + RMS_NORM stub)
+#### Phase 2 prototype CLOSED 2026-05-06 — gate BLOCKED (decode-path swap missing)
 
-**Action: begin Task 0 of the plan immediately.** Per the user's CLAUDE.md ("Plan approval IS execution approval"), no further confirmation needed. Use `superpowers:subagent-driven-development` to execute the 8-task plan task-by-task with spec-compliance + code-quality review gates between tasks; each task ships as a separate commit.
+- **Spec:** [`docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`](docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md)
+- **Plan:** [`docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md`](docs/superpowers/plans/2026-05-05-p2-v2-jsep-prototype.md)
+- **Closure findings:** see this commit's message + the per-task commit map below. (Per global skill rules, the closure summary is recorded in the commit body rather than as a freestanding `eval/reports/.../SUMMARY.md`.)
+- **Disposition:** the prototype produces byte-identical 5-token greedy output (`"I'm not"`) on the JSEP build at decode parity with legacy (28 ms / 5 tokens both builds, ~177 tok/s), but **every JSEP callback counter reads zero across the entire decode** — the JSEP backend is dormant because spec §189-192's decode-path swap (`engine.chatCompletion → webllm_decode` for `backend === "jsep"`) was not implemented in Task 6. The current decode path always routes through the hand-rolled TS `ModelInference.forward` graph, which dispatches kernels directly to `ggml-webgpu` via `wasm.opMatMul`/`opRmsNorm` cwrap'd exports — the scheduler is never engaged, so no graph reaches `ggml-jsep::graph_compute`. The gate's EM_ASM-per-node thesis cannot be adjudicated from this run.
+- **Per-task commits:**
+  - Task 0: `91e0396` (JSPI tensor-get-async fix) + `1094351` (pre-prototype baseline)
+  - Tasks 1+2+4 amended: llama.cpp `webllm-browser-patches` `48acb658d` (single +1 patch)
+  - Task 3: `09ba2d4` (TS runtime scaffold)
+  - Task 4: `43390b0` (matmul kernel)
+  - Task 5: `04a38cc` (rms_norm kernel)
+  - Task 6: `d1a8348f` (engine integration + bundle wiring)
+  - Task 7: this commit (counter wiring + jsep smoke harness + closure)
+- **Patch stack:** llama.cpp `webllm-browser-patches` carries +1 patch (`48acb658d`); 2 reserved for Phase 3.
+- **Build infra unchanged for production path:** `make wasm-build` produces the legacy artifacts cleanly; canonical-6 baseline unaffected. `make wasm-build-jsep` produces `webllm-wasm-jsep.{js,wasm}` + `webllm-bundle-jsep.js`. `make checkall` green (747 pass / 36 skip).
 
-**Goal:** validate the JSEP-style architecture via a 2-op stub (matmul + RMS_NORM); measure 5-token tinyllama Q4_0 greedy decode against legacy `ModelInference`; gate green/yellow/red on per-token wall + EM_ASM crossings/token.
+**Next session pickup — Phase 2 follow-on cycle: decode-path swap.** The spec's §189-192 architectural promise is the load-bearing missing piece. Phase 3 plan-write is blocked until `engine.chatCompletion` for `backend === "jsep"` routes through `webllm_decode` (the libllama `llama_decode` wrapper retained across the P2 v1 revert at `0b57d41`). Once that swap lands, re-run the same 5-token tinyllama smoke against `real-model-jsep.html` — the counters in `module.__jsep.counters` then show the actual EM_ASM crossing rate the T3 gate measures, and a green/yellow/red disposition becomes adjudicable. Reuse the existing bridge surface; no new C++ patches expected for the swap itself.
 
-**Phase 1 closure (state you can rely on as of `d76bd38`):**
-- JSEP ABI mental model: [`eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md`](eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md) (commit `ec18120`). One EM_ASM/node + flat `uintptr_t[]` descriptor + integer GPU handles. ggml's `graph_compute(cgraph)` lets us go further (graph-once is a Phase 3 yellow-recovery lever).
-- ggml backend contract: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md) (commit `cec7172`). ~12-entry vtable; matmul-only stub auto-falls-back to CPU via scheduler. Existing `webllm-browser-patches` async-readback bundle (`846e0685e` + `702d40ee9` + `55fba3670` + `ff362d4ae`) directly reusable for the `get_tensor` async path.
-- ggml op catalog: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md) (commit `b6d807a`). 19 distinct ggml ops cover the working fleet; ~40 TS kernels once dtype permutations counted (Phase 3 sizing). Phase 2 only needs MUL_MAT + RMS_NORM.
-
-**State on `main` as of `d76bd38` (post-Phase-1 + spec + plan commits):**
-- Legacy `ModelInference` (`src/inference/model-inference.ts`, ~2890 LOC) restored, running at the canonical-6 baseline (110 tok/s tinyllama). It's the **kernel reference** — JSEP-style WGSL ports from its hand-rolled recording. Untouched in Phase 2 (legacy stays the default; jsep is opt-in).
-- Bridge expansion from P2 v1 Tasks 1-4 + 5 kept across the revert. C++ exports (`src/wasm/webgpu-bridge.cpp`): `webllm_get_metadata`, `webllm_n_ctx_train/n_embd/n_layer/n_head/n_head_kv/n_ctx`, `webllm_kv_seq_rm/kv_clear`, `webllm_state_seq_get_size/get_data/set_data`, `webllm_get_embeddings`, `webllm_perf_counter`. TS bindings in `src/inference/llama-bridge.ts`.
-- llama.cpp `webllm-browser-patches` tip: `b54503497 ggml-webgpu: use wgpu::WaitAny under JSPI` (note: the JSPI WaitAny patch was committed since the prior TODO note).
-
-**P2-v2 Phase 2 task summary (from plan):**
-0. Capture pre-prototype baseline (5-token tinyllama legacy decode wall + EM_ASM crossings/token).
-1. C++ skeleton — `ggml/src/ggml-jsep/ggml-jsep.cpp` with vtables, all ops `false`. CMake hook + 1-line registration. webllm `wasm-build-jsep` target.
-2. C++ op dispatch — flip `supports_op` to `true` for `(MUL_MAT, src1=F32, src0 ∈ {F32, F16, Q4_0, Q4_K})` + `(RMS_NORM, F32)`. EM_ASM per qualifying node. **Amend Task 1's commit** (single +1 patch).
-3. TS jsep runtime scaffold (`src/inference/jsep/{index, gpu-data-manager, command-encoder, pipeline-cache}.ts`); buffer-roundtrip golden.
-4. TS matmul kernel (`ops/matmul.ts`); 3-dtype golden.
-5. TS rms_norm kernel (`ops/rms-norm.ts`); 2-shape golden.
-6. Engine integration (`engine.init({ backend: "jsep" })`) + `dist/webllm-{wasm,bundle}-jsep.*` artifacts.
-7. End-to-end smoke + gate report at `eval/reports/p2-v2-prototype-<DATE>/SUMMARY.md`; update this TODO.md with green/yellow/red disposition.
-
-**T3 gate (tinyllama Q4_0, 5-token greedy):**
-- Per-token wall ≤2× legacy = green; 2-5× = yellow; >5× = red.
-- EM_ASM crossings/token <1500 = green; 1500-4000 = yellow; >4000 = red.
-- Greedy 5/5 token equality required either band.
-
-**Patch budget:** band B has 3 reserved. P2-v2 Phase 2 uses **1** (the ggml-jsep skeleton patch). Remaining: 2 for Phase 3.
+**Phase 1 closure links retained (still load-bearing for Phase 3):**
+- JSEP ABI: [`eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md`](eval/reports/p2-v2-jsep-research-2026-05-05/JSEP-ABI-MENTAL-MODEL.md)
+- ggml backend contract: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-BACKEND-CONTRACT.md)
+- ggml op catalog: [`eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md`](eval/reports/p2-v2-jsep-research-2026-05-05/GGML-OP-CATALOG.md)
 
 **Side-effects: items obviated.** P2 v1's "side-effects closed" claims for §1 (Decode graph reuse) and §4 (Flash attention in browser) are **withdrawn** with the revert. The legacy `ModelInference` retains its own graph caching + FA gating, and those remain live until Phase 3 ships their replacement.
 

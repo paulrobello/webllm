@@ -84,6 +84,21 @@ export interface JsepModule {
 	__jsep?: JsepRuntime;
 }
 
+/**
+ * Per-callback invocation counters. Diagnostic-only — reads as
+ * `module.__jsep.counters`. Used by Task 7 to compute steady-state
+ * EM_ASM crossings/token (legacy gate metric).
+ */
+export interface JsepCounters {
+	alloc: number;
+	free: number;
+	write: number;
+	read: number;
+	clear: number;
+	runOp: number;
+	sync: number;
+}
+
 export interface JsepRuntime {
 	device: GPUDevice;
 	dataManager: GpuDataManager;
@@ -94,6 +109,7 @@ export interface JsepRuntime {
 	// reusing a layout from a destroyed device is a WebGPU validation
 	// error.
 	bindGroupLayoutCache: Map<string, GPUBindGroupLayout>;
+	counters: JsepCounters;
 }
 
 /**
@@ -119,6 +135,15 @@ export function installJsepCallbacks(
 	const encoderBatcher = new CommandEncoderBatcher(device);
 	const pipelineCache = new PipelineCache(device);
 	const bindGroupLayoutCache = new Map<string, GPUBindGroupLayout>();
+	const counters: JsepCounters = {
+		alloc: 0,
+		free: 0,
+		write: 0,
+		read: 0,
+		clear: 0,
+		runOp: 0,
+		sync: 0,
+	};
 
 	const runtime: JsepRuntime = {
 		device,
@@ -126,12 +151,17 @@ export function installJsepCallbacks(
 		encoderBatcher,
 		pipelineCache,
 		bindGroupLayoutCache,
+		counters,
 	};
 	module.__jsep = runtime;
 
-	module.jsepAlloc = (size: number): number => dataManager.alloc(size);
+	module.jsepAlloc = (size: number): number => {
+		counters.alloc++;
+		return dataManager.alloc(size);
+	};
 
 	module.jsepFree = (handle: number): void => {
+		counters.free++;
 		dataManager.free(handle);
 	};
 
@@ -141,6 +171,7 @@ export function installJsepCallbacks(
 		hostPtr: number,
 		size: number,
 	): void => {
+		counters.write++;
 		// Re-derive the heap buffer each call — the WASM heap may have
 		// grown between EM_ASM frames, detaching prior views.
 		dataManager.write(handle, offset, hostPtr, size, module.HEAPU8.buffer);
@@ -151,8 +182,16 @@ export function installJsepCallbacks(
 		offset: number,
 		hostPtr: number,
 		size: number,
-	): Promise<void> =>
-		dataManager.readAsync(handle, offset, hostPtr, size, module.HEAPU8.buffer);
+	): Promise<void> => {
+		counters.read++;
+		return dataManager.readAsync(
+			handle,
+			offset,
+			hostPtr,
+			size,
+			module.HEAPU8.buffer,
+		);
+	};
 
 	module.jsepClear = (
 		handle: number,
@@ -160,6 +199,7 @@ export function installJsepCallbacks(
 		offset: number,
 		size: number,
 	): void => {
+		counters.clear++;
 		dataManager.clear(handle, value, offset, size);
 	};
 
@@ -169,6 +209,7 @@ export function installJsepCallbacks(
 		opParamsPtr: number,
 		_opParamsLen: number,
 	): number => {
+		counters.runOp++;
 		// Re-derive HEAP32 each call — the WASM heap may have grown
 		// between EM_ASM frames, detaching prior views.
 		const buf = module.HEAPU8.buffer;
@@ -192,6 +233,7 @@ export function installJsepCallbacks(
 	};
 
 	module.jsepSync = (): void => {
+		counters.sync++;
 		encoderBatcher.flush();
 	};
 
