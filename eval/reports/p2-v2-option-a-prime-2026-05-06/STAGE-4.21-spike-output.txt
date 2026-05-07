@@ -1,0 +1,11 @@
+     [probe9b] weight-hash probe armed
+     model loaded in 271 ms; vocab = 32000
+     [probe9b] blk.0.attn_q.weight: pre=0xf2f7188c ref=0xf2f7188c size_pre=2359296 size_ref=2359296 match=true
+     [probe9b] blk.0.attn_k.weight: pre=0x9399f36a ref=0x9399f36a size_pre=294912 size_ref=294912 match=true
+     [probe9b] OUTCOME: F (hashes match — upload preserves bytes)
+     [probe9c] blk.0.attn_q.weight: pre=0xf2f7188c gpu=0xf2f7188c size=2359296 match=true
+     [probe9c] blk.0.attn_k.weight: pre=0x9399f36a gpu=0x9399f36a size=294912 match=true
+     [probe9c] OUTCOME: F-1 (GPU bytes match — upload chain bit-clean; kernel re-investigation)
+LIVE_BUFFERS = [{"h":36,"size":134217728,"bucket":9},{"h":37,"size":134217728,"bucket":9},{"h":38,"size":134217728,"bucket":9},{"h":39,"size":134217728,"bucket":9},{"h":40,"size":16777216,"bucket":7},{"h":41,"size":67108864,"bucket":8}]
+GENERATED_TOKENS = [297,8927,13601,29877,29899]
+GENERATED_TEXT = "inonic boso-"
