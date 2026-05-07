@@ -915,9 +915,27 @@ Two distinct downstream bugs surfaced (per closure §"Diagnosis"):
 
 Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.2-RESULT.md). Patch stack: 6 (unchanged). Stage 4.3 brief below splits into 4.3a (production-shape kernel selftests) and 4.3b (full-graph runOp capture + per-op readback).
 
+**Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
+
 **Stage 4.3 CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch; spike instrumentation only).** Production-shape kernel selftests (4.3a) and full-graph runOp capture (4.3b) landed in `smoke-test/p2-v2-spike.src.ts`. **Stage 4.3a result: all four selftests PASS** — `RMSNORM_MULTIROW_NODIVERT/DIVERT` (rows=6, cols=2048) and `MATMUL_PROD_NODIVERT/DIVERT` (M=64, K=2048, N=6, Q4_K) all match CPU reference (max delta 2e-6 / 3.5e-4 respectively, no NaN/Inf, divert path matches non-divert exactly). **Bug A is NOT in the kernels or divert paths.** Stage 4.3b raised RUN_MAX 30→1700, MAX_LOG 30→3000, and added a unified `evtSeq` interleave so jsepWrite/jsepRead/jsepRunOp ordering is unambiguous. The smoking-gun timeline: `seq 0` jsepWrite buf19@0 = **valid** embedding · `seq 1` jsepRunOp i=0 RMS_NORM (in-place divert) · `seq 2` jsepRead buf19@0 = **valid** normed output `[-0.336, 0.49, ...]` · `seq 3` jsepWrite buf19@0 = **GARBAGE** `[-5e-5, 142, -4.5, -7.4e18, ...]` · `seq 4` jsepRunOp i=1 MUL_MAT consumes garbage src1 · `seq 5` jsepRead reads canonical NaN at the MUL_MAT dst. Between seq 2 (read) and seq 3 (write) is exactly one CPU op — the per-channel `MUL` (gain × normed = `out[r,c] = normed[r,c] * attn_norm.weight[c]`). Implied weight values from the output bytes: `[1.5e-4, 290, 8.96, -7.5e18, ...]` — wildly out of range for an RMSNorm gain (should be ~1.0). **Distribution-of-handle smoking gun:** all 1206 jsepWrites and 1266 jsepReads target handle 19 (the activations buffer); ZERO traffic on weight buffers (handles 14-17, the four 128 MiB weight buckets). The CPU-fallback ops never copy weights from JSEP to host — they dereference `tensor->data` directly, which on JSEP is the sentinel `GGML_JSEP_PTR_BASE = 0x2000` plus a per-tensor offset. ggml-backend treats this as a valid host pointer (because `get_base()` claims it is), so CPU MUL reads `0x2000 + offset` as F32, which is uninitialized wasm-heap RAM. Garbage weights × valid input → garbage activations → garbage MUL_MAT inputs → ±Inf accumulators → NaN dst → cascade through every downstream op. **Bug B (lm_head all-zero) is a downstream symptom of Bug A**, not an independent bug. Per-token decode 23.92 ms (within noise of Stage-4.2 baseline 24.34 ms). Closure: [`STAGE-4.3-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.3-RESULT.md). Patch stack: 6 (unchanged). Q4_K production-shape and multi-row RMS_NORM selftests are now permanent regression checks in the spike. Stage 4.4 brief below queues the F1 dual-resident-weights fix in `ggml-jsep.cpp`.
 
-### Next session pickup — Phase 3 Stage 4.4: F1 dual-resident weight buffers in ggml-jsep. START HERE in a fresh session.
+### Closure-stub discipline — every TODO closure prepares for a fresh session
+
+Every time a stage / phase / probe closes and gets recorded above:
+
+1. **Bank a closure paragraph in-place** (the Phase 3 progress entries above are the canonical style — outcome verdict, headline metrics, smoking-gun observations, links to the closure report under `eval/reports/`, patch-stack delta).
+2. **Replace the active brief below with a fresh paste-and-go brief** for the next stage/probe, sized for a cold start: assume the next session has zero conversation context, no idea what files just changed, and no live agentchrome tab. The brief must include:
+   - A single-line goal + single-line context (what just shipped, what's next).
+   - A **paste-and-go bootstrap block** that verifies state in 30 seconds: working-tree tip, llama.cpp branch + tip, smoke server status, agentchrome session port + reusable tab id (with fallback to `tabs create` if absent), and a baseline replay step that prints expected pre-fix markers (so the operator confirms they're starting from the right place).
+   - The implementation steps: files to read first (with line ranges), files to touch (with brief role per file), code sketches where useful.
+   - The exit criteria as a checklist that maps onto explicit log markers from the spike / harness output.
+   - A "branch on outcome" section listing what to do if the fix flips, partially flips, or doesn't flip.
+3. **Collapse the prior brief to a one-line "Earlier Stage X.Y brief — collapsed (full text in closure report)"** pointer so the active surface stays focused. The full brief lives in the `STAGE-X.Y-RESULT.md` closure report under `eval/reports/<probe>/`.
+4. **Commit cadence stays:** `docs(reports): Stage X.Y closure — <one-line>` + `docs(TODO): Stage X.Y closed — queue Stage X.Z <one-line>` as separate commits before any implementation work for the next stage starts (per the "Always commit before work" workflow policy in `CLAUDE.md`).
+
+The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
+
+### Next session pickup — Phase 3 Stage 4.5: GPU→host writeback for JSEP-produced tensors. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -925,11 +943,11 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 # 1. Confirm you're in the right working tree on the right tip.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → f733b2e docs(TODO): Stage 4.3 closed — queue Stage 4.4 F1 dual-resident weights
+#   → <stage 4.4 commit hash> docs(TODO): Stage 4.4 closed — queue Stage 4.5 GPU→host writeback
 
-# 2. Confirm llama.cpp is on the patched branch.
+# 2. Confirm llama.cpp is on the patched branch (Stage 4.4 P7 landed; tip will be a fresh sha).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → 53c66649f
+#   → <stage 4.4 P7 sha>     (patch stack 7; before P7 was 53c66649f)
 #   → webllm-browser-patches
 
 # 3. Smoke-server must be up on 8031. If not running, start it:
@@ -938,220 +956,127 @@ lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 # 4. Reuse the existing agentchrome session + spike tab.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
-[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.4-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.5-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "PORT=$PORT TAB=$TAB"
 
-# 5. Reproduce the post-Stage-4.3 baseline (Outcome C still active).
-#    Expect: 4 selftests pass, GPU_ERR_COUNT=0, GENERATED_TOKENS=[0,0,0,0,0],
-#    LOGIT_STATS_STEP0.first8=[0,...,0], PER_TOKEN_MS ~24.
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.4-replay" --tab "$TAB"
+# 5. Reproduce the post-Stage-4.4 partial-flip baseline (Bug A fixed, Bug C live).
+#    Expect: 4 selftests pass, GPU_ERR_COUNT=0,
+#            GENERATED_TOKENS = [593, 5871, 945, 16976, 25487],
+#            GENERATED_TEXT  = "ntiuracinateenes",
+#            LOGIT_STATS_STEP0.first8 = real finite values (top-1 = 593, conf 0.159),
+#            FIRST_NAN_DST_PROBE = null,
+#            FIRST_ALLZERO_DST_PROBE = {i:3, op:42 (SET_ROWS), dstH:18, ...},
+#            COUNTER_DELTAS.read = 0,
+#            PER_TOKEN_MS ~23.
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.5-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
 agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText'
 ```
 
-If those checks pass, jump to Step 1 (F1 implementation in `ggml-jsep.cpp`). If anything fails, see Step 0 below for the unrolled verify-state procedure.
+If those checks pass, the post-Stage-4.4 baseline is live and Stage 4.5 work can start. If anything fails, see Step 0 below.
 
-**One-line goal:** flip Outcome A "Paris" decode by ensuring CPU-fallback ops can read jsep-resident weight tensors. Implement F1 (dual-resident weights) per the Stage 4.3 closure.
+**One-line goal:** flip Outcome A "Paris" decode by closing the GPU→host writeback gap so CPU-fallback ops dereferencing `tensor->data` (now a valid `host_mirror + offset` pointer post-F1) read *current* GPU output, not stale-zero from initial mirror init.
 
-**One-line context:** Stage 4.3 localized Bug A to `ggml_backend_jsep_buffer_get_base` returning the sentinel `0x2000` so ggml-backend treats jsep-resident `tensor->data` as a valid host pointer. CPU-fallback MUL/ADD/ROPE/SOFTMAX ops dereference `data` directly, reading uninitialized RAM for weights, producing garbage that cascades into NaN and then all-zero logits. Bug B (lm_head all-zero) is a downstream symptom and should resolve once Bug A is fixed.
+**One-line context:** Stage 4.4 (P7) implemented F1 dual-resident weights and fixed Bug A — CPU MUL on attention-norm gain now reads real weights, killing the NaN cascade. But the model decodes incorrect tokens because JSEP ops write to the GPU buffer only; the host mirror stays stale; downstream peeled-to-CPU ops read zero. Smoking gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42 SET_ROWS, dstH:18}` (KV cache write that the host mirror never sees), and `COUNTER_DELTAS.read = 0` confirms ggml-backend isn't inserting `get_tensor` bridges.
 
-#### F1 design — dual-resident weight buffers (recommended)
+#### Three options — pick one to probe first
 
-During model load, allocate a parallel **host-side mirror** of every jsep-resident tensor. Keep `tensor->data = sentinel + offset` for GPU dispatch routing (existing JSEP semantics), but expose the host mirror via a side-channel that ggml-backend consults when copying tensor data into a CPU-backend split.
+- **H1 (recommended starting point — correctness probe): per-runOp unconditional writeback.** In `ggml_backend_jsep_graph_compute` (~ggml-jsep.cpp:357), after each `Module.jsepRunOp`, call `ggml_jsep_read(dst.handle, dst.offset, host_mirror+dst.offset, dst.size)` to mirror the freshly-computed GPU output back into host RAM. Cost: one jsepRead per JSEP op (~1206 extra round-trips per prefill on TinyLlama). Massive perf hit (decode goes from 23 ms → likely 50-100+ ms per token; needs measurement) but it's the simplest possible correctness fix and tells us whether writeback IS the only remaining bug. If H1 produces "Paris", we know the diagnosis is right and can optimize via H3. If H1 doesn't produce "Paris", there's a deeper bug (KV cache wiring, ROPE, attention masking) and we re-diagnose with the corrected mirror invariant.
+- **H2 (if scheduler-cooperative path exists): implement `cpy_tensor` callback.** Set `ggml_backend_jsep_buffer_interface.cpy_tensor` (currently NULL) to a function that, when copying *from* a JSEP buffer *to* a CPU-buft buffer, issues a `ggml_jsep_read` to fetch the latest GPU data and memcpy into the destination. Risk: the scheduler currently doesn't insert cpy_tensor calls (post-F1 `read=0` confirms this), so this might not fire. But if the scheduler's `ggml_backend_sched_split_graph` does add boundary copies under some conditions, this is the cleanest hook. Prefer to investigate (read `ggml-backend.cpp:ggml_backend_sched_compute_splits` first) before implementing.
+- **H3 (perf-aware refinement, only after H1 confirms diagnosis): graph-walk pre-pass.** Walk the cgraph once at the start of `graph_compute` and mark every JSEP-op output tensor whose downstream consumer is a peeled (CPU) op — those need writeback. Skip writeback for JSEP→JSEP-only chains (the GPU buffer is already the canonical home; the host mirror just needs to be current at backend boundaries and at the final output). Cost: one O(n_nodes × max_consumers) walk per compute call; constant runtime overhead per op for the bool check. Win: 90%+ of JSEP ops likely don't need writeback (forward pass is mostly JSEP-resident). Decode throughput stays close to the current 23 ms.
 
-Two sub-options for *where* the mirror lives:
+#### Files to read first (reading order, ~15 min)
 
-- **F1a (per-buffer)**: `ggml_backend_jsep_buffer_context` gains a `host_mirror` `void *` field allocated in `ggml_backend_jsep_buffer_type_alloc_buffer`. `set_tensor` writes to BOTH the GPU (via `ggml_jsep_write` → JS `Module.jsepWrite`) AND the host mirror (memcpy). `get_tensor` returns from the host mirror (no GPU round-trip). `get_base` keeps returning the sentinel so existing JSEP routing is unchanged.
-- **F1b (per-tensor)**: each `tensor->data` allocation carries a sibling host-pointer slot. More plumbing but finer granularity (only allocates host RAM for tensors that actually need it).
+1. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp` lines 357-448 (`ggml_backend_jsep_graph_compute`) — this is where H1 / H3 hook in. Note the current loop already builds the descriptor and calls `Module.jsepRunOp`; the writeback logic adds 1-3 lines per op (H1) or a marked-dst flag check (H3).
+2. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp` lines 200-300 (buffer interface, post-F1) — to confirm where `host_mirror` lives and how `jsep_tensor_handle` recovers the offset.
+3. `~/Repos/llama.cpp/ggml/src/ggml-backend.cpp` — search for `ggml_backend_sched_compute_splits` and `cpy_tensor` to understand whether H2's hook even fires under the scheduler's current split logic.
+4. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md` — the full F1 closure with the diagnosis evidence (bug C smoking gun).
 
-**Recommended:** F1a. Smaller patch, single allocation point, host mirror size matches the JSEP buffer size (no per-tensor accounting). Memory cost: weight buffers (4 × 128 MiB = 512 MiB) duplicated host-side. KV-cache buffer (16 MiB) and activations buffer (64 MiB) also duplicated, but those are smaller. Total host overhead for TinyLlama: ~592 MiB. On the 16 GB / 32 GB hardware baseline this is fine.
+#### Step 1 — implement H1 in `ggml_backend_jsep_graph_compute` (~20 min)
 
-#### Files to touch (~80 LOC total)
-
-- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp`:
-  - `ggml_backend_jsep_buffer_context` — add `void * host_mirror` (~5 LOC).
-  - `ggml_backend_jsep_buffer_type_alloc_buffer` — `malloc` host_mirror at the same size as the GPU buffer (~10 LOC).
-  - `ggml_backend_jsep_buffer_free_buffer` — `free` host_mirror (~3 LOC).
-  - `ggml_backend_jsep_buffer_set_tensor` — memcpy to `host_mirror + total_offset` BEFORE calling `ggml_jsep_write` (~5 LOC).
-  - `ggml_backend_jsep_buffer_get_tensor` — memcpy FROM `host_mirror + total_offset` instead of calling `ggml_jsep_read` (~5 LOC). This eliminates the round-trip through JS for reads.
-  - `ggml_backend_jsep_buffer_memset_tensor` — apply memset to host_mirror in addition to the JSEP clear (~5 LOC).
-  - `ggml_backend_jsep_buffer_clear` — same (~3 LOC).
-  - **Critical: `ggml_backend_jsep_buffer_get_base`** — return `host_mirror` instead of `0x2000` (~1 LOC). This is the load-bearing change. Now `tensor->data = host_mirror + per-tensor-handle-encoded-offset`, which CPU ops can dereference correctly. JSEP routing still works because the descriptor packing in `graph_compute` uses `jsep_tensor_handle(tensor)` which strips the sentinel base — needs a check that the new base value is correctly stripped.
-  - `jsep_tensor_handle(tensor)` — currently subtracts `GGML_JSEP_PTR_BASE` to recover the handle-encoded offset. Will need updating to subtract the buffer's `host_mirror` instead (or keep `0x2000` as a virtual base and store the host_mirror as a separate pointer that's added after the strip).
-
-- Sub-decision: do we keep `0x2000` as the virtual sentinel and add `host_mirror` AFTER the per-tensor offset is computed (so `tensor->data` becomes `host_mirror + offset` directly)? **Yes.** This is cleaner — the descriptor packing uses `jsep_tensor_handle(tensor)` which extracts the offset; the offset is independent of which base pointer (`0x2000` or `host_mirror`) was used. The buffer's `get_base` now returns `host_mirror`, ggml-tensor allocator does `tensor->data = base + offset`, and dereferencing `tensor->data` reads valid host memory.
-
-- `smoke-test/p2-v2-spike.src.ts` — no changes expected (the diagnostic instrumentation can now reproduce the fix flipping Outcome A: post-prefill `LOGIT_STATS_STEP0.first8` should be non-zero finite values, not `[0,0,0,0,0,0,0,0]`).
-
-- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md` — closure (force-add per `eval/reports/` gitignore).
-
-- `TODO.md` — closure stub + queue Stage 5 (perf characterization + accuracy bench) on Outcome A flip.
-
-#### Step 0 — verify state (5 min)
-
-```bash
-( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → 53c66649f  webllm-browser-patches
-
-git log --oneline -6
-#   → f733b2e docs(TODO): Stage 4.3 closed — queue Stage 4.4 F1 dual-resident weights
-#   → 1333e02 docs(reports): Stage 4.3 closure — Bug A localized to 0x2000 sentinel deref
-#   → 2ca7b48 chore(jsep): Stage 4.3 spike selftests + full-graph capture instrumentation
-#   → 6c4b958 docs(TODO): polish Stage 4.3 brief with paste-and-go bootstrap block
-#   → 4c41b88 docs(TODO): Stage 4.2 closed — queue Stage 4.3 production-shape selftests + full-graph capture
-#   → dadaf24 docs(reports): Stage 4.2 closure — JSEP NaN cascade + lm_head non-write
-
-# Reproduce Outcome C baseline:
-PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
-TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))')
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.4-replay" --tab "$TAB"
-until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
-# Expected: all four selftests pass, GENERATED_TOKENS = [0,0,0,0,0], LOGIT_STATS_STEP0.first8 = [0,...,0]
-```
-
-#### Step 1 — implement F1 in ggml-jsep.cpp (~30 min)
-
-1. Add `host_mirror` field to `ggml_backend_jsep_buffer_context`.
-2. Allocate / free in alloc_buffer / free_buffer.
-3. Update `set_tensor` to dual-write (GPU + host_mirror).
-4. Update `get_tensor` to read from host_mirror (drops the JS round-trip — perf win).
-5. Update `memset_tensor` / `clear` to apply to both.
-6. Change `get_base` to return `host_mirror`.
-7. Verify `jsep_tensor_handle(tensor)` still works — it strips `tensor->data - tensor->buffer->iface.get_base(tensor->buffer)` to recover the encoded handle/offset. With the new base, the math is `(host_mirror + offset) - host_mirror = offset` — stays correct.
-
-Code sketch (paste-and-adapt):
+After the `if (status != 0) { ... return GGML_STATUS_FAILED; }` block in the per-node loop (~ggml-jsep.cpp:441), add unconditional dst writeback:
 
 ```cpp
-// 1) Context struct (~ggml-jsep.cpp:201)
-struct ggml_backend_jsep_buffer_context {
-    int32_t handle;
-    size_t  size;
-    void *  host_mirror;   // NEW: F1a — host-side parallel copy for CPU ops
-};
-
-// 2) alloc (~ggml-jsep.cpp:283)
-static ggml_backend_buffer_t ggml_backend_jsep_buffer_type_alloc_buffer(
-        ggml_backend_buffer_type_t buft, size_t size) {
-    int32_t handle = ggml_jsep_alloc((int32_t) size);
-    if (handle < 0) return nullptr;
-    void * host_mirror = aligned_alloc(GGML_JSEP_BUFFER_ALIGN, size);
-    if (!host_mirror) { ggml_jsep_free(handle); return nullptr; }
-    memset(host_mirror, 0, size);                  // match the JSEP zero-init
-    auto * ctx = new ggml_backend_jsep_buffer_context{ handle, size, host_mirror };
-    return ggml_backend_buffer_init(buft, ggml_backend_jsep_buffer_interface, ctx, size);
-}
-
-// 3) free
-static void ggml_backend_jsep_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
-    if (ctx) {
-        free(ctx->host_mirror);
-        ggml_jsep_free(ctx->handle);
-        delete ctx;
-    }
-}
-
-// 4) get_base — LOAD-BEARING change
-static void * ggml_backend_jsep_buffer_get_base(ggml_backend_buffer_t buffer) {
-    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
-    return ctx->host_mirror;   // was: GGML_JSEP_PTR_BASE (0x2000)
-}
-
-// 5) set_tensor — dual-write
-static void ggml_backend_jsep_buffer_set_tensor(ggml_backend_buffer_t buffer,
-        ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
-    const size_t total_offset = jsep_tensor_handle(tensor) + offset;
-    memcpy((char *) ctx->host_mirror + total_offset, data, size);  // NEW
-    ggml_jsep_write(ctx->handle, (int32_t) total_offset, (int32_t) (uintptr_t) data, (int32_t) size);
-}
-
-// 6) get_tensor — read from host_mirror (drops JS round-trip)
-static void ggml_backend_jsep_buffer_get_tensor(ggml_backend_buffer_t buffer,
-        const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
-    const size_t total_offset = jsep_tensor_handle(tensor) + offset;
-    memcpy(data, (char *) ctx->host_mirror + total_offset, size);  // CHANGED
-}
-
-// 7) memset_tensor / clear — apply to both
-static void ggml_backend_jsep_buffer_memset_tensor(ggml_backend_buffer_t buffer,
-        ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
-    if (size == 0) return;
-    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
-    const size_t total_offset = jsep_tensor_handle(tensor) + offset;
-    memset((char *) ctx->host_mirror + total_offset, value, size);  // NEW
-    ggml_jsep_clear(ctx->handle, (int32_t) value, (int32_t) total_offset, (int32_t) size);
-}
-
-static void ggml_backend_jsep_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
-    memset(ctx->host_mirror, value, ctx->size);                     // NEW
-    ggml_jsep_clear(ctx->handle, (int32_t) value, 0, (int32_t) buffer->size);
+// H1: GPU→host mirror writeback. Mirror the just-written dst back so
+// downstream CPU-fallback ops (which dereference tensor->data → host
+// mirror) read current GPU output, not stale-zero from alloc-time init.
+// Cost: one jsepRead per JSEP op. H3 (graph-walk pre-pass) refines
+// this to mirror only tensors consumed by peeled-to-CPU ops.
+if (node->buffer && node->buffer->context) {
+    auto * bctx = static_cast<ggml_backend_jsep_buffer_context *>(node->buffer->context);
+    const size_t dst_offset = jsep_tensor_handle(node);
+    const size_t dst_size   = ggml_nbytes(node);
+    ggml_jsep_read(bctx->handle, (int32_t) dst_offset,
+                   (int32_t) (uintptr_t) ((char *) bctx->host_mirror + dst_offset),
+                   (int32_t) dst_size);
 }
 ```
 
-**Critical verification before declaring success — cross-backend writes.** If a CPU op writes its output directly via `tensor->data` (not via `set_tensor`), the host_mirror gets updated but the GPU buffer stays stale; the next JSEP op reading that tensor sees old data. The Stage 4.2 trace shows `jsepWrite[i=1]` IS being called by some upstream code path (so set_tensor IS firing on CPU outputs), suggesting the scheduler routes outputs through set_tensor — but verify post-fix that the unified evtSeq trace still shows jsepWrite calls bridging CPU→JSEP after the fix lands. If POSTPREFILL_BUF11 reads back stale-but-not-NaN values, this is the failure mode.
-
-`jsep_tensor_handle()` arithmetic correctness: it is defined as `((uintptr_t) tensor->data) - ((uintptr_t) GGML_JSEP_PTR_BASE)` (~ggml-jsep.cpp:97-103). After our change, `tensor->data = host_mirror + per-tensor-offset` (the ggml-tensor allocator computes data from `buffer->iface.get_base + offset`). So `jsep_tensor_handle` would compute `(host_mirror + offset) - 0x2000`, which is **wrong** — the per-tensor offset gets polluted by `host_mirror - 0x2000`. **Fix `jsep_tensor_handle` to subtract the buffer's `host_mirror` instead of the global `GGML_JSEP_PTR_BASE`:**
-
-```cpp
-// ~ggml-jsep.cpp:101 — UPDATED (return type stays size_t)
-static inline size_t jsep_tensor_handle(const ggml_tensor * t) {
-    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(t->buffer->context);
-    return (size_t) ((uintptr_t) t->data - (uintptr_t) ctx->host_mirror);
-}
-```
+Skip writeback for the metadata-op fast path (NONE/VIEW/RESHAPE/PERMUTE/TRANSPOSE) — those don't dispatch and share storage with their parent; nothing to mirror.
 
 Build:
 ```bash
-cd /Users/probello/Repos/webllm && make wasm-build
-# wasm-build pulls llama.cpp from ~/Repos/llama.cpp on the
-# webllm-browser-patches branch and rebuilds smoke-test/webllm-wasm-jsep.js.
-# After it lands, also rebuild the spike bundle:
-bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
+cd /Users/probello/Repos/webllm && make wasm-build-jsep
+# wasm-build-jsep also rebuilds the spike bundle (smoke-test/p2-v2-spike.js) and copies WASM artifacts into smoke-test/.
 ```
 
 #### Step 2 — verify Outcome A flips (5 min)
 
 ```bash
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.4-fix" --tab "$TAB"
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.5-fix" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
 agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText'
-# Expected:
+# Expected with H1:
 #   - All four kernel selftests still PASS
-#   - PREPREFILL_BUF11 = all zeros (unchanged)
-#   - POSTPREFILL_BUF11 = real f32 values (NOT canonical NaN)
-#   - LOGIT_STATS_STEP0.first8 = real values (NOT [0,...,0])
-#   - GENERATED_TEXT = "Paris" (or some Paris-adjacent token sequence)
 #   - GPU_ERR_COUNT = 0
+#   - FIRST_NAN_DST_PROBE = null (Bug A still fixed)
+#   - FIRST_ALLZERO_DST_PROBE = null (Bug C now fixed; SET_ROWS dst now mirrors back)
+#   - LOGIT_STATS_STEP0.first8 = real finite values (sharper distribution than Stage 4.4)
+#   - GENERATED_TEXT = "Paris" (or some Paris-adjacent token sequence)
+#   - COUNTER_DELTAS.read = ~1602 (one read per runOp; was 0 in Stage 4.4)
+#   - PER_TOKEN_MS = expect 50-150 ms (H1 negates F1's no-round-trip win — measure exact cost)
 ```
 
 #### Step 3 — branch on outcome
 
-- **Outcome A flips ("Paris")** — file Stage 5 narrowly on perf characterization (the F1 dual-write costs an extra memcpy per `set_tensor`; weight uploads at model load take longer; quantify via `bench-inference` on TinyLlama). Close Bug B as "downstream of Bug A, no longer reproduces."
-- **Outcome A doesn't flip** — diagnose: are weights now correctly transferred to host_mirror? Is the `get_base` change consistent with how ggml-tensor's allocator computes `data = base + offset`? Check that the pre-load `set_tensor` calls (134 of them per Stage 4.2's counters) write to host_mirror. Likely culprits: the `get_base` change wasn't applied at the right indirection level, or weight uploads went via a path that bypasses `set_tensor` (some libllama loaders do bulk uploads via a memcpy into a freshly-allocated host buffer that's then copied to the backend; check whether the host_mirror sees that traffic).
-
-#### Files to read first (reading order, ~10 min)
-
-1. `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp` lines 90–270 — buffer interface, sentinel definition, jsep_tensor_handle, set_tensor / get_tensor / get_base.
-2. `~/Repos/llama.cpp/ggml/src/ggml.c` — search for `tensor->data = ` to see how the ggml-tensor allocator computes `data` from buffer base + offset.
-3. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.3-RESULT.md` — full diagnosis with all evidence.
+- **Outcome A flips ("Paris")** — diagnosis confirmed. File Stage 4.6: implement H3 (graph-walk pre-pass) to recover decode throughput. Target: bring per-token decode back under 30 ms. Then file Stage 5: perf characterization + accuracy bench (TinyLlama + Qwen3 family + 8B IQ3_M).
+- **Outcome A still doesn't flip (decode produces real but wrong tokens)** — H1 is the strongest possible writeback. If it doesn't fix it, the bug is deeper than just GPU→host mirror staleness. Likely candidates to investigate next: KV cache layout (TinyLlama's V-cache transpose vs `dispatchSetRows` F32→F16 atomic CAS path; is the right cell being written?); ROPE position indexing (CPU-fallback for `GGML_OP_ROPE` reads from where? Is the position tensor mirrored?); attention masking (CPU SOFT_MAX with mask).
+- **Outcome A regresses to NaN cascade** — H1 introduced a bug (e.g., wrong dst_offset arithmetic, race between jsepRunOp completion and jsepRead). Re-check that ggml_jsep_read awaits properly under JSPI (the EM_JS body returns the promise; it auto-awaits at the JSPI export boundary). Add a `Module.jsepSync()` call before each writeback as a debug hammer; if that fixes it, the issue is missing sync.
 
 #### Spike state cheat sheet
 
-- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.4-<probe>`
-- **Per-token decode (post-Stage-4.3):** ~23.9 ms. F1 dual-write at set_tensor adds a memcpy per write — only impacts model-load wall time (134 weight uploads), not steady-state decode.
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.5-<probe>`
+- **Per-token decode (post-Stage-4.4):** ~23.2 ms. H1 will likely 2-6× this; H3 should bring it back close to 23 ms.
 - **Built-in self-tests** still permanent (Q4K K=256, RMSNORM rows=1, RMSNORM rows=6 / K=2048, MATMUL Q4_K M=64/K=2048/N=6 — both no-divert and divert).
-- **Build:** WASM rebuild needed after changing `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp`. Run `make wasm-build` from the webllm root.
+- **Build:** WASM rebuild needed after changing `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp`. Run `make wasm-build-jsep` (NOT `wasm-build` — JSEP is a separate variant) from the webllm root.
 - **`make checkall` must be green** before committing.
 
-#### Exit criteria
+#### Exit criteria — Stage 4.5 closes when documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.5-RESULT.md`:
 
-Stage 4.4 closes when ONE of the following holds, documented in `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md`:
+- **Outcome A "Paris" decode achieved** (H1 alone or H1+H3) — non-zero finite logits, sensible top-1 token, decoded text contains "Paris" or semantically equivalent (e.g. "Paris.\n\n2" — the same tail Stage 2 Task 12 produced on the device-hint chat path). Closure stub queues Stage 4.6 (perf-recover via H3 if H1 alone) and/or Stage 5 (perf characterization + accuracy bench).
+- **Outcome A doesn't flip even under H1** — diagnosis identifies the next-deepest bug (KV cache wiring, ROPE positions, or attention masking). Patch stack +1-2 expected.
 
-- **Outcome A "Paris" decode achieved** — non-zero finite logits, sensible top-1 token. Closure stub queues Stage 5 (perf characterization + accuracy bench).
-- **F1 implemented but Outcome A doesn't flip** — diagnosis identifies what's missing (e.g., weight uploads bypass set_tensor; ggml-tensor allocator doesn't use buffer's get_base; another sentinel-using code path exists). Patch stack +1 to ggml-jsep.cpp expected; possibly +1 more if a follow-on tweak is needed.
+#### Step 0 — verify state (only if the bootstrap block at the top failed)
+
+```bash
+( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
+#   → <stage 4.4 P7 sha>  webllm-browser-patches  (patch stack 7)
+
+git log --oneline -8
+#   → docs(TODO): Stage 4.4 closed — queue Stage 4.5 GPU→host writeback
+#   → docs(reports): Stage 4.4 closure — F1 fixes Bug A, Bug C surfaces
+#   → feat(jsep): Stage 4.4 P7 — F1 dual-resident host mirror in ggml-jsep
+#   → 3806c36 docs(TODO): polish Stage 4.4 brief with paste-and-go bootstrap + code sketch
+#   → f733b2e docs(TODO): Stage 4.3 closed — queue Stage 4.4 F1 dual-resident weights
+#   → 1333e02 docs(reports): Stage 4.3 closure — Bug A localized to 0x2000 sentinel deref
+#   → 2ca7b48 chore(jsep): Stage 4.3 spike selftests + full-graph capture instrumentation
+```
+
+If the llama.cpp tip isn't on the P7 commit, the WASM was built against the wrong source — `make wasm-build-jsep` and re-run the bootstrap.
+
+### Earlier Stage 4.4 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.4 brief (Step 0 baseline verification, Step 1 F1 implementation in ggml-jsep.cpp, Step 2 verify Outcome A flips, Step 3 branch on outcome, code sketches, files-to-touch table) lives in [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). The F1 design's load-bearing change (`get_base` returning `host_mirror` instead of `0x2000`) flipped Bug A as predicted; the brief's "critical verification" footnote about cross-backend writes proved load-bearing in the inverse direction (GPU→host, not host→GPU as the footnote framed it). Collapsed at Stage 4.5 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.3 brief — collapsed (full text in closure report)
 
