@@ -1446,6 +1446,42 @@ async function runSpike(): Promise<void> {
 		const dstProbePromises: Promise<void>[] = [];
 		(window as any).__dstProbes = dstProbes;
 
+		// Stage 4.6 D2-lite: per-SET_ROWS source/indices probe. For the
+		// first SET_ROWS_DIAG_COUNT SET_ROWS dispatches (op=42), capture
+		// src[0] first 8 F32 values (the K/V data being written), src[1]
+		// first 8 I64 indices (cells targeted in the cache), dst pre and
+		// post at the first targeted cell. If src[0] has NaN/Inf/garbage
+		// values, the bug is upstream of SET_ROWS (H-source). If indices
+		// are wildly out of range, it's H-indices. If both look fine but
+		// post differs from f16(src[0]@indices), it's a dispatcher bug
+		// in production graph context (D1 wouldn't have caught it).
+		const SET_ROWS_DIAG_COUNT = 10;
+		type SetRowsDiagEntry = {
+			i: number;
+			seq: number;
+			dstH: number;
+			dstO: number;
+			divert: boolean;
+			src0H: number;
+			src0O: number;
+			src0Type: number;
+			src1H: number;
+			src1O: number;
+			src1Type: number;
+			dstNe: number[];
+			src0Ne: number[];
+			src1Ne: number[];
+			src0First8F32: number[] | null;
+			src1First8Idx: number[] | null;
+			dstPreFirst8U16: number[] | null;
+			dstPostFirst8U16: number[] | null;
+			err?: string;
+		};
+		const setRowsDiag: SetRowsDiagEntry[] = [];
+		const setRowsDiagPromises: Promise<void>[] = [];
+		(window as any).__setRowsDiag = setRowsDiag;
+		const GGML_OP_SET_ROWS_VAL = 42; // mirrors GGML_OP_SET_ROWS
+
 		mod.jsepRunOp = (
 			descriptorPtr: number,
 			descriptorWords: number,
@@ -1454,6 +1490,7 @@ async function runSpike(): Promise<void> {
 		): number => {
 			let entry: RunOpEntry | null = null;
 			let probeI = -1;
+			let setRowsDiagEntry: SetRowsDiagEntry | null = null;
 			if (runLog.length < RUN_MAX) {
 				const buf = mod.HEAPU8.buffer as ArrayBuffer;
 				const heap32 = new Int32Array(buf, 0, buf.byteLength >>> 2);
@@ -1498,6 +1535,57 @@ async function runSpike(): Promise<void> {
 						first8: null,
 					});
 				}
+
+				// Stage 4.6 D2-lite: per-SET_ROWS source/indices probe.
+				// Capture full ne arrays for src[0], src[1], dst so we can
+				// interpret the readback dimensions correctly.
+				if (
+					op === GGML_OP_SET_ROWS_VAL &&
+					nSrc >= 2 &&
+					setRowsDiag.length < SET_ROWS_DIAG_COUNT
+				) {
+					const dstNe = [
+						heap32[baseW + 2 + 3 + 0],
+						heap32[baseW + 2 + 3 + 1],
+						heap32[baseW + 2 + 3 + 2],
+						heap32[baseW + 2 + 3 + 3],
+					];
+					const src0W = baseW + 2 + TBLK;
+					const src1W = baseW + 2 + 2 * TBLK;
+					const src0Ne = [
+						heap32[src0W + 3 + 0],
+						heap32[src0W + 3 + 1],
+						heap32[src0W + 3 + 2],
+						heap32[src0W + 3 + 3],
+					];
+					const src1Ne = [
+						heap32[src1W + 3 + 0],
+						heap32[src1W + 3 + 1],
+						heap32[src1W + 3 + 2],
+						heap32[src1W + 3 + 3],
+					];
+					setRowsDiagEntry = {
+						i: runLog.length - 1,
+						seq: entry.seq,
+						dstH,
+						dstO,
+						divert,
+						src0H: srcs[0].h,
+						src0O: srcs[0].o,
+						src0Type: srcs[0].t,
+						src1H: srcs[1].h,
+						src1O: srcs[1].o,
+						src1Type: srcs[1].t,
+						dstNe,
+						src0Ne,
+						src1Ne,
+						src0First8F32: null,
+						src1First8Idx: null,
+						dstPreFirst8U16: null,
+						dstPostFirst8U16: null,
+					};
+					setRowsDiag.push(setRowsDiagEntry);
+				}
 			}
 			const status = runOpOrig(
 				descriptorPtr,
@@ -1541,6 +1629,124 @@ async function runSpike(): Promise<void> {
 							probe.first8 = Array.from(data.slice(0, 8));
 						} catch (e) {
 							probe.err = (e as Error).message;
+						}
+					}),
+				);
+			}
+			// Stage 4.6 D2-lite: schedule SET_ROWS source / indices / dst
+			// readbacks. SET_ROWS src[0] is read-only, so reading after
+			// dispatch returns the same value the kernel saw. dst-post is
+			// what the kernel actually wrote. The first targeted dst cell
+			// (src1[0]) tells us whether the write landed at the right
+			// offset with the right value.
+			if (setRowsDiagEntry) {
+				const diag = setRowsDiagEntry;
+				setRowsDiagPromises.push(
+					Promise.resolve().then(async () => {
+						try {
+							const dev = runtime.device;
+							const READ_F32 = 32; // 8 F32 values = 32 bytes
+							const READ_I64 = 64; // 8 I64 values = 64 bytes (low+high halves)
+							const READ_U16 = 16; // 8 F16 cells = 16 bytes
+
+							// src[0] — F32 K/V data being written
+							const src0Rec = runtime.dataManager.get(diag.src0H);
+							const src0Staging = dev.createBuffer({
+								size: READ_F32,
+								usage:
+									GPUBufferUsage.MAP_READ |
+									GPUBufferUsage.COPY_DST,
+							});
+
+							// src[1] — I64/I32 indices
+							const src1Rec = runtime.dataManager.get(diag.src1H);
+							const src1Staging = dev.createBuffer({
+								size: READ_I64,
+								usage:
+									GPUBufferUsage.MAP_READ |
+									GPUBufferUsage.COPY_DST,
+							});
+
+							// dst — F16 cells at the buffer offset (we read
+							// the start of the buffer view, which may or may
+							// not contain the targeted cells; comparing
+							// post against pre at the same window shows
+							// whether the SET_ROWS dispatch wrote here).
+							const dstRec = runtime.dataManager.get(diag.dstH);
+							const dstStaging = dev.createBuffer({
+								size: READ_U16,
+								usage:
+									GPUBufferUsage.MAP_READ |
+									GPUBufferUsage.COPY_DST,
+							});
+
+							const enc = dev.createCommandEncoder();
+							enc.copyBufferToBuffer(
+								src0Rec.buffer,
+								diag.src0O,
+								src0Staging,
+								0,
+								READ_F32,
+							);
+							enc.copyBufferToBuffer(
+								src1Rec.buffer,
+								diag.src1O,
+								src1Staging,
+								0,
+								READ_I64,
+							);
+							enc.copyBufferToBuffer(
+								dstRec.buffer,
+								diag.dstO,
+								dstStaging,
+								0,
+								READ_U16,
+							);
+							dev.queue.submit([enc.finish()]);
+
+							await src0Staging.mapAsync(
+								GPUMapMode.READ,
+								0,
+								READ_F32,
+							);
+							const src0F32 = new Float32Array(
+								src0Staging.getMappedRange().slice(0),
+							);
+							src0Staging.unmap();
+							src0Staging.destroy();
+							diag.src0First8F32 = Array.from(src0F32.slice(0, 8));
+
+							await src1Staging.mapAsync(
+								GPUMapMode.READ,
+								0,
+								READ_I64,
+							);
+							const src1U32 = new Uint32Array(
+								src1Staging.getMappedRange().slice(0),
+							);
+							src1Staging.unmap();
+							src1Staging.destroy();
+							// I64 is 8 bytes = 2 u32; index value is low half
+							// (high half should be 0 for typical indices).
+							const idx: number[] = [];
+							for (let k = 0; k < 8; k++) {
+								idx.push(src1U32[k * 2]);
+							}
+							diag.src1First8Idx = idx;
+
+							await dstStaging.mapAsync(
+								GPUMapMode.READ,
+								0,
+								READ_U16,
+							);
+							const dstU16 = new Uint16Array(
+								dstStaging.getMappedRange().slice(0),
+							);
+							dstStaging.unmap();
+							dstStaging.destroy();
+							diag.dstPostFirst8U16 = Array.from(dstU16);
+						} catch (e) {
+							diag.err = (e as Error).message;
 						}
 					}),
 				);
@@ -1700,6 +1906,9 @@ async function runSpike(): Promise<void> {
 		// `dstProbePromises` as runOps fire; awaiting all settles every
 		// staging copy + mapAsync.
 		await Promise.allSettled(dstProbePromises);
+		// Stage 4.6 D2-lite — wait for SET_ROWS source/indices/dst
+		// readbacks to complete.
+		await Promise.allSettled(setRowsDiagPromises);
 
 		// Emit summaries + first-30 slices on the page log (full data
 		// stays on `window.__jsep*Log` and `window.__dstProbes` for
@@ -1747,6 +1956,14 @@ async function runSpike(): Promise<void> {
 				p.first8.every((v) => v === 0),
 		);
 		log(`FIRST_ALLZERO_DST_PROBE = ${JSON.stringify(firstZeroProbe ?? null)}`);
+		// Stage 4.6 D2-lite — first SET_ROWS dispatches' source / indices /
+		// dst readback. Tells us whether the K/V data fed into SET_ROWS is
+		// sensible (small floats), garbage (NaN/Inf/denormals), or all-zero
+		// (Stage 4.4 H1-pre-fix host_mirror state). The first SET_ROWS in a
+		// TinyLlama prefill graph writes the K cache for the prompt's first
+		// layer; src[0] should contain F32 K-projection outputs after ROPE
+		// rotation — typical magnitudes are |x| < 5.
+		log(`SETROWS_DIAG_FIRST5 = ${JSON.stringify(setRowsDiag.slice(0, 5))}`);
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`GENERATED_TEXT = ${JSON.stringify(generatedText)}`);
