@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.8 CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch; spike + JSEP diagnostic instrumentation only).** Stage 4.7's "Reading R1" framing (i=3 SET_ROWS divert dispatch silently fails) was a misframing. The dispatcher, the kernel, the divert path are all correct. The bug is upstream: at i=3 dispatch time, `src0` (h26o0 — the K-projection-after-ROPE buffer) is **stale on the GPU side**. Step A (eager-warmup probe at engine init, two shapes) did NOT fix it — the bug isn't generic first-call cold-start. Step B (windowed temp-dst + src0 readback inside `dispatchSetRows`, gated on a `globalThis.__stage48DivertHook` flag set just before `bridge.decode()`) captured: pre-kernel temp-dst row 0..5 = all zeros (pre-copy of zero real-dst); **post-kernel temp-dst row 0 = all zeros**, rows 2..5 = sparse `0x8000` (= f16 -0.0) cells exactly where `src0` raw bytes show `00 00 00 80` (= f32 -0.0). The kernel is correct; it reads f32 from src0, packs via `pack2x16float`, atomic-CAS writes f16. The reads return mostly 0.0 (writes 0x0000 = no-op) and sparse -0.0 (writes 0x8000) because `src0`'s GPU region was never populated — i=2 (K-projection MUL_MAT) writes to h26o4194304, but i=3 reads from h26o0. The h26o4194304→h26o0 hop is a CPU-fallback op chain (likely `CPY` + ROPE) that updates host_mirror but **never writes back to the GPU buffer**. Stage 4.5 H1 adds GPU→host writeback after every JSEP runOp; the symmetric **host→GPU** writeback after every CPU-fallback op (flagged but not addressed by the Stage 4.4 brief) is the missing piece. Closure: [`STAGE-4.8-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.8-RESULT.md). False trail ruled out: an earlier Stage 4.8 sentinel-probe variant added awaits BEFORE `runOpOrig` and saw "status=-1" — this turned out to be JSPI **not** preserving the C-stack `desc` array (`ggml-jsep.cpp:409`, declared outside the for loop) across `EM_ASM_INT` Promise-await reentries. Diagnostic-only artifact; fix was to move all probe awaits to AFTER `runOpOrig`. Patch stack: 7 (unchanged). Stage 4.9 brief below queues the host→GPU writeback fix (H1-inverse, mirroring Stage 4.5 H1).
+
 **Stage 4.7 D2-tight CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch; spike instrumentation only).** D2-tight rewrites the `mod.jsepRunOp` wrapper as `async`. After the original dispatcher returns, when the op is one of the first 10 SET_ROWS, the wrapper flushes `runtime.encoderBatcher`, copies 16 bytes (8 F16 cells) from `dst[dstO..+16)` into a staging buffer, awaits `mapAsync(GPUMapMode.READ)`, and stores the result on `setRowsDiagEntry.dstImmediateFirst8U16`. Because `graph_compute` is in `JSPI_EXPORTS` (`src/wasm/CMakeLists.txt:158`), JSPI awaits the returned `Promise<number>` on the wasm side — the wasm-side caller suspends until the readback resolves, so when wasm proceeds to the NEXT jsepRunOp the read above is guaranteed to reflect ONLY this op's output (no later ops have run yet). The `): number =>` return annotation is dropped and the closure is cast through `any` to keep the `JsepModule` interface honest. **Outcome: Reading R1 confirmed.** i=3 (FIRST SET_ROWS, K-cache layer 0, dstO=0, divert) reads `dstImmediateFirst8U16 = [0,0,0,0,0,0,0,0]` — byte-exact identical to its end-of-decode `dstPostFirst8U16`. Every other captured SET_ROWS (i=4, 14, 15, 26, 27, 39, 40, 51, 52) shows non-zero F16 cells with `dstImmediate == dstPost` byte-exact. **R2 is ruled out: the dispatch itself silently failed to land i=3's writes; no later op had a chance to overwrite anything.** All 6 selftests still PASS. Spike chat path unchanged: `GENERATED_TEXT = "ntiuhuihnerquant"`, PER_TOKEN_MS = 25.24 (vs 25.16 D2-lite baseline — within noise; the per-call readback only fires for the first 10 SET_ROWS dispatches and lands during prefill, not decode). `make typecheck` green. Closure: [`STAGE-4.7-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.7-RESULT.md). Stage 4.8 brief below queues localization of the first-call corner case in the SET_ROWS divert dispatcher (suspect surfaces: encoder-batcher first flush, pipeline cache miss for the SET_ROWS variant, bind-group / temp-dst first allocation lifecycle, pre-copy of zero-initialised dst surviving as the post-copy-back result). Patch stack: 7 (unchanged).
 
 **Stage 4.6 D2-lite PARTIALLY CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch; spike instrumentation only).** D2-lite captures src[0] (8 F32), src[1] (8 I64 indices low-half), and dst (8 F16 cells) for the first 10 SET_ROWS dispatches via deferred Promise.then microtask staging copies. **Findings:** src0 is sensible across all 10 (`[-1.067, 0.656, -0.110, -0.110, ...]` for K — note the (2,3)/(4,5) pair-mate identity consistent with ROPE @ position 0, or `[-0.0006, 0.0009, ...]` for V); indices are exactly correct (`[0,1,2,3,4,5]` for K-cache shape `[256,512]`; strided `[0, 512, 1024, 1536, 2048, 2560, 3072, 3584]` for V-cache transpose `[1, 131072]`). **H-indices REJECTED.** **H-source WEAKENED** — no garbage / NaN / Inf values seen. **But i=3 (FIRST SET_ROWS, K-cache layer 0 at dstO=0) shows `dstPostFirst8U16 = [0, 0, 0, 0, 0, 0, 0, 0]`** at end-of-decode while every other captured SET_ROWS shows non-zero F16 cells (i=4, i=14, i=15, i=26, i=27, i=39, i=40, i=51, i=52). Two readings: (R1) i=3's dispatch silently failed — position-0 K cache at layer 0 was never written; (R2) i=3 wrote correctly but a later op overwrote cells 0..7 with zeros (no captured SET_ROWS targets dstO=0..7 of K-cache layer 0; possible jsepClear or divert pre-copy from another op). The end-of-decode readback is 5 decode steps + ~100+ ops removed from i=3, so we can't tell which reading without an immediate post-dispatch capture. Closure: [`STAGE-4.6-D2-LITE-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.6-D2-LITE-RESULT.md). Stage 4.7 brief below queues D2-tight (synchronous readback inside the wrapped jsepRunOp before it returns) to disambiguate R1 vs R2. Patch stack: 7 (unchanged).
@@ -943,7 +945,7 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.8: localize the SET_ROWS divert first-call silent failure. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.9: close the host→GPU writeback gap (H1-inverse). START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -951,7 +953,7 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → <Stage 4.7 D2-tight TODO closure commit> docs(TODO): Stage 4.7 closed — queue Stage 4.8 first-call divert localization
+#   → <Stage 4.8 TODO closure commit> docs(TODO): Stage 4.8 closed — queue Stage 4.9 host→GPU writeback fix
 
 # 2. Confirm llama.cpp tip.
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
@@ -963,61 +965,56 @@ lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 # 4. Reuse agentchrome session + spike tab.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
-[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.8-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.9-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "PORT=$PORT TAB=$TAB"
 
-# 5. Reproduce post-Stage-4.7 D2-tight baseline:
+# 5. Reproduce post-Stage-4.8 baseline (the diagnostic captures are still wired):
 #    - 6 selftests PASS
-#    - SETROWS_DIAG: i=3 has dstImmediateFirst8U16 = [0,0,0,0,0,0,0,0] AND dstPostFirst8U16 = [0,0,0,0,0,0,0,0]
-#    - all other entries (i=4, 14, 15, 26, 27, 39, 40, 51, 52) have dstImmediate == dstPost byte-exact, non-zero
-#    - chat path unchanged: GENERATED_TEXT = "ntiuhuihnerquant", read=1602, ~25 ms/tok
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.8-replay" --tab "$TAB"
+#    - window.__stage48Captures: src0AtKernelTimeF32 row 2 cell 0 = -0.0 (raw bytes 00 00 00 80)
+#    - postKernelFirst8U16 rows 0,1 = all zeros; rows 2..5 sparse 0x8000
+#    - chat path unchanged: GENERATED_TEXT = "ntiuhuihnerquant"
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.9-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
-agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify(window.__setRowsDiag.find(e => e.i === 3))'
-#   → expect dstImmediateFirst8U16: [0,0,0,0,0,0,0,0]
+agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify(window.__stage48Captures)'
+#   → expect postKernel row 0 = [0,0,0,0,0,0,0,0]; row 2 = [32768,0,...]; src0 row 2 hex 00 00 00 80
 ```
 
-**One-line goal:** identify which step inside `dispatchSetRows` (`src/inference/jsep/ops/set-rows.ts:418-494`) silently no-ops on the very first call.
+**One-line goal:** add host→GPU writeback so JSEP ops that read tensors written by CPU-fallback ops see fresh data. Symmetric to Stage 4.5 H1's GPU→host writeback.
 
-**One-line context:** Stage 4.7 D2-tight proved Reading R1 — the FIRST SET_ROWS divert dispatch (i=3, K-cache layer 0, dstO=0) silently fails to write its dst. Every subsequent SET_ROWS divert succeeds. Suspect surfaces (in roughly suspect-likelihood order): encoder-batcher first flush; pipeline cache miss for the SET_ROWS variant; bind-group / temp-dst first allocation lifecycle; pre-copy of zero-initialised dst surviving past the kernel.
+**One-line context:** Stage 4.8 proved that i=3's `src0` GPU region (h26o0) holds stale zeros at dispatch time because the K-projection→ROPE→CPY chain is CPU-fallback (per Stage 4.4 F1: CPU ops dereference `tensor->data = host_mirror + offset` and write only to host_mirror). The kernel reads stale zeros, writes zeros, KV cache stays at zero, decode collapses to gibberish. Stage 4.5 H1 fixed the symmetric direction (GPU→host). The Stage 4.4 brief flagged this host→GPU direction; Stage 4.5 deferred it. Stage 4.8 confirmed it's the load-bearing remaining bug.
 
-#### Implementation — Stage 4.8 (cheap probe first, then narrow)
+#### Implementation — Stage 4.9 (start with H1-inverse; measure; revisit)
 
-**Step A — eager-warmup probe (~5 min, can ship the fix in the same step if it works).**
+**Step 1 — H1-inverse in `ggml_backend_jsep_graph_compute`** (`~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp`).
 
-If the first-call failure is a pipeline-compile race or a "first dispatch hits cold encoder" issue, a single throwaway warm-up SET_ROWS divert dispatch at engine init makes the bug invisible to user code. Add to `installJsepCallbacks` (`src/inference/jsep/index.ts:129+`) — right after `runtime` construction, BEFORE returning — a 6-line warm-up:
+Mirror the H1 pattern: after each CPU-fallback op runs, copy its dst tensor's `host_mirror[offset..+size]` → GPU buffer via `jsepWrite`. CPU-fallback ops are detected as nodes where `device_supports_op` returns false (the scheduler peels them to the CPU sub-graph) — but those don't go through this `graph_compute` at all. The actual location to instrument is at the BOUNDARY where ggml-backend re-syncs cross-backend tensors. Look at how Stage 4.5 H1 tracks JSEP-side ops (after each `jsepRunOp` call) and find the symmetric hook for CPU-side ops.
 
-```ts
-// Stage 4.8 warm-up: dispatch one throwaway SET_ROWS divert into a
-// scratch buffer so the pipeline / encoder / temp-dst allocator are
-// hot before any real graph dispatches them. Cheap (~50 µs of GPU
-// time amortised over model load).
-const warmDst = dataManager.alloc(64);
-const warmSrc = dataManager.alloc(64);
-const warmIdx = dataManager.alloc(64);
-// pre-zero buffers, dispatchSetRows with divert=true (dst aliases src[2])...
-// see set-rows.ts dispatchSetRows signature.
-dataManager.free(warmDst); dataManager.free(warmSrc); dataManager.free(warmIdx);
-```
+If the CPU-fallback path doesn't go through JSEP's `graph_compute` at all, an alternative location: instrument the JSEP backend's `cpy_tensor` callback (or whichever callback fires when ggml's scheduler issues a CPU→JSEP tensor copy). That's where host_mirror is updated by an external write; we can mirror it to the GPU buffer at the same time.
 
-Then re-run the spike and check whether `i=3` succeeds (dstImmediate now non-zero).
-- **If yes:** ship the warm-up as the fix. Patch stack unchanged. Stage 4.8 closes here.
-- **If no:** fall through to Step B (the bug isn't a generic first-call cold-start; it's specific to i=3's exact arguments).
+Concretely: in `ggml-jsep.cpp`, look for the existing `set_tensor`/`memset_tensor`/`cpy_tensor` callbacks and trace where the CPU-fallback path's dst tensor (which lives in JSEP buffer via the F1 host_mirror trick) lands its writes. Add a `jsepWrite(handle, offset, host_mirror+offset, size)` call at that point.
 
-**Step B — read-temp-dst probe (~30 min, only if Step A doesn't fix it).**
+If no clean hook exists in current `ggml-jsep.cpp`, fall back to **per-runOp pre-pass**: in `ggml_backend_jsep_graph_compute`, BEFORE dispatching each JSEP runOp, walk the descriptor's source tensors and for each one call `jsepWrite` to sync host_mirror→GPU. This is heavier but guaranteed to work.
 
-Extend the `mod.jsepRunOp` D2-tight wrapper to also read **temp-dst** for the first SET_ROWS, in three windows: pre-dispatch (after pre-copy from real-dst into temp), post-dispatch (after kernel writes temp), post-copy-back (real-dst after copy-back). The divert path's temp-dst is allocated inside `dispatchSetRows` and freed before return; we need to instrument from JS. Two options:
+**Step 2 — verify via the spike's existing Stage 4.8 captures.**
 
-1. **Hook from JS** — extend `dispatchSetRows` (or its caller) to expose the temp-dst handle on a `window.__lastSetRowsDivert` field while the dispatch is in flight, then read from the wrapper.
-2. **Hook from C++** — add `console.log` calls inside the divert branch via `EM_ASM` (heavier; needs wasm rebuild).
+Re-run the spike with the H1-inverse patch in. Expected outcomes:
 
-Option 1 is cheaper. Apply only to the first divert call (gated by `setRowsDiag.length === 0`).
+- `window.__stage48Captures.src0AtKernelTimeF32` row 0 = real F32 K data (~order of 0.01-1.0 magnitude, non-zero).
+- `window.__stage48Captures.postKernelFirst8U16` row 0..5 = real f16 K data (no all-zero rows).
+- `window.__stage48Captures.postCopyBackFirst8U16` row 0..5 = matches post-kernel.
+- `GENERATED_TEXT` = something sensible. The TinyLlama prompt is "What is the capital of France?" → expected answer contains "Paris".
 
-**Step C — branch on which temp-dst window is zero:**
+If src0 IS now real but tokens are still gibberish, there's a downstream bug. Move to Stage 4.10.
 
-- **Pre-dispatch already zero AND post-dispatch zero AND post-copy-back zero**: pre-copy ran into a zero-init temp-dst (correct — KV cache is fresh-zero), kernel didn't write to temp-dst. Suspect pipeline cache miss or bind-group layout issue. Probe: compile the SET_ROWS pipelines eagerly at engine init (same shape as the warm-up in Step A but skip the actual dispatch). If first call now succeeds, pipeline-compile-race confirmed.
-- **Pre-dispatch correct, post-dispatch correct, post-copy-back stale (real-dst still zero)**: copy-back is skipped or encoded-wrong on first call specifically. Inspect whether the encoder commits between the kernel dispatch and the copy-back, or whether copy-back's source (temp-dst) is alive at the right point.
-- **Pre-dispatch correct, post-dispatch zero**: kernel itself didn't run. Suspect dispatch-count off-by-one on first call, or workgroup-count miscalculation that drops the only group.
+**Step 3 — Stage 4.8 instrumentation cleanup.**
+
+Once decode works:
+
+- Revert `src/inference/jsep/index.ts` shape-matched warmup (was only useful as Step A negative result; bug was elsewhere).
+- Revert `src/inference/jsep/ops/set-rows.ts` `__stage48SetRowsLog` entry/exit log + divert hook capture.
+- Revert `smoke-test/p2-v2-spike.src.ts` `__consoleErrors` wrap, `__stage48Captures`, `__stage48DivertHook` allocation block, full-`nb` fields in `setRowsDiagEntry`.
+
+Keep the Stage 4.8 closure report (`STAGE-4.8-RESULT.md`) as the historical record.
 
 #### Step 0 — verify state (only if the bootstrap block at the top failed)
 
@@ -1026,34 +1023,40 @@ Option 1 is cheaper. Apply only to the first divert call (gated by `setRowsDiag.
 #   → e0fa38928   webllm-browser-patches   (patch stack 7)
 
 git log --oneline -10
+#   → docs(TODO): Stage 4.8 closed — queue Stage 4.9 host→GPU writeback fix
+#   → docs(reports): Stage 4.8 closure — host→GPU writeback gap (H1-inverse)
+#   → chore(spike+jsep): Stage 4.8 instrumentation — temp-dst + src0 readback
 #   → docs(TODO): Stage 4.7 closed — queue Stage 4.8 first-call divert localization
 #   → docs(reports): Stage 4.7 D2-tight closure — i=3 dispatch silently fails (R1 confirmed)
 #   → chore(spike): Stage 4.7 D2-tight — synchronous post-dispatch SET_ROWS dst readback
-#   → docs(TODO): Stage 4.6 D2-lite partial closure — i=3 anomaly; queue Stage 4.7 D2-tight
-#   → docs(reports): Stage 4.6 D2-lite closure — i=3 K-cache layer 0 dst all-zero
-#   → chore(spike): Stage 4.6 D2-lite — per-SET_ROWS source/indices/dst probe
 ```
 
 #### Spike state cheat sheet
 
-- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.8-<probe>`
-- **Per-token decode (post-D2-tight):** ~25 ms. Step A's warm-up adds a one-shot ~50 µs of GPU time amortised over model load (invisible). Step B's per-call temp-dst readbacks land during prefill, not decode (same as D2-tight).
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.9-<probe>`
+- **Per-token decode (post-Stage-4.8):** ~25 ms. Stage 4.9's H1-inverse adds N×jsepWrite per CPU-fallback op (similar cost to Stage 4.5 H1's ~7% per-token overhead).
 - **Built-in selftests:** 6 PASS (Q4K, RMSNORM single, RMSNORM multi, MATMUL prod no-divert/divert, SETROWS V-cache no-divert/divert).
-- **Build:** Step A only needs `make wasm-build` (well, only `bun build` if the warm-up lives in JS-side `index.ts`). Step B needs `bun build smoke-test/p2-v2-spike.src.ts`.
+- **Build:** `make wasm-build` then `bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js`.
 - **`make checkall` must be green** before committing.
 
-#### Exit criteria — Stage 4.8 closes when documented in `STAGE-4.8-RESULT.md`:
+#### Exit criteria — Stage 4.9 closes when documented in `STAGE-4.9-RESULT.md`:
 
-- **Step A flips i=3 dstImmediate non-zero** → ship the warm-up. Closure brief notes "first-call cold-start" was the root cause; queues Stage 4.9 (full Outcome A "Paris" decode verification on the canonical TinyLlama smoke prompt).
-- **Step B narrows to a specific window**:
-  - Pipeline / bind-group race → ship eager-compile of SET_ROWS pipelines + retry of the throwaway warm-up.
-  - Copy-back skipped → fix the encoder-commit ordering inside `dispatchSetRows` divert path.
-  - Kernel didn't run → fix dispatch/workgroup-count.
-- Either way, the spike's chat path should now decode "Paris" (or some sensible English answer) — that's the load-bearing exit signal for the entire Phase 3 Stage 4.x sequence.
+- `window.__stage48Captures.src0AtKernelTimeF32` rows 0..5 contain real F32 K-projection-after-ROPE values (not zeros / sparse -0.0).
+- `window.__stage48Captures.postKernelFirst8U16` rows 0..5 contain real f16 K data (not all-zeros / sparse 0x8000).
+- The spike's chat path decodes "Paris" (or some sensible English answer).
+- Patch stack: 7 → 8 (the H1-inverse change in `ggml-jsep.cpp`).
+- Stage 4.8 diagnostic instrumentation reverted; spike clean.
+- `make checkall` green.
+
+After Stage 4.9 closes, the entire Stage 4.x sequence (option A-prime KV-cache-on-jsep_buf path) is finally cleared and Phase 3 can proceed.
+
+### Earlier Stage 4.8 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.8 brief (Step A eager-warmup probe, Step B temp-dst windowed readback inside `dispatchSetRows`, Step C window-by-window branch logic) lives in [`STAGE-4.8-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.8-RESULT.md). Step A ruled out generic first-call cold-start (warmup with both tiny and shape-matched dispatches did not flip i=3). Step B's multi-row temp-dst + src0 capture proved the real bug is upstream: src0 GPU buffer is stale because CPU-fallback ops update host_mirror but not GPU buffer. Stage 4.9 brief above queues the host→GPU writeback fix (H1-inverse, mirroring Stage 4.5 H1). Collapsed at Stage 4.9 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.7 brief — collapsed (full text in closure report)
 
-Full step-by-step Stage 4.7 D2-tight brief (paste-and-go bootstrap, async jsepRunOp wrapper rewrite, synchronous readback sketch with `runtime.encoderBatcher.flush()` + `device.queue.submit` + `mapAsync`, branch-on-outcome R1 vs R2) lives in [`STAGE-4.7-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.7-RESULT.md). D2-tight CONFIRMED Reading R1: i=3's dispatch silently fails (dstImmediate identical to dstPost, both all-zero) and ruled R2 out (every other captured SET_ROWS has dstImmediate == dstPost byte-exact, non-zero). The Stage 4.8 brief above queues localization of the first-call corner case in the SET_ROWS divert path. Collapsed at Stage 4.8 queue time to keep the active surface focused.
+Full step-by-step Stage 4.7 D2-tight brief (paste-and-go bootstrap, async jsepRunOp wrapper rewrite, synchronous readback sketch with `runtime.encoderBatcher.flush()` + `device.queue.submit` + `mapAsync`, branch-on-outcome R1 vs R2) lives in [`STAGE-4.7-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.7-RESULT.md). D2-tight CONFIRMED Reading R1: i=3's dispatch silently fails (dstImmediate identical to dstPost, both all-zero) — but Stage 4.8 reframed this as misleading: the dispatch is fine, src0 is stale. Collapsed at Stage 4.8 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.6 D2/D3 brief — collapsed (full text in closure report)
 
