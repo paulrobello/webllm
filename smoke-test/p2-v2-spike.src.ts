@@ -1916,20 +1916,36 @@ async function runSpike(): Promise<void> {
 		}
 		try {
 			const gguf = GgufParser.parse(buf);
-			const targetNames = ["blk.0.attn_q.weight", "blk.0.attn_k.weight"];
+			// Stage 4.28 Probe 15 — extended from 2 weights (Stage 4.20) to
+			// 7 to localize the cascade source after Stage 4.27 confirmed
+			// `attn_out-0` Δ=4.77e-3 → `ffn_norm-0` Δ=0.183 reproduces
+			// bit-for-bit. `ffn_norm.weight` is highest-prior (38× jump
+			// suggests gain-vector mis-load); `attn_output.weight` is the
+			// other primary suspect (never directly probed). The three
+			// FFN matmul weights round out the layer-0 weight surface so
+			// any FFN-block upload bug is caught simultaneously.
+			const targetNames = [
+				"blk.0.attn_q.weight",
+				"blk.0.attn_k.weight",
+				"blk.0.attn_output.weight",
+				"blk.0.ffn_norm.weight",
+				"blk.0.ffn_gate.weight",
+				"blk.0.ffn_up.weight",
+				"blk.0.ffn_down.weight",
+			];
 			// GgufParser.tensors entries don't carry an explicit byte size;
 			// compute it from element count × per-element bytes-per-element.
 			// For Q4_0 (type=2) blocks are 32 elements in 18 bytes ⇒ 18/32
 			// bytes per element. Matches GgufParser.calculateTotalDataSize
 			// internal logic.
-			const Q4_0_TYPE = 2;
 			const elemBytes = (type: number): number => {
 				switch (type) {
-					case 0: return 4;       // F32
-					case 1: return 2;       // F16
-					case Q4_0_TYPE: return 18 / 32; // Q4_0
-					case 8: return 34 / 32; // Q8_0
+					case 0: return 4;          // F32
+					case 1: return 2;          // F16
+					case 2: return 18 / 32;    // Q4_0
+					case 8: return 34 / 32;    // Q8_0
 					case 12: return 144 / 256; // Q4_K
+					case 14: return 210 / 256; // Q6_K
 				}
 				throw new Error(`probe9b: unsupported tensor type ${type}`);
 			};
@@ -2086,6 +2102,65 @@ async function runSpike(): Promise<void> {
 				`     [probe9c] OUTCOME: ${allMatch9c ? "F-1 (GPU bytes match — upload chain bit-clean; kernel re-investigation)" : "F-2 (GPU bytes differ — host→GPU corruption in writeBuffer path)"}`,
 				allMatch9c ? "ok" : "fail",
 			);
+
+			// Stage 4.28 Probe 15 — synthesize per-weight verdict across the
+			// extended 7-tensor allowlist into a single P-15-* outcome line.
+			// Each weight's verdict line is in the format the brief specifies:
+			//   [STAGE-4.28] <name> ref_hash=0x<H1> gpu_readback_hash=0x<H2> match=<bool>
+			// where ref_hash is the JS-side GgufParser hash (probe9b.ref) and
+			// gpu_readback_hash is the GPU mapAsync readback hash (probe9c).
+			// "match" is the AND of (ref==pre) AND (pre==gpu) — i.e., the
+			// full chain GGUF→set_tensor→GPU is bit-clean for that weight.
+			const stage428Names = [
+				"blk.0.attn_q.weight",
+				"blk.0.attn_k.weight",
+				"blk.0.attn_output.weight",
+				"blk.0.ffn_norm.weight",
+				"blk.0.ffn_gate.weight",
+				"blk.0.ffn_up.weight",
+				"blk.0.ffn_down.weight",
+			];
+			const refMap = (globalThis as any).__weightHashRef as
+				| Record<string, { fnv1a: number; offset: number; size: number }>
+				| undefined;
+			const gpuMap: Record<string, { fnv1a_pre: string; fnv1a_gpu: string; match: boolean }> = {};
+			for (const v of verdict9c) {
+				gpuMap[v.name] = { fnv1a_pre: v.fnv1a_pre, fnv1a_gpu: v.fnv1a_gpu, match: v.match };
+			}
+			const stage428Lines: string[] = [];
+			let firstMismatch: string | null = null;
+			for (const name of stage428Names) {
+				const r = refMap?.[name];
+				const g = gpuMap[name];
+				const refHex = r ? `0x${(r.fnv1a >>> 0).toString(16).padStart(8, "0")}` : "<missing>";
+				const gpuHex = g ? g.fnv1a_gpu : "<missing>";
+				const refMatchesPre = !!(r && g && refHex === g.fnv1a_pre);
+				const fullMatch = !!(r && g && g.match && refMatchesPre);
+				stage428Lines.push(
+					`[STAGE-4.28] ${name} ref_hash=${refHex} gpu_readback_hash=${gpuHex} match=${fullMatch}`,
+				);
+				if (!fullMatch && firstMismatch === null) {
+					firstMismatch = name;
+				}
+			}
+			(globalThis as any).__stage428Lines = stage428Lines;
+			(globalThis as any).__stage428FirstMismatch = firstMismatch;
+			for (const line of stage428Lines) {
+				log(`     ${line}`, line.endsWith("match=true") ? "ok" : "fail");
+			}
+			let outcome: string;
+			if (firstMismatch === null) {
+				outcome = "P-15-clean (all 7 weights byte-exact end-to-end; suspects 1+2 close; pivot to suspect 3 first8-window blindness on kqv_out-0)";
+			} else if (firstMismatch === "blk.0.ffn_norm.weight") {
+				outcome = "P-15-gain (ffn_norm.weight gain-vector mis-load CONFIRMED; trace upload path)";
+			} else if (firstMismatch === "blk.0.attn_output.weight") {
+				outcome = "P-15-output-proj (attn_output.weight mis-uploaded despite attn_q/k bit-clean; diff upload call sites)";
+			} else if (firstMismatch.startsWith("blk.0.ffn_")) {
+				outcome = `P-15-ffn (${firstMismatch} mis-uploaded; deep-dive FFN-block upload path)`;
+			} else {
+				outcome = `P-15-other (${firstMismatch} first mismatch — unexpected; revisit upload path for that tensor)`;
+			}
+			log(`     [STAGE-4.28] OUTCOME: ${outcome}`, firstMismatch === null ? "ok" : "fail");
 		} catch (err) {
 			log(`     [probe9c] GPU-readback hash threw: ${(err as Error).message}`, "fail");
 		}
