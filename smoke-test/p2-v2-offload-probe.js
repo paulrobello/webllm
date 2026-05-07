@@ -542,6 +542,60 @@ function dispatchMatmul(ctx, desc) {
   const src0Rec = ctx.dataManager.get(src0.bufHandle);
   const src1Rec = ctx.dataManager.get(src1.bufHandle);
   const dstRec = ctx.dataManager.get(dst.bufHandle);
+  const dispatchX = Math.ceil(M / TILE_M);
+  const dispatchY = Math.ceil(N / TILE_N);
+  const dispatchZ = batchCount;
+  const dstAliasesSrc = dst.bufHandle === src0.bufHandle || dst.bufHandle === src1.bufHandle;
+  if (dstAliasesSrc) {
+    const expectedRowBytes = M * 4;
+    const expectedBatchBytes = N * M * 4;
+    if (dst.nb[1] !== expectedRowBytes || batchCount > 1 && dst.nb[2] !== expectedBatchBytes) {
+      console.error(`dispatchMatmul: aliased dst is non-contiguous (nb=[${dst.nb.join(",")}], ` + `expected row=${expectedRowBytes}, batch=${expectedBatchBytes}); ` + `divert path requires contiguous dst.`);
+      return -1;
+    }
+    const dstBytesNeeded = batchCount * N * M * 4;
+    const tempDst = ctx.device.createBuffer({
+      size: dstBytesNeeded,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const divertBindGroup = ctx.device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: src0Rec.buffer,
+            offset: src0.offset,
+            size: src0Rec.size - src0.offset
+          }
+        },
+        {
+          binding: 1,
+          resource: {
+            buffer: src1Rec.buffer,
+            offset: src1.offset,
+            size: src1Rec.size - src1.offset
+          }
+        },
+        {
+          binding: 2,
+          resource: { buffer: tempDst, offset: 0, size: dstBytesNeeded }
+        },
+        { binding: 3, resource: { buffer: shapeBuffer } }
+      ]
+    });
+    ctx.encoderBatcher.flush();
+    const enc = ctx.device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, divertBindGroup);
+    pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+    pass.end();
+    enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstBytesNeeded);
+    ctx.device.queue.submit([enc.finish()]);
+    tempDst.destroy();
+    return 0;
+  }
   const bindGroup = ctx.device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
@@ -572,9 +626,6 @@ function dispatchMatmul(ctx, desc) {
       { binding: 3, resource: { buffer: shapeBuffer } }
     ]
   });
-  const dispatchX = Math.ceil(M / TILE_M);
-  const dispatchY = Math.ceil(N / TILE_N);
-  const dispatchZ = batchCount;
   ctx.encoderBatcher.record({
     pipeline,
     bindGroup,
@@ -687,6 +738,46 @@ function dispatchRmsNorm(ctx, desc, opParamsPtr, heapBuffer) {
   ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeU32);
   const src0Rec = ctx.dataManager.get(src0.bufHandle);
   const dstRec = ctx.dataManager.get(dst.bufHandle);
+  const dispatchX = Math.ceil(rows / WG_X);
+  const dispatchY = Math.ceil(cols / WG_Y);
+  const dispatchZ = 1;
+  const dstAliasesSrc = dst.bufHandle === src0.bufHandle;
+  if (dstAliasesSrc) {
+    const dstBytesNeeded = rows * cols * 4;
+    const tempDst = ctx.device.createBuffer({
+      size: dstBytesNeeded,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const divertBindGroup = ctx.device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: src0Rec.buffer,
+            offset: src0.offset,
+            size: src0Rec.size - src0.offset
+          }
+        },
+        {
+          binding: 1,
+          resource: { buffer: tempDst, offset: 0, size: dstBytesNeeded }
+        },
+        { binding: 2, resource: { buffer: shapeBuffer } }
+      ]
+    });
+    ctx.encoderBatcher.flush();
+    const enc = ctx.device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, divertBindGroup);
+    pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+    pass.end();
+    enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstBytesNeeded);
+    ctx.device.queue.submit([enc.finish()]);
+    tempDst.destroy();
+    return 0;
+  }
   const bindGroup = ctx.device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
@@ -709,9 +800,6 @@ function dispatchRmsNorm(ctx, desc, opParamsPtr, heapBuffer) {
       { binding: 2, resource: { buffer: shapeBuffer } }
     ]
   });
-  const dispatchX = Math.ceil(rows / WG_X);
-  const dispatchY = Math.ceil(cols / WG_Y);
-  const dispatchZ = 1;
   ctx.encoderBatcher.record({
     pipeline,
     bindGroup,
@@ -992,6 +1080,64 @@ function dispatchSetRows(ctx, desc) {
   const src0Rec = ctx.dataManager.get(src0.bufHandle);
   const src1Rec = ctx.dataManager.get(src1.bufHandle);
   const dstRec = ctx.dataManager.get(dst.bufHandle);
+  const dispatchX = Math.ceil(ne0 / WG_X2);
+  const dispatchY = nr;
+  const dispatchZ = ne02 * ne03;
+  const src2BufHandle = desc.srcs.length > 2 ? desc.srcs[2].bufHandle : -1;
+  const dstAliasesSrc = dst.bufHandle === src0.bufHandle || dst.bufHandle === src1.bufHandle || src2BufHandle >= 0 && dst.bufHandle === src2BufHandle;
+  if (dstAliasesSrc) {
+    let dstSize = dst.ne[0] * dst.nb[0];
+    for (let d = 1;d < 4; d++) {
+      if (dst.ne[d] > 0)
+        dstSize = Math.max(dstSize, dst.ne[d] * dst.nb[d]);
+    }
+    if (dst.offset + dstSize > dstRec.size) {
+      console.error(`dispatchSetRows: divert would read past dst buffer end ` + `(offset=${dst.offset} + size=${dstSize} > ${dstRec.size})`);
+      return -1;
+    }
+    const tempDst = ctx.device.createBuffer({
+      size: dstSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+    const divertBindGroup = ctx.device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: src0Rec.buffer,
+            offset: src0.offset,
+            size: src0Rec.size - src0.offset
+          }
+        },
+        {
+          binding: 1,
+          resource: {
+            buffer: src1Rec.buffer,
+            offset: src1.offset,
+            size: src1Rec.size - src1.offset
+          }
+        },
+        {
+          binding: 2,
+          resource: { buffer: tempDst, offset: 0, size: dstSize }
+        },
+        { binding: 3, resource: { buffer: paramsBuf } }
+      ]
+    });
+    ctx.encoderBatcher.flush();
+    const enc = ctx.device.createCommandEncoder();
+    enc.copyBufferToBuffer(dstRec.buffer, dst.offset, tempDst, 0, dstSize);
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, divertBindGroup);
+    pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+    pass.end();
+    enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstSize);
+    ctx.device.queue.submit([enc.finish()]);
+    tempDst.destroy();
+    return 0;
+  }
   const bindGroup = ctx.device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
@@ -1022,9 +1168,6 @@ function dispatchSetRows(ctx, desc) {
       { binding: 3, resource: { buffer: paramsBuf } }
     ]
   });
-  const dispatchX = Math.ceil(ne0 / WG_X2);
-  const dispatchY = nr;
-  const dispatchZ = ne02 * ne03;
   ctx.encoderBatcher.record({
     pipeline,
     bindGroup,

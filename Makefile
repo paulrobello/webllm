@@ -150,6 +150,15 @@ wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → w
 		-DGGML_BACKEND_DL=OFF \
 		-DWEBLLM_ASSERTIONS=$(WEBLLM_ASSERTIONS) && \
 	cmake --build . --config Release -j
+	# Co-locate the JSEP WASM artifacts next to the bundle FIRST, so the
+	# spike's `bun build` step below picks up the just-built JS shim
+	# instead of the previous build's stale copy. Stage 4.5 lesson:
+	# putting cp after bun build caused the bundler to inline a prior
+	# build's wasmImports table, which DCE'd `ggml_jsep_read` whenever
+	# the previous wasm didn't actually call it. The next build that
+	# DID call it failed at WebAssembly.instantiate with "function
+	# import requires a callable" because the bundle was stale.
+	cp src/wasm/build-jsep/webllm-wasm-jsep.js src/wasm/build-jsep/webllm-wasm-jsep.wasm smoke-test/
 	# Bundle that pulls in src/inference/jsep/** so the runtime is reachable
 	# from a smoke harness via plain `import "./webllm-bundle-jsep.js"`.
 	bun run build:jsep
@@ -162,10 +171,6 @@ wasm-build-jsep: ## Build the JSEP-style backend variant (P2-v2 prototype) → w
 	# JSEP runOp delta ≥ 1) confirms the scheduler routes MUL_MAT to JSEP
 	# when src->buffer is host memory.
 	bun build smoke-test/p2-v2-offload-probe.src.ts --outfile smoke-test/p2-v2-offload-probe.js --target browser
-	# Co-locate the JSEP WASM artifacts next to the bundle so the smoke
-	# page's relative `./webllm-wasm-jsep.js` resolves cleanly. Mirrors the
-	# default `smoke-test` target's layout.
-	cp src/wasm/build-jsep/webllm-wasm-jsep.js src/wasm/build-jsep/webllm-wasm-jsep.wasm smoke-test/
 
 wasm-build-debug: WEBLLM_ASSERTIONS=1 ## Build WASM with -sASSERTIONS=1 (slower, preserves abort messages)
 wasm-build-debug: wasm-clean wasm-build
