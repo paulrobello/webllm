@@ -1675,6 +1675,83 @@ async function runSpike(): Promise<void> {
 			log(`     [probe9b] ref-hash computation threw: ${(err as Error).message}`, "fail");
 		}
 
+		// Stage 4.21 Probe 9c — GPU-side post-upload mapAsync readback hash.
+		// Walk __weightHashLog and, for each entry, compute FNV-1a-32 over
+		// the bytes that actually live on the GPU buffer at (bufHandle,
+		// offset, size). Compare against entry.fnv1a_pre (set_tensor's
+		// pre-upload host-side hash from Stage 4.20). Match ⇒ Outcome F-1
+		// (upload through GPU is bit-clean — kernel re-investigation in
+		// production conditions). Differ ⇒ Outcome F-2 (host→GPU corruption
+		// in the writeBuffer path; bisect Module.jsepWrite ➜
+		// device.queue.writeBuffer).
+		try {
+			const log4c = (globalThis as any).__weightHashLog as Array<{
+				name: string;
+				bufHandle: number;
+				offset: number;
+				size: number;
+				fnv1a_pre: number;
+			}>;
+			const verdict9c: Array<{
+				name: string;
+				match: boolean;
+				fnv1a_pre: string;
+				fnv1a_gpu: string;
+				size: number;
+			}> = [];
+			for (const entry of log4c) {
+				const rec = runtime.dataManager.get(entry.bufHandle);
+				if (entry.offset + entry.size > rec.size) {
+					log(
+						`     [probe9c] ${entry.name}: range out of bounds ` +
+							`(off=${entry.offset} size=${entry.size} buf_size=${rec.size})`,
+						"fail",
+					);
+					continue;
+				}
+				const staging = runtime.device.createBuffer({
+					size: entry.size,
+					usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+				});
+				const enc = runtime.device.createCommandEncoder();
+				enc.copyBufferToBuffer(rec.buffer, entry.offset, staging, 0, entry.size);
+				runtime.device.queue.submit([enc.finish()]);
+				await staging.mapAsync(GPUMapMode.READ, 0, entry.size);
+				const mapped = new Uint8Array(staging.getMappedRange(0, entry.size));
+				let h = 2166136261 >>> 0;
+				for (let i = 0; i < entry.size; ++i) {
+					h ^= mapped[i];
+					h = Math.imul(h, 16777619) >>> 0;
+				}
+				staging.unmap();
+				staging.destroy();
+				const match = (h >>> 0) === (entry.fnv1a_pre >>> 0);
+				verdict9c.push({
+					name: entry.name,
+					match,
+					fnv1a_pre: `0x${(entry.fnv1a_pre >>> 0).toString(16).padStart(8, "0")}`,
+					fnv1a_gpu: `0x${(h >>> 0).toString(16).padStart(8, "0")}`,
+					size: entry.size,
+				});
+			}
+			(globalThis as any).__weightHashGpuVerdict = verdict9c;
+			for (const v of verdict9c) {
+				log(
+					`     [probe9c] ${v.name}: pre=${v.fnv1a_pre} gpu=${v.fnv1a_gpu} ` +
+						`size=${v.size} match=${v.match}`,
+					v.match ? "ok" : "fail",
+				);
+			}
+			const allMatch9c =
+				verdict9c.length > 0 && verdict9c.every((v) => v.match);
+			log(
+				`     [probe9c] OUTCOME: ${allMatch9c ? "F-1 (GPU bytes match — upload chain bit-clean; kernel re-investigation)" : "F-2 (GPU bytes differ — host→GPU corruption in writeBuffer path)"}`,
+				allMatch9c ? "ok" : "fail",
+			);
+		} catch (err) {
+			log(`     [probe9c] GPU-readback hash threw: ${(err as Error).message}`, "fail");
+		}
+
 		const ctx = await bridge.createContext(model, { nCtx: 512 });
 
 		// Snapshot counters AFTER model load so model-load JSEP traffic
