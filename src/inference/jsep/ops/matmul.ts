@@ -210,11 +210,17 @@ function typeName(t: number): string {
  *                                  src1_stride1_bytes, dst_stride1_bytes,
  *                                  src0_stride2_bytes, src1_stride2_bytes,
  *                                  dst_stride2_bytes, _pad0, _pad1 } (12 u32)
+ *
+ * Stage 4.25 Probe 13 — when `kahan=true` (only honored for Q4_K), the
+ * intra-thread K-loop accumulator uses Neumaier-corrected summation. The
+ * dispatch gate (`__stage425KahanArm` global, shape match Qcur-0 only)
+ * keeps the variant kernel out of every other dispatch's pipeline cache.
  */
 function buildMatmulShader(
 	src0Type: number,
 	src1Type: number,
 	dstType: number,
+	kahan = false,
 ): string {
 	if (src1Type !== GGML_TYPE_F32 || dstType !== GGML_TYPE_F32) {
 		throw new Error(
@@ -367,7 +373,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-		case GGML_TYPE_Q4_K:
+		case GGML_TYPE_Q4_K: {
 			// Q4_K: 256-elem super-blocks; 144 bytes per super-block layout
 			// (matches ggml-common.h::block_q4_K):
 			//   bytes [0..2]   d     (f16 super-block scale)
@@ -450,15 +456,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var acc: f32 = 0.0;
+    ${kahan ? "var compensation: f32 = 0.0;" : ""}
     for (var k: u32 = 0u; k < shape.K; k = k + 1u) {
         let a: f32 = load_q4_K(m, k, batch);
         let b: f32 = src1[(batch * shape.src1_batch_bytes + n * shape.src1_row_bytes) / 4u + k];
-        acc = acc + a * b;
+        ${
+					kahan
+						? `// Neumaier-Kahan compensated summation. Recovers ~1 extra
+        // f32 mantissa bit per step over a length-K reduction by tracking
+        // the lost-low-order term in 'compensation'. WebGPU has no f64,
+        // so the correction lives entirely in f32 — single-step Kahan
+        // recovers the per-add rounding loss; cascading multiple
+        // consecutive losses (e.g. matched magnitudes) needs Neumaier's
+        // variant which we use here (always-keep-larger).
+        let term: f32 = a * b;
+        let t: f32 = acc + term;
+        if (abs(acc) >= abs(term)) {
+            compensation = compensation + ((acc - t) + term);
+        } else {
+            compensation = compensation + ((term - t) + acc);
+        }
+        acc = t;`
+						: "acc = acc + a * b;"
+				}
     }
+    ${kahan ? "acc = acc + compensation;" : ""}
     let dst_idx: u32 = (batch * shape.dst_batch_bytes + n * shape.dst_row_bytes) / 4u + m;
     dst[dst_idx] = acc;
 }
 `;
+		}
 
 		default:
 			throw new Error(`matmul: unsupported src0 type ${src0Type}`);
@@ -472,8 +499,9 @@ function buildPipeline(
 	src0Type: number,
 	src1Type: number,
 	dstType: number,
+	kahan = false,
 ): GPUComputePipeline {
-	const wgsl = buildMatmulShader(src0Type, src1Type, dstType);
+	const wgsl = buildMatmulShader(src0Type, src1Type, dstType, kahan);
 	const shaderModule = device.createShaderModule({ code: wgsl });
 	const layout = device.createBindGroupLayout({
 		entries: [
@@ -550,10 +578,38 @@ export function dispatchMatmul(
 	const batchCount = Math.max(1, src1.ne[2]) * Math.max(1, src1.ne[3]);
 
 	const ndim = batchCount > 1 ? 3 : 2;
-	const cacheKey = `mat-${typeName(src0.type)}-${typeName(src1.type)}-${typeName(dst.type)}-${ndim}`;
+
+	// Stage 4.25 Probe 13 — gated Kahan-summed accumulator path. Armed by
+	// the spike via `globalThis.__stage425KahanArm`; auto-disarms after
+	// first eligible dispatch so only Qcur-0 layer 0 (M=2048, K=2048, N=6,
+	// Q4_K) takes the variant kernel. The variant kernel uses a separate
+	// pipeline cache key (`-kahan` suffix) so the production kernel cache
+	// is unchanged for every other dispatch.
+	const kahanGlobal = globalThis as unknown as {
+		__stage425KahanArm?: boolean;
+	};
+	let useKahan = false;
+	if (
+		kahanGlobal.__stage425KahanArm &&
+		src0.type === GGML_TYPE_Q4_K &&
+		M === 2048 &&
+		K === 2048 &&
+		N === 6
+	) {
+		useKahan = true;
+		kahanGlobal.__stage425KahanArm = false;
+		// One-shot confirmation that the Kahan dispatch fired. Read by the
+		// spike's Probe 13 verdict block to disambiguate "Kahan ran and
+		// produced identical output" from "Kahan gate never fired".
+		(
+			globalThis as unknown as { __stage425KahanFired?: boolean }
+		).__stage425KahanFired = true;
+	}
+
+	const cacheKey = `mat-${typeName(src0.type)}-${typeName(src1.type)}-${typeName(dst.type)}-${ndim}${useKahan ? "-kahan" : ""}`;
 
 	const pipeline = ctx.pipelineCache.getOrCreate(cacheKey, (device) => {
-		const p = buildPipeline(device, src0.type, src1.type, dst.type);
+		const p = buildPipeline(device, src0.type, src1.type, dst.type, useKahan);
 		// Recover the bindGroupLayout from the pipeline (createComputePipeline
 		// owns it via the explicit layout we set).
 		ctx.bindGroupLayoutCache.set(cacheKey, p.getBindGroupLayout(0));

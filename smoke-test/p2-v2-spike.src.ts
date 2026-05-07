@@ -2809,6 +2809,15 @@ async function runSpike(): Promise<void> {
 		}).__probe10Capture = { armed: true, result: null };
 		log("     [probe10] capture armed (first Q4_0 MUL_MAT in prefill)");
 
+		// Stage 4.25 Probe 13 — arm Kahan-summed accumulator path on the
+		// SAME first-eligible Q4_K MUL_MAT (M=2048, K=2048, N=6) dispatch.
+		// dispatchMatmul auto-disarms after first fire so only Qcur-0
+		// layer 0 takes the Kahan kernel; every other Q4_K MUL_MAT in
+		// the 22-layer prefill stays on the production pipeline.
+		(globalThis as unknown as { __stage425KahanArm: boolean }).__stage425KahanArm =
+			true;
+		log("     [probe13] kahan accumulator armed (Qcur-0 layer 0 only)");
+
 		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
 		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
 		const tPrefillStart = performance.now();
@@ -3043,6 +3052,99 @@ async function runSpike(): Promise<void> {
 						`     [probe12] skipped — cap.src0Type=${cap.src0Type} ≠ Q4_K`,
 					);
 				}
+
+				// Stage 4.25 Probe 13 — diff captured Kahan dst-after first8
+				// against Stage 4.24's hard-coded non-Kahan baseline first8Got
+				// (recorded in `STAGE-4.24-RESULT.md`). The captured `first8Got`
+				// from the current run reflects the Kahan kernel output (the
+				// dispatch gate triggered on this same first-eligible Q4_K
+				// MUL_MAT). Build a Kahan-summed JS reference too — the Kahan
+				// WGSL output should match a Kahan JS loop to ~ULP and a plain
+				// f32 loop to ~5e-5 (single-ULP recovery) if Kahan worked.
+				const STAGE424_BASELINE_FIRST8: readonly number[] = [
+					-0.01618947833776474, 0.004848937503993511,
+					-0.015738369897007942, -0.02449355274438858,
+					-0.007620065473020077, 0.04053414985537529,
+					-0.009678085334599018, 0.04543862119317055,
+				];
+				const kahanFirst8 = captured.first8Got;
+				let kahanVsBaselineMax = 0;
+				let kahanVsBaselineIdx = -1;
+				const perElem: number[] = [];
+				for (let i = 0; i < 8; i++) {
+					const d = Math.abs(kahanFirst8[i] - STAGE424_BASELINE_FIRST8[i]);
+					perElem.push(d);
+					if (d > kahanVsBaselineMax) {
+						kahanVsBaselineMax = d;
+						kahanVsBaselineIdx = i;
+					}
+				}
+
+				// Kahan-summed JS reference over the same captured src0/src1.
+				// Mirrors the WGSL Neumaier accumulator (always-keep-larger).
+				const refKahan = new Float32Array(cap.M * cap.N);
+				for (let n = 0; n < cap.N; n++) {
+					for (let m = 0; m < cap.M; m++) {
+						let acc = Math.fround(0);
+						let comp = Math.fround(0);
+						for (let k = 0; k < cap.K; k++) {
+							const a = src0Dequant[m * cap.K + k];
+							const b = src1View[n * cap.K + k];
+							const term = Math.fround(a * b);
+							const t = Math.fround(acc + term);
+							if (Math.abs(acc) >= Math.abs(term)) {
+								comp = Math.fround(comp + Math.fround(Math.fround(acc - t) + term));
+							} else {
+								comp = Math.fround(comp + Math.fround(Math.fround(term - t) + acc));
+							}
+							acc = t;
+						}
+						refKahan[n * cap.M + m] = Math.fround(acc + comp);
+					}
+				}
+				const kahanRef = compareF32Buffers(cap.dstAfterBytes, refKahan);
+
+				// Verdict thresholds (per Stage 4.25 brief):
+				//   capturedDelta = max delta between WGSL-Kahan output and
+				//   the Stage 4.24 non-Kahan WGSL baseline. Measures how
+				//   much enabling Kahan moved the kernel. The historical
+				//   cross-module disagreement (libllama vs WGSL Qcur-0)
+				//   was 5.242e-4 — if Kahan moves the WGSL output by that
+				//   magnitude in the right direction, Kahan IS the fix.
+				let verdict: string;
+				if (kahanVsBaselineMax <= 1e-5) {
+					verdict =
+						"H-3b-structural (Kahan ≈ baseline — accumulation order is not the disagreement source; cascade mitigation needed)";
+				} else if (kahanVsBaselineMax > 1e-4) {
+					verdict =
+						"H-3b-Kahan (Kahan moved kernel ≥1e-4 — investigate alignment with libllama; ship Kahan if production prefill output stabilizes)";
+				} else {
+					verdict =
+						"H-3b-partial (Kahan moved kernel between 1e-5 and 1e-4 — investigate FMA + Kahan combination)";
+				}
+				log(
+					`MATMUL_PROBE13_DELTA = ${JSON.stringify({
+						M: cap.M,
+						K: cap.K,
+						N: cap.N,
+						kahanVsBaselineMax,
+						kahanVsBaselineIdx,
+						perElem,
+						kahanFirst8,
+						stage424BaselineFirst8: STAGE424_BASELINE_FIRST8,
+						kahanVsKahanRefMax: kahanRef.maxAbsDelta,
+					})}`,
+				);
+				const kahanFired =
+					(globalThis as unknown as { __stage425KahanFired?: boolean })
+						.__stage425KahanFired === true;
+				log(
+					`     [probe13] kahanArm=true kahanFired=${kahanFired} ` +
+						`capturedDelta=${kahanVsBaselineMax.toExponential(3)} ` +
+						`baseline=5.242e-04 ` +
+						`kahanVsKahanRef=${kahanRef.maxAbsDelta.toExponential(3)} ` +
+						`verdict: ${verdict}`,
+				);
 			}
 		} catch (err) {
 			log(
