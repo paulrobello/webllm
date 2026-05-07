@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.24 CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch — `webllm_dequantize_q4_K` shim landed in webllm's own `src/wasm/webgpu-bridge.cpp`, not in the `webllm-browser-patches` series; patch stack unchanged at 13).** **Outcome H-3b CONFIRMED — Q4_K dequant is bit-clean; the 5.24e-4 production Qcur-0 delta is f32 matmul accumulation-order disagreement.** Probe 12 added a `webllm_dequantize_q4_K(src, dst, k)` C export wrapping `ggml_get_type_traits(GGML_TYPE_Q4_K)->to_float` (= `dequantize_row_q4_K` in `ggml-quants.c`), and a post-prefill block in `smoke-test/p2-v2-spike.src.ts` that takes Stage 4.22's `__probe10Capture.result.src0Bytes` (the 2,359,296-byte Q4_K tile for `blk.0.attn_q.weight`) and dequantizes it via two paths: (A) `dequantQ4_KTile` (existing JS port of WGSL `load_q4_K`), (B) `mod._webllm_dequantize_q4_K` (libllama). Element-wise diff over **4,194,304** outputs: `maxAbsDelta = 0` (exact, not single-ULP), `nNaN = 0`, `nInf = 0`, first-8 outputs byte-identical (`PROBE12_DEQUANT_DELTA = {"M":2048,"K":2048,"totalElems":4194304,"maxAbsDelta":0,"maxIdx":-1,"verdict":"H-3b"}`). The WGSL kernel's dequant logic is provably correct against libllama's reference — Stage 4.22's self-consistency check verified the kernel against its own dequant; Probe 12 closes the gap by verifying that JS port against libllama directly. **Hypothesis split for Stage 4.25:** the remaining variable is f32 matmul accumulation order. WGSL kernel reduces 2048-K partial sums via subgroup tree + workgroup horizontal add (4 OUTPUTS_PER_WG × 16-wide subgroup); libllama reduces via SIMD lane-pair adds + horizontal sum (`vec_dot_q4_K_q8_K`'s AVX2 `_mm256_hadd_ps` / NEON `vaddvq_f32` / scalar fallback). f32 reductions of length 2048 with O(0.1) operands disagree on their last 12-13 mantissa bits ≈ O(1e-4) — fits the 5.24e-4 envelope. Stage 4.18's 4.77e-7 WGSL-vs-f32-loop delta confirms the WGSL kernel matches a *chosen* k-major f32 reference, not libllama's reduction order. `GENERATED_TEXT = "inonic boso-"` (unchanged — bug still active, framing localized to matmul accumulation). All 6 spike selftests + 5 sweep selftests still PASS. `make checkall` green (747 pass / 36 skip / 0 fail). Per-token decode 311.60 ms (within noise of Stage 4.22's 879.7 ms run-with-sweep envelope; this run reuses Stage 4.23's spike state without the q4_0 sweep enabled). Files touched: `src/wasm/webgpu-bridge.cpp` (+`webllm_dequantize_q4_K` shim), `src/wasm/CMakeLists.txt` (+ `_webllm_dequantize_q4_K` in EXPORTED_FUNCTIONS; intentionally NOT in JSPI_EXPORTS — synchronous CPU dequant doesn't need promising-wrap overhead), `smoke-test/p2-v2-spike.src.ts` (Probe 12 block in post-Probe-10 try, gated on `cap.src0Type === GGML_TYPE_Q4_K`). Closure: [`STAGE-4.24-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.24-RESULT.md). Raw artifact: [`STAGE-4.24-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.24-spike-output.txt). Stage 4.25 brief below queues a Kahan-summed WGSL accumulator probe gated to `Qcur-0` only — measures whether the 5.24e-4 collapses to ≤1e-5 with f32-Kahan accumulation (H-3b-Kahan ship target) or stays put (structural — Branch C: downstream cascade mitigation).
+
 **Stage 4.23 CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch; commits the previously-untracked `smoke-test/p2-v2-ref-probe.{html,src.ts,js}` ref-capture harness from Stage 4.17 Probe 7; patch stack unchanged at 13).** **Outcome H-3 — Probe 11 hypothesis (host-mirror writeback gap) misframed; the 5.24e-4 first8 Qcur-0 delta originates from the WGSL Q4_K matmul kernel disagreeing with libllama's CPU Q4_K matmul on the same Q-projection inputs.** Side-by-side diff of the spike's `__stage417Checkpoints` (JSEP build, patch stack 13) and the non-JSEP ref-probe's `__refCheckpoints` (`webllm-wasm.js`, same llama.cpp tip — WebGPU compiled but doesn't engage on TinyLlama's per-token shapes, so Q-proj falls back to libllama's CPU Q4_K dequant + GEMM) for the first 12 nodes of layer-0 prefill: idx=0 `attn_norm-0` (CPU on both) Δ=1e-7 (input bit-clean — rules out src1 staleness); idx=1 `Qcur-0` (jsep_buf vs CPU) Δ=**5.242e-4** (the historical number, exactly reproduced); idx=4 `Vcur-0` (CPU on both — V-proj falls to CPU on the spike too, per Stage 4.18 Probe 8b) Δ=**1e-9** (conclusive: when the spike takes the same code path as the reference, output agrees to numerical precision); idx=6 `Kcur-0` (jsep_buf vs CPU) Δ=**3.376e-4** (corroborates: WGSL Q4_K matmul produces the same scale of disagreement on a different but adjacent Q4_K dispatch); idx=9 `kq-0` Δ=1.19e-2 (Q@K^T amplifies upstream Q+K disagreement). **Why Stage 4.22's writeback-gap framing missed this:** the historical 5.24e-4 traces back to Stage 4.17's 96-checkpoint diff between **two separate WASM modules** (JSEP spike vs non-JSEP ref-probe), not a within-spike host_mirror comparison; Stage 4.22's f32 self-consistency check matched the WGSL kernel against a JS port of its own `load_q4_K` dequant (`dequantQ4_KTile`), so it verified the kernel against itself, not against libllama's `dequantize_row_q4_K`. **Hypothesis split for Stage 4.24:** H-3a (likely) — WGSL `load_q4_K` reconstructs Q4_K super-block scales/mins differently from libllama; H-3b (less likely) — both kernels reconstruct identically but accumulate the 2048-K matmul partial sums in different orders, accumulating ~K × 1e-7 = 2e-4 of f32 rounding. H-3a is the priority and easier to disprove (dequant cross-check on the captured `__probe10Capture.result.src0Bytes` against an EM_ASYNC_JS shim into `ggml_dequantize_row_q4_K`). `GENERATED_TEXT = "inonic boso-"` (unchanged from Stage 4.22 — bug still active, framing now correct). All 6 spike selftests + 5 sweep selftests still PASS at the Stage 4.22 tip. `make checkall` not re-run (no source-code change to library or kernel; only commits the ref-probe files). Closure: [`STAGE-4.23-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.23-RESULT.md). Stage 4.24 brief below queues Probe 12: capture `__probe10Capture.result.src0Bytes`, dequant via `dequantQ4_KTile` (WGSL-equivalent) and via libllama's `ggml_dequantize_row_q4_K` (EM_ASYNC_JS shim into the existing WASM module), diff element-wise; `maxAbsDelta > 1e-5` ⇒ H-3a confirmed (fix WGSL dequant); `≤ 1e-5` ⇒ H-3b (investigate matmul accumulation order).
 
 **Stage 4.22 CLOSED 2026-05-07 — `82147e8` (no llama.cpp patch — pure JS-side spike + matmul.ts probe gate; patch stack 13 unchanged).** **Outcome G-2 CONFIRMED — kernel bit-clean on production inputs.** Probe 10 captured the actual src0 / src1 / dst-after bytes the kernel saw at the first production JSEP MUL_MAT dispatch in TinyLlama prefill (layer-0 Q-projection, `Qcur-0` ne=[2048,6,1,1]) via pre-encoder + kernel-encoder + post-encoder mapAsync staging buffers, then replayed those captured bytes through the same `dispatchMatmul` entry point as a one-off synthetic call. Both the captured production output and the synthetic replay match an f32 element-wise k-major CPU reference to within **4.768e-7** (single ULP at `outputMaxAbs=6.37`); first-8 outputs are bit-identical between captured and synthetic. The dispatch / kernel-execution boundary is exonerated — pipeline cache collisions, bind-group offset mismatches, workgroup count off-by-ones, src0/src1 swaps are mathematically excluded by the bit-identical first-8 outputs. **Surprise finding** — TinyLlama-1.1b-chat-q4_0.gguf actually contains Q4_K projections + Q6_K embeddings (`token_embd.weight` t=12 Q4_K; `blk.0.attn_q.weight` t=12 Q4_K; `blk.0.attn_v.weight` t=14 Q6_K; `output.weight` t=14 Q6_K). The "Q4_0" in the filename is the HuggingFace quant tier label, not the on-disk tensor type — **Stage 4.18's "Q4_0 production-shape sweep" was therefore measuring a different code path from production**. The 312× delta gap that motivated Stage 4.22 was an apples-vs-oranges comparison all along. (Footnote: Stage 4.22's f32 reference was JS-side dequant of captured Q4_K bytes via `dequantQ4_KTile` — a port of WGSL `load_q4_K` — so the kernel was verified against its own dequant logic, not against libllama's; Stage 4.23 closes that gap.) All 6 spike selftests still PASS, all 5 sweep selftests still PASS. `make checkall` green (747 pass / 36 skip / 0 fail). Files touched: `src/inference/jsep/ops/matmul.ts` (Probe 10 capture branch in divert path; gated on Q4_0 OR Q4_K src0; auto-disarms after first fire); `smoke-test/p2-v2-spike.src.ts` (`dequantQ4_KTile` port of WGSL `load_q4_K`; generalized `runMatmulQ4_0FromBytes` → `runMatmulFromBytes(src0Type, ...)` covering both Q4_0 and Q4_K; `compareF32Buffers` helper; post-prefill probe10 block). Closure: [`STAGE-4.22-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.22-RESULT.md). Stage 4.23 above re-derived the 5.24e-4 number's provenance and reframed Stage 4.22's writeback-gap follow-on hypothesis (Outcome H-3).
@@ -975,7 +977,7 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.24 Probe 12: WGSL `load_q4_K` vs libllama `dequantize_row_q4_K` cross-check. Stage 4.23 closed Outcome **H-3** — the 5.24e-4 first8 Qcur-0 delta is a kernel-vs-kernel disagreement (JSEP WGSL Q4_K matmul vs libllama CPU Q4_K matmul on the same Q-projection inputs), NOT a host_mirror writeback gap. Diagnostic: ref-probe (`p2-v2-ref-probe.html` — non-JSEP `webllm-wasm.js`, Q-proj falls back to libllama CPU) and spike (`p2-v2-spike.html` — JSEP path, Q-proj on GPU) both compute identical attn_norm-0 input on CPU (idx=0 Δ=1e-7), but their Qcur-0 outputs differ by 5.242e-4 (idx=1) at exactly element [7] — the historical number reproduced exactly. V-projection runs on CPU on both sides (Stage 4.18 Probe 8b — V-on-CPU) and matches to 1e-9, which is conclusive: the divergence is path-dependent, not input-dependent. Stage 4.22's f32 self-consistency check was tautological — it diffed the WGSL kernel against its own JS-port `dequantQ4_KTile`, not against libllama. **Probe 12 disambiguates between H-3a (dequant disagreement) and H-3b (matmul accumulation-order disagreement) by capturing the production layer-0 wq Q4_K bytes once and dequantizing them via two paths:** the existing `dequantQ4_KTile` (WGSL-equivalent JS port) and an EM_ASYNC_JS shim into libllama's `ggml_dequantize_row_q4_K` exposed from the JSEP WASM module. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.25 Probe 13: Kahan-summed WGSL matmul accumulator gated to `Qcur-0`. Stage 4.24 closed Outcome **H-3b** — Q4_K dequant is bit-clean (Probe 12: `maxAbsDelta=0` over 4,194,304 elements between WGSL-equivalent `dequantQ4_KTile` and libllama's `dequantize_row_q4_K`). The 5.24e-4 production Qcur-0 delta is therefore f32 matmul accumulation-order disagreement: WGSL reduces 2048-K via subgroup tree + workgroup horizontal add (4 OUTPUTS_PER_WG × 16-wide subgroup); libllama reduces via SIMD lane-pair adds + horizontal sum (`vec_dot_q4_K_q8_K`). f32 reductions of length 2048 with O(0.1) operands disagree on their last 12-13 mantissa bits ≈ O(1e-4). **Probe 13 quantifies whether Kahan-summed accumulation in the WGSL kernel collapses the 5.24e-4 to ≤1e-5 (H-3b-Kahan ship target) or leaves it intact (structural — Branch C, downstream cascade mitigation).** Gate the Kahan path to layer-0 `Qcur-0` only — the 32 lm-head + N projection dispatches don't share the kernel pipeline at runtime, so a `qcur0Only: bool` push constant (or a separate WGSL pipeline keyed on op name) keeps the perf cost bounded while the probe runs. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -983,15 +985,15 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.23 TODO closure commit>  docs(TODO): Stage 4.23 closed — queue Stage 4.24 Q4_K dequant cross-check
-#   → <Stage 4.23 reports commit>       docs(reports): Stage 4.23 closure — Outcome H-3 (writeback-gap reframed)
-#   → <Stage 4.23 feat commit>          feat(spike): Stage 4.17 Probe 7 — non-JSEP ref-probe harness (committed at Stage 4.23)
-#   → 1e33dd2                           docs(TODO): Stage 4.22 closed — queue Stage 4.23 CPU-fallback writeback gap
-#   → 1cbef25                           docs(reports): Stage 4.22 closure — Outcome G-2 (kernel bit-clean on production)
+#   → <Stage 4.24 TODO closure commit>  docs(TODO): Stage 4.24 closed — queue Stage 4.25 Kahan accumulator probe
+#   → <Stage 4.24 reports commit>       docs(reports): Stage 4.24 closure — Outcome H-3b (matmul accumulation-order)
+#   → <Stage 4.24 feat commit>          feat(spike): Stage 4.24 Probe 12 — Q4_K dequant cross-check shim + harness
+#   → 8782b4b                           docs(TODO): Stage 4.23 closed — queue Stage 4.24 Q4_K dequant cross-check
+#   → 158906d                           docs(reports): Stage 4.23 closure — Outcome H-3 (5.24e-4 provenance reframed)
 
-# 2. Confirm llama.cpp tip (patch stack unchanged at 13 — Probe 12 may add P14 if the EM_ASYNC_JS export is implemented in C++).
+# 2. Confirm llama.cpp tip (patch stack 13 unchanged from Stage 4.24).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → ef89f9314   webllm-browser-patches   (patch stack 13 — no change from Stage 4.23)
+#   → ef89f9314   webllm-browser-patches   (patch stack 13)
 
 # 3. Smoke-server up on 8031.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
@@ -1002,149 +1004,152 @@ PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.loa
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 
-# 5. Reproduce Stage 4.23's reference comparison (sanity-check the H-3 framing still holds before adding Probe 12 instrumentation):
-REF_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-ref-probe.html" in t.get("url","")), ""))' 2>/dev/null)
-[ -n "$REF_TAB" ] || REF_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html?v=stage4.24-ref&ingest=off" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-agentchrome --port "$PORT" page wait --tab "$REF_TAB" --text "DONE" --timeout 240000
-agentchrome --port "$PORT" navigate --tab "$SPIKE_TAB" "http://localhost:8031/p2-v2-spike.html?v=stage4.24-spike&ingest=off"
+# 5. Sanity-check Stage 4.24's H-3b verdict still reproduces (~30 s):
+agentchrome --port "$PORT" navigate --tab "$SPIKE_TAB" "http://localhost:8031/p2-v2-spike.html?v=stage4.25-baseline&ingest=off"
 agentchrome --port "$PORT" page wait --tab "$SPIKE_TAB" --text "DONE" --timeout 240000
-# Diff idx=1 Qcur-0 first8: expect element [7] delta = 5.242e-4 reproduced exactly.
+# Look for: PROBE12_DEQUANT_DELTA "maxAbsDelta":0 "verdict":"H-3b"
+#           MATMUL_PROBE10_CAPTURED_DELTA "maxAbsDelta":4.768e-7 (kernel matches its own f32 reference)
+#           GENERATED_TEXT = "inonic boso-"
 ```
 
-**One-line goal:** Capture the production layer-0 wq Q4_K bytes that the WGSL kernel sees at first dispatch (already done in Stage 4.22's `__probe10Capture.result.src0Bytes` — the 2,359,296-byte Q4_K tile for `blk.0.attn_q.weight`), dequantize them via both the WGSL-equivalent JS port (`dequantQ4_KTile`) and libllama's `ggml_dequantize_row_q4_K`, and diff the resulting f32 weight tiles element-wise to localize H-3a vs H-3b.
+**One-line goal:** Add a Kahan-summed accumulator path to `dispatchMatmul` in `src/inference/jsep/ops/matmul.ts`, gated to layer-0 `Qcur-0` (or any layer-0 Q4_K MUL_MAT — the dispatch path doesn't see the ggml node name directly, so gate via a one-shot `__stage425KahanArm` flag set right before prefill). Re-run the spike. Diff the `MATMUL_PROBE10_CAPTURED_DELTA.maxAbsDelta` between the kernel's existing path and the Kahan path on the *same captured production inputs*.
 
-**One-line context:** Stages 4.17 → 4.23 ruled out every byte-clean / writeback-gap framing of the bug. Q-proj and K-proj are both Q4_K JSEP-GPU dispatches; their outputs diverge from libllama CPU by ~5e-4 / ~3e-4. V-proj is CPU on both sides and matches to 1e-9 — so whatever differs is **kernel-implementation only**, not input or buffer state.
+**One-line context:** Probe 12 closed dequant; the only remaining f32-precision lever in the Q-projection chain is the matmul reduction tree. Kahan summation is the textbook fix for catastrophic cancellation in long-running f32 sums; if it doesn't help here, the disagreement is structurally forced by the SIMD reduction layout of libllama and the cascade fix has to live downstream.
 
-#### Probe 12 implementation sketch
+#### Probe 13 implementation sketch
 
-1. **Expose `ggml_dequantize_row_q4_K` to JS as an EM_ASYNC_JS-callable
-   shim** (or — cheaper — a regular `EMSCRIPTEN_KEEPALIVE` C export
-   since dequant is synchronous CPU code, no JSPI needed). Add to
-   `src/wasm/webgpu-bridge.cpp`:
-   ```cpp
-   extern "C" EMSCRIPTEN_KEEPALIVE
-   void webllm_dequantize_q4_K(const void * src, float * dst, int64_t k) {
-       ggml_get_type_traits(GGML_TYPE_Q4_K)->to_float(src, dst, k);
+1. **WGSL kernel split.** In `src/inference/jsep/ops/matmul.ts` the
+   Q4_K MUL_MAT WGSL kernel (the path Stage 3 added) accumulates
+   into a `var<private> acc: f32` (or per-thread reg) over a 2048-K
+   loop. Add a Kahan path:
+   ```wgsl
+   var acc: f32 = 0.0;
+   var compensation: f32 = 0.0;
+   for (var k = 0u; k < K; k = k + STEP) {
+       let term = src0_dequant[k] * src1[k];
+       let y = term - compensation;
+       let t = acc + y;
+       compensation = (t - acc) - y;
+       acc = t;
    }
    ```
-   Build: `make wasm-build-jsep` (rebuilds `webllm-wasm-jsep.{js,wasm}`
-   with the new export). Patch stack ticks 13 → 14 if the C export
-   needs to be in libllama's tree; alternatively, gate it inside
-   webgpu-bridge.cpp where the existing `webllm_*` exports live (no
-   patch-stack change in that case).
+   The kernel is split by a uniform / push-constant `useKahan: u32`
+   so the same pipeline can run both paths (or use two separately-
+   compiled pipelines if the uniform branch causes shader-cache
+   issues — measure first). Keep the existing OUTPUTS_PER_WG=4
+   subgroup tree intact; the Kahan correction is intra-thread, no
+   cross-lane changes.
 
-2. **Add a Probe 12 block to `smoke-test/p2-v2-spike.src.ts`** in the
-   post-prefill region (after Probe 10 has captured `src0Bytes`):
-   ```ts
-   const cap = (globalThis as any).__probe10Capture.result;
-   const src0 = new Uint8Array(cap.src0Bytes);  // 2,359,296 B Q4_K tile
-   const K = 2048;
-   const N = 2048;  // wq is [K=2048, N=2048] in row-major
+2. **Gate via spike-side push.** In `dispatchMatmul`, accept an
+   optional `kahanArm: boolean` from the runtime. Gate the WGSL
+   `useKahan` uniform on `kahanArm && M == 2048 && K == 2048 &&
+   N == 6 && src0Type == GGML_TYPE_Q4_K` (matches `Qcur-0`'s
+   shape — and `Kcur-0` is `M == 256` so it won't trigger). Auto-
+   disarm after first fire (same pattern as Probe 10). The runtime
+   reads `(globalThis as any).__stage425KahanArm` once per dispatch.
 
-   // Path A: WGSL-equivalent dequant (existing JS port).
-   const wgslDequant = new Float32Array(K * N);
-   for (let row = 0; row < N; ++row) {
-     dequantQ4_KTile(src0, row, K, wgslDequant, row * K);
-   }
+3. **Spike block reuse.** The existing Probe 10 capture path
+   (`dispatchMatmul` already records src0/src1/dst on the first
+   eligible production dispatch) gives us the *exact same captured
+   bytes* before and after the Kahan switch. So re-running the
+   spike with `__stage425KahanArm = true` set right before
+   `bridge.decode(prefill)` gives a direct A/B on identical inputs.
 
-   // Path B: libllama dequant via WASM export.
-   const llamaDequant = new Float32Array(K * N);
-   const srcPtr = mod._malloc(src0.byteLength);
-   const dstPtr = mod._malloc(llamaDequant.byteLength);
-   mod.HEAPU8.set(src0, srcPtr);
-   for (let row = 0; row < N; ++row) {
-     mod._webllm_dequantize_q4_K(srcPtr + row * (src0.byteLength / N), dstPtr, K);
-     llamaDequant.set(new Float32Array(mod.HEAPU8.buffer, dstPtr, K), row * K);
-   }
-   mod._free(srcPtr); mod._free(dstPtr);
-
-   // Element-wise diff.
-   let maxAbs = 0, maxIdx = -1;
-   for (let i = 0; i < K * N; ++i) {
-     const d = Math.abs(wgslDequant[i] - llamaDequant[i]);
-     if (d > maxAbs) { maxAbs = d; maxIdx = i; }
-   }
-   const verdict = maxAbs > 1e-5 ? "H-3a" : "H-3b";
-   log(`[probe12] dequantDeltaMax=${maxAbs.toExponential(3)} maxIdx=${maxIdx} OUTCOME: ${verdict}`);
+4. **Logging.** Re-use Stage 4.22's `MATMUL_PROBE10_CAPTURED_DELTA`
+   line — the JSON already includes `maxAbsDelta` and first-8 outputs.
+   Compare against the Stage 4.24 baseline (first8 element [7] delta
+   = 5.242e-4). New verdict line:
    ```
-
-3. **Verdict line + branch.**
-   - `[probe12] dequantDeltaMax=<x> maxIdx=<i> OUTCOME: H-3a` if
-     `maxAbs > 1e-5` — fix the WGSL `load_q4_K` (Stage 4.25). Probably
-     a sub-block scale/min reconstruction bug — compare WGSL bit-twiddling
-     against `ggml-quants.c::dequantize_row_q4_K`.
-   - `[probe12] dequantDeltaMax=<x> maxIdx=<i> OUTCOME: H-3b` if
-     `maxAbs ≤ 1e-5` — both kernels reconstruct identically; the
-     5.24e-4 must come from f32 accumulation-order disagreement
-     between CPU GEMM and WGSL workgroup-tiled matmul. Stage 4.25
-     would re-implement the WGSL matmul with libllama-style row-major
-     accumulation and re-measure.
+   [probe13] kahanArm=true capturedDelta=<x>.exp(3) baseline=5.242e-04 verdict: <H-3b-Kahan|H-3b-structural>
+   ```
+   `H-3b-Kahan` if `capturedDelta ≤ 1e-5`; `H-3b-structural` if
+   `capturedDelta > 1e-4` (essentially unchanged); pivot to a third
+   branch for in-between values.
 
 #### Files to read first
 
-- [`STAGE-4.23-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.23-RESULT.md) — H-3 reframe + ref-probe vs spike diff table.
-- [`STAGE-4.22-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.22-RESULT.md) — `__probe10Capture.result.src0Bytes` location + `dequantQ4_KTile` history.
-- `smoke-test/p2-v2-spike.src.ts` — `dequantQ4_KTile` definition (port of WGSL `load_q4_K`) and the post-prefill probe10 capture block where Probe 12 attaches.
-- `src/wasm/webgpu-bridge.cpp` — existing `webllm_*` exports pattern to mirror.
-- `~/Repos/llama.cpp/ggml/src/ggml-quants.c` — reference `dequantize_row_q4_K` (the implementation Path B will call into via `ggml_get_type_traits`).
-- `src/inference/jsep/ops/matmul.ts` — WGSL `load_q4_K` source (the path that Path A's `dequantQ4_KTile` mirrors).
+- [`STAGE-4.24-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.24-RESULT.md) — H-3b confirmation + matmul-accumulation reasoning.
+- `src/inference/jsep/ops/matmul.ts` — the WGSL Q4_K MUL_MAT kernel (Stage 3 + Probe 10 capture branch). Lines around the f32 accumulator loop.
+- `smoke-test/p2-v2-spike.src.ts` — Probe 10 capture block + Probe 12 cross-check (line ~2944 onward) — the new Probe 13 verdict line attaches just below.
+- `~/Repos/llama.cpp/ggml/src/ggml-cpu/quants.c::vec_dot_q4_K_q8_K` — the libllama reference reduction order (AVX2 `_mm256_hadd_ps` / NEON `vaddvq_f32` / scalar fallback). Compare against the WGSL accumulator structure.
 
 #### Risk register
 
-- **`webllm_dequantize_q4_K` export naming collision.** The existing
-  `webllm_*` exports (`webllm_load_model`, `webllm_decode`, etc.)
-  follow a `model/context/...` API contract. Adding a low-level dequant
-  shim is appropriate but should be clearly gated to the JSEP build
-  (or guarded by an `#ifdef WEBLLM_PROBE_EXPORTS`) so it's not part
-  of the production library API surface.
-- **EM_ASYNC_JS not strictly needed** — `dequantize_row_q4_K` is
-  synchronous CPU code with no I/O. A regular `EMSCRIPTEN_KEEPALIVE`
-  export + `mod._webllm_dequantize_q4_K(...)` from JS is fine. The
-  brief shows the simpler path; only fall back to EM_ASYNC_JS if a
-  Stage 4.6-style EM_JS Promise-discarding bug recurs.
-- **Q4_K block layout per row.** `blk.0.attn_q.weight` is shape
-  [K=2048, N=2048] in row-major; each row has K=2048 elements
-  packed as 2048/256 = 8 super-blocks of 256 elements each. Each
-  Q4_K super-block is 144 bytes (2 f16 + 12 scale_q + 128 nibbles =
-  4 + 12 + 128 = 144). Per-row size is 8 × 144 = 1152 bytes. Total
-  tensor size: 2048 rows × 1152 = 2,359,296 bytes — matches Stage 4.22
-  capture. The Path A loop above iterates row-by-row; verify the
-  per-row offset arithmetic matches `dequantQ4_KTile`'s expected
-  input layout (which Stage 4.22's probe10 already validated produces
-  the same output as the WGSL kernel).
-- **Memory pressure of full-tile dequant.** 2048 × 2048 f32 = 16 MiB
-  per buffer × 2 paths = 32 MiB transient. Fine on 16 GB floor; no
-  issue.
+- **Kahan inside f32 only.** WGSL doesn't expose f64 in WebGPU
+  (no extension landed yet on Chrome / Apple). The Kahan correction
+  has to live in f32 too. Single-step Kahan recovers ~1 extra digit
+  of precision in long sums; if the disagreement is >1 digit (e.g.
+  the SIMD horizontal-sum tree introduces 2-3 extra rounding stages
+  not present in scalar k-major), Kahan may help only partially.
+  Document the actual delta magnitude — Branch C (downstream cascade
+  mitigation) is the fallback if Kahan caps at 1e-4.
+- **Pipeline-cache key collision.** Adding a `useKahan: u32` uniform
+  changes the pipeline layout. WebGPU pipeline cache keys are
+  layout-sensitive — verify (via `__pipelineCacheStats` or browser
+  GPU profiler) that the new key doesn't collide with the existing
+  Q4_K MUL_MAT pipeline. The Stage 4.21 footnote on pipeline cache
+  collisions remains the open suspect — ruling out Kahan vs cache
+  needs both probes to land cleanly.
+- **Gate-arm timing.** The `dispatchMatmul` divert path runs many
+  times per prefill (88 layer Q+K+QKt+out projections × 22 layers ≈
+  1936 dispatches, capped by the Probe 10 auto-disarm at the first
+  Q4_K). If `__stage425KahanArm` is read inside the dispatch
+  function but auto-disarms after first fire, only the first
+  eligible dispatch (Qcur-0 layer 0) gets the Kahan path — exactly
+  what we want. Mirror Probe 10's `if (probe10.armed) { ...
+  probe10.armed = false; }` pattern.
+- **Per-token decode regression.** Even gated to one dispatch,
+  measure tok/s before vs after the Kahan path. If the gate's
+  uniform branch causes a shader-cache miss on every dispatch
+  (because the uniform value flips between Kahan-arm and
+  Kahan-disabled across the 22 layers), the per-token cost could
+  spike. Easy mitigation: separate WGSL pipeline keyed on a
+  compile-time flag.
 
-#### Exit criteria — Stage 4.24 closes when documented in `STAGE-4.24-RESULT.md`:
+#### Exit criteria — Stage 4.25 closes when documented in `STAGE-4.25-RESULT.md`:
 
-- A `[probe12]` verdict line with `dequantDeltaMax` and `OUTCOME: H-3a/H-3b`.
+- A `[probe13]` verdict line with `capturedDelta` and `OUTCOME: H-3b-Kahan` or `H-3b-structural`.
 - All spike + sweep selftests still PASS; `make checkall` green.
-- Either: a Stage 4.25 paste-and-go brief is queued for the chosen
-  branch (H-3a fix or H-3b investigation); OR — if the dequant cross-
-  check unexpectedly reveals both paths are wrong vs an f64 ground
-  truth — pivot to a third branch with rationale.
+- Either: a Stage 4.26 paste-and-go brief is queued for the chosen
+  branch (H-3b-Kahan: ship Kahan everywhere with a perf-cost
+  measurement; H-3b-structural: pivot to Branch C — quantify the
+  downstream cascade and queue an FA / softmax-precision /
+  RMSNorm-in-f64 probe).
+- Optional: if Kahan flips `GENERATED_TEXT` from `"inonic boso-"`
+  toward `"Paris"` even partially, that's an Outcome A milestone
+  worth banking inline (Stage 4.25-PARTIAL-OUTCOME-A) regardless
+  of the captured-delta number.
 
 #### Branch on outcome
 
-- **Outcome H-3a (dequant disagreement, `maxAbs > 1e-5`):** WGSL
-  `load_q4_K` is wrong. Compare against `ggml-quants.c::dequantize_row_q4_K`
-  side-by-side. Common Q4_K bugs: scale_q / min_q nibble unpacking
-  (the 6-bit packed format takes 12 bytes for 16 sub-blocks), super-
-  block-scale `d` / `dmin` f16-to-f32 promotion, sub-block index
-  ordering. Patch WGSL kernel; re-run Probe 10 + Probe 12; verify
-  `dequantDeltaMax ≤ 1e-5` AND `GENERATED_TEXT` flips toward "Paris".
-- **Outcome H-3b (accumulation-order disagreement, `maxAbs ≤ 1e-5`):**
-  the dequant is fine. Investigate WGSL matmul accumulation order vs
-  libllama CPU GEMM. The WGSL kernel uses workgroup-tiled partial
-  sums (16-wide subgroups, 4 OUTPUTS_PER_WG); libllama uses row-major
-  AVX2/NEON dot-products with horizontal sums. f32 partial-sum
-  accumulation is non-associative; reordering 2048-K reductions can
-  produce ~K × 1e-7 = 2e-4 worth of disagreement. Either re-implement
-  WGSL matmul with libllama-style accumulation order (probably
-  catastrophic for perf), or switch to f16 → f32 accumulator with
-  Kahan summation, or accept the disagreement and fix the cascade
-  via downstream techniques (FA / RMSNorm precision boosts).
+- **Outcome H-3b-Kahan (`capturedDelta ≤ 1e-5`):** Kahan is the fix.
+  Stage 4.26 measures the perf cost — re-run `make smoke-bench
+  PERF_MODEL=tinyllama-1.1b-chat-q4_0 PERF_RUNS=3` against the
+  Stage 4.24 baseline (24-25 ms/token). If the hit is <30%, ship
+  Kahan unconditionally for all Q4_K MUL_MAT (and likely Q6_K,
+  Q5_K, IQ-family — every quant whose dequant per-element error
+  feeds a 2048-K reduction). If the hit is 30-60%, gate Kahan
+  to lm-head only (where ranking is most sensitive to f32 noise);
+  measure accuracy delta on `bench-eval` to validate.
+- **Outcome H-3b-structural (`capturedDelta > 1e-4`):** Kahan didn't
+  help — the divergence is from SIMD horizontal-sum tree
+  re-association, not catastrophic cancellation. The path forward
+  is downstream cascade mitigation. Stage 4.26 queues a
+  cascade-amplification probe: capture the per-layer delta vector
+  through the residual stream, identify the layer where the
+  delta exceeds the f32 representation floor, and pick the
+  intervention site (FA in f32-Kahan accumulator? Per-layer
+  RMSNorm in f64? Final lm-head softmax in f64?).
+- **Outcome H-3b-partial (`capturedDelta` between 1e-5 and 1e-4`):**
+  Kahan helps but doesn't fully close the gap. Try fused
+  multiply-add (FMA) inside the WGSL kernel (WebGPU exposes `fma`
+  intrinsic) — FMA preserves one extra bit of precision per
+  multiply-add pair vs split mul + add. Combined with Kahan,
+  total improvement should be ≥2 bits ≈ 4× delta reduction.
+
+### Earlier Stage 4.24 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.24 brief (paste-and-go bootstrap, Probe 12 implementation sketch with `webllm_dequantize_q4_K` shim + JS dual-path harness, four-item risk register, two-outcome H-3a/H-3b branch table) lives in [`STAGE-4.24-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.24-RESULT.md). Outcome **H-3b** CONFIRMED: `maxAbsDelta = 0` over 4,194,304 elements between WGSL-equivalent `dequantQ4_KTile` and libllama `dequantize_row_q4_K` — Q4_K dequant is bit-clean. The 5.24e-4 production Qcur-0 delta is therefore f32 matmul accumulation-order disagreement (WGSL subgroup tree vs libllama SIMD horizontal sum), not a dequant bug. Stage 4.25 queues a Kahan-summed accumulator probe gated to Qcur-0 to quantify whether Kahan collapses the delta to ≤1e-5 (H-3b-Kahan ship target) or leaves it intact (H-3b-structural — Branch C downstream cascade mitigation). Collapsed at Stage 4.25 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.23 brief — collapsed (full text in closure report)
 
