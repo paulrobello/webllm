@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.26 CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch — `webllm_q4k_q8k_matmul` shim landed in webllm's own `src/wasm/webgpu-bridge.cpp`, mirroring Stage 4.24's `webllm_dequantize_q4_K` pattern; patch stack unchanged at 13).** **Outcome H-4-libllama-imprecise CONFIRMED — `llamaVsF64Max = 4.178e-2`, four orders of magnitude larger than `wgslVsF64Max = 7.94e-6`. libllama is the imprecise side of the cross-module disagreement by a wide margin; webllm's WGSL Q4_K matmul kernel is _more accurate than libllama's CPU reference_ on the same captured Q-projection inputs. The matmul-precision investigation is now closed.** Probe 14 added `webllm_q4k_q8k_matmul(src0_q4k, src1_f32, dst_f32, M, K, N)` C export wrapping `ggml_get_type_traits_cpu(GGML_TYPE_Q8_K)->from_float` (= `quantize_row_q8_K` per src1 row) + `ggml_get_type_traits_cpu(GGML_TYPE_Q4_K)->vec_dot` (= `vec_dot_q4_K_q8_K` per output element). The wasm32 build resolves both to the `_generic` (scalar) variants under `GGML_CPU_GENERIC` — same code path libllama would take in any wasm32 deployment. The spike harness mallocs src0/src1/dst, copies the captured `cap.src0Bytes` / `cap.src1Bytes` from Probe 10 onto the WASM heap, calls the shim, and scores libllama's output against an f64 reference computed in JS over the same `src0Dequant` / `src1View` (no `Math.fround`; pure double accumulation). It also re-scores webllm's WGSL captured `cap.dstAfterBytes` against the same f64 oracle for an apples-to-apples comparison. Headline numbers: `llamaVsF64Max = 4.178e-2` at idx 11567, `wgslVsF64Max = 7.94e-6`, `llamaVsWgslMax = 4.178e-2` at the same idx. The 4.178e-2 envelope is dominated by libllama's per-element src1 Q8_K quantization loss (~1/127 ≈ 7.9e-3 per element, ~1.3e-1 envelope after a 2048-K dot product); WGSL doesn't quantize src1, it consumes the raw f32 activations directly, hence its tighter f64 floor. The historical 5.24e-4 first8 disagreement (Stage 4.17 idx 0–2 `Qcur-0`) is consistent with this: 5.24e-4 was the first8 sample, 4.178e-2 is the worst-element across all 12,288 outputs; the per-element distribution sits between the two. **Implication:** The Q-projection matmul is _not_ the bug source for "inonic boso-" — webllm is more accurate than the reference path that decodes correctly. The cascade producing "inonic boso-" must come from a different op in the prefill or decode path. `GENERATED_TEXT = "inonic boso-"` (unchanged — bug still active, framing now decoupled from matmul precision). All 6 spike selftests + 5 sweep selftests still PASS. `make checkall` green (747 pass / 36 skip / 0 fail). Per-token decode 360 ms (elevated vs 23 ms baseline due to one-shot CPU matmul + heap-state in the same prefill cycle; not on the production decode path). Files touched: `src/wasm/webgpu-bridge.cpp` (+ `webllm_q4k_q8k_matmul` shim adjacent to Stage 4.24's dequant shim), `src/wasm/CMakeLists.txt` (+ `_webllm_q4k_q8k_matmul` to EXPORTED_FUNCTIONS; intentionally NOT in JSPI_EXPORTS), `smoke-test/p2-v2-spike.src.ts` (+ Probe 14 sub-block in post-Probe-13 try, gated on `cap.src0Type === GGML_TYPE_Q4_K`; emits `PROBE14_LLAMA_MATMUL_VS_F64` JSON + `[probe14]` verdict line). Closure: [`STAGE-4.26-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.26-RESULT.md). Raw artifact: [`STAGE-4.26-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.26-spike-output.txt). Stage 4.27 brief below pivots to the existing `__stage417Checkpoints` per-layer diff framework — re-run the JSEP spike vs the non-JSEP reference probe on the current code, identify the first checkpoint where the two diverge by a magnitude inconsistent with kernel precision artifacts (≥1e-2 absolute on small-magnitude tensors), and characterize that op as the cascade source.
+
 **Stage 4.25 CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch — Kahan path lives entirely in `src/inference/jsep/ops/matmul.ts`; patch stack unchanged at 13).** **Outcome H-3b-structural CONFIRMED — Kahan-corrected accumulation in the WGSL Q4_K MUL_MAT kernel produces bit-identical output to the non-Kahan baseline (`kahanVsBaselineMax = 0` exact, all 8 first-output positions match), and the existing `MATMUL_PROBE10_REPLAY.maxAbsDeltaVsF64 = 7.94e-6` proves the WGSL kernel is already accurate to within ~8e-6 of f64 truth — 67× smaller than the 5.24e-4 cross-module disagreement. f32 accumulation precision is ruled out as the dominant error source.** Probe 13 added a `kahan = false` parameter to `buildMatmulShader` (Q4_K branch only — the only quant type the Q-projection codepath uses at production scale on TinyLlama), splicing a Neumaier-Kahan compensated accumulator into the K-loop when `kahan == true`; gated by a one-shot `globalThis.__stage425KahanArm` flag in `dispatchMatmul` matched on `(M=2048, K=2048, N=6, src0=GGML_TYPE_Q4_K)` so only the layer-0 `Qcur-0` dispatch takes the variant kernel. Variant lives under a separate pipeline cache key (`mat-q4_k-f32-f32-2-kahan`) so the production pipeline cache is unchanged for the other ~1935 Q4_K MUL_MAT dispatches in prefill. A confirmation flag (`__stage425KahanFired = true`) was added to disambiguate "Kahan ran, output unchanged" from "gate never fired" — `kahanFired = true` confirmed the gate engaged. Two non-exclusive explanations for the bit-identical output: **(1)** WGSL compiler elision of the compensation math (Naga / Tint can apply algebraic simplification across `(acc + term) - acc - term = 0`; WGSL has no `volatile` / `FP_CONTRACT off`); **(2)** compensation magnitude below ULP at the final `acc + compensation` step (per-add lost-low ~ULP(0.045)≈5.4e-9, summed corrections potentially below ULP at the end). Distinguishing (1) from (2) requires Naga IR disassembly and is disproportionate to the finding — the **structural conclusion is robust either way**: the pre-existing `maxAbsDeltaVsF64 = 7.94e-6` already proves f32 accumulation precision can close at most 1.5% of the 5.24e-4 gap. The remaining 99% must come from libllama-side imprecision, a different src1 input upstream, or a fused-dequant/multiply boundary inside `vec_dot_q4_K_q8_K`. `GENERATED_TEXT = "inonic boso-"` (unchanged — bug still active, framing now structural). All 6 spike selftests + 5 sweep selftests still PASS. `make checkall` green (747 pass / 36 skip / 0 fail). Files touched: `src/inference/jsep/ops/matmul.ts` (`buildMatmulShader` and `buildPipeline` gain optional `kahan` parameter; Q4_K branch wraps in block scope; new dispatch-time gate on `__stage425KahanArm`); `smoke-test/p2-v2-spike.src.ts` (arms `__stage425KahanArm` adjacent to `__probe10Capture`; new `MATMUL_PROBE13_DELTA` JSON + `[probe13]` verdict line; reads `__stage425KahanFired` for explicit confirmation). Closure: [`STAGE-4.25-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.25-RESULT.md). Raw artifact: [`STAGE-4.25-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.25-spike-output.txt). Stage 4.26 brief below queues Probe 14: a `webllm_q4k_q8k_matmul` shim (mirror of Stage 4.24's `webllm_dequantize_q4_K` pattern) that runs libllama's CPU `vec_dot_q4_K_q8_K` on the captured production inputs and computes `llamaVsF64Max`; verdict H-4-libllama-{imprecise|precise|mid} based on whether libllama is the imprecise side (≥1e-4), agrees with f64 truth (≤1e-5), or contributes partially.
 
 **Stage 4.24 CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch — `webllm_dequantize_q4_K` shim landed in webllm's own `src/wasm/webgpu-bridge.cpp`, not in the `webllm-browser-patches` series; patch stack unchanged at 13).** **Outcome H-3b CONFIRMED — Q4_K dequant is bit-clean; the 5.24e-4 production Qcur-0 delta is f32 matmul accumulation-order disagreement.** Probe 12 added a `webllm_dequantize_q4_K(src, dst, k)` C export wrapping `ggml_get_type_traits(GGML_TYPE_Q4_K)->to_float` (= `dequantize_row_q4_K` in `ggml-quants.c`), and a post-prefill block in `smoke-test/p2-v2-spike.src.ts` that takes Stage 4.22's `__probe10Capture.result.src0Bytes` (the 2,359,296-byte Q4_K tile for `blk.0.attn_q.weight`) and dequantizes it via two paths: (A) `dequantQ4_KTile` (existing JS port of WGSL `load_q4_K`), (B) `mod._webllm_dequantize_q4_K` (libllama). Element-wise diff over **4,194,304** outputs: `maxAbsDelta = 0` (exact, not single-ULP), `nNaN = 0`, `nInf = 0`, first-8 outputs byte-identical (`PROBE12_DEQUANT_DELTA = {"M":2048,"K":2048,"totalElems":4194304,"maxAbsDelta":0,"maxIdx":-1,"verdict":"H-3b"}`). The WGSL kernel's dequant logic is provably correct against libllama's reference — Stage 4.22's self-consistency check verified the kernel against its own dequant; Probe 12 closes the gap by verifying that JS port against libllama directly. **Hypothesis split for Stage 4.25:** the remaining variable is f32 matmul accumulation order. WGSL kernel reduces 2048-K partial sums via subgroup tree + workgroup horizontal add (4 OUTPUTS_PER_WG × 16-wide subgroup); libllama reduces via SIMD lane-pair adds + horizontal sum (`vec_dot_q4_K_q8_K`'s AVX2 `_mm256_hadd_ps` / NEON `vaddvq_f32` / scalar fallback). f32 reductions of length 2048 with O(0.1) operands disagree on their last 12-13 mantissa bits ≈ O(1e-4) — fits the 5.24e-4 envelope. Stage 4.18's 4.77e-7 WGSL-vs-f32-loop delta confirms the WGSL kernel matches a *chosen* k-major f32 reference, not libllama's reduction order. `GENERATED_TEXT = "inonic boso-"` (unchanged — bug still active, framing localized to matmul accumulation). All 6 spike selftests + 5 sweep selftests still PASS. `make checkall` green (747 pass / 36 skip / 0 fail). Per-token decode 311.60 ms (within noise of Stage 4.22's 879.7 ms run-with-sweep envelope; this run reuses Stage 4.23's spike state without the q4_0 sweep enabled). Files touched: `src/wasm/webgpu-bridge.cpp` (+`webllm_dequantize_q4_K` shim), `src/wasm/CMakeLists.txt` (+ `_webllm_dequantize_q4_K` in EXPORTED_FUNCTIONS; intentionally NOT in JSPI_EXPORTS — synchronous CPU dequant doesn't need promising-wrap overhead), `smoke-test/p2-v2-spike.src.ts` (Probe 12 block in post-Probe-10 try, gated on `cap.src0Type === GGML_TYPE_Q4_K`). Closure: [`STAGE-4.24-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.24-RESULT.md). Raw artifact: [`STAGE-4.24-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.24-spike-output.txt). Stage 4.25 brief below queues a Kahan-summed WGSL accumulator probe gated to `Qcur-0` only — measures whether the 5.24e-4 collapses to ≤1e-5 with f32-Kahan accumulation (H-3b-Kahan ship target) or stays put (structural — Branch C: downstream cascade mitigation).
@@ -979,7 +981,9 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.26 Probe 14: libllama CPU Q4_K matmul precision check via `webllm_q4k_q8k_matmul` shim. Stage 4.25 closed Outcome **H-3b-structural** — Kahan-corrected accumulation in the WGSL Q4_K MUL_MAT kernel produced bit-identical output to the non-Kahan baseline (`kahanVsBaselineMax = 0` exact; `kahanFired = true` confirmed the gate engaged), AND the existing `MATMUL_PROBE10_REPLAY.maxAbsDeltaVsF64 = 7.94e-6` proves the WGSL kernel is already accurate to within ~8e-6 of f64 truth — 67× smaller than the historical 5.24e-4 cross-module disagreement. f32 accumulation precision is therefore ruled out as the dominant error source: even closing the residual 7.94e-6 to zero would resolve only ~1.5% of the 5.24e-4 gap. **Probe 14 shifts the precision check to the OTHER side of the cross-module disagreement — does libllama's CPU `vec_dot_q4_K_q8_K` agree with f64 truth, or does it carry ~5e-4 precision errors of its own?** The shim mirrors Stage 4.24's `webllm_dequantize_q4_K` pattern: a `webllm_q4k_q8k_matmul(src0_q4k, src1_f32, dst_f32, M, K, N)` C export that internally quantizes src1 to `block_q8_K` (the type vec_dot expects) and runs libllama's matmul on the captured Probe 10 production inputs. Compare against an f64 reference computed in JS over the same captured src0/src1 and compute `llamaVsF64Max`. **Outcome H-4-libllama-imprecise (`≥1e-4`): libllama is the imprecise side, no fix needed in webllm; Outcome H-4-libllama-precise (`≤1e-5`): pivot to candidate #2 (re-recapture src1 at Q-proj idx=1); Outcome H-4-libllama-mid: contributing factor, multi-source mitigation.** The Stage 4.24 dequant cross-check pattern is the template — a roughly 30-line C++ shim + 30-line JS harness slice. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.27: cascade-source localization via `__stage417Checkpoints` per-layer diff (rerun on current code)
+
+Stage 4.26 closed Outcome **H-4-libllama-imprecise** — libllama's CPU `quantize_row_q8_K` → `vec_dot_q4_K_q8_K` path produces output `4.178e-2` from f64 truth on the captured production Q-proj inputs, vs webllm's WGSL kernel at `7.94e-6` from truth. **webllm is more accurate than the reference path that decodes correctly.** The matmul-precision investigation is closed: the cascade producing `GENERATED_TEXT = "inonic boso-"` is not driven by Q-projection numerical imprecision. Stage 4.27 pivots to localizing _which op_ in the prefill or decode path actually wedges the spike's output. The Stage 4.17 framework already captured `__stage417Checkpoints` for both the JSEP spike and the non-JSEP reference probe, with idx 11 `attn_out-0` flagged as the first checkpoint to cross 1e-3 (4.77e-3) and idx 12 `ffn_norm-0` exploding to 1.83e-1. **But that data is from 2026-05-07 morning; the codebase has moved through Stage 4.18–4.26 since.** Step 1 is to re-run both harnesses on the _current_ code, re-diff, and confirm whether the same divergence pattern still holds. If yes, Stage 4.27 deep-dives the first ≥1e-2-magnitude op (likely `attn_out-0` projection, `ffn_norm-0`, or one of `ffn_gate/up/down-0`). If no (e.g., post-Stage-4.4 H1 fix or post-Stage-4.5 H1-inverse fix shifted the picture), Stage 4.27 starts from the new first-divergent checkpoint. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -987,181 +991,89 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.25 TODO closure commit>  docs(TODO): Stage 4.25 closed — queue Stage 4.26 libllama matmul precision probe
-#   → <Stage 4.25 reports commit>       docs(reports): Stage 4.25 closure — Outcome H-3b-structural
-#   → <Stage 4.25 feat commit>          feat(spike): Stage 4.25 Probe 13 Kahan accumulator gated to Qcur-0
-#   → 24cef38                           docs(TODO): Stage 4.24 closed — queue Stage 4.25 Kahan accumulator probe
-#   → 91d4ab6                           docs(reports): Stage 4.24 closure — Outcome H-3b (matmul accumulation-order)
+#   → <Stage 4.26 TODO closure commit>  docs(TODO): Stage 4.26 closed — queue Stage 4.27 cascade localization
+#   → <Stage 4.26 reports commit>       docs(reports): Stage 4.26 closure — Outcome H-4-libllama-imprecise
+#   → <Stage 4.26 feat commit>          feat(spike): Stage 4.26 Probe 14 — libllama Q4_K×Q8_K matmul precision shim
+#   → 02fb1ca                           docs(TODO): Stage 4.25 closed — queue Stage 4.26 libllama matmul precision probe
+#   → 67d720e                           docs(reports): Stage 4.25 closure — Outcome H-3b-structural
 
-# 2. Confirm llama.cpp tip (patch stack 13 unchanged from Stage 4.25).
+# 2. Confirm llama.cpp tip (patch stack 13 unchanged from Stage 4.25/4.26).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
 #   → ef89f9314   webllm-browser-patches   (patch stack 13)
 
 # 3. Smoke-server up on 8031.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 
-# 4. Reuse agentchrome session + spike tab.
+# 4. Reuse agentchrome session + spike + ref-probe tabs.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 [ -n "$PORT" ] || agentchrome connect --launch --headless
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
+REF_TAB=$(agentchrome --port "$PORT" tabs list   | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-ref-probe.html" in t.get("url","")), ""))' 2>/dev/null)
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -n "$REF_TAB" ]   || REF_TAB=$(agentchrome   --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 
-# 5. Sanity-check Stage 4.25's H-3b-structural verdict still reproduces (~30 s):
-agentchrome --port "$PORT" navigate --tab "$SPIKE_TAB" "http://localhost:8031/p2-v2-spike.html?v=stage4.26-baseline&ingest=off"
-agentchrome --port "$PORT" page wait --tab "$SPIKE_TAB" --text "DONE" --timeout 240000
-# Look for: MATMUL_PROBE13_DELTA "kahanVsBaselineMax":0 verdict: H-3b-structural
-#           MATMUL_PROBE10_REPLAY "maxAbsDeltaVsF64":7.944e-6 (WGSL accuracy floor — already measured)
-#           GENERATED_TEXT = "inonic boso-"
+# 5. Capture fresh checkpoints from BOTH paths (~5 min total).
+agentchrome --port "$PORT" navigate --tab "$SPIKE_TAB" "http://localhost:8031/p2-v2-spike.html?v=stage4.27-jsep&ingest=off"
+agentchrome --port "$PORT" page wait --tab "$SPIKE_TAB" --text "DONE" --timeout 360000
+agentchrome --port "$PORT" js exec --tab "$SPIKE_TAB" "JSON.stringify(window.__stage417Checkpoints)" \
+  > eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-jsep-checkpoints.txt
+
+agentchrome --port "$PORT" navigate --tab "$REF_TAB" "http://localhost:8031/p2-v2-ref-probe.html?v=stage4.27-ref"
+agentchrome --port "$PORT" page wait --tab "$REF_TAB" --text "DONE" --timeout 360000
+agentchrome --port "$PORT" js exec --tab "$REF_TAB" "JSON.stringify(window.__stage417Checkpoints)" \
+  > eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-ref-checkpoints.txt
 ```
 
-**One-line goal:** Add a `webllm_q4k_q8k_matmul(const void *src0_q4k, const float *src1_f32, float *dst_f32, int M, int K, int N)` C export to `src/wasm/webgpu-bridge.cpp` that runs libllama's `vec_dot_q4_K_q8_K` on the captured production Q-projection inputs, then in the spike harness compute `llamaVsF64Max` against an f64 reference over the same `cap.src0Bytes` / `cap.src1Bytes`. Emit `[probe14] llamaVsF64=<x>.exp(3) verdict: <H-4-libllama-{imprecise|precise|mid}>`.
+**One-line goal:** Diff the two fresh checkpoint dumps with `STAGE-4.17-diff.py`, identify the first checkpoint where the JSEP spike and the non-JSEP reference probe disagree by ≥1e-2 absolute (or ≥1e-1 relative on small-magnitude tensors), and characterize that op as the cascade source for "inonic boso-".
 
-**One-line context:** Stage 4.25 ruled out WGSL accumulation precision as the bug source; the WGSL kernel is already at its f64-truth precision floor (~8e-6). Probe 14 closes the symmetric question on the libllama side — if libllama is also at ~1e-5 from truth, the 5.24e-4 disagreement isn't from matmul precision at all and the bug must be upstream (different src1 input, different RMSNorm output, embedding lookup divergence, etc.); if libllama is at ~5e-4 from truth, the cross-module disagreement is mostly libllama's imprecision and webllm needs no fix here.
+**One-line context:** Stage 4.17's first run identified `attn_out-0` (idx 11) as the first node crossing 1e-3 and `ffn_norm-0` (idx 12) at 1.83e-1, but that snapshot pre-dates the patch stack growing from 12 → 13 (Stage 4.16 EM_ASYNC_JS + Stage 4.4/4.5 host-mirror writeback fixes). Re-capture confirms whether those landmarks still hold — and now that we know libllama is the imprecise side at Q-proj, the spike's *more accurate* WGSL output should be the truth oracle within bounded error, so any divergence ≥1e-2 at the spike side is structural (wrong-buffer read, missing CPU-fallback writeback, KV-cache layout mismatch, RMSNorm gain-vector mis-upload, etc.), not numerical.
 
-#### Probe 14 implementation sketch
+#### Stage 4.27 implementation sketch
 
-1. **C++ shim.** Add to `src/wasm/webgpu-bridge.cpp`:
-   ```cpp
-   extern "C" int webllm_q4k_q8k_matmul(
-       const void * src0_q4k,    // M*K bytes of Q4_K (M rows × K cols, packed)
-       const float * src1_f32,   // N*K f32 activations
-       float * dst_f32,          // M*N output (libllama stores [M] as ne[0])
-       int32_t M, int32_t K, int32_t N
-   );
+1. **Bootstrap as above** — capture `STAGE-4.27-jsep-checkpoints.txt` and `STAGE-4.27-ref-checkpoints.txt`.
+
+2. **Diff with the existing `STAGE-4.17-diff.py`** (still in `eval/reports/p2-v2-option-a-prime-2026-05-06/`):
+   ```bash
+   cd eval/reports/p2-v2-option-a-prime-2026-05-06/
+   python3 STAGE-4.17-diff.py STAGE-4.27-jsep-checkpoints.txt STAGE-4.27-ref-checkpoints.txt \
+     > STAGE-4.27-diff.txt
    ```
-   Internally:
-   - `quantize_row_q8_K(src1_f32 + n*K, src1_q8k + n*nb_q8k, K)` per n in [0, N).
-   - `vec_dot_q4_K_q8_K(K, &dst_f32[n*M + m], 0, src0_q4k + m*nb_q4k, 0, src1_q8k + n*nb_q8k, 0, 1)` per (m, n).
-   - Allocate `src1_q8k` via `malloc(N * nb_q8k_per_K(K))`; free at end. Stage 4.24's pattern.
-   - Returns 0 on success, non-zero for malloc failure.
+   The script tabulates per-checkpoint max-abs first8 deltas. Look for the first idx where `max-abs-Δ ≥ 1e-2`; that's the working hypothesis for the cascade source.
 
-2. **CMake export.** Add `_webllm_q4k_q8k_matmul` to
-   `src/wasm/CMakeLists.txt::EXPORTED_FUNCTIONS` (alongside the
-   Stage 4.24 `_webllm_dequantize_q4_K`). NOT in `JSPI_EXPORTS` —
-   synchronous CPU computation, no promising-wrap needed.
+3. **Characterize the failing op.** Three branches:
+   - **Op is a matmul** (e.g., `attn_out-0` output projection, `ffn_gate-0`, `ffn_up-0`, `ffn_down-0`, or `result_output` lm_head): re-use the Probe 10 capture pattern (M/K/N + src0/src1 byte capture from `__probe10Capture`) extended to fire on a per-shape gate matching the failing op. Run Probe 14 again on those bytes to confirm precision attribution; if libllama is also the imprecise side at this op, look for a structural cause (wrong src0 weight bucket, wrong src1 input, wrong dst buffer offset).
+   - **Op is an RMSNorm** (e.g., `ffn_norm-0`, `attn_norm-0`, `result_norm`): RMSNorm has TWO inputs — the activation tensor and the per-channel gain vector. Stage 4.3 already identified the per-channel gain MUL as a load-bearing CPU-fallback step that, post-Stage-4.4, reads from `host_mirror`. Verify the gain vector in `host_mirror` matches the GGUF weight bytes (FNV-1a-32 hash check on the captured bytes vs the loaded `attn_norm.weight` / `ffn_norm.weight` / `result_norm.weight` for the appropriate layer).
+   - **Op is something else** (FA, softmax, RoPE, SET_ROWS, GET_ROWS): look at the JSEP runOp wrapper instrumentation already landed in Stage 4.2 / 4.3. Capture pre-/post-op buffer state and compare to the reference path's CPU-computed expectation.
 
-3. **Spike harness.** In `smoke-test/p2-v2-spike.src.ts`, in the
-   existing Probe-12 / Probe-13 try block (Q4_K-gated), add a
-   Probe 14 sub-block immediately after Probe 13's verdict line.
-   The captured `cap.src0Bytes` / `cap.src1Bytes` are already in
-   scope. Pattern:
-   ```typescript
-   const dstShimSize = cap.M * cap.N * 4;
-   const src0Ptr = (mod as any)._malloc(cap.src0Bytes.byteLength);
-   const src1Ptr = (mod as any)._malloc(cap.src1Bytes.byteLength);
-   const dstShimPtr = (mod as any)._malloc(dstShimSize);
-   (mod as any).HEAPU8.set(cap.src0Bytes, src0Ptr);
-   (mod as any).HEAPU8.set(cap.src1Bytes, src1Ptr);
-   const status = (mod as any)._webllm_q4k_q8k_matmul(
-       src0Ptr, src1Ptr, dstShimPtr, cap.M, cap.K, cap.N);
-   const llamaOutput = new Float32Array(
-       (mod as any).HEAPF32.buffer, dstShimPtr, cap.M * cap.N).slice();
-   // F64 reference (no Math.fround — full f64 accumulation).
-   const refF64 = new Float64Array(cap.M * cap.N);
-   for (let n = 0; n < cap.N; n++) {
-       for (let m = 0; m < cap.M; m++) {
-           let acc = 0;
-           for (let k = 0; k < cap.K; k++) {
-               acc += src0Dequant[m*cap.K + k] * src1View[n*cap.K + k];
-           }
-           refF64[n*cap.M + m] = acc;
-       }
-   }
-   let llamaVsF64Max = 0;
-   for (let i = 0; i < cap.M*cap.N; i++) {
-       const d = Math.abs(llamaOutput[i] - refF64[i]);
-       if (d > llamaVsF64Max) llamaVsF64Max = d;
-   }
-   const verdict = llamaVsF64Max >= 1e-4
-       ? "H-4-libllama-imprecise"
-       : (llamaVsF64Max <= 1e-5 ? "H-4-libllama-precise" : "H-4-libllama-mid");
-   log(`PROBE14_LLAMA_MATMUL_VS_F64 = ${JSON.stringify({...})}`);
-   (mod as any)._free(src0Ptr);
-   (mod as any)._free(src1Ptr);
-   (mod as any)._free(dstShimPtr);
-   ```
+4. **Risk register.**
+   - **Reference probe drift.** The non-JSEP reference path runs against the `webllm-wasm.js` (non-JSEP) build, which uses the same WGSL kernels as the spike for matmul/RMSNorm. The "reference" is _not_ a different oracle — it's a different scheduler routing. Both paths use the same matmul kernel; the divergence MUST come from scheduling / op-routing differences (which ops run on JSEP vs CPU-fallback, which buffers are read/written), not kernel precision. Frame the diff with this in mind.
+   - **First8-window blindness.** Stage 4.17 noted that `kq_soft_max-0` and `kqv_out-0` looked bit-identical at first8 because the causal mask makes position-0 column trivial. Stage 4.27's diff should sample additional positions or capture full-tensor stats (mean, max-abs, NaN count) — extend `node_dump_cb` in `src/wasm/webgpu-bridge.cpp` if needed.
+   - **Stage 4.18–4.26 may have closed the gap.** Stage 4.4 fixed Bug A (canonical NaN cascade), Stage 4.5 fixed Bug C (GPU→host writeback), Stages 4.6–4.10 closed SET_ROWS divert correctness. The current "inonic boso-" failure may be a _smaller_ residual cascade than Stage 4.17's first capture — the diff may be tighter than it was. If the new diff shows < 1e-3 across all checkpoints, the bug is in decode (post-prefill KV-cache read or lm_head readback), not prefill.
 
-#### Files to read first
+5. **Files to read first:**
+   - [`STAGE-4.17-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-RESULT.md) — original checkpoint framework, smoking-gun table, first-divergent-op analysis.
+   - [`STAGE-4.18-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.18-RESULT.md) — first8-window artifact analysis; full-tensor stats may be needed.
+   - `src/wasm/webgpu-bridge.cpp::node_dump_cb` — the cb_eval allowlist; extend to dump mean/max-abs if needed.
+   - `smoke-test/p2-v2-spike.src.ts::__stage417Checkpoints` — capture surface (line ~3582).
+   - `smoke-test/p2-v2-ref-probe.src.ts` — non-JSEP reference path.
 
-- [`STAGE-4.25-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.25-RESULT.md) — H-3b-structural confirmation + 5.24e-4 disagreement source candidates.
-- [`STAGE-4.24-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.24-RESULT.md) — Probe 12 shim pattern (template for Probe 14's `webllm_q4k_q8k_matmul` shim).
-- `src/wasm/webgpu-bridge.cpp` — find the `webllm_dequantize_q4_K` shim landed in Stage 4.24; the new shim sits adjacent.
-- `src/wasm/CMakeLists.txt` — find `_webllm_dequantize_q4_K` in `EXPORTED_FUNCTIONS`; add the new export.
-- `~/Repos/llama.cpp/ggml/src/ggml-cpu/quants.c::vec_dot_q4_K_q8_K` — the libllama matmul kernel; check its NEON / AVX2 / scalar reduction.
-- `~/Repos/llama.cpp/ggml/src/ggml-cpu/quants.c::quantize_row_q8_K` — the f32 → block_q8_K converter the shim invokes per src1 row.
+#### Exit criteria — Stage 4.27 closes when documented in `STAGE-4.27-RESULT.md`:
 
-#### Risk register
+- Fresh `STAGE-4.27-{jsep,ref}-checkpoints.txt` captured on the current code.
+- `STAGE-4.27-diff.txt` shows the first ≥1e-2-magnitude divergent checkpoint, with idx + name + shape + max-abs Δ.
+- Working hypothesis named for the failing op (matmul / RMSNorm / FA / softmax / SET_ROWS / KV-cache / lm_head).
+- Stage 4.28 paste-and-go brief queued for the chosen branch (deep-dive on the named op).
 
-- **Q8_K conversion drift.** Probe 14 must quantize-then-vec_dot
-  src1 (f32 activations) to block_q8_K because that's the type
-  `vec_dot_q4_K_q8_K` consumes. The Q8_K conversion itself has
-  precision loss. To make the shim a fair representation of
-  libllama's production behavior, follow `ggml_compute_forward_mul_mat`'s
-  exact path: it calls `from_float` (= `quantize_row_q8_K`) on the
-  f32 src1 row, then vec_dots. If the shim does this differently,
-  the `llamaVsF64Max` is measuring the shim's deviation from truth,
-  not libllama's deviation from truth.
-- **WASM heap growth during shim.** The captured src0/src1 are
-  ~2.4 MB; the Q8_K conversion buffer adds another ~12 KB; dst is
-  ~48 KB. Total ~2.5 MB allocations could trigger heap growth.
-  Re-derive HEAPU8/HEAPF32 views inside the call site after malloc
-  — same pattern as Stage 4.24 Probe 12.
-- **vec_dot_q4_K_q8_K signature.** The function takes
-  `(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc)`.
-  For our usage: `n = K`, `s = &dst[n*M + m]`, `bs = 0`, `vx = src0_q4k + m*nb_q4k_row`,
-  `bx = 0`, `vy = src1_q8k + n*nb_q8k_row`, `by = 0`, `nrc = 1`.
-  `nb_q4k_row = (K/QK_K) * 144` (super-block bytes); `nb_q8k_row = (K/QK_K) * sizeof(block_q8_K)`.
-  Cross-reference with `ggml_compute_forward_mul_mat_q_f32` for the
-  exact invocation pattern.
-- **Single-dispatch shim cost.** The shim does an M=2048 × K=2048
-  × N=6 matmul on the CPU side (~25M f32 mul-adds). On the wasm32
-  build that's ~150-300 ms — acceptable for a one-shot diagnostic
-  inside the post-prefill block; no streaming or batching needed.
+#### Branch on diff outcome
 
-#### Exit criteria — Stage 4.26 closes when documented in `STAGE-4.26-RESULT.md`:
+- **Diff matches Stage 4.17 pattern** (first ≥1e-3 at `attn_out-0`, ≥1e-1 at `ffn_norm-0`): the post-Stage-4.4/4.5/4.16 patch stack didn't close the cascade; the bug is structurally identical to what Stage 4.17 captured. Stage 4.28 deep-dives `attn_out-0` (output projection matmul) — re-use Probe 14 on its captured bytes.
+- **Diff is tighter than Stage 4.17** (no checkpoint reaches 1e-2 in prefill): the cascade is in decode. Stage 4.28 captures `LOGIT_STATS_STEP0` first8 from both paths and locates the divergence in lm_head / KV-cache.
+- **Diff is a different first-divergent op** (e.g., `Vcur-0` or `Kcur-0` at idx 3–7 now diverging): a downstream regression from a Stage 4.18–4.26 patch. Stage 4.28 bisects the patch stack.
 
-- A `[probe14]` verdict line with `llamaVsF64Max` and `OUTCOME: H-4-libllama-{imprecise|precise|mid}`.
-- All spike + sweep selftests still PASS; `make checkall` green.
-- Either: a Stage 4.27 paste-and-go brief is queued for the chosen
-  branch (libllama-imprecise → close matmul-precision investigation
-  entirely, document as expected libllama precision artifact and
-  pivot to investigating the actual cascade source of "inonic boso-";
-  libllama-precise → re-recapture src1 at Q-proj idx=1 in both
-  modules; libllama-mid → multi-source mitigation plan).
+### Earlier Stage 4.26 brief — collapsed (full text in closure report)
 
-#### Branch on outcome
+Full step-by-step Stage 4.26 brief (paste-and-go bootstrap, Probe 14 implementation sketch with `webllm_q4k_q8k_matmul` C shim using `ggml_get_type_traits_cpu` for `from_float` (Q8_K) + `vec_dot` (Q4_K), four-item risk register, three-outcome H-4-libllama-{imprecise|precise|mid} branch table) lives in [`STAGE-4.26-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.26-RESULT.md). Outcome **H-4-libllama-imprecise** CONFIRMED: `llamaVsF64Max = 4.178e-2` over 12,288 elements vs `wgslVsF64Max = 7.94e-6` — libllama is the imprecise side by orders of magnitude. The 4.178e-2 envelope is dominated by libllama's per-element src1 Q8_K quantization loss; webllm's WGSL kernel consumes raw f32 src1 and stays at its f64 floor. Q-projection matmul precision is not the cascade source. Stage 4.27 pivots to localizing which op in the prefill or decode path actually wedges the spike's output, via the existing `__stage417Checkpoints` framework re-run on the current code. Collapsed at Stage 4.27 queue time to keep the active surface focused.
 
-- **Outcome H-4-libllama-imprecise (`llamaVsF64Max ≥ 1e-4`):**
-  libllama is the imprecise side. The 5.24e-4 cross-module disagreement
-  is two-sided (WGSL ~8e-6 from truth, libllama ~5e-4 from truth);
-  most of the gap comes from libllama. **No fix needed in webllm.**
-  Stage 4.27 closes the matmul-precision investigation entirely.
-  Pivot to whether the production Qcur-0 path actually feeds the
-  cascade causing "inonic boso-" — likely it does NOT, since the
-  WGSL kernel is more accurate than libllama and yet the spike
-  generates "inonic boso-" while the non-JSEP ref-probe presumably
-  generates coherent text. The bug must be in some other operation
-  (RMSNorm, FA, softmax, lm-head, embedding lookup) downstream
-  of Q-proj — characterize which one via the same
-  `__stage417Checkpoints` framework.
-- **Outcome H-4-libllama-precise (`llamaVsF64Max ≤ 1e-5`):**
-  libllama IS accurate to truth. Then the 5.24e-4 disagreement
-  isn't from matmul precision on either side — both sides agree
-  with f64 truth at ~1e-5. The disagreement must come from
-  **different src1 inputs** at the Q-proj dispatch position
-  between the two modules. Stage 4.23's idx=0 attn_norm-0 check
-  was at a different position from idx=1 Qcur-0 — re-recapture
-  src1 (= post attn_norm RMSNorm output) at the exact dispatch
-  moment in both modules and re-compare. Stage 4.27 brief queues
-  that re-capture; the candidate cause is RMSNorm itself
-  (different scale/bias path, gain weight upload, or denormal
-  handling between WASM CPU and JSEP-routed-to-CPU-fallback).
-- **Outcome H-4-libllama-mid (`1e-5 < llamaVsF64Max < 1e-4`):**
-  libllama is contributing 1e-4-magnitude error, but the gap is
-  larger. Both libllama-side error and src1-input-mismatch could
-  be partial contributors. Stage 4.27 queues both probes:
-  re-recapture src1 AND quantify the libllama contribution
-  precisely; sum should cover the 5.24e-4 gap.
 
 ### Earlier Stage 4.25 brief — collapsed (full text in closure report)
 
