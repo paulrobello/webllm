@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.6 D2-lite PARTIALLY CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch; spike instrumentation only).** D2-lite captures src[0] (8 F32), src[1] (8 I64 indices low-half), and dst (8 F16 cells) for the first 10 SET_ROWS dispatches via deferred Promise.then microtask staging copies. **Findings:** src0 is sensible across all 10 (`[-1.067, 0.656, -0.110, -0.110, ...]` for K — note the (2,3)/(4,5) pair-mate identity consistent with ROPE @ position 0, or `[-0.0006, 0.0009, ...]` for V); indices are exactly correct (`[0,1,2,3,4,5]` for K-cache shape `[256,512]`; strided `[0, 512, 1024, 1536, 2048, 2560, 3072, 3584]` for V-cache transpose `[1, 131072]`). **H-indices REJECTED.** **H-source WEAKENED** — no garbage / NaN / Inf values seen. **But i=3 (FIRST SET_ROWS, K-cache layer 0 at dstO=0) shows `dstPostFirst8U16 = [0, 0, 0, 0, 0, 0, 0, 0]`** at end-of-decode while every other captured SET_ROWS shows non-zero F16 cells (i=4, i=14, i=15, i=26, i=27, i=39, i=40, i=51, i=52). Two readings: (R1) i=3's dispatch silently failed — position-0 K cache at layer 0 was never written; (R2) i=3 wrote correctly but a later op overwrote cells 0..7 with zeros (no captured SET_ROWS targets dstO=0..7 of K-cache layer 0; possible jsepClear or divert pre-copy from another op). The end-of-decode readback is 5 decode steps + ~100+ ops removed from i=3, so we can't tell which reading without an immediate post-dispatch capture. Closure: [`STAGE-4.6-D2-LITE-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.6-D2-LITE-RESULT.md). Stage 4.7 brief below queues D2-tight (synchronous readback inside the wrapped jsepRunOp before it returns) to disambiguate R1 vs R2. Patch stack: 7 (unchanged).
+
 **Stage 4.6 D1 PARTIALLY CLOSED 2026-05-06 — `<pending>` (no llama.cpp patch; spike instrumentation only).** D1 V-cache transpose SET_ROWS selftest landed in `smoke-test/p2-v2-spike.src.ts` (~270 LOC). Builds 16 F16 dst cells with sentinel pattern, 4 source rows with F16-exact values, I64 indices `[0, 1, 6, 7]` chosen so cells 0&1 share u32 word 0 and cells 6&7 share u32 word 3 (atomic-CAS race). **Both no-divert AND divert variants PASS bit-exactly** — `maxAbsDeltaTargeted=0`, `maxAbsDeltaUntargeted=0`, no NaN, no Inf; postF16 matches expectedF16 cell-for-cell. The divert path's pre-copy correctly preserves untargeted cells; the F32→F16 atomic CAS at adjacent pair-mates doesn't corrupt either side; I64 indices read correctly (low 32 bits). **Implication: `dispatchSetRows` is exonerated as the source of Stage 4.5's wrong-decode bug.** Stage 4.5's `FIRST_ALLZERO_DST_PROBE` reading was (a) — false positive — because the multi-MB KV cache buffer at offset 0 has only 8 cells in the `first8` window and SET_ROWS targets a sparse subset; cells not in the indices list stay at post-allocation zero. Closure: [`STAGE-4.6-D1-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.6-D1-RESULT.md). Stage 4.6 is not yet fully closed — D2 (per-dispatch CPU-reference diff in production graph context) and D3 (ROPE / SOFT_MAX / attention-masking inspection) remain. Stage 4.6 D2/D3 brief below queues the source-data + indices + attention-consumer hypotheses, in priority order based on the Stage 4.5 token-2-onward divergence pattern (token 0 + 1 deterministic across H1 on/off; tokens 2+ differ — points at a decode-step KV write/read interaction). Patch stack: 7 (unchanged).
 
 **Stage 4.5 CLOSED 2026-05-06 — `<pending>` + llama.cpp `e0fa38928` (P7 follow-on — H1 unconditional GPU→host writeback in `ggml_backend_jsep_graph_compute`; patch stack unchanged at 7 — H1 lives inside the F1 patch as a 12-LOC addition). Bonus: Makefile build-order race fix (cp-before-bundle) so the spike no longer captures a stale wasmImports table when a wasm import gets DCE'd or re-introduced across builds.** **PARTIAL OUTCOME A — H1 fires correctly: `COUNTER_DELTAS.read = 1602` (was 0), matching the runOp count exactly; FIRST_NAN_DST_PROBE still null (Bug A stable). Per-token decode 25.04 ms (was 23.30 — H1 cost is +7%, much smaller than the brief's 50-150ms estimate; likely because most ops have small dst tensors and the per-op jsepRead fixed cost dominates over bytes-read scaling). All 4 kernel selftests still PASS.** **But Outcome A "Paris" decode NOT achieved** — `LOGIT_STATS_STEP0` is bit-exactly identical to Stage 4.4 (`topId/topVal = 593/0.159`); generated tokens 2-4 changed (`[593, 5871, 945, 16976, 25487]` → `[593, 5871, 15669, 15565, 12150]`); decoded text `"ntiuhuihnerquant"` (was `"ntiuracinateenes"`). Both gibberish — H1 affected data flow but not curatively. **`FIRST_ALLZERO_DST_PROBE` still fires on the same op** — `{i:3, op:42 (SET_ROWS), dstH:18 (KV cache), dstO:0}`. Two readings: (a) the KV cache row at offset 0 legitimately contains zeros at the start (false positive), or (b) SET_ROWS is genuinely writing to the wrong offset/cell/layout. Reading (b) is more load-bearing because TinyLlama uses the **transposed V-cache layout** (`llama-kv-cache.cpp:1281`: ne[0]=1, adjacent indices share a u32 word) and Stage 1's `dispatchSetRows` has an F32→F16 atomic-CAS path specifically for this case. If the atomic CAS indexing is off-by-one or the wrong source row is read, V-cache writes go to the wrong place — forward pass produces real-but-wrong tokens, exactly what we see. Closure: [`STAGE-4.5-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.5-RESULT.md). Stage 4.6 brief below queues KV-cache write correctness localization (real-shape SET_ROWS selftest with V-cache transpose layout + per-dispatch CPU-reference diff).
@@ -939,123 +941,117 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.6 D2/D3: localize the upstream bug feeding SET_ROWS. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.7 D2-tight: synchronous post-dispatch SET_ROWS dst readback. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
 ```bash
-# 1. Confirm you're in the right working tree on the right tip.
+# 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → <stage 4.6 D1 TODO commit> docs(TODO): Stage 4.6 D1 partial closure — kernel exonerated; queue D2/D3
+#   → <stage 4.6 D2-lite TODO commit> docs(TODO): Stage 4.6 D2-lite partial closure — i=3 anomaly; queue Stage 4.7 D2-tight
 
-# 2. Confirm llama.cpp is on the patched branch (Stage 4.5 H1 still tip; D1 was spike-only).
+# 2. Confirm llama.cpp tip.
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
 #   → e0fa38928   webllm-browser-patches   (patch stack 7)
 
-# 3. Smoke-server must be up on 8031. If not running, start it:
+# 3. Smoke-server up on 8031.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 
-# 4. Reuse the existing agentchrome session + spike tab.
+# 4. Reuse agentchrome session + spike tab.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
-[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.6-d2-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.7-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "PORT=$PORT TAB=$TAB"
 
-# 5. Reproduce the post-Stage-4.6-D1 baseline:
-#    - 6 selftests PASS (4 prior + SETROWS_VCACHE_NODIVERT + SETROWS_VCACHE_DIVERT)
-#    - SETROWS_VCACHE_*: maxAbsDeltaTargeted=0, maxAbsDeltaUntargeted=0
-#    - Chat path unchanged from Stage 4.5: GENERATED_TEXT="ntiuhuihnerquant"
-#      GENERATED_TOKENS = [593, 5871, 15669, 15565, 12150], PER_TOKEN_MS ~25, read=1602
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.6-d2-replay" --tab "$TAB"
+# 5. Reproduce post-Stage-4.6 D2-lite baseline:
+#    - 6 selftests PASS
+#    - SETROWS_DIAG_FIRST5: i=3 entry has dstPostFirst8U16 = [0,0,0,0,0,0,0,0]
+#    - all other entries have non-zero dstPostFirst8U16
+#    - chat path unchanged: GENERATED_TEXT = "ntiuhuihnerquant", read=1602, ~25ms/tok
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.7-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
-agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify({nodivert: window.__setRowsNoDivert, divert: window.__setRowsDivert}, null, 2)'
+agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify(window.__setRowsDiag.find(e => e.i === 3))'
+#   → expect dstPostFirst8U16: [0,0,0,0,0,0,0,0]
 ```
 
-If those checks pass, you're starting at the right baseline. If anything fails, see Step 0 below.
+**One-line goal:** disambiguate Reading R1 (i=3's dispatch silently failed) vs R2 (i=3 wrote correctly but a later op overwrote cells 0..7 with zeros) by capturing dst IMMEDIATELY post-dispatch instead of at end-of-decode.
 
-**One-line goal:** flip Outcome A "Paris" decode by localizing the *upstream* bug feeding wrong data into SET_ROWS. D1 proved the dispatcher is bit-exactly correct on the V-cache transpose layout; the wrong-decode must come from src[0] (the K/V vector being written) or src[1] (the indices), or from a downstream consumer that reads cells SET_ROWS didn't write to.
+**One-line context:** Stage 4.6 D1 proved the SET_ROWS dispatcher is correct. D2-lite proved src[0] and src[1] inputs are sensible. But the FIRST SET_ROWS dispatch (i=3, K-cache layer 0 at dstO=0) shows all-zero dst at end-of-decode while every other captured SET_ROWS shows non-zero F16 cells. Need to know whether i=3 ITSELF dispatched correctly or a later op clobbered its output.
 
-**One-line context:** D1 selftest covers ne[0]=1, F16 dst, I64 indices, atomic-CAS race on cells {0,1} and {6,7} — `maxAbsDelta=0` on both no-divert and divert paths. Stage 4.5 token pattern (token 0+1 deterministic, tokens 2+ differ across H1 on/off) points at a decode-step KV write/read interaction; D1 proved the *write* is correct, so the bug is either in the data fed into the write or in the read.
+#### Implementation — D2-tight (~30 min)
 
-#### Three remaining hypotheses, in priority order
+The current D2-lite uses `Promise.resolve().then(...)` to defer the readback to a microtask AFTER `mod.jsepRunOp` returns. By the time the microtask runs, many later ops have queued GPU work; the readback we get is end-of-decode state, not immediate post-dispatch state.
 
-- **H-source (likeliest — 60%): the F32 `src[0]` data fed into SET_ROWS is wrong.** SET_ROWS receives K from the chain `q_proj/k_proj matmul → ROPE → SET_ROWS`. `q_proj/k_proj` is a JSEP MUL_MAT (mirrored to host_mirror by H1). ROPE is CPU-fallback (`GGML_OP_ROPE` not in JSEP supports_op). ROPE reads its input from a CPU-resident tensor, applies rotation, writes the output to a CPU-resident tensor. SET_ROWS' src[0] is then the ROPE output. **Critical question: how does ROPE's CPU-resident output reach the JSEP dispatcher's bind group?** Either (1) the scheduler inserts a CPY-to-jsep_buft, which routes via `set_tensor` on the JSEP buffer interface (dual-write to mirror + GPU); (2) something else. If (1) is broken or absent, src[0] on the GPU side is stale.
-- **H-indices (40%): the I64 indices src[1] are wrong.** Indices for the V-cache transpose case (line 1397 in kv-cache) are computed by libllama based on token positions. If the position tensor or the cell-index computation is wrong, SET_ROWS writes correct data to wrong cells.
-- **H-attention (lower priority — H1 should have closed this): SOFT_MAX/attention reads from a stale K_cache mirror.** H1 mirrors per-op writeback, but the multi-op attention chain has reads interleaved with writes; if the encoder batcher coalesces writes that should be visible to a later read, the read sees stale data.
-
-#### Files to read first (reading order, ~15 min)
-
-1. `~/Repos/llama.cpp/src/llama-kv-cache.cpp:1278-1397` — the V-cache transpose layout AND the indices computation (line 1397: `ggml_set_rows(...)` with index tensor). Identify which CPU op produces the indices tensor.
-2. `~/Repos/llama.cpp/src/llama-context.cpp` — search for `build_kv_self_view` / `ggml_rope` to map the K/V chain. Verify ROPE is CPU vs JSEP.
-3. `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.6-D1-RESULT.md` — D1 closure with the kernel-exoneration evidence.
-4. `~/Repos/webllm/smoke-test/p2-v2-spike.src.ts` lines containing `runOpsLog` / `evtSeq` (search). The existing graph-capture infrastructure can be repurposed for D2 with minor extensions.
-
-#### Step 1 — implement D2: per-SET_ROWS jsepRead pre/post + CPU diff (~60 min)
-
-The Stage 4.3b instrumentation already captures jsepRead/jsepWrite/jsepRunOp into `runOpsLog` with `evtSeq` interleave. Extend it to:
-
-- Hook *before* every SET_ROWS dispatch: jsepRead `src[0]` (F32 source data), jsepRead `src[1]` (I64 indices), jsepRead `dst` (F16 pre-state). Save these as JSON attached to the runOp entry.
-- Hook *after* every SET_ROWS dispatch: jsepRead `dst` (F16 post-state).
-- Compute CPU reference: for each (idx, srcRow), F16-encode src[0] row and write to dst[idx]. Diff vs the post-state.
-
-The first divergent SET_ROWS' ratio of (src divergence : indices divergence : dst-pre divergence) tells you which input was wrong:
-- src[0] divergence → H-source confirmed; trace back through ROPE / matmul.
-- src[1] divergence → H-indices confirmed; inspect the index-producing op.
-- dst-post correctly reflects (dst-pre with target cells overwritten by f16(src[0])) but the model still decodes wrong → H-attention; move to D3.
-
-Implementation sketch (extend the existing `wrapJsepRunOp` in spike):
+D2-tight: change the wrapping so the readback happens BEFORE `mod.jsepRunOp` returns, awaited synchronously. Since `mod.jsepRunOp` is called from a JSPI-promised wasm export (`graph_compute`), the wasm execution suspends while the readback awaits. After the readback resolves, we have the dst state IMMEDIATELY post-dispatch (with no later ops having run yet).
 
 ```ts
-// Inside wrapJsepRunOp, when desc.op === GGML_OP_SET_ROWS:
-const src0Bytes = readJsepBuffer(src0.bufHandle, src0.offset, src0_size);
-const src1Bytes = readJsepBuffer(src1.bufHandle, src1.offset, src1_size);
-const dstPreBytes = readJsepBuffer(dst.bufHandle, dst.offset, dst_size);
-
-const status = origJsepRunOp(...);  // dispatch the op
-
-const dstPostBytes = readJsepBuffer(dst.bufHandle, dst.offset, dst_size);
-
-// Compute CPU reference and diff (only for the first 5-10 SET_ROWS calls
-// to keep log size bounded).
-if (setRowsCallCount < 10) {
-    const refDst = computeCpuSetRowsReference(src0Bytes, src1Bytes, dstPreBytes, ...);
-    const divergence = countDivergentCells(refDst, dstPostBytes);
-    setRowsLog.push({ callIdx: setRowsCallCount, divergence, srcF32First8, indicesFirst4, dstPostFirst8 });
-}
-setRowsCallCount++;
+mod.jsepRunOp = async (descriptorPtr, descriptorWords, opParamsPtr, opParamsLen) => {
+    // ... existing capture of entry + setRowsDiagEntry ...
+    const status = await origJsepRunOp(descriptorPtr, descriptorWords, opParamsPtr, opParamsLen);
+    if (entry) entry.status = status;
+    if (setRowsDiagEntry) {
+        const diag = setRowsDiagEntry;
+        try {
+            // SYNCHRONOUS post-dispatch readback. Force a flush so the
+            // dispatch is submitted to the GPU before we readback.
+            runtime.encoderBatcher.flush();
+            const dstRec = runtime.dataManager.get(diag.dstH);
+            const READ = 16;
+            const staging = runtime.device.createBuffer({ size: READ, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            const enc = runtime.device.createCommandEncoder();
+            enc.copyBufferToBuffer(dstRec.buffer, diag.dstO, staging, 0, READ);
+            runtime.device.queue.submit([enc.finish()]);
+            await staging.mapAsync(GPUMapMode.READ, 0, READ);
+            const u16 = new Uint16Array(staging.getMappedRange().slice(0));
+            staging.unmap();
+            staging.destroy();
+            diag.dstImmediateFirst8U16 = Array.from(u16);
+        } catch (e) {
+            diag.errImmediate = (e as Error).message;
+        }
+    }
+    return status;
+};
 ```
 
-#### Step 2 — run D2 and inspect the first divergent SET_ROWS (~10 min)
+Note: changing `mod.jsepRunOp` to `async` requires the runtime to await it. Check `installJsepCallbacks` to confirm — if the wasm side calls it via JSPI, the await is implicit.
+
+#### Step 1 — patch + build (~15 min)
+
+Edit `smoke-test/p2-v2-spike.src.ts` jsepRunOp wrapper to add the synchronous readback for SET_ROWS.
 
 ```bash
-cd /Users/probello/Repos/webllm && bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.6-d2" --tab "$TAB"
-until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
-agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify(window.__setRowsLog, null, 2)'
-# Expected output: array of 10 entries, each with divergence count + first8 of src/indices/dst.
-# The first entry with divergence>0 (or where src/indices look corrupt) is the smoking gun.
+cd /Users/probello/Repos/webllm
+bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
 ```
 
-#### Step 3 — branch on D2 outcome
+#### Step 2 — run + inspect (~5 min)
 
-- **All 10 SET_ROWS calls have divergence=0 AND srcF32 looks like real K/V values** — D2 confirms SET_ROWS is doing exactly what it should at every dispatch, with valid inputs. The bug is downstream (H-attention). Move to D3 — instrument the SOFT_MAX consumer or the attention matmul that READS from the K_cache.
-- **Some SET_ROWS calls have divergence>0** — kernel diverges from CPU reference. This contradicts D1 (the kernel WAS correct in selftest), so the production-graph environment is doing something the selftest didn't replicate (e.g. concurrent dispatches, larger row counts triggering a different code path). Reduce the test case to the minimum that reproduces.
-- **srcF32 is all-zero or NaN** — H-source confirmed. Trace back: which JSEP op produces the tensor that becomes ROPE's input? Verify post-H1 mirror state of that output.
-- **Indices are wildly wrong** (large values, NaN-pattern bits) — H-indices confirmed. Find the indices-producing op and check its output.
+```bash
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.7-fix" --tab "$TAB"
+until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
+agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify(window.__setRowsDiag.slice(0, 5).map(e => ({i: e.i, dstO: e.dstO, dstNe: e.dstNe, dstImmediateFirst8U16: e.dstImmediateFirst8U16, dstPostFirst8U16: e.dstPostFirst8U16})), null, 2)'
+```
+
+#### Step 3 — branch on outcome
+
+- **i=3 dstImmediateFirst8U16 = [0, 0, 0, ...]** — Reading R1 confirmed: the dispatch silently failed. Dig into why the FIRST SET_ROWS divert specifically fails. Suspects: encoder batcher's first flush, temp-dst's first allocation lifecycle, the divert path's pre/post copy with offset=0, the divert path's createBindGroup for the very first invocation. Add fprintf-style diagnostic logging inside `dispatchSetRows` for the first call.
+- **i=3 dstImmediateFirst8U16 has F16 values matching f16(src0)** — Reading R2 confirmed: i=3 wrote correctly, a later op overwrote dstO=0. Likely culprits: a `jsepClear(KVcache, 0, 0, ...)` between i=3 and end-of-decode, or another SET_ROWS' divert pre-copy that copies stale-zero dst back over our written data (possible if two SET_ROWS share an aliasing region). Stage 4.8 follow-on: instrument `jsepClear` and `jsepWrite` to log writes to dstH=23 dstO=0, find the overwriter.
 
 #### Spike state cheat sheet
 
-- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.6-<probe>`
-- **Per-token decode (post-Stage-4.6 D1):** ~25 ms. D2 will add 6-10 extra jsepRead per first-N-SET_ROWS calls; bound the count to keep perf flat after warmup.
-- **Built-in selftests now 6 (post-D1):** Q4K K=256, RMSNORM rows=1, RMSNORM rows=6/K=2048, MATMUL Q4_K M=64/K=2048/N=6 (no-divert + divert), **SETROWS_VCACHE (no-divert + divert)**.
-- **Build:** Spike harness changes only need `bun build smoke-test/p2-v2-spike.src.ts`. Full `make wasm-build-jsep` only if changing C++ side.
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.7-<probe>`
+- **Per-token decode (post-D2-lite):** ~25 ms. D2-tight will pause wasm per-SET_ROWS for the first 10 dispatches; perf hit might be ~100ms total (10 × ~10ms per readback). Acceptable for diagnostic.
+- **Built-in selftests:** 6 PASS (Q4K, RMSNORM single, RMSNORM multi, MATMUL prod no-divert/divert, SETROWS V-cache no-divert/divert).
+- **Build:** Spike-only changes need `bun build smoke-test/p2-v2-spike.src.ts`. No wasm rebuild.
 - **`make checkall` must be green** before committing.
 
-#### Exit criteria — Stage 4.6 closes (full closure, not just D2 sub-step) when documented in `STAGE-4.6-RESULT.md`:
+#### Exit criteria — Stage 4.7 closes when documented in `STAGE-4.7-RESULT.md`:
 
-- **Outcome A "Paris" decode achieved** — finite logits, sensible top-1 token, decoded text contains "Paris" or semantically equivalent. Closure queues Stage 4.7 (H3 perf-recover) or Stage 5 (perf bench).
-- **Outcome A still doesn't flip after D2+D3** — bug is in a fourth class (e.g. layer-norm output offsets, GET_ROWS for embedding lookup, or batch-token-position metadata). Closure documents which D-step localized the next suspect.
+- **i=3's dstImmediate captured** with R1 or R2 confirmed. Closure brief queues:
+  - R1 confirmed → Stage 4.8 = fix the dispatcher's first-call corner case.
+  - R2 confirmed → Stage 4.8 = find and fix the overwriter.
 
 #### Step 0 — verify state (only if the bootstrap block at the top failed)
 
@@ -1064,16 +1060,18 @@ agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify(window.__setRows
 #   → e0fa38928   webllm-browser-patches   (patch stack 7)
 
 git log --oneline -10
-#   → docs(TODO): Stage 4.6 D1 partial closure — kernel exonerated; queue D2/D3
-#   → docs(reports): Stage 4.6 D1 closure — SET_ROWS V-cache transpose selftest PASS
-#   → chore(spike): Stage 4.6 D1 — V-cache transpose SET_ROWS selftest
+#   → docs(TODO): Stage 4.6 D2-lite partial closure — i=3 anomaly; queue Stage 4.7 D2-tight
+#   → docs(reports): Stage 4.6 D2-lite closure — i=3 K-cache layer 0 dst all-zero
+#   → chore(spike): Stage 4.6 D2-lite — per-SET_ROWS source/indices/dst probe
+#   → 07ea21d docs(TODO): Stage 4.6 D1 partial closure — kernel exonerated; queue D2/D3
+#   → add3c54 docs(reports): Stage 4.6 D1 closure — SET_ROWS V-cache transpose selftest PASS
+#   → 67ecae8 chore(spike): Stage 4.6 D1 — V-cache transpose SET_ROWS selftest
 #   → b178483 docs(TODO): Stage 4.5 closed — queue Stage 4.6 KV-cache write correctness
-#   → f413223 docs(reports): Stage 4.5 closure — H1 fires; partial outcome A
-#   → 80ad8a2 fix(makefile): wasm-build-jsep cp-before-bundle (Stage 4.5 build-order race)
-#   → 13c84e4 docs(TODO): Stage 4.4 closed — queue Stage 4.5 GPU→host writeback
 ```
 
-If the llama.cpp tip isn't on `e0fa38928`, the WASM was built against the wrong source — `make wasm-build-jsep` and re-run the bootstrap.
+### Earlier Stage 4.6 D2/D3 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.6 D2/D3 brief (three hypotheses H-source/H-indices/H-attention with priorities, files-to-read order, D2 instrumentation sketch, branch-on-outcome) lives in [`STAGE-4.6-D2-LITE-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.6-D2-LITE-RESULT.md). D2-lite REJECTED H-indices and WEAKENED H-source by showing src[0] and src[1] are sensible across all 10 captured SET_ROWS — but surfaced a fourth diagnosis (i=3 K-cache layer 0 anomaly) that needed Stage 4.7 D2-tight to disambiguate. Collapsed at Stage 4.7 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.6 D1 brief — collapsed (full text in closure report)
 
