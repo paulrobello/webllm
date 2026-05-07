@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.12 PARTIAL CLOSED 2026-05-07 — `<pending>` + llama.cpp `b50f92fd3` (Stage-4.12 diagnostic patch — Probe 2 CPU graph_compute instrumentation in `ggml-cpu.cpp` + JSEP residency resolver in `ggml-jsep.cpp` + set_tensor logging on handle 26; patch stack 8 → 9; expected to revert at Stage 4.13 once the structural fix lands).** **Probe 2's three predicted sub-cases all rest on a false premise.** `__cpuGraphLog` (30 calls × 42 nodes) shows **zero** nodes with a jsep-resident `dst`, `src0`, or `src1` — the CPU backend operates entirely on tensors already split off into CPU buft by ggml-backend's scheduler. Cross-backend writes into `jsep_buf` go through `ggml_backend_jsep_buffer_set_tensor`, NOT through cgraph nodes the CPU backend executes. Set_tensor follow-up gives the smoking gun: `__setTensorLog` shows the V SET_ROWS' source and K SET_ROWS' source land via twin 6144-byte `set_tensor` calls — but **V's lands as all-zeros at `(h26, 0)`** while **K's lands as valid f32 at `(h26, 528384)`**. Sequence at `(h26, 0)`: 49152 bytes (input embedding) → 49152 bytes (RMS_NORM result) → **6144 bytes ZEROS** (V projection result), exactly the allocator-coalesced slot Stage 4.11 hypothesized — and the V projection's CPU-side scratch is filled with zeros by the time the scheduler CPYs it back into `jsep_buf`. Three sub-cases for V's CPU producer: (CPU-A) MUL_MAT skipped entirely, scratch passes through; (CPU-B) MUL_MAT runs but reads zero src1/src0; (CPU-C) MUL_MAT routes to JSEP but allocator-coalesces V's dst onto (h26, 0) clobbered by input embedding/RMS_NORM. CPU-C is most likely given the size-49152 → size-49152 → size-6144 sequence at offset 0. Stage 4.11 baseline reproduced bit-exactly (`GENERATED_TEXT="ntiuhuihnerquant"`, `topId/topVal=593/0.159`, 6 selftests PASS, `make checkall` green). Per-token decode 129.36 ms (Stage 4.11 baseline 126.04 ms; +2.6% within noise — instrumentation visible during prefill, invisible during decode). Closure: [`STAGE-4.12-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.12-RESULT.md). Stage 4.13 brief below queues the disambiguation probe (CPU-A vs CPU-B vs CPU-C) followed by the structural fix.
+
 **Stage 4.11 CLOSED 2026-05-07 — `<pending>` + llama.cpp `<pending>` (no patch — diagnostic instrumentation only in `ggml-jsep.cpp::ggml_backend_jsep_graph_compute`; patch stack unchanged at 8).** **HD' CONFIRMED — and asymmetric.** Probe 1 added ENTRY/EXIT host_mirror snapshots for `h26+0` and `h26+528384` keyed by `s_sliceIdx411` into `globalThis.__interSliceLog` (60 entries = 30 enter + 30 exit; cap shared with Stage 4.10 graph-log). **Smoking gun:** the K side works (`h26+528384` = `[-3.09e-6, -1.52e-6]` at slice 3 enter — populated in time by a CPU CPY+ROPE chain between slice 2 exit and slice 3 enter), but the V side is broken (`h26+0` = `[0, 0]` at slice 3 enter; stays zero through slice 10 exit; turns into K-shaped data — not V — by slice 11 enter, suggesting allocator reuse from a later layer rather than V landing). Slice-0 RMS_NORM legitimately writes to `h26+0` ([-1.30e-3, 1.90e-3]); a CPU op between slices 0 exit and 1 enter overwrites with smaller values; another CPU op between slice 2 exit and slice 3 enter zeros the slot — most plausibly the scheduler reusing the slot for V's tensor allocation, with V's producer not firing in time. Cross-checked `__jsepGraphLog`: JSEP's distinct `dstO` values for `dstH=26` across all 30 slices are `{4194304, 6295552, 528384}` — **offset 0 absent**, so the producer is necessarily a CPU subgraph (or never fires). Stage 4.10's "missing 3rd projection" observation narrows: K's CPU subgraph fires correctly; V's does not. Stage 4.10 baseline reproduced bit-exactly (`GENERATED_TEXT="ntiuhuihnerquant"`, `topId/topVal=593/0.159`, 6 selftests PASS, `make checkall` green). Per-token decode 126.04 ms (vs 127.42 baseline; instrumentation invisible). Closure: [`STAGE-4.11-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.11-RESULT.md). Stage 4.12 brief below queues Probe 2 (CPU graph_compute instrumentation) to localize WHERE V's CPU producer writes, plus the structural-fix decision once that data lands.
 
 **Stage 4.10 CLOSED 2026-05-07 — `<pending>` + llama.cpp `<pending>` (no patch — diagnostic instrumentation only in `ggml-jsep.cpp::ggml_backend_jsep_graph_compute`; patch stack unchanged at 8).** **HA strict-form REJECTED, refined HA' / HD CONFIRMED.** Per-graph_compute slice composition logged into `globalThis.__jsepGraphLog` (first 30 invocations × per-node `[op, dstH, dstO, src0H, src0O, src0Op, src1H, src1O, src1Op, src0VsOp]`). **Smoking gun:** slice 3 (the FIRST SET_ROWS slice) has `nodes[0] = {op:42, dstH:25, dstO:0, src0H:26, src0O:0, src0Op:0, s0VsOp:0, src1H:26, src1O:524288, src1Op:0}` and `nodes[4] = {op:42, dstH:25, dstO:262144, src0H:26, src0O:528384, src0Op:0, s0VsOp:0, ...}`. Both SET_ROWS' src0 have **`src0Op = GGML_OP_NONE = 0`** AND `s0VsOp = 0` — they are LEAF tensors in JSEP's split-cgraph view, not produced by any op visible to JSEP. The scheduler split treats `h26+0` (V data) and `h26+528384` (K data) as cross-backend boundary inputs; the producer chain lives in CPU subgraphs that should populate `host_mirror[26]+0..6144` via direct `tensor->data → host_mirror` writes (post-F1). HA's strict form is rejected: 3 JSEP graph_compute calls fire BEFORE slice 3 (slices 0/1/2 = RMS_NORM h26+0 → proj A h26+4194304 → proj B h26+4194304), with CPU subgraphs interleaved between them. Pre-SET_ROWS JSEP slices write to h26+0 (RMS_NORM, but content ≠ V/K data) and h26+4194304 (allocator-coalesced projection scratch); **none write the V/K-shaped data the SET_ROWS leaves expect at h26+0 / h26+528384**. HB weakened (s0VsOp=0 rules out view-src indirection); HC unlikely (Stage 4.9 callIdx 2-7 show stable K data implying no spurious clearing). The actual root cause appears to be **HD: cross-backend leaf without producer landing data in time** — the CPU CPY/MUL_MAT chain that should populate the leaves either doesn't fire before slice 3 or writes to a different absolute address. Stage 4.9 baseline reproduced bit-exactly (`GENERATED_TEXT="ntiuhuihnerquant"`, `topId/topVal=593/0.159`, 6 selftests PASS, `make checkall` green). Closure: [`STAGE-4.10-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.10-RESULT.md). Stage 4.11 brief below queues two probes in priority order: (1) inter-slice host_mirror snapshot to localize WHEN h26+0 gets populated; (2) CPU graph_compute instrumentation to localize WHICH CPU subgraph produces the data.
@@ -951,7 +953,7 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.12: localize V's CPU producer via Probe 2, then enact the structural fix. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.13: disambiguate CPU-A / CPU-B / CPU-C for V's zero-output, then enact the structural fix. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -959,11 +961,11 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → <Stage 4.11 TODO closure commit> docs(TODO): Stage 4.11 closed — queue Stage 4.12 V-producer localization + structural fix
+#   → <Stage 4.12 TODO closure commit> docs(TODO): Stage 4.12 closed — queue Stage 4.13 V-zero-output disambiguation + structural fix
 
 # 2. Confirm llama.cpp tip.
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → <Stage-4.11-instrumentation commit>   webllm-browser-patches   (patch stack 8)
+#   → <Stage-4.12-instrumentation commit>   webllm-browser-patches   (patch stack 9)
 
 # 3. Smoke-server up on 8031.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
@@ -971,124 +973,131 @@ lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 # 4. Reuse agentchrome session + spike tab.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
-[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.12-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.13-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "PORT=$PORT TAB=$TAB"
 
-# 5. Reproduce post-Stage-4.11 baseline:
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.12-replay" --tab "$TAB"
+# 5. Reproduce post-Stage-4.12 baseline (with set_tensor probe live):
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.13-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").textContent.slice(-50)' 2>&1 | grep -qE "DONE|FAIL"; do sleep 3; done
-agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify({interLen: globalThis.__interSliceLog.length, s3enterO0: globalThis.__interSliceLog.find(e=>e.slice===3 && e.tag==="enter").h26o0.slice(0,2), s3enterO528: globalThis.__interSliceLog.find(e=>e.slice===3 && e.tag==="enter").h26o528384.slice(0,2)})'
-#   → expect: interLen=60, s3enterO0=[0,0], s3enterO528≈[-3.09e-6, -1.52e-6]
+agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify({
+  setTensorLen: globalThis.__setTensorLog ? globalThis.__setTensorLog.length : null,
+  cpuLogLen: globalThis.__cpuGraphLog ? globalThis.__cpuGraphLog.length : null,
+  vSlot: globalThis.__setTensorLog ? globalThis.__setTensorLog.find(e => e.handle===26 && e.offset===0 && e.size===6144) : null,
+  kSlot: globalThis.__setTensorLog ? globalThis.__setTensorLog.find(e => e.handle===26 && e.offset===528384 && e.size===6144) : null
+})'
+#   → expect: setTensorLen=200, cpuLogLen=30, vSlot.f32_first4=[0,0,0,0], kSlot.f32_first4=[~-3e-6, ~-1.5e-6, ~4e-6, ~4.6e-6]
 ```
 
-**One-line goal:** identify which CPU op writes to `host_mirror[26]+528384` (K — works) vs which CPU op SHOULD write to `host_mirror[26]+0` (V — broken) but doesn't, then enact a structural fix that makes V's path agree with K's. Stage 4.11 proved the asymmetry; Stage 4.12 must explain WHY V differs from K and remove the difference.
+**One-line goal:** distinguish CPU-A (V's MUL_MAT skipped, scratch passes through) vs CPU-B (V's MUL_MAT runs but reads zeros) vs CPU-C (V's MUL_MAT routes to JSEP but allocator-coalesces with input embedding/RMS_NORM at offset 0). Then enact the structural fix.
 
-**One-line context:** Stage 4.11 confirmed HD' for V only — `h26+528384` (K) populated in time by a CPU subgraph; `h26+0` (V) zero from slice 3 entry through slice 10 exit. JSEP never writes to `h26+0` itself (verified via `__jsepGraphLog`), so V's producer must be on CPU. Stage 4.10 noted only 2 of the 3 attention projections appear as JSEP slices before each SET_ROWS slice — Stage 4.11 narrows the missing one to V (K's projection chain works).
+**One-line context:** Stage 4.12 confirmed V's projection result lands at `(h26, 0)` as a 6144-byte all-zeros `set_tensor` write while K's lands at `(h26, 528384)` as valid f32. The CPU graph_compute log shows zero jsep-resident dst writes — cross-backend writes flow through `ggml_backend_jsep_buffer_set_tensor`, not through cgraph nodes. The 6144-byte zero-write at offset 0 follows two 49152-byte writes (input embedding + RMS_NORM result) at the SAME offset — strongly suggesting allocator-coalesced V dst (CPU-C).
 
-#### Implementation — Stage 4.12 (Probe 2 first; structural fix second)
+#### Implementation — Stage 4.13 (disambiguation first; structural fix second)
 
-**Probe 2 — CPU graph_compute instrumentation (~60 LOC + ggml-cpu rebuild).** Wrap ggml-cpu's top-level graph_compute entry point so we can see CPU op composition between JSEP slices. Look at `~/Repos/llama.cpp/ggml/src/ggml-cpu/ggml-cpu.c` (or `.cpp` — confirm in fresh session) for the function registered as `.graph_compute` in `ggml_backend_cpu_i`. Likely candidate: `ggml_backend_cpu_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph)`. Mirror the Stage 4.10 EM_ASM block: per-call, log up to 128 nodes' `{op, dstH, dstO, src0H, src0O, src0Op}` into `globalThis.__cpuGraphLog` (cap 30 calls). Use the same `ggml_backend_jsep_buffer_context` static-cast pattern keyed on `iface.get_base == ggml_backend_jsep_buffer_get_base` to extract `(handle, offset)` for tensors residing in jsep_buf. (jsep is the default buft post-Stage-1.5, so most tensors will be jsep_buf-resident.)
-
-The smoking-gun query after the spike runs:
+**Probe 3 — disambiguate CPU-A / CPU-B / CPU-C.** Cheapest path: instrument `ggml_backend_cpu_graph_compute` to log per-CPU-call **the source data first 4 floats** for each MUL_MAT node (so we see if a CPU MUL_MAT runs and what it reads), AND tag each `__cpuGraphLog` entry with the corresponding `s_cpuGraphCallIdx` so we can timeline-correlate against `__setTensorLog` and `__jsepGraphLog`. Then probe by:
 
 ```js
-const cpuLog = globalThis.__cpuGraphLog || [];
-// All CPU dispatches whose dst is (handle=26, offset=0) — V's expected target.
-cpuLog.flatMap((c, ci) => c.nodes
-  .map((n, ni) => ({callIdx: ci, nodeIdx: ni, ...n}))
-  .filter(n => n.dstH === 26 && n.dstO === 0)
+// 1) Did a CPU MUL_MAT run with src0 / src1 from CPU heap that produced a 6144-byte F32 dst?
+const cpuMulMats = (globalThis.__cpuGraphLog || []).flatMap((c, ci) =>
+  c.nodes.map((n, ni) => ({callIdx: ci, nodeIdx: ni, ...n}))
+       .filter(n => n.op === 29)
 );
-// All CPU dispatches whose dst is (handle=26, offset=528384) — K's working target.
-cpuLog.flatMap((c, ci) => c.nodes
-  .map((n, ni) => ({callIdx: ci, nodeIdx: ni, ...n}))
-  .filter(n => n.dstH === 26 && n.dstO === 528384)
-);
+// If empty → CPU-A confirmed (no MUL_MAT for V on CPU).
+// If non-empty → check src1 first 4 floats (use the new Probe 3 src1 capture).
+//   If src1 = [0,0,0,0] → CPU-B confirmed.
+//   If src1 = real f32 → either CPU-B with right inputs but wrong wiring,
+//     or the MUL_MAT ran but its dst is in CPU buft, then set_tensor wrote
+//     zeros — meaning the dst tensor for V's CPU MUL_MAT and the dst tensor
+//     for set_tensor are NOT the same tensor (allocator alias).
+// 2) The set_tensor (h26, 0, size=6144, zeros) entry's data pointer (already
+//    captured): which heap region is it? If it overlaps with the JSEP-set
+//    handle 26 host_mirror, this is CPU-C — the allocator put V's dst on
+//    top of the input-embedding slot which is now zero-valued because
+//    nothing has written to it post-RMS_NORM-overwrite-with-different-shape.
 ```
 
-Three sub-cases:
+**Files to read first (with line ranges):**
 
-- **K writes to `(26, 528384)` found, V writes to `(26, 0)` not found anywhere:** V's MUL_MAT writes to a different (handle, offset) than what SET_ROWS reads. Address mismatch in the cgraph — fix lives in libllama's graph topology / `ggml_set_kv` call sites or the `tensor->data` mapping logic. Look at the V tensor's allocation in libllama's `llm_build_kv_store` (or equivalent) — possibly the V tensor pointer in the cgraph differs from the SET_ROWS `src0` pointer. This is the most concerning sub-case.
-- **K writes to `(26, 528384)` found in CPU call N, V writes to `(26, 0)` found in CPU call M with M > N+1:** scheduler ordering bug. V's CPU op is scheduled into a later split than K's. Look at `ggml_backend_sched_split_graph` for what makes V's split land after the SET_ROWS' JSEP split. Possible cause: V cache's transposed layout (`llama-kv-cache.cpp:1281`) creates a different dependency edge that the scheduler interprets as schedulable later.
-- **K writes to `(26, 528384)` found, V writes to `(26, 0)` found AT THE SAME callIdx as K (e.g., both in CPU call N):** V is a graph node but its values are wrong (zeros). Look at the V projection MUL_MAT — possibly its src0 (input embedding) or src1 (V weight) is being misread as zeros.
+- `~/Repos/llama.cpp/ggml/src/ggml-cpu/ggml-cpu.cpp:170-190` — Stage 4.12's CPU graph_compute instrumentation block. Extend with src1/src0 first-4 F32 capture for MUL_MAT nodes.
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:259-310` — `set_tensor` and the Stage-4.12 logging block. Extend to capture the `data` pointer's value as a hex address so we can correlate against host_mirror slots.
+- `~/Repos/llama.cpp/src/llama-graph.cpp` (or `~/Repos/llama.cpp/src/llama-build-graph.cpp`) — find the V projection MUL_MAT in libllama's graph builder. Search for `wv` / `model.layers[il].wv` / `cur = ggml_mul_mat(ctx0, model.layers[il].wv, cur)`. Note its dst tensor's name (often `Vcur` or `kv_self.v_l[il]`). Then check the surrounding `ggml_set_input` / `ggml_format_name` / scheduler hint calls.
 
-Implementation sketch:
+**Implementation sketch — Probe 3 extension to `ggml-cpu.cpp` Stage 4.12 block:**
 
 ```cpp
-// In ggml-cpu's graph_compute, add same kind of EM_ASM block we added to ggml-jsep.cpp.
-// Pack a stack array of {op, dstH, dstO, src0H, src0O, src0Op} per node, push one
-// __cpuGraphLog record per call, cap 30 calls. Use the
-// `iface.get_base == ggml_backend_jsep_buffer_get_base` predicate as the
-// jsep-resident check (the symbol is exported from ggml-jsep — verify visibility
-// from ggml-cpu; if not, declare extern in a small header or hard-code the
-// handle/offset extraction by stashing a `jsep_get_handle(t)` helper in jsep's
-// public header).
+// Inside the per-node loop, after the existing dst/src0/src1 metadata block:
+if ((int) t->op == GGML_OP_MUL_MAT && t->src[0] && t->src[1]) {
+    // Capture first 4 F32 of src0 (weight) and src1 (activation).
+    // src0 might be quantized — only capture if F32/F16; mark as -1 otherwise.
+    // src1 is always F32 per supports_op gate; capture directly.
+    const int32_t s1_addr = (int32_t) (intptr_t) t->src[1]->data;
+    EM_ASM({
+        if (typeof globalThis.__cpuMulMatDiag === "undefined") globalThis.__cpuMulMatDiag = [];
+        if (globalThis.__cpuMulMatDiag.length < 60) {
+            const arr = [];
+            for (let i = 0; i < 4; ++i) arr.push(HEAPF32[($1 >> 2) + i]);
+            globalThis.__cpuMulMatDiag.push({callIdx: $0, src1_first4: arr, src1_addr: $1});
+        }
+    }, s_cpuGraphCallIdx, s1_addr);
+}
 ```
 
-If the helper isn't externally visible, the cleanest quick path is to declare a
-small `extern "C"` helper in `ggml-jsep.cpp` that returns `(handle, offset)` for
-any tensor whose buffer's `get_base` matches jsep's, and have ggml-cpu's logger
-call that helper. ~10 extra LOC. Patch stack: 8 → 9.
+**Then disambiguate:**
 
-**Structural fix — depends on Probe 2 result.** Three candidate fixes:
+| Outcome | Reading | Fix shape |
+|---|---|---|
+| `cpuMulMats.length === 0` AND none of the captured CPU MUL_MATs has dst shape `[256, 6]` (V projection) | **CPU-A**: V's MUL_MAT never runs on CPU. Then it's either on JSEP (and we missed it in slices 0–29) or it's been silently optimized away. | Widen `__jsepGraphLog` to first 60 slices to find V's MUL_MAT; if not there, instrument `ggml_backend_sched_split_graph` to log V's tensor's backend assignment. |
+| Any CPU MUL_MAT has `src1_first4 = [0, 0, 0, 0]` | **CPU-B**: V's MUL_MAT runs on CPU but reads a stale/zero src1. | Localize the producer of `t->src[1]` for V's MUL_MAT — likely the input-embedding lookup that should `set_tensor` into a CPU staging buft before V's MUL_MAT runs. |
+| All CPU MUL_MATs have valid `src1_first4`, AND the `(h26, 0, size=6144, zeros)` set_tensor's data address is in the host_mirror[26] region | **CPU-C**: allocator-coalesced V dst onto input-embedding slot. The `set_tensor` is copying *from* host_mirror[26]+0 *to* host_mirror[26]+0 (no-op), or from a CPU scratch slot that's never written. | Force V's dst tensor to a non-coalesced slot via libllama hint, OR force V's MUL_MAT onto JSEP via offload_op widening. |
 
-1. **(if address mismatch)** Trace V tensor's pointer evolution from
-   `llm_build_kv_store` through to SET_ROWS. The fix lives in libllama —
-   likely a one-line tensor-pointer correction.
-2. **(if scheduler ordering)** Investigate
-   `ggml_backend_sched_split_graph` and `set_node_backend` for V vs. K.
-   Possibly Stage 1.5's `supports_buft = jsep_buft only` interacts badly
-   with V's transposed layout; either widen `supports_buft` carefully or
-   adjust libllama's graph build to avoid the asymmetry.
-3. **(if V producer outputs zeros)** Look upstream — the V projection
-   MUL_MAT's inputs are wrong. Possibly the input-embedding tensor's data
-   pointer is stale at V's projection-time but fresh at K's. Check H1-inverse
-   coverage for the embedding tensor.
+**Structural fix candidates (queue for Stage 4.13's second half):**
 
-**Path B (orthogonal — re-enable narrow offload_op for MUL_MAT):** Revert
-Stage 1.5's `supports_buft = jsep_buft only` partially and re-apply Phase 2
-Task 10's offload_op patches scoped to MUL_MAT only. Goal: pull V projection
-back into JSEP's slice 3 so the cross-backend leaf disappears entirely.
-Risk: re-introduces the Phase 2 Task 8 host-buft acceptance bug. Treat as
-backup if Probe 2's fix doesn't land cleanly.
+- **(if CPU-C — most likely)** Widen JSEP's `offload_op` to MUL_MAT shapes that fit the cap, even when src1 is in CPU buft, so V's MUL_MAT routes to JSEP via the Phase 2 Task 10 offload path. Risk: re-introduces the host-buft acceptance bug Stage 1.5 closed. Mitigation: keep `supports_buft = jsep_buft only` AND offload_op on for MUL_MAT — the scheduler will insert CPY-to-jsep_buft for the src, which Stage 1.5's `set_tensor` callback handles correctly. Test: confirm the offload_op fires only for V's MUL_MAT (not Q/K which already work), with a counter in the offload_op callback.
+- **(if CPU-A)** Update libllama's graph builder to wire V's MUL_MAT explicitly to JSEP via `ggml_format_name` or a new hint helper. Look at `~/Repos/llama.cpp/src/llama-graph.cpp` for the V projection's tensor naming and surrounding context.
+- **(if CPU-B)** Insert an explicit input-staging step before V's MUL_MAT — likely a `ggml_cpy` or a `set_tensor` call on the CPU-staging buft from the input-embedding tensor.
+
+**Path B fallback (orthogonal — re-enable narrow offload_op for MUL_MAT):** Already mentioned in the Stage 4.12 brief. Reverts Stage 1.5's `supports_buft = jsep_buft only` partially. Treat as backup if (CPU-C fix) doesn't land cleanly.
 
 #### Step 0 — verify state (only if the bootstrap block at the top failed)
 
 ```bash
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → <Stage-4.11-instrumentation>   webllm-browser-patches   (patch stack 8)
+#   → <Stage-4.12-instrumentation>   webllm-browser-patches   (patch stack 9)
 
 git log --oneline -10
+#   → docs(TODO): Stage 4.12 closed — queue Stage 4.13 V-zero-output disambiguation + structural fix
+#   → docs(reports): Stage 4.12 closure — Probe 2 + set_tensor follow-up; V projection lands as zeros
+#   → chore(jsep,cpu): Stage 4.12 Probe 2 — CPU graph_compute + jsep set_tensor instrumentation
 #   → docs(TODO): Stage 4.11 closed — queue Stage 4.12 V-producer localization + structural fix
 #   → docs(reports): Stage 4.11 closure — HD' confirmed; V-side asymmetry localized
-#   → chore(jsep): Stage 4.11 graph_compute host_mirror entry/exit snapshot
-#   → docs(TODO): Stage 4.10 closed — queue Stage 4.11 cross-backend leaf producer localization
-#   → docs(reports): Stage 4.10 closure — HA strict rejected; cross-backend leaf surfaces
 ```
 
 #### Spike state cheat sheet
 
-- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.12-<probe>`
-- **Per-token decode (post-Stage-4.11):** ~126 ms (Stage 4.9/4.10/4.11 baseline; instrumentation overhead invisible).
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.13-<probe>`
+- **Per-token decode (post-Stage-4.12):** ~129 ms (Stage 4.11 baseline 126 ms; +2.6% from CPU log + set_tensor log instrumentation, invisible during decode steady state).
 - **Built-in selftests:** 6 PASS.
 - **Build:** `make wasm-build-jsep`.
 - **`make checkall` must be green** before committing.
-- **Existing diagnostics retained:** `__jsepGraphLog` (Stage 4.10 — 30 slices × per-node metadata), `__h1invDiag` (Stage 4.9 — 8 captures of host_mirror[26+0..32] gated on size=6144), `__interSliceLog` (Stage 4.11 — 60 enter/exit host_mirror[26+{0,528384}] snapshots). Stage 4.12 adds `__cpuGraphLog`.
+- **Existing diagnostics retained:** `__jsepGraphLog` (Stage 4.10 — 30 slices × per-node metadata), `__h1invDiag` (Stage 4.9 — 8 captures of host_mirror[26+0..32] gated on size=6144), `__interSliceLog` (Stage 4.11 — 60 enter/exit host_mirror[26+{0,528384}] snapshots), `__cpuGraphLog` (Stage 4.12 — 30 calls × 9-i32-stride per node), `__setTensorLog` (Stage 4.12 — 200 entries gated on handle 26). Stage 4.13 adds `__cpuMulMatDiag` (60 captures of CPU MUL_MAT src1 first 4 F32).
 
-#### Exit criteria — Stage 4.12 closes when documented in `STAGE-4.12-RESULT.md`:
+#### Exit criteria — Stage 4.13 closes when documented in `STAGE-4.13-RESULT.md`:
 
-- Probe 2 produces `__cpuGraphLog` data sufficient to identify the CPU op (or absence thereof) that should write V data to `(handle=26, offset=0)`.
-- The closure report names the load-bearing fix shape (address mismatch / scheduler ordering / V producer zeros / Path B fallback).
-- The structural fix lands and flips Outcome A (`GENERATED_TEXT` shows real English; ideally `"Paris"` or close), OR the closure documents why a follow-on stage is required (e.g., the fix surfaced a deeper bug).
+- Probe 3 produces enough data to pick CPU-A / CPU-B / CPU-C unambiguously.
+- The structural fix lands. Patch stack: 9 → either 9 (if fix is webllm-side only) or 10 (if fix needs a llama.cpp patch).
+- Outcome A confirmed (`GENERATED_TEXT` shows real English; ideally `"Paris"` or close), OR the closure documents a follow-on stage (e.g., the fix surfaced a deeper bug downstream of the V projection — Q@K^T attention reading zero V, etc).
 - `make checkall` green.
-- Patch stack: 8 → 9 (probe instrumentation) or 9 → 10 if the structural fix requires its own patch.
+- The Stage 4.12 diagnostic patch (Probe 2 instrumentation + set_tensor logging) reverts as part of the fix commit, OR is retained as a permanent regression check (decision belongs in the closure report).
 
 #### Branch on outcome:
 
-- **Outcome A (Paris-ish English decode):** Stage 4.x closes; Phase 3 proceeds to Stage 5 (perf optimization, e.g., dirty-bit tracking for H1/H1-inverse to claw back the 5.3× regression).
-- **Outcome B (V data lands but decode still wrong):** another upstream bug — perhaps post-V SET_ROWS attention `Q@K^T` or `softmax(...)·V` reads stale data. Stage 4.13 brief queues per-attention-op readback.
+- **Outcome A (Paris-ish English decode):** entire Stage 4.x sequence finally clears; Phase 3 proceeds to Stage 5 (perf optimization, dirty-bit tracking for H1/H1-inverse to claw back the 5.3× regression).
+- **Outcome B (V data lands but decode still wrong):** another upstream bug — perhaps post-V SET_ROWS attention `Q@K^T` or `softmax(...)·V` reads stale data. Stage 4.14 brief queues per-attention-op readback.
 - **Outcome C (V data still doesn't land — fix didn't work):** revisit fix-shape choice; consider Path B (offload_op re-enable for MUL_MAT) or a more invasive libllama scheduler change.
 
-After Stage 4.12 closes (with Outcome A), the entire Stage 4.x sequence is finally cleared and Phase 3 proceeds. After Stage 4.12 closes (with Outcome B/C), Stage 4.13 brief replaces this one.
+### Earlier Stage 4.12 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.12 brief (paste-and-go bootstrap, Probe 2 CPU graph_compute instrumentation with EM_ASM sketch + jsep_resolve_tensor helper, three predicted sub-cases, structural-fix candidates) lives in [`STAGE-4.12-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.12-RESULT.md). Probe 2's three predicted sub-cases all rest on the false premise that the CPU producer is a cgraph node visible to ggml-cpu's graph_compute — it is not. Cross-backend writes flow through `set_tensor`, surfaced by the Probe 2 follow-up. Collapsed at Stage 4.13 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.11 brief — collapsed (full text in closure report)
 
