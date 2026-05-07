@@ -1475,6 +1475,12 @@ async function runSpike(): Promise<void> {
 			src1First8Idx: number[] | null;
 			dstPreFirst8U16: number[] | null;
 			dstPostFirst8U16: number[] | null;
+			// Stage 4.7 D2-tight: synchronous readback captured before
+			// jsepRunOp returns. JSPI suspends the wasm-side caller while
+			// the readback awaits, so no later ops have run yet.
+			dstImmediateFirst8U16: number[] | null;
+			errImmediate?: string;
+			immediateMs?: number;
 			err?: string;
 		};
 		const setRowsDiag: SetRowsDiagEntry[] = [];
@@ -1482,12 +1488,17 @@ async function runSpike(): Promise<void> {
 		(window as any).__setRowsDiag = setRowsDiag;
 		const GGML_OP_SET_ROWS_VAL = 42; // mirrors GGML_OP_SET_ROWS
 
-		mod.jsepRunOp = (
+		// Stage 4.7 D2-tight: jsepRunOp is now async. graph_compute is in
+		// JSPI_EXPORTS (src/wasm/CMakeLists.txt) so the wasm side awaits the
+		// returned Promise<number>. JSPI suspends the wasm caller while any
+		// readback inside this wrapper runs, so reads here see the immediate
+		// post-dispatch state — no later ops have run yet.
+		mod.jsepRunOp = (async (
 			descriptorPtr: number,
 			descriptorWords: number,
 			opParamsPtr: number,
 			opParamsLen: number,
-		): number => {
+		) => {
 			let entry: RunOpEntry | null = null;
 			let probeI = -1;
 			let setRowsDiagEntry: SetRowsDiagEntry | null = null;
@@ -1583,6 +1594,7 @@ async function runSpike(): Promise<void> {
 						src1First8Idx: null,
 						dstPreFirst8U16: null,
 						dstPostFirst8U16: null,
+						dstImmediateFirst8U16: null,
 					};
 					setRowsDiag.push(setRowsDiagEntry);
 				}
@@ -1751,8 +1763,50 @@ async function runSpike(): Promise<void> {
 					}),
 				);
 			}
+			// Stage 4.7 D2-tight — synchronous post-dispatch readback for the
+			// first SET_ROWS_DIAG_COUNT SET_ROWS dispatches. Flush the
+			// encoder batcher so the dispatch lands on the GPU, then read 16
+			// bytes (8 F16 cells) from dst[dstO..+16). JSPI awaits this
+			// promise before resuming the wasm-side caller, so when wasm
+			// proceeds to the NEXT jsepRunOp the read here is guaranteed to
+			// reflect ONLY this op's output (no later ops have run yet).
+			if (setRowsDiagEntry) {
+				const diag = setRowsDiagEntry;
+				const tImmStart = performance.now();
+				try {
+					const dev = runtime.device;
+					const READ_U16 = 16;
+					runtime.encoderBatcher.flush();
+					const dstRec = runtime.dataManager.get(diag.dstH);
+					const staging = dev.createBuffer({
+						size: READ_U16,
+						usage:
+							GPUBufferUsage.MAP_READ |
+							GPUBufferUsage.COPY_DST,
+					});
+					const enc = dev.createCommandEncoder();
+					enc.copyBufferToBuffer(
+						dstRec.buffer,
+						diag.dstO,
+						staging,
+						0,
+						READ_U16,
+					);
+					dev.queue.submit([enc.finish()]);
+					await staging.mapAsync(GPUMapMode.READ, 0, READ_U16);
+					const u16 = new Uint16Array(
+						staging.getMappedRange().slice(0),
+					);
+					staging.unmap();
+					staging.destroy();
+					diag.dstImmediateFirst8U16 = Array.from(u16);
+				} catch (e) {
+					diag.errImmediate = (e as Error).message;
+				}
+				diag.immediateMs = performance.now() - tImmStart;
+			}
 			return status;
-		};
+		}) as any;
 		(window as any).__jsepRunLog = runLog;
 
 		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
