@@ -2942,6 +2942,107 @@ async function runSpike(): Promise<void> {
 						`syntheticDelta=${syntheticDelta.toExponential(3)} — neither boundary)`;
 				}
 				log(`     [probe10] OUTCOME: ${outcome}`);
+
+				// Stage 4.24 Probe 12 — WGSL-equivalent dequant (Path A,
+				// `dequantQ4_KTile`) vs libllama dequant (Path B, the
+				// `webllm_dequantize_q4_K` shim wrapping
+				// `ggml_get_type_traits(GGML_TYPE_Q4_K)->to_float` =
+				// `dequantize_row_q4_K`). Diffs the resulting f32 weight
+				// tiles element-wise on the production layer-0 wq Q4_K
+				// bytes (`cap.src0Bytes`). H-3a if maxAbs > 1e-5 (WGSL
+				// dequant disagreement); H-3b if ≤ 1e-5 (matmul
+				// accumulation-order disagreement). Q4_0 capture path is
+				// not exercised here — the production capture in TinyLlama
+				// is Q4_K (verified by Stage 4.22's surprise finding that
+				// "Q4_0" in the GGUF filename is the HF tier label, not
+				// the on-disk tensor type for projections).
+				if (cap.src0Type === GGML_TYPE_Q4_K) {
+					const totalElems = cap.M * cap.K;
+					const wgslDequant = dequantQ4_KTile(
+						cap.src0Bytes,
+						cap.M,
+						cap.K,
+					);
+
+					const srcBytes = cap.src0Bytes.byteLength;
+					const dstBytes = totalElems * 4;
+					const srcPtr = (mod as { _malloc: (n: number) => number })._malloc(srcBytes);
+					const dstPtr = (mod as { _malloc: (n: number) => number })._malloc(dstBytes);
+					if (!srcPtr || !dstPtr) {
+						log(
+							`     [probe12] _malloc failed (srcPtr=${srcPtr} dstPtr=${dstPtr})`,
+							"fail",
+						);
+					} else {
+						const heap = (mod as { HEAPU8: Uint8Array }).HEAPU8;
+						heap.set(cap.src0Bytes, srcPtr);
+						const status = (mod as {
+							_webllm_dequantize_q4_K: (
+								s: number,
+								d: number,
+								k: number,
+							) => number;
+						})._webllm_dequantize_q4_K(srcPtr, dstPtr, totalElems);
+						if (status !== 0) {
+							log(`     [probe12] dequant shim status=${status}`, "fail");
+						} else {
+							const heapF32 = (mod as { HEAPF32: Float32Array }).HEAPF32;
+							const llamaDequant = new Float32Array(totalElems);
+							llamaDequant.set(
+								heapF32.subarray(dstPtr / 4, dstPtr / 4 + totalElems),
+							);
+
+							let maxAbs = 0;
+							let maxIdx = -1;
+							let nNaN = 0;
+							let nInf = 0;
+							for (let i = 0; i < totalElems; i++) {
+								const a = wgslDequant[i];
+								const b = llamaDequant[i];
+								if (Number.isNaN(a) || Number.isNaN(b)) {
+									nNaN++;
+									continue;
+								}
+								if (!Number.isFinite(a) || !Number.isFinite(b)) {
+									nInf++;
+									continue;
+								}
+								const d = Math.abs(a - b);
+								if (d > maxAbs) {
+									maxAbs = d;
+									maxIdx = i;
+								}
+							}
+							const verdict = maxAbs > 1e-5 ? "H-3a" : "H-3b";
+							const first8Wgsl = Array.from(wgslDequant.subarray(0, 8));
+							const first8Llama = Array.from(llamaDequant.subarray(0, 8));
+							log(
+								`PROBE12_DEQUANT_DELTA = ${JSON.stringify({
+									M: cap.M,
+									K: cap.K,
+									totalElems,
+									maxAbsDelta: maxAbs,
+									maxIdx,
+									nNaN,
+									nInf,
+									first8Wgsl,
+									first8Llama,
+									verdict,
+								})}`,
+							);
+							log(
+								`     [probe12] dequantDeltaMax=${maxAbs.toExponential(3)} ` +
+									`maxIdx=${maxIdx} OUTCOME: ${verdict}`,
+							);
+						}
+						(mod as { _free: (p: number) => void })._free(srcPtr);
+						(mod as { _free: (p: number) => void })._free(dstPtr);
+					}
+				} else {
+					log(
+						`     [probe12] skipped — cap.src0Type=${cap.src0Type} ≠ Q4_K`,
+					);
+				}
 			}
 		} catch (err) {
 			log(

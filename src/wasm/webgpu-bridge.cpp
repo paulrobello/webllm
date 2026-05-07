@@ -797,6 +797,24 @@ void webllm_enable_node_dump(int32_t max_dumps) {
     g_node_dump_idx = 0;
 }
 
+// Stage 4.24 Probe 12: libllama Q4_K dequant shim. Calls
+// ggml_get_type_traits(GGML_TYPE_Q4_K)->to_float (= dequantize_row_q4_K
+// in ggml-quants.c). Used by the spike harness to cross-check the WGSL
+// `load_q4_K` reconstruction against libllama's reference path on
+// captured production weight bytes (`__probe10Capture.result.src0Bytes`).
+//
+// `src` is k/QK_K Q4_K super-blocks (144 bytes each); `dst` receives k
+// f32 outputs. Caller is responsible for src/dst lifetime + alignment.
+// `k` MUST be a multiple of QK_K (256). Returns 0 on success, -1 on
+// alignment violation.
+int32_t webllm_dequantize_q4_K(const void* src, float* dst, int32_t k) {
+    if (!src || !dst || k <= 0 || (k % 256) != 0) return -1;
+    const struct ggml_type_traits* traits = ggml_get_type_traits(GGML_TYPE_Q4_K);
+    if (!traits || !traits->to_float) return -1;
+    traits->to_float(src, dst, (int64_t) k);
+    return 0;
+}
+
 void* webllm_create_context(void* model, int32_t n_ctx, int32_t embeddings,
                             int32_t pooling_type, int32_t flash_attn) {
     if (!model) return nullptr;

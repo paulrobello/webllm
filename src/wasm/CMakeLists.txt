@@ -134,7 +134,8 @@ if(EMSCRIPTEN)
         "_webllm_get_embeddings,"
         "_webllm_perf_counter,"
         "_webllm_synthetic_offload_probe,_webllm_synthetic_probe_log,"
-        "_webllm_enable_node_dump"
+        "_webllm_enable_node_dump,"
+        "_webllm_dequantize_q4_K"
     )
 
     # Stage 4.20 Probe 9b — JSEP-only export. The C++ symbol lives in

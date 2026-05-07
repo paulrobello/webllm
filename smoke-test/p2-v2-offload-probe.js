@@ -558,6 +558,66 @@ function dispatchMatmul(ctx, desc) {
       size: dstBytesNeeded,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
     });
+    const probe10Global = globalThis;
+    const probe10 = probe10Global.__probe10Capture;
+    let probe10DstAfterStaging = null;
+    let probe10Result = null;
+    let probe10DstSize = 0;
+    if (probe10?.armed && (src0.type === GGML_TYPE_Q4_0 || src0.type === GGML_TYPE_Q4_K)) {
+      probe10.armed = false;
+      const src0RowBytes = src0.nb[1];
+      const src0Size = M * src0RowBytes;
+      const src1Size = batchCount * N * K * 4;
+      probe10DstSize = dstBytesNeeded;
+      const src0Staging = ctx.device.createBuffer({
+        size: src0Size,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+      const src1Staging = ctx.device.createBuffer({
+        size: src1Size,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+      const dstBeforeStaging = ctx.device.createBuffer({
+        size: probe10DstSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+      probe10Result = {
+        M,
+        K,
+        N,
+        src0Type: src0.type,
+        src0Bytes: null,
+        src1Bytes: null,
+        dstBeforeBytes: null,
+        dstAfterBytes: null
+      };
+      probe10.result = probe10Result;
+      const preEnc = ctx.device.createCommandEncoder();
+      preEnc.copyBufferToBuffer(src0Rec.buffer, src0.offset, src0Staging, 0, src0Size);
+      preEnc.copyBufferToBuffer(src1Rec.buffer, src1.offset, src1Staging, 0, src1Size);
+      preEnc.copyBufferToBuffer(dstRec.buffer, dst.offset, dstBeforeStaging, 0, probe10DstSize);
+      ctx.device.queue.submit([preEnc.finish()]);
+      const result = probe10Result;
+      Promise.all([
+        src0Staging.mapAsync(GPUMapMode.READ, 0, src0Size),
+        src1Staging.mapAsync(GPUMapMode.READ, 0, src1Size),
+        dstBeforeStaging.mapAsync(GPUMapMode.READ, 0, probe10DstSize)
+      ]).then(() => {
+        result.src0Bytes = new Uint8Array(src0Staging.getMappedRange().slice(0));
+        result.src1Bytes = new Uint8Array(src1Staging.getMappedRange().slice(0));
+        result.dstBeforeBytes = new Uint8Array(dstBeforeStaging.getMappedRange().slice(0));
+        src0Staging.unmap();
+        src1Staging.unmap();
+        dstBeforeStaging.unmap();
+        src0Staging.destroy();
+        src1Staging.destroy();
+        dstBeforeStaging.destroy();
+      });
+      probe10DstAfterStaging = ctx.device.createBuffer({
+        size: probe10DstSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+    }
     const divertBindGroup = ctx.device.createBindGroup({
       layout: bindGroupLayout,
       entries: [
@@ -593,6 +653,18 @@ function dispatchMatmul(ctx, desc) {
     pass.end();
     enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstBytesNeeded);
     ctx.device.queue.submit([enc.finish()]);
+    if (probe10DstAfterStaging && probe10Result) {
+      const postEnc = ctx.device.createCommandEncoder();
+      postEnc.copyBufferToBuffer(dstRec.buffer, dst.offset, probe10DstAfterStaging, 0, probe10DstSize);
+      ctx.device.queue.submit([postEnc.finish()]);
+      const stagingAfter = probe10DstAfterStaging;
+      const resultAfter = probe10Result;
+      stagingAfter.mapAsync(GPUMapMode.READ, 0, probe10DstSize).then(() => {
+        resultAfter.dstAfterBytes = new Uint8Array(stagingAfter.getMappedRange().slice(0));
+        stagingAfter.unmap();
+        stagingAfter.destroy();
+      });
+    }
     const probeGlobal = globalThis;
     if (probeGlobal.__stage415DivertProbe) {
       if (!probeGlobal.__stage415DivertLog) {
