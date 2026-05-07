@@ -13,6 +13,7 @@
 
 import { installJsepCallbacks } from "../src/inference/jsep/index.js";
 import { createLlamaBridge } from "../src/inference/llama-bridge.js";
+import { GgufParser } from "../src/models/gguf-parser.js";
 import {
 	dispatchMatmul,
 	GGML_TYPE_F16,
@@ -1540,11 +1541,140 @@ async function runSpike(): Promise<void> {
 
 		log("[6/8] Loading model + creating context...");
 		const bridge = createLlamaBridge(mod);
+
+		// Stage 4.20 Probe 9b — arm the JSEP set_tensor weight-hash probe
+		// before loadModel so it captures FNV-1a-32 of the bytes set_tensor
+		// sees for blk.0.attn_q.weight + blk.0.attn_k.weight. Compared
+		// downstream against an independent JS-side hash of the same
+		// tensors parsed out of `buf` directly. Probe is a no-op outside
+		// the JSEP build (the export only exists when WEBLLM_BACKEND_JSEP
+		// is on); guard with `?.` so the spike still loads under default
+		// builds without throwing.
+		(globalThis as any).__weightHashLog = [];
+		const setWeightHashProbe = (mod as any)._ggml_jsep_set_weight_hash_probe as
+			| ((enable: number) => void)
+			| undefined;
+		if (typeof setWeightHashProbe === "function") {
+			setWeightHashProbe(1);
+			log("     [probe9b] weight-hash probe armed");
+		} else {
+			log("     [probe9b] weight-hash export missing — non-JSEP build?", "fail");
+		}
+
 		const t0 = performance.now();
 		const model = await bridge.loadModel(buf);
 		const tLoadMs = performance.now() - t0;
 		const vocab = bridge.nVocab(model);
 		log(`     model loaded in ${tLoadMs.toFixed(0)} ms; vocab = ${vocab}`);
+
+		// Stage 4.20 Probe 9b — disarm probe + emit JS-side reference hash
+		// for the same two tensors, parsed independently out of `buf`. Any
+		// mismatch ⇒ Outcome E (corruption between GGUF parser and
+		// set_tensor — fix lives in libllama). Match ⇒ Outcome F (the
+		// upload preserves bytes; investigate kernel or GPU upload via a
+		// follow-on probe).
+		if (typeof setWeightHashProbe === "function") {
+			setWeightHashProbe(0);
+		}
+		try {
+			const gguf = GgufParser.parse(buf);
+			const targetNames = ["blk.0.attn_q.weight", "blk.0.attn_k.weight"];
+			// GgufParser.tensors entries don't carry an explicit byte size;
+			// compute it from element count × per-element bytes-per-element.
+			// For Q4_0 (type=2) blocks are 32 elements in 18 bytes ⇒ 18/32
+			// bytes per element. Matches GgufParser.calculateTotalDataSize
+			// internal logic.
+			const Q4_0_TYPE = 2;
+			const elemBytes = (type: number): number => {
+				switch (type) {
+					case 0: return 4;       // F32
+					case 1: return 2;       // F16
+					case Q4_0_TYPE: return 18 / 32; // Q4_0
+					case 8: return 34 / 32; // Q8_0
+					case 12: return 144 / 256; // Q4_K
+				}
+				throw new Error(`probe9b: unsupported tensor type ${type}`);
+			};
+			const ref: Record<string, { fnv1a: number; offset: number; size: number }> = {};
+			for (const name of targetNames) {
+				const t = gguf.tensors.find((ti) => ti.name === name);
+				if (!t) {
+					log(`     [probe9b] tensor ${name} not in GGUF metadata`, "fail");
+					continue;
+				}
+				const elemCount = t.dimensions.reduce((a, b) => a * b, 1);
+				const tSize = Math.round(elemCount * elemBytes(t.type));
+				const start = gguf.dataOffset + t.offset;
+				const end = start + tSize;
+				if (end > buf.byteLength) {
+					log(`     [probe9b] tensor ${name} extends past buf end`, "fail");
+					continue;
+				}
+				let h = 2166136261 >>> 0;
+				for (let i = start; i < end; ++i) {
+					h ^= buf[i];
+					h = Math.imul(h, 16777619) >>> 0;
+				}
+				ref[name] = { fnv1a: h >>> 0, offset: t.offset, size: tSize };
+			}
+			(globalThis as any).__weightHashRef = ref;
+
+			const log4 = (globalThis as any).__weightHashLog as Array<{
+				name: string;
+				bufHandle: number;
+				offset: number;
+				size: number;
+				fnv1a_pre: number;
+			}>;
+			const verdict: Array<{
+				name: string;
+				match: boolean;
+				fnv1a_pre: string;
+				fnv1a_ref: string;
+				size_pre: number;
+				size_ref: number;
+			}> = [];
+			for (const name of targetNames) {
+				const pre = log4.find((e) => e.name === name);
+				const r = ref[name];
+				if (!pre || !r) {
+					verdict.push({
+						name,
+						match: false,
+						fnv1a_pre: pre ? `0x${pre.fnv1a_pre.toString(16).padStart(8, "0")}` : "<missing>",
+						fnv1a_ref: r ? `0x${r.fnv1a.toString(16).padStart(8, "0")}` : "<missing>",
+						size_pre: pre?.size ?? -1,
+						size_ref: r?.size ?? -1,
+					});
+					continue;
+				}
+				const match = (pre.fnv1a_pre >>> 0) === (r.fnv1a >>> 0) && pre.size === r.size;
+				verdict.push({
+					name,
+					match,
+					fnv1a_pre: `0x${(pre.fnv1a_pre >>> 0).toString(16).padStart(8, "0")}`,
+					fnv1a_ref: `0x${(r.fnv1a >>> 0).toString(16).padStart(8, "0")}`,
+					size_pre: pre.size,
+					size_ref: r.size,
+				});
+			}
+			(globalThis as any).__weightHashVerdict = verdict;
+			for (const v of verdict) {
+				log(
+					`     [probe9b] ${v.name}: pre=${v.fnv1a_pre} ref=${v.fnv1a_ref} ` +
+						`size_pre=${v.size_pre} size_ref=${v.size_ref} match=${v.match}`,
+					v.match ? "ok" : "fail",
+				);
+			}
+			const allMatch = verdict.length === targetNames.length && verdict.every((v) => v.match);
+			log(
+				`     [probe9b] OUTCOME: ${allMatch ? "F (hashes match — upload preserves bytes)" : "E (hash mismatch — upload corruption)"}`,
+				allMatch ? "ok" : "fail",
+			);
+		} catch (err) {
+			log(`     [probe9b] ref-hash computation threw: ${(err as Error).message}`, "fail");
+		}
+
 		const ctx = await bridge.createContext(model, { nCtx: 512 });
 
 		// Snapshot counters AFTER model load so model-load JSEP traffic

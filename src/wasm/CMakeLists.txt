@@ -137,6 +137,14 @@ if(EMSCRIPTEN)
         "_webllm_enable_node_dump"
     )
 
+    # Stage 4.20 Probe 9b — JSEP-only export. The C++ symbol lives in
+    # ggml-jsep.cpp (linked into the JSEP build only); listing it in
+    # EXPORTED_FUNCTIONS for the legacy webgpu build would yield a
+    # link-time "undefined symbol" since ggml-jsep is not in that link.
+    if(WEBLLM_BACKEND_JSEP)
+        set(EXPORTED_FUNCTIONS "${EXPORTED_FUNCTIONS},_ggml_jsep_set_weight_hash_probe")
+    endif()
+
     # JSPI requires explicit listing of exports that may transitively call
     # async imports (WebGPU async readback, queue.onSubmittedWorkDone, etc).
     # Each listed export is wrapped in WebAssembly.promising at module init,
