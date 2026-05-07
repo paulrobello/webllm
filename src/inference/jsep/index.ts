@@ -184,6 +184,44 @@ export function installJsepCallbacks(
 		// pre-write contents — a write meant to feed dispatch N+1 would
 		// silently overwrite the data that dispatch N still needed to read.
 		encoderBatcher.flush();
+		// Stage 4.9 diagnostic — capture host_mirror peek for the
+		// distinctive H1-inverse signature of i=3 src0 (handle=26, offset=0,
+		// size=6144). Records bytes BEFORE writeBuffer fires so we know what
+		// host_mirror holds at H1-inverse time.
+		const __h1invDiag = (
+			globalThis as unknown as {
+				__h1invDiag?: {
+					captures: Array<{
+						callIdx: number;
+						handle: number;
+						offset: number;
+						size: number;
+						first16: number[];
+						first8F32: number[];
+					}>;
+					callIdx: number;
+					match: { handle: number; offset: number; size: number };
+				};
+			}
+		).__h1invDiag;
+		if (
+			__h1invDiag &&
+			__h1invDiag.captures.length < 8 &&
+			handle === __h1invDiag.match.handle &&
+			offset === __h1invDiag.match.offset &&
+			size === __h1invDiag.match.size
+		) {
+			const heap8 = new Uint8Array(module.HEAPU8.buffer, hostPtr, 16);
+			const heap32 = new Float32Array(module.HEAPU8.buffer, hostPtr, 8);
+			__h1invDiag.captures.push({
+				callIdx: __h1invDiag.callIdx++,
+				handle,
+				offset,
+				size,
+				first16: Array.from(heap8),
+				first8F32: Array.from(heap32),
+			});
+		}
 		// Re-derive the heap buffer each call — the WASM heap may have
 		// grown between EM_ASM frames, detaching prior views.
 		dataManager.write(handle, offset, hostPtr, size, module.HEAPU8.buffer);

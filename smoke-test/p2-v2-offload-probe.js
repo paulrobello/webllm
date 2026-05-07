@@ -984,8 +984,21 @@ function buildPipeline3(device, wgsl) {
   });
 }
 function dispatchSetRows(ctx, desc) {
+  const __stage48Log = globalThis.__stage48SetRowsLog;
+  if (__stage48Log)
+    __stage48Log.push({
+      phase: "entry",
+      data: {
+        nSrc: desc.nSrc,
+        op: desc.op,
+        dstH: desc.dst.bufHandle,
+        dstO: desc.dst.offset
+      }
+    });
   if (desc.nSrc !== 3) {
     console.error(`dispatchSetRows: expected 3 srcs, got ${desc.nSrc}`);
+    if (__stage48Log)
+      __stage48Log.push({ phase: "ret-1-nsrc", data: desc.nSrc });
     return -1;
   }
   const src0 = desc.srcs[0];
@@ -993,14 +1006,20 @@ function dispatchSetRows(ctx, desc) {
   const dst = desc.dst;
   if (src0.type !== GGML_TYPE_F32) {
     console.error(`dispatchSetRows: src0 must be F32 (got type=${src0.type})`);
+    if (__stage48Log)
+      __stage48Log.push({ phase: "ret-1-src0type", data: src0.type });
     return -1;
   }
   if (src1.type !== GGML_TYPE_I64 && src1.type !== GGML_TYPE_I32) {
     console.error(`dispatchSetRows: src1 must be I64 or I32 (got type=${src1.type})`);
+    if (__stage48Log)
+      __stage48Log.push({ phase: "ret-1-src1type", data: src1.type });
     return -1;
   }
   if (dst.type !== GGML_TYPE_F16 && dst.type !== GGML_TYPE_F32) {
     console.error(`dispatchSetRows: dst must be F16 or F32 (got type=${dst.type})`);
+    if (__stage48Log)
+      __stage48Log.push({ phase: "ret-1-dsttype", data: dst.type });
     return -1;
   }
   const ne0 = src0.ne[0];
@@ -1011,6 +1030,11 @@ function dispatchSetRows(ctx, desc) {
   const ne12 = Math.max(1, src1.ne[2]);
   if (dst.ne[0] !== ne0) {
     console.error(`dispatchSetRows: dst ne[0]=${dst.ne[0]} != src0 ne[0]=${ne0}`);
+    if (__stage48Log)
+      __stage48Log.push({
+        phase: "ret-1-ne0mismatch",
+        data: { dst: dst.ne[0], src0: ne0 }
+      });
     return -1;
   }
   const f32Bytes = 4;
@@ -1040,6 +1064,11 @@ function dispatchSetRows(ctx, desc) {
   ]) {
     if (!Number.isInteger(val) || val < 0) {
       console.error(`dispatchSetRows: non-integer or negative stride ${name}=${val} ` + `(src0.nb=[${src0.nb.join(",")}] src1.nb=[${src1.nb.join(",")}] ` + `dst.nb=[${dst.nb.join(",")}] dstElemBytes=${dstElemBytes})`);
+      if (__stage48Log)
+        __stage48Log.push({
+          phase: "ret-1-stride",
+          data: { name, val }
+        });
       return -1;
     }
   }
@@ -1053,6 +1082,8 @@ function dispatchSetRows(ctx, desc) {
   const bindGroupLayout = ctx.bindGroupLayoutCache.get(cacheKey);
   if (!bindGroupLayout) {
     console.error(`dispatchSetRows: missing bindGroupLayout for ${cacheKey}`);
+    if (__stage48Log)
+      __stage48Log.push({ phase: "ret-1-bgl", data: cacheKey });
     return -1;
   }
   const paramsBuf = ctx.device.createBuffer({
@@ -1093,6 +1124,15 @@ function dispatchSetRows(ctx, desc) {
     }
     if (dst.offset + dstSize > dstRec.size) {
       console.error(`dispatchSetRows: divert would read past dst buffer end ` + `(offset=${dst.offset} + size=${dstSize} > ${dstRec.size})`);
+      if (__stage48Log)
+        __stage48Log.push({
+          phase: "ret-1-divertOOB",
+          data: {
+            offset: dst.offset,
+            dstSize,
+            dstRecSize: dstRec.size
+          }
+        });
       return -1;
     }
     const tempDst = ctx.device.createBuffer({
@@ -1126,16 +1166,52 @@ function dispatchSetRows(ctx, desc) {
       ]
     });
     ctx.encoderBatcher.flush();
+    const __stage48Hook = globalThis.__stage48DivertHook;
+    const __stage48Capture = __stage48Hook && !__stage48Hook.triggered;
+    if (__stage48Capture && __stage48Hook) {
+      __stage48Hook.triggered = true;
+      __stage48Hook.capturedDstSize = dstSize;
+      __stage48Hook.capturedNe0 = ne0;
+      __stage48Hook.capturedNr = nr;
+    }
     const enc = ctx.device.createCommandEncoder();
     enc.copyBufferToBuffer(dstRec.buffer, dst.offset, tempDst, 0, dstSize);
+    if (__stage48Capture && __stage48Hook) {
+      const rowStrideBytes = ne0 * 2;
+      const src0RowStrideBytes = ne0 * 4;
+      const rowsToCapture = Math.min(nr, 8);
+      for (let r = 0;r < rowsToCapture; r++) {
+        enc.copyBufferToBuffer(tempDst, r * rowStrideBytes, __stage48Hook.preKernelBuf, r * 16, 16);
+        enc.copyBufferToBuffer(src0Rec.buffer, src0.offset + r * src0RowStrideBytes, __stage48Hook.src0CaptureBuf, r * 16, 16);
+      }
+    }
     const pass = enc.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, divertBindGroup);
     pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
     pass.end();
+    if (__stage48Capture && __stage48Hook) {
+      const rowStrideBytes = ne0 * 2;
+      const rowsToCapture = Math.min(nr, 8);
+      for (let r = 0;r < rowsToCapture; r++) {
+        enc.copyBufferToBuffer(tempDst, r * rowStrideBytes, __stage48Hook.postKernelBuf, r * 16, 16);
+      }
+    }
     enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstSize);
+    if (__stage48Capture && __stage48Hook) {
+      const rowStrideBytes = ne0 * 2;
+      const rowsToCapture = Math.min(nr, 8);
+      for (let r = 0;r < rowsToCapture; r++) {
+        enc.copyBufferToBuffer(dstRec.buffer, dst.offset + r * rowStrideBytes, __stage48Hook.postCopyBackBuf, r * 16, 16);
+      }
+    }
     ctx.device.queue.submit([enc.finish()]);
     tempDst.destroy();
+    if (__stage48Log)
+      __stage48Log.push({
+        phase: "ret-0-divert",
+        data: { dstSize, dispatchX, dispatchY, dispatchZ }
+      });
     return 0;
   }
   const bindGroup = ctx.device.createBindGroup({
@@ -1279,6 +1355,77 @@ function installJsepCallbacks(module, device) {
     counters.sync++;
     encoderBatcher.flush();
   };
+  {
+    const F32_BYTES = 4;
+    const I64_BYTES = 8;
+    const F16_BYTES = 2;
+    const NE0 = 256;
+    const NR = 6;
+    const DST_ROWS = 512;
+    const srcAllocSize = NE0 * NR * F32_BYTES + NR * I64_BYTES;
+    const dstAllocSize = NE0 * DST_ROWS * F16_BYTES;
+    const srcHandle = dataManager.alloc(srcAllocSize);
+    const dstHandle = dataManager.alloc(dstAllocSize);
+    const desc = {
+      op: GGML_OP_SET_ROWS,
+      nSrc: 3,
+      dst: {
+        bufHandle: dstHandle,
+        offset: 0,
+        type: 1,
+        ne: [NE0, DST_ROWS, 1, 1],
+        nb: [
+          F16_BYTES,
+          NE0 * F16_BYTES,
+          NE0 * DST_ROWS * F16_BYTES,
+          NE0 * DST_ROWS * F16_BYTES
+        ]
+      },
+      srcs: [
+        {
+          bufHandle: srcHandle,
+          offset: 0,
+          type: 0,
+          ne: [NE0, NR, 1, 1],
+          nb: [
+            F32_BYTES,
+            NE0 * F32_BYTES,
+            NE0 * NR * F32_BYTES,
+            NE0 * NR * F32_BYTES
+          ]
+        },
+        {
+          bufHandle: srcHandle,
+          offset: NE0 * F32_BYTES,
+          type: 27,
+          ne: [NR, 1, 1, 1],
+          nb: [I64_BYTES, NR * I64_BYTES, NR * I64_BYTES, NR * I64_BYTES]
+        },
+        {
+          bufHandle: dstHandle,
+          offset: 0,
+          type: 1,
+          ne: [NE0, DST_ROWS, 1, 1],
+          nb: [
+            F16_BYTES,
+            NE0 * F16_BYTES,
+            NE0 * DST_ROWS * F16_BYTES,
+            NE0 * DST_ROWS * F16_BYTES
+          ]
+        }
+      ]
+    };
+    const ctx = {
+      device,
+      dataManager,
+      encoderBatcher,
+      pipelineCache,
+      bindGroupLayoutCache
+    };
+    dispatchSetRows(ctx, desc);
+    dataManager.free(srcHandle);
+    dataManager.free(dstHandle);
+  }
   return runtime;
 }
 

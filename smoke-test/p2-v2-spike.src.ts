@@ -1178,6 +1178,28 @@ async function runSpike(): Promise<void> {
 		};
 		(window as any).__consoleErrors = consoleErrors;
 
+		// Stage 4.9 diagnostic — H1-inverse host_mirror peek. Capture first
+		// 16 bytes / 8 F32 of host_mirror at hostPtr for the distinctive
+		// (handle=26, offset=0, size=6144) signature: this is i=3 SET_ROWS
+		// src0 (K-projection-after-ROPE, F32 [256,6,1,1]) under H1-inverse.
+		// If first8F32 is all zeros, host_mirror is itself stale at H1-inverse
+		// time → CPU op chain didn't write h26o0 yet. If non-zero, then GPU
+		// writeBuffer is failing to land before the divert hook reads.
+		const h1invDiag = {
+			callIdx: 0,
+			match: { handle: 26, offset: 0, size: 6144 },
+			captures: [] as Array<{
+				callIdx: number;
+				handle: number;
+				offset: number;
+				size: number;
+				first16: number[];
+				first8F32: number[];
+			}>,
+		};
+		(globalThis as any).__h1invDiag = h1invDiag;
+		(window as any).__h1invDiag = h1invDiag;
+
 		log("[3/8] Installing JSEP callbacks (must precede webllm_load_model)...");
 		const runtime = installJsepCallbacks(mod, device);
 
