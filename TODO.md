@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.15 PARTIAL CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch; webllm-side spike instrumentation only — `src/inference/jsep/ops/matmul.ts` divert path adds gated tempDst + dstRec.buffer readback at `__stage415DivertProbe`; `smoke-test/p2-v2-spike.src.ts` enables the gate before model load; patch stack unchanged at 11).** **Branch 3 of Stage 4.14's disambiguation table CONFIRMED — divert path lands data correctly; H1 GPU→host writeback fails to deposit it in host_mirror at the offset `get_tensor` reads from.** Probe 5 captures `tempDst[0..16)` and `dstRec.buffer[dst.offset..+16)` per divert dispatch (cap 32, deferred mapAsync drain). **Smoking-gun #1 (Branch 1 REJECTED):** i=1 (layer 0 Q proj, dst=[2048,6] @ h26+4194304) records `tempF4 = [-6.26e-5, 1.87e-5, -6.09e-5, -9.48e-5]` — kernel produces valid output at the load-bearing Q-shape (M=2048). i=2 (layer 0 K proj, dst=[256,6] @ h26+4194304) records `tempF4 = [6.85e-5, 1.35e-4, -1.74e-4, 7.41e-5]` — also valid. **Smoking-gun #2 (Branch 2 REJECTED):** for every captured entry, `tempBytes` is byte-exact equal to `dstBytes` (`tempEqDst === true` for all 32). copyBufferToBuffer lands at `dst.offset` in `dstRec.buffer`. **Smoking-gun #3 (Branch 3 CONFIRMED):** Probe 5 i=1 wrote valid Q to GPU(handle=26, offset=4194304); Stage 4.14 `__jsepGetTensorLog` reports `host_mirror[26]+4194304` reads `[0, 0, 0, 0]` for `name = "Qcur-0"` — the data exists on the GPU but `Module.jsepRead` (called from H1 in `ggml-jsep.cpp:779-786`) is not reading it into host_mirror. Cascade corroboration: i=3 (attention scores Q × K_cache, dst=[256,6,32]) records `tempF4 = [0,0,0,0]` — its src1 (Q ROPE'd on CPU) is genuinely zero at GPU kernel time because the CPU read host_mirror's stale zeros, ROPE'd zeros, and H1-inverse synced zeros back to GPU. i=5 (layer 1 Q proj, dst=[2048,6]) also records zero output — layer 0's broken output zeros the residual stream cascading through every subsequent layer. **Stage 4.14's "JSEP MUL_MAT divert produces no host-visible output" framing was right in observable effect but wrong in mechanism — the divert IS host-visible at the GPU level; H1's writeback path is what fails to mirror it.** All three sub-hypotheses for Stage 4.16 to disambiguate (H1-mirror-mismatch / H1-stale-buffer / H1-fires-on-different-node-than-dispatch) are listed in the closure report. Spike replay reproduced (`__stage415DivertLog.length === 32`, `tempEqDst === true`, 6 selftests PASS, `make checkall` green). Per-token decode 107.7 ms (Stage 4.14 baseline 127.92 ms; deferred mapAsyncs land outside decode timing). Closure: [`STAGE-4.15-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.15-RESULT.md). Raw probe data: [`STAGE-4.15-probe5-raw.json`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.15-probe5-raw.json). Stage 4.16 brief below queues per-runOp logging of `(node->buffer->context->handle, jsep_tensor_handle(node), ggml_nbytes(node), tensor_name)` to cross-correlate against Probe 5's `(dst.bufHandle, dst.offset, dst.ne)` and identify which sub-hypothesis fires.
+
 **Stage 4.14 PARTIAL CLOSED 2026-05-07 — `<pending>` + llama.cpp `ddeb2fb6e` (Stage-4.14 Probe 4 instrumentation — `ggml-cpu.cpp` post-compute per-node dst readback + `ggml-jsep.cpp::ggml_backend_jsep_buffer_get_tensor` log; patch stack 10 → 11; expected to revert at Stage 4.15 once structural fix lands).** **Stage 4.13's CPU-D narrative REFUTED; new diagnosis CPU-E (JSEP MUL_MAT divert dispatch produces no host-visible output) CONFIRMED.** Probe 4 captures every CPU op's `dst_addr`/`src0_addr` post-compute and every JSEP `get_tensor` bridge call. **Smoking-gun #1:** zero CPU ops write to addr 99811136 between i=1 (`attn_norm-0` valid) and i=2 (`Kcur-0 (view)` zeros). The `99811136` slot is recycled by ggml's allocator — Kcur-0 isn't a clobbered live value, it's a fresh sched-allocated `CPU#Kcur-0#0` bridge slot that never received its expected payload. **Smoking-gun #2:** ggml-backend-sched correctly invokes JSEP `get_tensor` for every cross-backend Q/K projection (handle 26, distinct offsets per layer). The bridge faithfully reads `host_mirror[h] + offset`. For `Qcur-0/Kcur-0` (both at offset 4194304) and `Qcur-1` (at offset 6295552) and every other Q-projection across all layers, the read returns `[0,0,0,0]`. **Smoking-gun #3:** `Kcur-1` at offset 528384 reads `[-3.09e-6, -1.52e-6, 4.02e-6, 4.66e-6]` — bit-identical to Vcur-0's CPU MUL_MAT output. So the "valid" Kcur-1 read is **stale V-projection data leftover from an earlier set_tensor write**, not a real K projection. **Therefore every JSEP MUL_MAT for Q (every layer) and K (layer 0) produces zero output at host_mirror.** `COUNTER_DELTAS.read == runOp == 1602` confirms H1 fires for every JSEP op, so the post-runOp writeback is executing — yet host_mirror reads zeros. The bug must live inside the divert dispatch path itself: either the kernel writes zeros into tempDst (bind-group / dispatch-dim mismatch on Q-shape M=2048), or copyBufferToBuffer doesn't land at the expected dstRec.buffer offset, or H1's readAsync samples a different buffer than the divert wrote. Prefill+decode reproduced bit-exactly (`GENERATED_TEXT="ntiuhuihnerquant"`, `topId/topVal=593/0.159`, 6 selftests PASS, `make checkall` green). Per-token decode 127.92 ms (Stage 4.13 baseline 127.40 ms; instrumentation invisible). Closure: [`STAGE-4.14-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.14-RESULT.md). Stage 4.15 brief below queues per-divert-dispatch readback of tempDst + dstRec.buffer at the just-written offset, with three branch-on-outcome paths (kernel bug / copy bug / readback-vs-buffer mismatch).
 
 **Stage 4.13 PARTIAL CLOSED 2026-05-07 — `<pending>` + llama.cpp `3b0e40d6f` (Stage-4.13 Probe 3 instrumentation — CPU MUL_MAT capture in `ggml-cpu.cpp` + set_tensor `name` + `data_addr` enrichment + `alloc_buffer` host_mirror publication in `ggml-jsep.cpp`; patch stack 9 → 10; expected to revert at Stage 4.14 once structural fix lands).** **All three predicted sub-cases (CPU-A / CPU-B / CPU-C) REJECTED; new diagnosis CPU-D (cross-backend buffer-aliasing) CONFIRMED.** Tensor-name capture in `set_tensor` revealed Stages 4.10/4.11/4.12 had **K and V slot labels swapped**: `(h26, 0)` is the **K cur layer 0** slot, **not** V; `(h26, 528384)` is the **V cur layer 0** slot. Slice 3 SET_ROWS node 0 reads `(h26, 0)` for K cache write; node 4 reads `(h26, 528384)` for V cache write. **Bug is on the K side**: `JSEP#Kcur-0 (view)#0` lands as 6144B zeros at `(h26, 0)` from CPU heap addr 99827008 — the SAME address as i=1's `JSEP#attn_norm-0` write (which contained valid normed×gain). Between i=1 and i=2, scratch 99827008's first 6144B gets zeroed by some intervening CPU op. K projection on JSEP (slice 1/2 MUL_MAT) writes to `(h26, 4194304)` = host_mirror[26]+4194304 = 53658624, NOT to 99827008 where Kcur-0 view points. So Kcur-0's view is mis-aliased (points at the wrong scratch); the JSEP K result never reaches `(h26, 0)`; slice 3 reads zeros for K → K cache layer 0 = zeros → broken attention (`Q×K^T = 0`, uniform softmax) → garbage decode. V side works because Vcur-0's MUL_MAT runs on **CPU** (callIdx=2, dst=108215616, src1=valid normed×gain) and its set_tensor copies the actual MUL_MAT dst to `(h26, 528384)`. The 10 [256,6] CPU MUL_MATs are all Vcur-N projections; no CPU MUL_MAT produces a Kcur-N. The 10 [2048,6] CPU MUL_MATs are output projections (`kqv_out`) whose src1 is `softmax(Q×K^T)V` — observed src1 patterns of `[0,0,0,0]` and denormal-style garbage are **downstream artifacts** of broken K cache, not independent bugs. Prefill+decode reproduced bit-exactly (`GENERATED_TEXT="ntiuhuihnerquant"`, `topId=593/0.159`, 6 selftests PASS, `make checkall` green). Per-token decode 127.40 ms (Stage 4.12 baseline 127.40 ms; instrumentation invisible). Closure: [`STAGE-4.13-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.13-RESULT.md). Stage 4.14 brief below queues a tighter localization probe (capture every CPU op writing to addr 99827008 between i=1 and i=2) before committing to Path R (re-aim Kcur-0's view at JSEP K projection result), Path U (force K projection to CPU like V), or Path Q (eliminate the zeroing op).
@@ -957,7 +959,7 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.15: localize the JSEP MUL_MAT divert path's GPU-buffer fate (does tempDst get correct kernel output? does the copy land at the right dstRec offset? does H1 read the right buffer?). START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.16: cross-correlate H1's `(node->buffer->context->handle, jsep_tensor_handle(node), ggml_nbytes(node), tensor_name)` against Probe 5's `(dst.bufHandle, dst.offset, dst.ne)` for each load-bearing MUL_MAT to pinpoint why H1 doesn't deposit divert output into host_mirror at the offset `get_tensor` reads. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -965,7 +967,7 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → <Stage 4.14 TODO closure commit> docs(TODO): Stage 4.14 closed — queue Stage 4.15 divert dispatch GPU-buffer-fate localization
+#   → <Stage 4.15 TODO closure commit> docs(TODO): Stage 4.15 closed — queue Stage 4.16 H1-vs-divert handle/offset cross-correlation
 
 # 2. Confirm llama.cpp tip.
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
@@ -977,157 +979,145 @@ lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 # 4. Reuse agentchrome session + spike tab.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
-[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.15-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.16-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "PORT=$PORT TAB=$TAB"
 
-# 5. Reproduce post-Stage-4.14 baseline (Probe 4 diagnostics live):
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.15-replay" --tab "$TAB"
+# 5. Reproduce post-Stage-4.15 baseline (Probe 5 + Probe 4 diagnostics live):
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.16-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").textContent.slice(-50)' 2>&1 | grep -qE "DONE|FAIL"; do sleep 3; done
-agentchrome --port "$PORT" js exec --tab "$TAB" '(() => {
-  const get = globalThis.__jsepGetTensorLog || [];
-  const cpu = globalThis.__cpuOpDstLog || [];
-  // Pin the load-bearing finding: Qcur-0/Kcur-0 bridge reads zeros at offset 4194304.
+agentchrome --port "$PORT" js exec --tab "$TAB" '(async () => {
+  await new Promise(r => setTimeout(r, 500));
+  const dlog = (globalThis.__stage415DivertLog || []);
+  const glog = (globalThis.__jsepGetTensorLog || []);
   return JSON.stringify({
-    getLogLen: get.length,
-    cpuOpDstLogLen: cpu.length,
-    h26_base: globalThis.__jsepHostMirrorBases ? globalThis.__jsepHostMirrorBases["26"] : null,
-    qcur0: get[0],     // expect handle:26 offset:4194304 size:49152 name:"Qcur-0" f32_first4:[0,0,0,0]
-    kcur0: get[1],     // expect handle:26 offset:4194304 size:6144  name:"Kcur-0" f32_first4:[0,0,0,0]
-    kcur1: get[10],    // expect handle:26 offset:528384  size:6144  name:"Kcur-1" f32_first4:[-3.09e-6,...]  (stale V data, NOT real K)
+    divertLen: dlog.length,
+    tempEqDstAll: dlog.every(e => e.tempBytes && e.dstBytes && Array.from(e.tempBytes).every((b,i) => b === e.dstBytes[i])),
+    i1: { o: dlog[1]?.dstOffset, dstNe: dlog[1]?.dstNe,
+          temp4: dlog[1]?.tempBytes ? Array.from(new Float32Array(dlog[1].tempBytes.buffer.slice(0,16))) : null },
+    qcur0: glog[1],
   });
 })()'
-#   → expect: getLogLen=64, cpuOpDstLogLen=200,
-#             qcur0/kcur0 f32_first4=[0,0,0,0], kcur1 f32_first4 starts with -3.09e-6 (V leftover)
+#   → expect: divertLen=32, tempEqDstAll=true,
+#             i1.o=4194304, i1.dstNe=[2048,6,1,1], i1.temp4 valid f32,
+#             qcur0 = {handle:26, offset:4194304, name:"Qcur-0", f32_first4:[0,0,0,0]}
 ```
 
-**One-line goal:** Determine whether the JSEP MUL_MAT divert path's tempDst receives correct kernel output AND whether the copyBufferToBuffer to dstRec.buffer lands at the expected offset, by adding per-divert-dispatch mapAsync readbacks for (a) tempDst right after queue.submit, (b) dstRec.buffer at `[dst.offset, dst.offset+16)` right after queue.submit, for the first ~16 divert dispatches.
+**One-line goal:** Pinpoint the divergence between (A) where the JSEP divert dispatch *writes* in GPU memory (Probe 5 confirms `dstRec.buffer[dst.offset]` for `dst.bufHandle = 26` receives valid Q at offset 4194304) and (B) where H1's `ggml_jsep_read(bctx->handle, dst_offset, host_mirror+dst_offset, dst_size)` *reads* in GPU memory (host_mirror at offset 4194304 stays zero).
 
-**One-line context:** Stage 4.14 ruled out CPU-side clobbering (no CPU op writes addr 99811136 between i=1 and i=2; the slot is fresh sched-allocated `CPU#Kcur-0#0`) and confirmed the JSEP→CPU bridge mechanism via `get_tensor` works correctly. The bridge faithfully reads `host_mirror[h] + offset`, but for every Q-projection (every layer) and Kcur-0, host_mirror is zero at the bridge offset. Counter parity (`read == runOp == 1602`) shows H1 fires 1:1 with JSEP runOps. Conclusion: the JSEP MUL_MAT divert dispatch path itself produces no host-visible output for these tensors. Three branch hypotheses: (1) divert kernel writes zeros into tempDst (kernel/bind-group bug specific to Q-shape M=2048), (2) tempDst has correct values but copyBufferToBuffer doesn't land at `dst.offset` in `dstRec.buffer`, (3) both are correct but H1's `dataManager.readAsync` reads from a different `record.buffer` than the divert wrote to.
+**One-line context:** Stage 4.15 confirmed Branch 3 of Stage 4.14's disambiguation: divert path lands valid data at `(dst.bufHandle, dst.offset)` but `Module.jsepRead` (called from H1 in `ggml-jsep.cpp:779-786`) does not mirror it into host_mirror at the offset `get_tensor` reads. Three sub-hypotheses to disambiguate.
 
-#### Implementation — Stage 4.15 (probe first, fix second)
+#### Implementation — Stage 4.16 (Probe 6 first, structural fix second)
 
-**Probe 5 — per-divert-dispatch GPU buffer fate.** In
-`src/inference/jsep/ops/matmul.ts` divert path, add per-dispatch readback of
-**(a)** `tempDst[0..16)` and **(b)** `dstRec.buffer[dst.offset, dst.offset+16)`
-right after `queue.submit([enc.finish()])` and before `tempDst.destroy()`.
-Gate on a global flag (`globalThis.__stage415DivertProbe`) so production paths
-stay unaffected. Stash captures into `globalThis.__stage415DivertLog` (cap
-~32). Filter on the JS side: divert dispatches whose dst is on handle 26 at
-offset 4194304 / 6295552 are the load-bearing failures; their tempDst and
-dstRec.buffer reads disambiguate the three branch hypotheses.
+**Probe 6 — H1-vs-dispatch handle/offset cross-correlation.** In
+`ggml-jsep.cpp::ggml_backend_jsep_graph_compute`, after the H1 block at
+lines 779-786, add an EM_ASM that pushes a record into
+`globalThis.__stage416H1Log` with:
+- `idx` (post-runOp counter — same as the i loop variable)
+- `node_op` (`node->op`) — match against MUL_MAT (op=42 in older ggml,
+  check current `GGML_OP_MUL_MAT` value)
+- `bctx_handle` (`bctx->handle`)
+- `dst_offset` (computed)
+- `dst_size` (`ggml_nbytes(node)`)
+- `tensor_name` (`node->name`)
+- `view_src_offs` (`node->view_offs` if `node->view_src`, else 0)
+- `view_src_handle` (`node->view_src ? view_src->buffer->context->handle : 0`)
+
+Cap at ~256 entries to cover the first ~3 layers' load-bearing ops.
+Mirror Probe 5's `__stage415DivertLog` row keyed by JSEP runOp index so
+each Probe 5 entry pairs with one Probe 6 entry.
 
 **Files to read first (with line ranges):**
 
-- `src/inference/jsep/ops/matmul.ts:573-662` — full divert block (alias check
-  → tempDst alloc → bind group → flush → dispatch → copyBufferToBuffer →
-  submit → destroy). Probe 5's readback insertion point is between
-  `device.queue.submit(...)` and `tempDst.destroy()`.
-- `src/inference/jsep/index.ts:230-254` — `module.jsepRead`
-  (encoderBatcher.flush + dataManager.readAsync). Confirms H1 path is
-  already async/JSPI-promised.
-- `src/inference/jsep/gpu-data-manager.ts:144-169` — `readAsync` (staging
-  buffer + copyBufferToBuffer + mapAsync). Confirms the post-runOp readback
-  source is `record.buffer` keyed by handle.
-- `src/inference/jsep/ops/matmul.ts:680-720` (no-divert path) — the
-  bind-group + dispatch shape for non-divert; useful reference for the
-  divert branch's bind-group correctness check.
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:760-815` — the
+  per-node loop, jsepRunOp call, H1 block. Probe 6 instrumentation goes
+  right after the H1 block, before the EM_ASM Stage 4.11 exit snapshot.
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:215-220` —
+  `jsep_tensor_handle` (the offset H1 uses).
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:200-215` —
+  `ggml_backend_jsep_buffer_context` definition (where `host_mirror` and
+  `handle` live).
+- `src/inference/jsep/index.ts:230-254` — `module.jsepRead` and the JS
+  side of `Module.jsepRead`. Confirm what `dataManager.handles.get(handle)`
+  returns.
+- `src/inference/jsep/gpu-data-manager.ts:144-169` — `readAsync`.
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp::pack_tensor` (find
+  via grep) — packs `dst.bufHandle = tensor->buffer->context->handle`
+  into the descriptor. Compare to H1's `bctx->handle` for the same node.
 
-**Implementation sketch — Probe 5 in `dispatchMatmul`:**
+**Disambiguation matrix:**
 
-`dispatchMatmul` is currently sync. The cleanest probe path is to keep it
-sync, queue the readback copies into the existing divert encoder, and
-collect them in a deferred async drain (mirroring Stage 4.7 D2-tight's
-pattern for SET_ROWS):
+| Probe 6 vs Probe 5 finding | Sub-hypothesis | Structural fix |
+|---|---|---|
+| `bctx->handle` (Probe 6) ≠ `dst.bufHandle` (Probe 5) for the same MUL_MAT | **H1-mirror-mismatch.** Stage-2's pack_tensor packs the descriptor's `dst` from one tensor's buffer; H1 reads `node->buffer->context->handle` from another. Likely a node-vs-view confusion. | Reconcile pack_tensor and H1 to use the same tensor (probably the underlying base tensor's handle, not a view). |
+| Handles match; `dst_offset` (H1) ≠ `dst.offset` (Probe 5) | **H1-offset-mismatch.** `jsep_tensor_handle(node)` and the descriptor's offset come out differently. Suspect view_offs handling. | Use `t->view_src ? t->view_src->data : t->data` consistently in both paths, or have pack_tensor honor view_offs. |
+| Handles + offsets match; `dst_size` H1 reads is smaller than what divert wrote | **H1-undersized-read.** H1 reads `ggml_nbytes(node)`. If node is a smaller view of a larger MUL_MAT result, H1 syncs only the view's bytes, leaving the larger underlying scratch unsynchronized. | Use the larger of `ggml_nbytes(node)` and the parent tensor's nbytes; or attach H1 to the produces-tensor (the MUL_MAT's true dst) rather than the post-pack node. |
+| All match; H1 fires for a node *other than* the MUL_MAT (e.g. fires for a downstream PERMUTE/CPY node, never for the MUL_MAT itself) | **H1-fires-on-different-node.** Cross-correlation rows for MUL_MATs are absent in Probe 6 entirely; H1 only fires for some other op type. | Drop the conditional on `node->buffer && node->buffer->context` (line 779) — likely already correct — and inspect whether MUL_MAT nodes have a NULL buffer because the scheduler routed the result via a CPU buft. If yes, the divert's GPU write is into a buffer whose backend isn't JSEP for H1 purposes. |
 
-```ts
-// After ctx.device.queue.submit([enc.finish()]); and before tempDst.destroy().
-if ((globalThis as any).__stage415DivertProbe) {
-    const dbg = (globalThis as any).__stage415DivertLog ??= [];
-    if (dbg.length < 32) {
-        const tempStaging = ctx.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-        });
-        const dstStaging = ctx.device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-        });
-        const probeEnc = ctx.device.createCommandEncoder();
-        probeEnc.copyBufferToBuffer(tempDst, 0, tempStaging, 0, 16);
-        probeEnc.copyBufferToBuffer(dstRec.buffer, dst.offset, dstStaging, 0, 16);
-        ctx.device.queue.submit([probeEnc.finish()]);
-        // Defer the await — let dispatchMatmul return synchronously.
-        const meta = {
-            divertIdx: dbg.length,
-            dstHandle: dst.bufHandle,
-            dstOffset: dst.offset,
-            dstNe: [...dst.ne],
-            src0Ne: [...src0.ne],
-            tempBytes: null as Uint8Array | null,
-            dstBytes:  null as Uint8Array | null,
-        };
-        dbg.push(meta);
-        Promise.all([
-            tempStaging.mapAsync(GPUMapMode.READ),
-            dstStaging.mapAsync(GPUMapMode.READ),
-        ]).then(() => {
-            meta.tempBytes = new Uint8Array(tempStaging.getMappedRange().slice(0));
-            meta.dstBytes  = new Uint8Array(dstStaging.getMappedRange().slice(0));
-            tempStaging.unmap();
-            dstStaging.unmap();
-            tempStaging.destroy();
-            dstStaging.destroy();
-        });
-    }
+**Implementation sketch — Probe 6 EM_ASM in ggml-jsep.cpp:**
+
+```cpp
+// After the H1 block (after line 786) and before the Stage 4.11 exit snapshot.
+#ifdef __EMSCRIPTEN__
+if (s_sliceIdx411 < 256) {  // reuse a counter or add a new one
+    const int32_t name_addr = (int32_t)(intptr_t) node->name;
+    const int32_t bctx_handle = (int32_t) bctx->handle;
+    const int32_t dst_offset_i = (int32_t) dst_offset;
+    const int32_t dst_size_i = (int32_t) dst_size;
+    const int32_t node_op_i = (int32_t) node->op;
+    const int32_t view_src_handle = node->view_src && node->view_src->buffer && node->view_src->buffer->context
+        ? (int32_t) static_cast<ggml_backend_jsep_buffer_context *>(node->view_src->buffer->context)->handle
+        : -1;
+    const int32_t view_src_offs = node->view_src ? (int32_t) node->view_offs : -1;
+    EM_ASM({
+        if (typeof globalThis.__stage416H1Log === "undefined") {
+            globalThis.__stage416H1Log = [];
+        }
+        if (globalThis.__stage416H1Log.length < 256) {
+            globalThis.__stage416H1Log.push({
+                idx: $0, node_op: $1, bctx_handle: $2,
+                dst_offset: $3, dst_size: $4,
+                tensor_name: UTF8ToString($5),
+                view_src_handle: $6, view_src_offs: $7,
+            });
+        }
+    }, i, node_op_i, bctx_handle, dst_offset_i, dst_size_i, name_addr, view_src_handle, view_src_offs);
 }
-// (existing) tempDst.destroy();
+#endif
 ```
-
-Note: tempDst.destroy() after the probe submit is documented-safe (pending
-GPU work uses the underlying memory; the destroy only invalidates the JS
-handle).
 
 **Then localize from the spike harness:**
 
 ```js
-// Set the gate before bridge.decode():
-globalThis.__stage415DivertProbe = true;
-
-// After DONE, await pending mapAsyncs and inspect:
-await new Promise(r => setTimeout(r, 200));   // give the deferred maps time to resolve
-const log = globalThis.__stage415DivertLog || [];
-const headlines = log.slice(0, 16).map(e => ({
-  divertIdx: e.divertIdx,
-  dstH: e.dstHandle, dstO: e.dstOffset,
-  dstNe: e.dstNe, src0Ne: e.src0Ne,
-  tempF4: e.tempBytes ? Array.from(new Float32Array(e.tempBytes.buffer.slice(0, 16))) : null,
-  dstF4:  e.dstBytes  ? Array.from(new Float32Array(e.dstBytes.buffer.slice(0, 16)))  : null,
-}));
-console.table(headlines);
+// After DONE + ~500ms drain:
+const dlog = globalThis.__stage415DivertLog || [];
+const hlog = globalThis.__stage416H1Log || [];
+// Find Probe 5 entries that wrote to (handle=26, offset=4194304) — the
+// load-bearing Qcur-0 / Kcur-0 slot per Stage 4.14.
+const writes_to_q = dlog.filter(e => e.dstHandle === 26 && e.dstOffset === 4194304);
+// Find Probe 6 entries that *should* have read from there.
+const reads_from_q = hlog.filter(e => e.bctx_handle === 26 && e.dst_offset === 4194304);
+console.log({writes: writes_to_q.length, reads: reads_from_q.length});
+console.table(reads_from_q.slice(0, 10));
+console.table(writes_to_q.slice(0, 10));
 ```
 
-**Branch on Probe 5 outcome:**
-
-| Probe 5 finding | Diagnosis | Structural fix |
-|---|---|---|
-| `tempF4 = [0,0,0,0]` for Q-shape (M=2048) divert dispatches | Kernel + bind-group bug specific to Q's larger M. Suspects: workgroup-size mismatch, `OUTPUTS_PER_WG` overflow, src1 binding offset. | Audit kernel constants vs Q's shape; check no-divert path produces correct output for the same shape (run a probe on a non-divert MUL_MAT with M=2048 to isolate divert-only vs kernel-bug). |
-| `tempF4` valid, `dstF4 = [0,0,0,0]` | `copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstBytesNeeded)` doesn't land. Suspects: `dstRec.buffer` resolution from `dst.bufHandle` is wrong post-Stage-2 split; or `dst.offset` is wrong; or `dstBytesNeeded` calc differs from what H1 reads. | Verify `dst.bufHandle` resolution path: `dataManager.handles.get(dst.bufHandle)` should return the same record that H1 later reads via `record.buffer`. Inspect post-Stage-2 `JsepTensorMeta.bufHandle` derivation. |
-| `tempF4` and `dstF4` both valid | The divert path lands data correctly. The bug is downstream — H1's `dataManager.readAsync(handle, offset, ...)` reads from a different `record.buffer` than the divert wrote to. | Compare `node->buffer->context->handle` (H1's source) vs `dst.bufHandle` (divert's destination) for the same MUL_MAT. Mismatch would mean Stage-2's split passes a different handle to the runtime than libllama assigns post-scheduler. |
+**Branch on outcome:** see disambiguation matrix above. After the
+sub-hypothesis is confirmed, the structural fix is one of the four rows.
 
 **Risk register:**
-- Probe 5 itself adds ~2 buffer allocations + 1 encoder + 2 mapAsyncs per
-  divert dispatch when the gate is on — at ~134 dispatches/decode, this is
-  noticeable wall-time overhead during diagnostic runs but does not affect
-  production (gate stays off). The mapAsync resolution is asynchronous and
-  doesn't block `dispatchMatmul`'s sync return; the spike's post-DONE
-  inspection waits ~200ms to drain.
-- The fix path depends entirely on Probe 5's result. Reserve 1-2 stages of
-  follow-up brief space; the gating fact is which of the 3 branches the
-  data points to.
-- If Probe 5 is inconclusive (e.g., divert dispatches for Q-shape don't
-  appear in the log because the gate was set after the first dispatches
-  fired), move the gate-setting earlier in the spike harness (before
-  `bridge.loadModel` returns).
+
+- Probe 6 is pure logging in C++ (no GPU work, no ABI change, no perf
+  cost during decode beyond ~256 EM_ASM calls during prefill). Safe to
+  add and remove.
+- The fix may require touching pack_tensor (descriptor build) AND H1
+  (writeback). Keep the fix in lockstep across both sides — a partial
+  fix can yield phantom successes that don't hold up across model
+  layers.
+- If the matrix yields a fifth case (e.g., handles + offsets + size all
+  match, but data still doesn't land), the bug moves to JS-side
+  `Module.jsepRead` (Promise.then ordering vs deferred mapAsync, stale
+  `record.buffer`, JSPI-suspension snags). Stage 4.17 brief queues a
+  `record === dstRec` identity check at jsepRead time.
 
 #### Step 0 — verify state (only if the bootstrap block at the top failed)
 
@@ -1136,34 +1126,38 @@ console.table(headlines);
 #   → ddeb2fb6e   webllm-browser-patches   (patch stack 11)
 
 git log --oneline -10
+#   → docs(TODO): Stage 4.15 closed — queue Stage 4.16 H1-vs-divert handle/offset cross-correlation
+#   → docs(reports): Stage 4.15 closure — Probe 5 confirms Branch 3 (divert lands data; H1 mirrors it elsewhere)
+#   → matmul,spike: Stage 4.15 Probe 5 — gated per-divert-dispatch tempDst + dstRec readback
 #   → docs(TODO): Stage 4.14 closed — queue Stage 4.15 divert dispatch GPU-buffer-fate localization
-#   → docs(reports): Stage 4.14 closure — Probe 4 refutes CPU-D; CPU-E confirmed (JSEP MUL_MAT divert produces no host-visible output)
-#   → ggml-cpu,jsep: Stage 4.14 Probe 4 — post-compute CPU dst readback + jsep get_tensor log
-#   → docs(TODO): Stage 4.13 closed — queue Stage 4.14 i=1→i=2 zeroing-op localization + structural fix
 ```
 
 #### Spike state cheat sheet
 
-- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.15-<probe>`
-- **Per-token decode (post-Stage-4.14):** ~127 ms (Stage 4.13 baseline 127 ms; Probe 4 instrumentation invisible).
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.16-<probe>`
+- **Per-token decode (post-Stage-4.15):** ~108 ms (Probe 5's deferred mapAsyncs land outside decode timing; net win vs Stage 4.14's 127.92 ms).
 - **Built-in selftests:** 6 PASS.
-- **Build:** `make wasm-build-jsep`.
+- **Build:** `make wasm-build-jsep` (adds llama.cpp Probe 6 patch + rebuilds spike with existing Probe 5).
 - **`make checkall` must be green** before committing.
-- **Existing diagnostics retained:** `__jsepGraphLog` (Stage 4.10 — 30 slices × per-node metadata), `__h1invDiag` (Stage 4.9 — 8 captures of host_mirror[26+0..32]), `__interSliceLog` (Stage 4.11 — 60 enter/exit host_mirror[26+{0,528384}] snapshots), `__cpuGraphLog` (Stage 4.12 — 30 calls × 9-i32-stride per node), `__setTensorLog` (Stage 4.12 + 4.13 enrichment — 200 entries with `name` + `data_addr`), `__cpuMulMatDiag` (Stage 4.13 — 60 CPU MUL_MAT entries with shape, src/dst pointers, src1 first 4 F32), `__jsepHostMirrorBases` (Stage 4.13 — `{handle: host_mirror_addr}` map), `__cpuOpDstLog` (Stage 4.14 — post-compute dst + src0 readback for every CPU op, cap 200), `__jsepGetTensorLog` (Stage 4.14 — JSEP→CPU bridge endpoint reads, cap 64). Stage 4.15 adds `__stage415DivertLog` (per-divert-dispatch tempDst + dstRec.buffer readback, cap 32, gated on `__stage415DivertProbe`).
+- **Existing diagnostics retained:** see Stage 4.15 cheat sheet plus `__stage415DivertLog` (per-divert-dispatch tempDst + dstRec readback, cap 32) and the new `__stage416H1Log` (cap 256). Stage 4.14's CPU dst readback (`__cpuOpDstLog`) and JSEP get_tensor log (`__jsepGetTensorLog`) remain in place for cross-correlation against Probe 6.
 
-#### Exit criteria — Stage 4.15 closes when documented in `STAGE-4.15-RESULT.md`:
+#### Exit criteria — Stage 4.16 closes when documented in `STAGE-4.16-RESULT.md`:
 
-- Probe 5 produces enough data to identify which of the 3 branches the bug is in (kernel/bind-group, copy/dst-resolution, or readback/handle-mismatch).
-- The structural fix lands. Patch stack: 11 → 11 (webllm-side fix likely) or 12 (if a llama.cpp scheduler/handle-resolution fix is needed).
+- Probe 6 produces enough data to identify which of the 4 sub-hypotheses fires (mirror-mismatch / offset-mismatch / undersized-read / fires-on-different-node — or a fifth outcome promoting to Stage 4.17).
+- The structural fix lands. Patch stack: 11 → 12 (likely a llama.cpp pack_tensor or H1 fix; possibly + a webllm-side dataManager change if Outcome 5).
 - Outcome A confirmed (`GENERATED_TEXT` shows real English; ideally `"Paris"` or close), OR the closure documents a follow-on stage with a tightly-scoped probe.
 - `make checkall` green.
-- Stage 4.14 diagnostic patch (Probe 4 instrumentation: post-compute CPU dst readback + JSEP get_tensor log) reverts as part of the fix commit, OR is retained as a permanent regression check (decision belongs in the closure report).
+- Stage 4.14 / 4.15 diagnostic instrumentation (Probe 4 CPU dst readback, Probe 4 JSEP get_tensor log, Probe 5 divert readback, Probe 6 H1 log) reverts as part of the fix commit, OR is retained as a permanent regression check (decision belongs in the closure report).
 
 #### Branch on outcome:
 
 - **Outcome A (Paris-ish English decode):** entire Stage 4.x sequence finally clears; Phase 3 proceeds to Stage 5 (perf optimization, dirty-bit tracking for H1/H1-inverse to claw back the 5.3× regression).
-- **Outcome B (Probe 5 isolates the branch but fix doesn't flip decode):** another cross-backend or kernel bug downstream. Stage 4.16 brief queues per-attention-output readback or scheduler-split-vs-handle audit.
-- **Outcome C (Probe 5 inconclusive — gate timing or insufficient capture window):** widen the cap, set the gate earlier (before model load), and rerun.
+- **Outcome B (Probe 6 isolates the sub-hypothesis but fix doesn't flip decode):** another cross-backend or kernel bug downstream. Stage 4.17 brief queues per-attention-output readback or scheduler-split-vs-handle audit.
+- **Outcome C (Probe 6 inconclusive — handles/offsets/sizes all match):** fifth outcome — bug is in `Module.jsepRead`'s record fetch or in JSPI ordering. Stage 4.17 queues a `record === dstRec` identity check at jsepRead time and a Promise-resolution audit.
+
+### Earlier Stage 4.15 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.15 brief (paste-and-go bootstrap, Probe 5 per-divert-dispatch tempDst + dstRec readback EM_ASM sketch, three branch hypotheses with disambiguation table, spike-harness drain pattern) lives in [`STAGE-4.15-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.15-RESULT.md). Branch 1 (kernel writes zeros) REJECTED and Branch 2 (copy doesn't land) REJECTED; Branch 3 (divert lands valid data; H1 mirrors it elsewhere) CONFIRMED. Probe 5's 32 entries showed `tempEqDst === true` everywhere, with valid F32 for layer-0 Q/K/V projections and zeros for everything that consumes Q (attention compute, layer-1 projections from cascade). The fix path moves to Stage 4.16's pack_tensor / H1 cross-correlation. Collapsed at Stage 4.16 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.14 brief — collapsed (full text in closure report)
 
