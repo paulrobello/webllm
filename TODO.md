@@ -981,6 +981,83 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
+### Phase 3 trajectory assessment (set 2026-05-07, post-Stage-4.26)
+
+Read this **before** starting Stage 4.27 to decide whether the
+investigation is still load-bearing or scope-reducible.
+
+**The single outstanding bug.** JSEP spike produces `"inonic boso-"`
+from `"The capital of France is"`; the non-JSEP reference probe
+produces coherent text from the same prompt with the same WGSL
+kernels. Only scheduler routing differs.
+
+**Investigation status.**
+- **Ruled out (Stages 4.22 → 4.26):** Q4_K dequant correctness
+  (H-3b), WGSL accumulation precision (H-3b-structural), Kahan
+  recovery (zero impact), libllama matmul precision
+  (H-4-libllama-imprecise — libllama is *worse* than webllm).
+  Five stages ruled out matmul-kernel and matmul-precision
+  hypotheses entirely.
+- **Last actual signal we have:** Stage 4.17 checkpoint diff
+  (2026-05-07 morning) — `attn_out-0` first ≥1e-3 at idx 11,
+  `ffn_norm-0` at 1.83e-1 (idx 12), `result_norm` 5.83 (idx 14),
+  `result_output` 6.61 (idx 15). The patch stack has grown
+  12 → 13 since with multiple host-mirror writeback fixes
+  (Stages 4.4 / 4.5 / 4.16), so that smoking-gun table is
+  potentially stale.
+- **Genuinely unknown right now:**
+  - Whether the cascade is in prefill or decode.
+  - Whether the failing op is a matmul, RMSNorm, FA, softmax,
+    SET_ROWS, or KV-cache layout.
+  - Whether Stages 4.4 / 4.5 / 4.16 host-mirror fixes already
+    shifted the picture (the diff may be tighter than 4.17's).
+  - Whether the bug is a structural cross-backend issue
+    (CPU-fallback writeback gap, wrong buffer offset,
+    gain-vector misload) — those are the remaining suspect
+    categories now that all numerical hypotheses are dead.
+
+**What Stage 4.27 buys.** A re-captured `__stage417Checkpoints`
+diff. **One probe, ~5 minutes of work.** Three branches:
+
+| Outcome | Diagnosis | Estimated remaining work |
+|---|---|---|
+| Same pattern as Stage 4.17 (`attn_out-0` / `ffn_norm-0` first divergent) | Post-4.4/4.5/4.16 patch stack didn't close the cascade; bug structurally identical | 2-3 more probes to localize the failing op |
+| Tighter than Stage 4.17 (no prefill checkpoint reaches 1e-2) | Cascade is in decode (lm_head / KV-cache / RoPE / SET_ROWS); pivot to `LOGIT_STATS_STEP0` diff | 2-3 probes |
+| Different first-divergent op (e.g. `Vcur-0` or `Kcur-0` now ≥1e-2) | Patch-stack regression from Stages 4.18-4.26 | Worst case ~6 probes (bisect) |
+
+**Risk assessment.** The trajectory has the hallmarks of a long
+tail: 26 sub-stages since Stage 3.5 nominally closed, each ruling
+out one hypothesis. The remaining suspect categories are
+**structural** (cross-backend writeback, KV layout, gain-vector
+load), not numerical, so Stage 4.27 *should* land a sharper
+signal — but if it doesn't, the realistic envelope is another
+5-10 stages.
+
+**Two paths forward:**
+
+1. **Run Stage 4.27 next session.** Cheap, high information value;
+   tells you within ~30 minutes whether you are 2 probes from done
+   or 10 probes from done.
+2. **Step back and reassess JSEP scope.** The Phase 3 cycle exists
+   because the JSEP / Option A-prime path was meant to unlock
+   `llama_decode` integration on top of webllm's WGSL kernels.
+   The non-JSEP reference path already decodes correctly and is
+   not blocked. Open question: **is JSEP load-bearing for the
+   project's actual use case** (agent + Three.js, 8B ceiling,
+   single-active-model)? If the non-JSEP `webllm-wasm.js` route
+   already meets the perf and feature budget on the canonical 6,
+   Phase 3 may be a path with no shipping requirement behind it,
+   and the entire cycle could be deferred or scoped down. The
+   project-level benefit of finishing Phase 3 (= upstream
+   `llama_decode` schedules our WGSL kernels for free, instead
+   of the hand-rolled forward-pass builder in
+   `src/inference/engine.ts`) is real but **not load-bearing**
+   for any committed use case. Worth an explicit go / no-go
+   decision before sinking another 5-10 stages.
+
+**Recommendation:** run 4.27 first (it's effectively free), then
+let the diff data drive the go / no-go conversation.
+
 ### Next session pickup — Phase 3 Stage 4.27: cascade-source localization via `__stage417Checkpoints` per-layer diff (rerun on current code)
 
 Stage 4.26 closed Outcome **H-4-libllama-imprecise** — libllama's CPU `quantize_row_q8_K` → `vec_dot_q4_K_q8_K` path produces output `4.178e-2` from f64 truth on the captured production Q-proj inputs, vs webllm's WGSL kernel at `7.94e-6` from truth. **webllm is more accurate than the reference path that decodes correctly.** The matmul-precision investigation is closed: the cascade producing `GENERATED_TEXT = "inonic boso-"` is not driven by Q-projection numerical imprecision. Stage 4.27 pivots to localizing _which op_ in the prefill or decode path actually wedges the spike's output. The Stage 4.17 framework already captured `__stage417Checkpoints` for both the JSEP spike and the non-JSEP reference probe, with idx 11 `attn_out-0` flagged as the first checkpoint to cross 1e-3 (4.77e-3) and idx 12 `ffn_norm-0` exploding to 1.83e-1. **But that data is from 2026-05-07 morning; the codebase has moved through Stage 4.18–4.26 since.** Step 1 is to re-run both harnesses on the _current_ code, re-diff, and confirm whether the same divergence pattern still holds. If yes, Stage 4.27 deep-dives the first ≥1e-2-magnitude op (likely `attn_out-0` projection, `ffn_norm-0`, or one of `ffn_gate/up/down-0`). If no (e.g., post-Stage-4.4 H1 fix or post-Stage-4.5 H1-inverse fix shifted the picture), Stage 4.27 starts from the new first-divergent checkpoint. START HERE in a fresh session.
