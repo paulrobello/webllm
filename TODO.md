@@ -925,7 +925,7 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 # 1. Confirm you're in the right working tree on the right tip.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → <Stage 4.3 closure commit, top of main>
+#   → f733b2e docs(TODO): Stage 4.3 closed — queue Stage 4.4 F1 dual-resident weights
 
 # 2. Confirm llama.cpp is on the patched branch.
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
@@ -942,10 +942,14 @@ TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(n
 echo "PORT=$PORT TAB=$TAB"
 
 # 5. Reproduce the post-Stage-4.3 baseline (Outcome C still active).
+#    Expect: 4 selftests pass, GPU_ERR_COUNT=0, GENERATED_TOKENS=[0,0,0,0,0],
+#    LOGIT_STATS_STEP0.first8=[0,...,0], PER_TOKEN_MS ~24.
 agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.4-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText' 2>&1 | grep -qE "(DONE|FAIL)"; do sleep 3; done
 agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").innerText'
 ```
+
+If those checks pass, jump to Step 1 (F1 implementation in `ggml-jsep.cpp`). If anything fails, see Step 0 below for the unrolled verify-state procedure.
 
 **One-line goal:** flip Outcome A "Paris" decode by ensuring CPU-fallback ops can read jsep-resident weight tensors. Implement F1 (dual-resident weights) per the Stage 4.3 closure.
 
@@ -990,12 +994,12 @@ Two sub-options for *where* the mirror lives:
 #   → 53c66649f  webllm-browser-patches
 
 git log --oneline -6
-#   → <Stage 4.3 closure>
+#   → f733b2e docs(TODO): Stage 4.3 closed — queue Stage 4.4 F1 dual-resident weights
+#   → 1333e02 docs(reports): Stage 4.3 closure — Bug A localized to 0x2000 sentinel deref
+#   → 2ca7b48 chore(jsep): Stage 4.3 spike selftests + full-graph capture instrumentation
 #   → 6c4b958 docs(TODO): polish Stage 4.3 brief with paste-and-go bootstrap block
 #   → 4c41b88 docs(TODO): Stage 4.2 closed — queue Stage 4.3 production-shape selftests + full-graph capture
 #   → dadaf24 docs(reports): Stage 4.2 closure — JSEP NaN cascade + lm_head non-write
-#   → b6f1631 chore(jsep): Stage 4.2 spike diagnostic instrumentation
-#   → 731f666 docs(TODO): polish Stage 4.2 brief for fresh-session paste-and-go
 
 # Reproduce Outcome C baseline:
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
@@ -1015,10 +1019,97 @@ until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("
 6. Change `get_base` to return `host_mirror`.
 7. Verify `jsep_tensor_handle(tensor)` still works — it strips `tensor->data - tensor->buffer->iface.get_base(tensor->buffer)` to recover the encoded handle/offset. With the new base, the math is `(host_mirror + offset) - host_mirror = offset` — stays correct.
 
+Code sketch (paste-and-adapt):
+
+```cpp
+// 1) Context struct (~ggml-jsep.cpp:201)
+struct ggml_backend_jsep_buffer_context {
+    int32_t handle;
+    size_t  size;
+    void *  host_mirror;   // NEW: F1a — host-side parallel copy for CPU ops
+};
+
+// 2) alloc (~ggml-jsep.cpp:283)
+static ggml_backend_buffer_t ggml_backend_jsep_buffer_type_alloc_buffer(
+        ggml_backend_buffer_type_t buft, size_t size) {
+    int32_t handle = ggml_jsep_alloc((int32_t) size);
+    if (handle < 0) return nullptr;
+    void * host_mirror = aligned_alloc(GGML_JSEP_BUFFER_ALIGN, size);
+    if (!host_mirror) { ggml_jsep_free(handle); return nullptr; }
+    memset(host_mirror, 0, size);                  // match the JSEP zero-init
+    auto * ctx = new ggml_backend_jsep_buffer_context{ handle, size, host_mirror };
+    return ggml_backend_buffer_init(buft, ggml_backend_jsep_buffer_interface, ctx, size);
+}
+
+// 3) free
+static void ggml_backend_jsep_buffer_free_buffer(ggml_backend_buffer_t buffer) {
+    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
+    if (ctx) {
+        free(ctx->host_mirror);
+        ggml_jsep_free(ctx->handle);
+        delete ctx;
+    }
+}
+
+// 4) get_base — LOAD-BEARING change
+static void * ggml_backend_jsep_buffer_get_base(ggml_backend_buffer_t buffer) {
+    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
+    return ctx->host_mirror;   // was: GGML_JSEP_PTR_BASE (0x2000)
+}
+
+// 5) set_tensor — dual-write
+static void ggml_backend_jsep_buffer_set_tensor(ggml_backend_buffer_t buffer,
+        ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
+    const size_t total_offset = jsep_tensor_handle(tensor) + offset;
+    memcpy((char *) ctx->host_mirror + total_offset, data, size);  // NEW
+    ggml_jsep_write(ctx->handle, (int32_t) total_offset, (int32_t) (uintptr_t) data, (int32_t) size);
+}
+
+// 6) get_tensor — read from host_mirror (drops JS round-trip)
+static void ggml_backend_jsep_buffer_get_tensor(ggml_backend_buffer_t buffer,
+        const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
+    const size_t total_offset = jsep_tensor_handle(tensor) + offset;
+    memcpy(data, (char *) ctx->host_mirror + total_offset, size);  // CHANGED
+}
+
+// 7) memset_tensor / clear — apply to both
+static void ggml_backend_jsep_buffer_memset_tensor(ggml_backend_buffer_t buffer,
+        ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
+    if (size == 0) return;
+    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
+    const size_t total_offset = jsep_tensor_handle(tensor) + offset;
+    memset((char *) ctx->host_mirror + total_offset, value, size);  // NEW
+    ggml_jsep_clear(ctx->handle, (int32_t) value, (int32_t) total_offset, (int32_t) size);
+}
+
+static void ggml_backend_jsep_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
+    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(buffer->context);
+    memset(ctx->host_mirror, value, ctx->size);                     // NEW
+    ggml_jsep_clear(ctx->handle, (int32_t) value, 0, (int32_t) buffer->size);
+}
+```
+
+**Critical verification before declaring success — cross-backend writes.** If a CPU op writes its output directly via `tensor->data` (not via `set_tensor`), the host_mirror gets updated but the GPU buffer stays stale; the next JSEP op reading that tensor sees old data. The Stage 4.2 trace shows `jsepWrite[i=1]` IS being called by some upstream code path (so set_tensor IS firing on CPU outputs), suggesting the scheduler routes outputs through set_tensor — but verify post-fix that the unified evtSeq trace still shows jsepWrite calls bridging CPU→JSEP after the fix lands. If POSTPREFILL_BUF11 reads back stale-but-not-NaN values, this is the failure mode.
+
+`jsep_tensor_handle()` arithmetic correctness: it is defined as `((uintptr_t) tensor->data) - ((uintptr_t) GGML_JSEP_PTR_BASE)` (~ggml-jsep.cpp:97-103). After our change, `tensor->data = host_mirror + per-tensor-offset` (the ggml-tensor allocator computes data from `buffer->iface.get_base + offset`). So `jsep_tensor_handle` would compute `(host_mirror + offset) - 0x2000`, which is **wrong** — the per-tensor offset gets polluted by `host_mirror - 0x2000`. **Fix `jsep_tensor_handle` to subtract the buffer's `host_mirror` instead of the global `GGML_JSEP_PTR_BASE`:**
+
+```cpp
+// ~ggml-jsep.cpp:101 — UPDATED (return type stays size_t)
+static inline size_t jsep_tensor_handle(const ggml_tensor * t) {
+    auto * ctx = static_cast<ggml_backend_jsep_buffer_context *>(t->buffer->context);
+    return (size_t) ((uintptr_t) t->data - (uintptr_t) ctx->host_mirror);
+}
+```
+
 Build:
 ```bash
-cd ~/Repos/llama.cpp && make clean && make ...   # whatever the existing build incantation is
 cd /Users/probello/Repos/webllm && make wasm-build
+# wasm-build pulls llama.cpp from ~/Repos/llama.cpp on the
+# webllm-browser-patches branch and rebuilds smoke-test/webllm-wasm-jsep.js.
+# After it lands, also rebuild the spike bundle:
+bun build smoke-test/p2-v2-spike.src.ts --outfile smoke-test/p2-v2-spike.js --target browser
 ```
 
 #### Step 2 — verify Outcome A flips (5 min)
