@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.17 PARTIAL CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch; webllm-side cb_eval bridge hook + non-JSEP ref-probe harness; patch stack unchanged at 12).** **Outcome B (kernel-correctness) CONFIRMED.** Probe 7 added `cb_eval`-based per-node first8 dump in `webgpu-bridge.cpp::node_dump_cb` (gated via new `webllm_enable_node_dump(int)` JS export; allowlist of 11 layer-0 + final tensor names: `Qcur-0`/`Kcur-0`/`Vcur-0`/`kq-0`/`kq_soft_max-0`/`kqv_out-0`/`attn_out-0`/`ffn_norm-0`/`ffn_out-0`/`result_norm`/`result_output`). Both `make wasm-build-wasm32` (production non-JSEP) and `make wasm-build-jsep` pick up the hook from the shared source file. New `smoke-test/p2-v2-ref-probe.{html,src.ts}` (~150 LOC) loads TinyLlama Q4_0 GGUF through `webllm-wasm.js`, runs identical prefill + greedy 5-decode, captures matching checkpoint set on `window.__refCheckpoints`. Reference produces `topId=3681 (" Paris"), topVal=13.04` — ground truth confirmed. JSEP produces `topId=297 ("in"), topVal=10.46`. **Smoking gun (96 checkpoints × prefill + 5 decode):** `Qcur-0` first8 max-abs-Δ = **5.24e-4** at the FIRST compute node (Q4_0 matmul output dim 2048); `Vcur-0` is **bit-identical** (suspect: V projection runs on CPU under Option A-prime scheduler split — Stage 4.13's retracted-but-prescient hypothesis); `Kcur-0` Δ = 3.38e-4 (same kernel as V, same shape, but non-zero — Vcur=0 is anomalous). The first checkpoint to cross the 1e-3 "structural" threshold is **`attn_out-0` at idx 11 (max-abs-Δ = 4.77e-3)** — this is `residual + out_proj × kqv_out_post_permute` where the out-proj matmul has same shape [2048,2048] × [2048,6] as Q-proj at idx 0. RMSNorm of the small-magnitude attn_out amplifies the relative diff: `ffn_norm-0` Δ = 1.83e-1 (38× the absolute attn_out diff because RMSNorm scales by 1/√(mean²+ε) at near-zero magnitude). By `result_norm` (post-22-layer, with layers 1-21 unmonitored by allowlist), absolute Δ = +5.83; logits Δ = +6.61 — flips the argmax token. **No NaN, no Inf, no all-zero pathology** — Stage 4.16's `EM_ASYNC_JS` fix landed correctly; remaining bug is purely numerical compounding precision noise across 22 layers. Per-token decode 474 ms (within noise of Stage 4.16 baseline 458 ms). All 6 selftests still PASS. `make checkall` green (747 pass / 36 skip / 0 fail). Closure: [`STAGE-4.17-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-RESULT.md). Raw artifacts: [`STAGE-4.17-jsep-checkpoints.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-jsep-checkpoints.txt), [`STAGE-4.17-ref-checkpoints.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-ref-checkpoints.txt), [`STAGE-4.17-diff.py`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-diff.py). Stage 4.18 brief below queues per-shape Q4_0 matmul self-test sweep (production shapes [2048,2048] / [256,2048] / [2048,5632] / [5632,2048] / [32000,2048]) against a numpy/CPU reference dequant, plus a "is V really on CPU?" backend-trace probe to explain the Vcur=0 anomaly.
+
 **Stage 4.16 PARTIAL CLOSED 2026-05-07 — `<pending>` + llama.cpp `<pending>` (P9 — `EM_ASYNC_JS` for `ggml_jsep_read` in `ggml-jsep.cpp:149-163`; patch stack 11 → 12).** **Fifth outcome of Stage 4.15's matrix CONFIRMED — Probe 6 ruled out all four documented sub-hypotheses (mirror-mismatch / offset-mismatch / undersized-read / fires-on-different-node), then a 4-float `mirror_post_h1` peek added to Probe 6 caught H1 fire-and-forget red-handed.** Cross-correlation is exact for Qcur-0: Probe 5 (divert) writes `(h=26, o=4194304, ne=[2048,6])` 49152 bytes valid; Probe 6 (H1) reads `(bctx_handle=26, dst_offset=4194304, dst_size=49152, name="Qcur-0")` — same node, same handle, same offset, same size, same `view_src=null`. Yet `mirror_post_h1[0..4]` *immediately after H1 returns* reads `[0, 0, 0, 0]` for the load-bearing Qcur-0 write. Smoking gun: `ggml_jsep_read` was declared `EM_JS(void, ...)` not `EM_ASYNC_JS`. Under JSPI (`-sJSPI_EXPORTS=...`, no `WebAssembly.Suspending` import), the JS body's returned Promise from `Module.jsepRead` was discarded; the readback ran asynchronously and host_mirror updates landed AFTER the C++ caller had moved on. The legacy comment at the EM_JS site claimed JSPI awaits implicitly — it does not; only `WebAssembly.Suspending`-wrapped imports suspend a `WebAssembly.promising`-wrapped export. `EM_ASYNC_JS` (in `<emscripten/em_js.h>:73`) routes the body through `Asyncify.handleAsync`, which Emscripten 5.0.7 lowers to JSPI's Suspending wrap. Fix is one macro change + an `await`. **PARTIAL Outcome A:** decode flips from stuck-at-confident-wrong (`topId=593/0.159`, `"ntiuhuihnerquant"`) to varied-but-still-wrong (`topId=297/topVal=10.46`, `LOGIT_STATS_STEP0.first8 = [-8.39, -8.11, 1.14, -5.41, -5.62, -4.41, -6.30, -7.71]`, finiteCount=32000, no NaN/Inf, `GENERATED_TOKENS=[297,8927,13601,29877,29899]`, `GENERATED_TEXT="inonic boso-"` — English-letter morphology, not yet "Paris"). H1-inverse (jsepWrite) unaffected — `device.queue.writeBuffer` is sync, no Promise. Per-token decode 458.5 ms (vs Stage 4.15's 107.7 / Stage 4.5's 25.0 ms; ~18× regression — H1 now actually awaits per-runOp; ~1602 readbacks per token). Optimization (dirty-bit, batched readback at slice boundaries, peeled-consumer-only) deferred to Stage 5+. All 6 selftests still PASS. `make checkall` green (747 pass / 36 skip / 0 fail). Closure: [`STAGE-4.16-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.16-RESULT.md). Stage 4.17 brief below queues per-attention-output reference-diff to localize the remaining downstream bug (kernel-correctness at production shape vs cross-backend boundary leak vs CPU-fallback ROPE/SOFT_MAX issue).
 
 **Stage 4.15 PARTIAL CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch; webllm-side spike instrumentation only — `src/inference/jsep/ops/matmul.ts` divert path adds gated tempDst + dstRec.buffer readback at `__stage415DivertProbe`; `smoke-test/p2-v2-spike.src.ts` enables the gate before model load; patch stack unchanged at 11).** **Branch 3 of Stage 4.14's disambiguation table CONFIRMED — divert path lands data correctly; H1 GPU→host writeback fails to deposit it in host_mirror at the offset `get_tensor` reads from.** Probe 5 captures `tempDst[0..16)` and `dstRec.buffer[dst.offset..+16)` per divert dispatch (cap 32, deferred mapAsync drain). **Smoking-gun #1 (Branch 1 REJECTED):** i=1 (layer 0 Q proj, dst=[2048,6] @ h26+4194304) records `tempF4 = [-6.26e-5, 1.87e-5, -6.09e-5, -9.48e-5]` — kernel produces valid output at the load-bearing Q-shape (M=2048). i=2 (layer 0 K proj, dst=[256,6] @ h26+4194304) records `tempF4 = [6.85e-5, 1.35e-4, -1.74e-4, 7.41e-5]` — also valid. **Smoking-gun #2 (Branch 2 REJECTED):** for every captured entry, `tempBytes` is byte-exact equal to `dstBytes` (`tempEqDst === true` for all 32). copyBufferToBuffer lands at `dst.offset` in `dstRec.buffer`. **Smoking-gun #3 (Branch 3 CONFIRMED):** Probe 5 i=1 wrote valid Q to GPU(handle=26, offset=4194304); Stage 4.14 `__jsepGetTensorLog` reports `host_mirror[26]+4194304` reads `[0, 0, 0, 0]` for `name = "Qcur-0"` — the data exists on the GPU but `Module.jsepRead` (called from H1 in `ggml-jsep.cpp:779-786`) is not reading it into host_mirror. Cascade corroboration: i=3 (attention scores Q × K_cache, dst=[256,6,32]) records `tempF4 = [0,0,0,0]` — its src1 (Q ROPE'd on CPU) is genuinely zero at GPU kernel time because the CPU read host_mirror's stale zeros, ROPE'd zeros, and H1-inverse synced zeros back to GPU. i=5 (layer 1 Q proj, dst=[2048,6]) also records zero output — layer 0's broken output zeros the residual stream cascading through every subsequent layer. **Stage 4.14's "JSEP MUL_MAT divert produces no host-visible output" framing was right in observable effect but wrong in mechanism — the divert IS host-visible at the GPU level; H1's writeback path is what fails to mirror it.** All three sub-hypotheses for Stage 4.16 to disambiguate (H1-mirror-mismatch / H1-stale-buffer / H1-fires-on-different-node-than-dispatch) are listed in the closure report. Spike replay reproduced (`__stage415DivertLog.length === 32`, `tempEqDst === true`, 6 selftests PASS, `make checkall` green). Per-token decode 107.7 ms (Stage 4.14 baseline 127.92 ms; deferred mapAsyncs land outside decode timing). Closure: [`STAGE-4.15-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.15-RESULT.md). Raw probe data: [`STAGE-4.15-probe5-raw.json`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.15-probe5-raw.json). Stage 4.16 brief below queues per-runOp logging of `(node->buffer->context->handle, jsep_tensor_handle(node), ggml_nbytes(node), tensor_name)` to cross-correlate against Probe 5's `(dst.bufHandle, dst.offset, dst.ne)` and identify which sub-hypothesis fires.
@@ -961,7 +963,7 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.17: localize the remaining downstream bug after H1 is correct. Decode now produces real-distinct logits (no NaN/Inf, finite=32000) and varied tokens but the text is gibberish ("inonic boso-"). Three suspect classes; cheapest probe first. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.18: per-shape Q4_0 matmul self-test sweep + V-on-CPU verification. Stage 4.17 localized the bug to compounding kernel imprecision (~5e-4 first8 deltas at every Q4_0 matmul; Vcur=0 anomaly suggests V runs on CPU); Stage 4.18 narrows to the specific kernel + shape that's load-bearing for the cascade. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -969,87 +971,85 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → <Stage 4.16 TODO closure commit> docs(TODO): Stage 4.16 closed — queue Stage 4.17 downstream-bug localization
+#   → <Stage 4.17 TODO closure commit> docs(TODO): Stage 4.17 closed — queue Stage 4.18 per-shape Q4_0 matmul sweep
 
 # 2. Confirm llama.cpp tip.
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → <P9 commit>   webllm-browser-patches   (patch stack 12)
+#   → fc376580e   webllm-browser-patches   (patch stack 12, unchanged)
 
 # 3. Smoke-server up on 8031.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 
 # 4. Reuse agentchrome session + spike tab.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
-TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
-[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.17-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-echo "PORT=$PORT TAB=$TAB"
+SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
+REF_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-ref-probe.html" in t["url"]))' 2>/dev/null)
+echo "PORT=$PORT SPIKE_TAB=$SPIKE_TAB REF_TAB=$REF_TAB"
 
-# 5. Reproduce post-Stage-4.16 baseline (H1 awaits properly):
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.17-replay" --tab "$TAB"
-until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").textContent.slice(-50)' 2>&1 | grep -qE "DONE|FAIL"; do sleep 5; done
-agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").textContent.match(/GENERATED_TEXT[^\n]*/g)?.slice(-1)[0]'
-#   → expect: GENERATED_TEXT = "inonic boso-"  (or similar real-letters gibberish; topId=297-ish)
-#   → expect: PER_TOKEN_MS ≈ 458 (much slower than 25 ms — H1 awaits)
-#   → expect: LOGIT_STATS_STEP0.hasNaN=false, hasInf=false, finiteCount=32000
+# 5. Reproduce post-Stage-4.17 baseline (both tabs):
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.18-replay" --tab "$SPIKE_TAB"
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-ref-probe.html?v=stage4.18-replay" --tab "$REF_TAB"
+# Wait for DONE on both, then re-run the diff to confirm starting state:
+python3 eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-diff.py \
+  eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-jsep-checkpoints.txt \
+  eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-ref-checkpoints.txt
+#   → expect: FIRST DIVERGENCE > 0.001: idx=8 name=kq-0  (or idx=11 attn_out-0 depending on threshold)
+#   → expect: Qcur-0 first8 max-abs-Δ ≈ 5.24e-4
+#   → expect: Vcur-0 first8 max-abs-Δ = 0.0   (anomaly to investigate)
 ```
 
-**One-line goal:** Localize the source of the remaining gibberish. With H1 now correct (Stage 4.16), logits are clean and finite; the bug is in *what data flows* through the graph, not whether data flows.
+**One-line goal:** Pinpoint the kernel that produces the first non-zero numerical delta — Q4_0 matmul at output dim 2048 (Q-proj / out-proj / FFN matmuls) — and either fix or confirm we accept its precision profile.
 
-**One-line context:** Stage 4.16 fixed `ggml_jsep_read` fire-and-forget Promise; decode flipped from stuck-at-593 to varied-but-wrong. Three downstream suspect classes ranked by cheapest-to-disambiguate-first.
+**One-line context:** Stage 4.17's Probe 7 confirmed Outcome B (kernel-correctness). The matmul kernel produces ~5e-4 absolute first8 deltas vs reference at the very first compute node. Compounded across 22 layers → +6 magnitude logits delta → wrong topId. Reference produces id 3681 (" Paris"); JSEP produces id 297 ("in").
 
-#### Suspects (priority order)
+#### Probes (priority order)
 
-1. **Cross-backend boundary leak (HOST→GPU side).** H1-inverse pre-pass syncs every src tensor whose buffer is jsep_buft. But ROPE / SOFT_MAX / GET_ROWS run on CPU, writing through `tensor->data → host_mirror`. The pre-pass *re-reads* host_mirror at runOp dispatch time — fine. But if a CPU subgraph runs *between* H1-inverse pre-pass and the JSEP runOp itself (e.g., scheduler interleaves), the GPU sees stale data. Suspect: ROPE-of-Q feeding into Q×K^T attention.
-2. **Kernel correctness at production shape.** Q4_K matmul self-test PASSES at K=2048 / N=6 (Stage 4.3). Other production shapes — output-projection (M=2048, K=2048, N=6), ffn_gate (M=5632, K=2048, N=6), ffn_down (M=2048, K=5632, N=6), lm_head ([32000, 2048] × [2048, 1]) — were not exhaustively self-tested. A small numerical bias would cascade.
-3. **CPU-fallback op correctness vs JSEP-resident KV.** TinyLlama ROPE base/freq + position handling against KV that lives in jsep_buf. Stage 4.13's "K/V swap" diagnosis was retracted but the underlying scheduling pattern wasn't verified post-Stage-4.16.
+1. **Probe 8a — per-shape Q4_0 matmul self-test sweep against numpy/CPU dequant reference** (cheapest, most directly actionable).
 
-#### Probe 7 — per-attention-output reference-diff (Suspect 1+2 disambiguator)
+   Extend `smoke-test/p2-v2-spike.src.ts`'s `MATMUL_PROD_*` selftest block to cover the production shapes used by TinyLlama:
+   - (M=2048, K=2048, N=6) — Q-projection / out-projection (also reused at decode N=1)
+   - (M=256, K=2048, N=6) — K-projection / V-projection
+   - (M=5632, K=2048, N=6) — FFN gate / FFN up (Q4_0 weight, F32 activation)
+   - (M=2048, K=5632, N=6) — FFN down
+   - (M=32000, K=2048, N=1) — lm_head
 
-Build a CPU-only "golden" reference of the same prefill+5-decode by routing libllama through the **WebGPU backend OR CPU-only backend** instead of JSEP (set `WEBLLM_PIN_TO_JSEP=0` at link time, or use the existing non-JSEP `make wasm-build` artifact and load the same model with the same prompt). Capture:
-- `attn_out_l0.first8` post-layer-0 attention output (real-shape, post-residual)
-- `ffn_out_l0.first8` post-layer-0 FFN output
-- `kqv_l0.first8` Q×K^T softmax × V
-- `logit_step0.first8`
+   For each: build a Q4_0 random weight matrix on CPU, dequant in JS to F32, compute `dequant(W) @ x` as the reference (use float64 accumulation in JS for the reference to expose any F16 accumulation in the WGSL kernel), then dispatch via `matmul.ts::dispatchMatmul` (both no-divert and divert paths). Compare; report max-abs-delta and mean-abs-delta. Threshold 1e-3 (target), 5e-4 (current observed); if >1e-3 the kernel is provably broken at that shape.
 
-Compare against the JSEP-resident decode's same checkpoints (already exposed via Stage 4.4 onward). The first checkpoint where JSEP diverges by >1e-3 from CPU reference is the layer + op where the bug enters.
+2. **Probe 8b — "is V really on CPU?" backend-trace.**
 
-**Estimated implementation cost:** ~150 LOC harness, no llama.cpp patches. The reference run already exists — `make wasm-build` produces a non-JSEP variant that bench-suite uses daily.
+   Why does Vcur-0 produce bit-identical output (Δ=0) while Kcur-0 has Δ=3.4e-4 with the same input shape and same Q4_0 weight format? Hypothesis: the scheduler routes V-projection to CPU under Option A-prime's split rules (V cache layout transposed in TinyLlama → maybe routed to CPU for the pre-cache permute fuse). Add a per-runOp log in `ggml-jsep.cpp::ggml_backend_jsep_graph_compute` that records `(op, src_names, dst_name, executed_on_jsep)` for the first 30 nodes; cross-correlate against `__cpuGraphLog` from Stage 4.13's CPU-side instrumentation. If V really is on CPU, that's a free win for precision (any V-related compounding error is already absent) but also means the kernel sample size is misleading — Probe 8a should focus on the K/Q kernel paths that actually run.
 
-#### Probe 8 — per-shape Q4_K matmul self-test sweep (if Probe 7 narrows to a specific MUL_MAT)
+3. **Probe 8c — RMSNorm-of-near-zero-magnitude self-test** (only if 8a + 8b don't yield a clear kernel bug).
 
-Add to `smoke-test/p2-v2-spike.src.ts`'s self-test block:
-- (M=2048, K=2048, N=6) — output projection
-- (M=5632, K=2048, N=6) — ffn_gate
-- (M=2048, K=5632, N=6) — ffn_down
-- (M=32000, K=2048, N=1) — lm_head (also exercises Q4_K row-wise reads at full vocab)
-
-For each, compare divert + non-divert against a CPU-side `dequant(Q4_K) @ x` reference. Max-abs delta tolerance 1e-3 (per-row dequant of Q4_K is bounded).
+   Stage 4.17 observed `attn_out-0` first8 magnitude is small (~1e-4 in JSEP, ~4e-3 in ref); RMSNorm scales by 1/√(mean²+ε), so position-0 first8 of `ffn_norm-0` becomes hyper-sensitive to attn_out's near-zero values. Build a self-test feeding small-magnitude rows (mean magnitude 1e-4 to 1e-2) through the JSEP RMSNorm kernel and compare to a numpy reference. If RMSNorm at low-magnitude is fine, the cascade attribution shifts to "matmul precision compounding through residual stream", which is a known-hard fix.
 
 #### Files to read first
 
-- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:656-787` — graph_compute loop with H1-inverse + runOp + H1.
-- `src/inference/jsep/ops/matmul.ts:572-735` — divert + non-divert matmul + Probe 5 staging.
-- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.16-RESULT.md` — full diagnosis + post-fix metrics.
-- Outcome-A "Paris" decode signal: `LOGIT_STATS_STEP0.topId` should land on a token whose decoded form is `Paris` (TinyLlama vocab 3681 or near). Currently topId=297 ("in").
+- `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-RESULT.md` — full Stage 4.17 closure with the 96-row diff table.
+- `src/inference/jsep/ops/matmul.ts:50-400` — Q4_0 + Q4_K kernel WGSL source; check accumulator type (F16 vs F32) and summation order against ggml-webgpu's WGSL Q4_0 kernel at `~/Repos/llama.cpp/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_q4_0.tmpl.wgsl`.
+- `smoke-test/p2-v2-spike.src.ts:42-1100` — existing Q4_K self-test block; clone and extend for Q4_0 + production shapes.
+- `src/wasm/webgpu-bridge.cpp:722-810` — Stage 4.17's `node_dump_cb` + `webllm_enable_node_dump`; reuse for Probe 8b's backend-trace.
 
 #### Risk register
 
-- Probe 7 requires building a CPU/WebGPU-backend reference against the same model + prompt + sampling. Could take a session or two — but it's the most informative single probe (decisively localizes which layer + op diverges).
-- If Probe 7 shows divergence at layer 0 attention output, the bug is in the JSEP attention pipeline (ROPE, softmax, Q×K^T, kqv). If it shows divergence first at layer 0 FFN output, the bug is in the FFN matmuls. If it shows divergence at lm_head, the issue is the final projection.
-- Stage 4.16's per-token cost (458 ms) is acceptable for diagnostic runs but unshippable. Stage 5 work (dirty-bit on host_mirror, batched readback) becomes load-bearing after Outcome A flips.
+- The matmul kernel may not have a "fix" — different summation order = different rounding = irreducibly different output. If the kernel is mathematically equivalent to ggml-webgpu's but rounded differently, the cascade is a feature of the architecture, not a bug. In that case Stage 4.18 closure documents the precision profile and Stage 4.19+ explores either (a) F32-accumulate kernels at the cost of 2× memory bandwidth, or (b) reordering decode-time computations to match a known-good kernel ordering.
+- Stage 4.18's three probes can run in parallel — 8a is in-page selftest, 8b is engine-side instrumentation, 8c is in-page selftest. Total wall < 1 hour.
 
-#### Exit criteria — Stage 4.17 closes when documented in `STAGE-4.17-RESULT.md`:
+#### Exit criteria — Stage 4.18 closes when documented in `STAGE-4.18-RESULT.md`:
 
-- Probe 7 (or follow-on probes) localizes which layer + op produces the first JSEP-vs-CPU-reference delta > 1e-3.
-- The structural fix lands. Patch stack delta documented.
-- Outcome A confirmed (`GENERATED_TEXT` shows real English; ideally `Paris` or close), OR the closure documents a follow-on Stage 4.18 with a tightly-scoped probe.
-- `make checkall` green.
+- Probe 8a localizes which Q4_0 matmul shape carries the largest precision delta vs numpy reference.
+- Probe 8b explains the Vcur=0 anomaly (V on CPU vs other reason).
+- Either a kernel-fix lands and `make checkall` is green AND `GENERATED_TEXT` flips toward "Paris", OR closure documents that current matmul precision is irreducible at the chosen accumulator type and queues Stage 4.19 with a higher-precision kernel design.
 
 #### Branch on outcome
 
-- **Outcome A (English decode):** Phase 3 proceeds to Stage 5 (perf optimization to claw back the 18× regression — dirty-bit, batched readback, peeled consumer-only).
-- **Outcome B (Probe 7 localizes a kernel bug):** Stage 4.18 brief queues the kernel fix (likely Q4_K shape-specific, or RMS_NORM at unusual K).
-- **Outcome C (Probe 7 localizes a cross-backend ordering bug):** Stage 4.18 queues a structural fix to H1 / H1-inverse / scheduler-split handling.
+- **Outcome A (kernel fix flips decode):** ≈ "Paris" or close — proceed to Stage 5 perf reclamation.
+- **Outcome B (kernel precision is irreducible at current accumulator):** Stage 4.19 brief queues F32-accumulate Q4_0 kernel + benchmark cost.
+- **Outcome C (V-on-CPU was the right path; Q/K/FFN should also be on CPU):** structural rewrite of the scheduler split — defer to Phase 4 with a fresh design doc.
+
+### Earlier Stage 4.17 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.17 brief (paste-and-go bootstrap, Probe 7 architecture decision matrix with three reference options, Probe 8 sketch for follow-on per-shape Q4_K self-test, three-outcome branch table) lives in [`STAGE-4.17-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-RESULT.md). Outcome B (kernel-correctness) CONFIRMED via 96-checkpoint diff between JSEP and non-JSEP reference: `Qcur-0` Δ = 5.24e-4 at idx 0; `Vcur-0` bit-identical (Δ = 0 anomaly); first node to cross 1e-3 threshold is `attn_out-0` at idx 11 (Δ = 4.77e-3); cascade through 22 layers lands `result_norm` Δ = +5.83 and logits Δ = +6.61. No NaN/Inf/all-zero pathology — purely numerical. Collapsed at Stage 4.18 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.16 brief — collapsed (full text in closure report)
 
