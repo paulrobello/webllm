@@ -1316,6 +1316,19 @@ function installJsepCallbacks(module, device) {
   module.jsepWrite = (handle, offset, hostPtr, size) => {
     counters.write++;
     encoderBatcher.flush();
+    const __h1invDiag = globalThis.__h1invDiag;
+    if (__h1invDiag && __h1invDiag.captures.length < 8 && handle === __h1invDiag.match.handle && offset === __h1invDiag.match.offset && size === __h1invDiag.match.size) {
+      const heap8 = new Uint8Array(module.HEAPU8.buffer, hostPtr, 16);
+      const heap32 = new Float32Array(module.HEAPU8.buffer, hostPtr, 8);
+      __h1invDiag.captures.push({
+        callIdx: __h1invDiag.callIdx++,
+        handle,
+        offset,
+        size,
+        first16: Array.from(heap8),
+        first8F32: Array.from(heap32)
+      });
+    }
     dataManager.write(handle, offset, hostPtr, size, module.HEAPU8.buffer);
   };
   module.jsepRead = (handle, offset, hostPtr, size) => {
