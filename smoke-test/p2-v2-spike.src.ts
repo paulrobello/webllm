@@ -702,6 +702,344 @@ async function runMatmulQ4_0Sweep(
 	};
 }
 
+// ----- Stage 4.22 Probe 10: production-dispatch kernel-input replay --------
+//
+// Stage 4.21 closed Outcome F-1: the host→GPU upload chain is byte-identical
+// end-to-end. The 5.24e-4 production Qcur-0 delta vs the 1.68e-6 Stage 4.18
+// synthetic-sweep delta (312× gap) must therefore originate inside the
+// dispatch / kernel-execution boundary at production conditions. Probe 10
+// captures the actual src0 (Q4_0 weight) + src1 (f32 activation) + dst
+// bytes the kernel sees at the first production MUL_MAT (Qcur-0,
+// M=2048/K=2048/N=6) and replays them through the same dispatchMatmul
+// entry point used by Stage 4.18. Verdict:
+//   G-1 (synthetic reproduces 5.24e-4 on captured bytes)  → Stage 4.18
+//       sweep missed an input distribution / tile geometry case at M=2048.
+//   G-2 (synthetic ≤1e-5 on the same bytes)               → bug between
+//       dispatch site and shader execution (pipeline cache, bind-group
+//       offsets, workgroup count, src0/src1 swap).
+
+// Q4_K row geometry: 144 bytes per 256-element super-block. Mirrors the
+// WGSL kernel in `src/inference/jsep/ops/matmul.ts::load_q4_K` and the
+// libllama `block_q4_K` layout.
+const Q4_K_BYTES_PER_BLOCK_SPIKE = 144;
+
+// Port of `q4k_unpack_scale_min` (matmul.ts WGSL). Returns (sc, m) for
+// sub-block index `is` in [0, 8) given the scales[12] byte region.
+function q4kUnpackScaleMin(
+	bytes: Uint8Array,
+	scalesByteBase: number,
+	is: number,
+): [number, number] {
+	const at = (off: number) => bytes[scalesByteBase + off];
+	if (is < 4) {
+		return [at(is) & 63, at(is + 4) & 63];
+	}
+	const qA = at(is + 4);
+	const qB = at(is - 4);
+	const qC = at(is);
+	const sc = (qA & 0xf) | ((qB >> 6) << 4);
+	const m = (qA >> 4) | ((qC >> 6) << 4);
+	return [sc, m];
+}
+
+// Dequantize a Q4_K weight tile (M rows × K cols) into f32, matching the
+// WGSL kernel's element-by-element formula. Used as the CPU reference for
+// Probe 10 replay.
+function dequantQ4_KTile(
+	bytes: Uint8Array,
+	M: number,
+	K: number,
+): Float32Array {
+	if (K % 256 !== 0) throw new Error(`Q4_K K=${K} must be multiple of 256`);
+	const blocksPerRow = K / 256;
+	const rowBytes = blocksPerRow * Q4_K_BYTES_PER_BLOCK_SPIKE;
+	if (bytes.byteLength < M * rowBytes) {
+		throw new Error(
+			`dequantQ4_KTile: bytes=${bytes.byteLength} < M*rowBytes=${M * rowBytes}`,
+		);
+	}
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const out = new Float32Array(M * K);
+	for (let m = 0; m < M; m++) {
+		for (let sb = 0; sb < blocksPerRow; sb++) {
+			const blockBase = m * rowBytes + sb * Q4_K_BYTES_PER_BLOCK_SPIKE;
+			const d = f16BitsToF32(view.getUint16(blockBase, true));
+			const dmin = f16BitsToF32(view.getUint16(blockBase + 2, true));
+			const scalesBase = blockBase + 4;
+			const qsBase = blockBase + 16;
+			for (let inSuper = 0; inSuper < 256; inSuper++) {
+				const pair = (inSuper / 64) | 0;
+				const withinPair = inSuper % 64;
+				const l = withinPair % 32;
+				const is = pair * 2 + (withinPair >= 32 ? 1 : 0);
+				const qByteIdx = pair * 32 + l;
+				const rawByte = bytes[qsBase + qByteIdx];
+				const nibble = withinPair < 32 ? rawByte & 0xf : (rawByte >> 4) & 0xf;
+				const [sc, mMin] = q4kUnpackScaleMin(bytes, scalesBase, is);
+				out[m * K + sb * 256 + inSuper] = d * sc * nibble - dmin * mMin;
+			}
+		}
+	}
+	return out;
+}
+
+// Dequantize a Q4_0 weight tile (M rows × K cols) into f32, matching the
+// WGSL kernel's nibble unpacking (in_block / 16 selects high vs low
+// nibble; scale is f16 at block start).
+function dequantQ4_0Tile(
+	bytes: Uint8Array,
+	M: number,
+	K: number,
+): Float32Array {
+	if (K % QK4_0 !== 0) throw new Error(`K=${K} must be multiple of 32`);
+	const blocksPerRow = K / QK4_0;
+	const rowBytes = blocksPerRow * Q4_0_BYTES_PER_BLOCK;
+	if (bytes.byteLength < M * rowBytes) {
+		throw new Error(
+			`dequantQ4_0Tile: bytes=${bytes.byteLength} < M*rowBytes=${M * rowBytes}`,
+		);
+	}
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const out = new Float32Array(M * K);
+	for (let m = 0; m < M; m++) {
+		for (let b = 0; b < blocksPerRow; b++) {
+			const base = m * rowBytes + b * Q4_0_BYTES_PER_BLOCK;
+			const dF16 = view.getUint16(base, true);
+			const d = f16BitsToF32(dF16);
+			for (let i = 0; i < QK4_0; i++) {
+				const byteIdx = base + 2 + (i % 16);
+				const raw = bytes[byteIdx];
+				const nibble = i < 16 ? raw & 0xf : (raw >> 4) & 0xf;
+				out[m * K + b * QK4_0 + i] = (nibble - 8) * d;
+			}
+		}
+	}
+	return out;
+}
+
+interface MatmulFromBytesResult {
+	M: number;
+	K: number;
+	N: number;
+	src0Type: number;
+	status: number;
+	maxAbsDeltaVsF32Loop: number;
+	maxAbsDeltaVsF64: number;
+	outputMaxAbs: number;
+	hasNaN: boolean;
+	hasInf: boolean;
+	first8Got: number[];
+	first8F32Loop: number[];
+}
+
+// Run a synthetic quantized matmul through the same dispatchMatmul entry
+// point used in production, using EXACT bytes captured at the production
+// dispatch site. Supports Q4_0 (type 2) and Q4_K (type 12) src0. Returns
+// the max-abs delta vs an f32 element-wise k-major reference (matches the
+// WGSL kernel's accumulation order).
+async function runMatmulFromBytes(
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+	M: number,
+	K: number,
+	N: number,
+	src0Type: number,
+	q4Bytes: Uint8Array,
+	src1Bytes: Uint8Array,
+): Promise<MatmulFromBytesResult> {
+	let blockBytes: number;
+	let elemsPerBlock: number;
+	if (src0Type === GGML_TYPE_Q4_0) {
+		if (K % QK4_0 !== 0) throw new Error(`Q4_0 K=${K} must be multiple of 32`);
+		blockBytes = Q4_0_BYTES_PER_BLOCK;
+		elemsPerBlock = QK4_0;
+	} else if (src0Type === GGML_TYPE_Q4_K) {
+		if (K % 256 !== 0) throw new Error(`Q4_K K=${K} must be multiple of 256`);
+		blockBytes = Q4_K_BYTES_PER_BLOCK_SPIKE;
+		elemsPerBlock = 256;
+	} else {
+		throw new Error(`runMatmulFromBytes: unsupported src0Type=${src0Type}`);
+	}
+	const blocksPerRow = K / elemsPerBlock;
+	const rowBytes = blocksPerRow * blockBytes;
+	const expectedSrc0Bytes = M * rowBytes;
+	const expectedSrc1Bytes = N * K * 4;
+	if (q4Bytes.byteLength < expectedSrc0Bytes) {
+		throw new Error(
+			`runMatmulFromBytes: q4Bytes=${q4Bytes.byteLength} < ` +
+				`expected=${expectedSrc0Bytes}`,
+		);
+	}
+	if (src1Bytes.byteLength < expectedSrc1Bytes) {
+		throw new Error(
+			`runMatmulFromBytes: src1Bytes=${src1Bytes.byteLength} < ` +
+				`expected=${expectedSrc1Bytes}`,
+		);
+	}
+
+	const src0Dequant =
+		src0Type === GGML_TYPE_Q4_0
+			? dequantQ4_0Tile(q4Bytes, M, K)
+			: dequantQ4_KTile(q4Bytes, M, K);
+	const src1View = new Float32Array(
+		src1Bytes.buffer,
+		src1Bytes.byteOffset,
+		expectedSrc1Bytes / 4,
+	);
+
+	// Reference — f32 element-wise loop in k-major order.
+	const refF32Loop = new Float32Array(M * N);
+	const refF64 = new Float64Array(M * N);
+	for (let n = 0; n < N; n++) {
+		for (let m = 0; m < M; m++) {
+			let acc32 = Math.fround(0);
+			let acc64 = 0;
+			for (let k = 0; k < K; k++) {
+				const a = src0Dequant[m * K + k];
+				const b = src1View[n * K + k];
+				acc32 = Math.fround(acc32 + Math.fround(a * b));
+				acc64 += a * b;
+			}
+			refF32Loop[n * M + m] = acc32;
+			refF64[n * M + m] = acc64;
+		}
+	}
+
+	const dstBytes = M * N * 4;
+	const h0 = runtime.dataManager.alloc(expectedSrc0Bytes);
+	const hSrc1 = runtime.dataManager.alloc(expectedSrc1Bytes);
+	const hDst = runtime.dataManager.alloc(dstBytes);
+	runtime.device.queue.writeBuffer(
+		runtime.dataManager.get(h0).buffer,
+		0,
+		q4Bytes,
+		0,
+		expectedSrc0Bytes,
+	);
+	runtime.device.queue.writeBuffer(
+		runtime.dataManager.get(hSrc1).buffer,
+		0,
+		src1Bytes,
+		0,
+		expectedSrc1Bytes,
+	);
+
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_MUL_MAT,
+		nSrc: 2,
+		dst: {
+			bufHandle: hDst,
+			offset: 0,
+			type: GGML_TYPE_F32,
+			ne: [M, N, 1, 1],
+			nb: [4, 4 * M, 4 * M * N, 4 * M * N],
+		},
+		srcs: [
+			{
+				bufHandle: h0,
+				offset: 0,
+				type: src0Type,
+				ne: [K, M, 1, 1],
+				nb: [blockBytes, rowBytes, rowBytes * M, 0],
+			},
+			{
+				bufHandle: hSrc1,
+				offset: 0,
+				type: GGML_TYPE_F32,
+				ne: [K, N, 1, 1],
+				nb: [4, 4 * K, 4 * K * N, 0],
+			},
+		],
+	};
+	const status = dispatchMatmul(runtime, desc);
+	runtime.encoderBatcher.flush();
+
+	const dstRec = runtime.dataManager.get(hDst);
+	const staging = runtime.device.createBuffer({
+		size: dstBytes,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	const enc = runtime.device.createCommandEncoder();
+	enc.copyBufferToBuffer(dstRec.buffer, 0, staging, 0, dstBytes);
+	runtime.device.queue.submit([enc.finish()]);
+	await staging.mapAsync(GPUMapMode.READ, 0, dstBytes);
+	const got = new Float32Array(staging.getMappedRange().slice(0));
+	staging.unmap();
+	staging.destroy();
+
+	let maxAbsDeltaVsF32Loop = 0;
+	let maxAbsDeltaVsF64 = 0;
+	let outputMaxAbs = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	for (let i = 0; i < got.length; i++) {
+		const v = got[i];
+		if (Number.isNaN(v)) hasNaN = true;
+		else if (!Number.isFinite(v)) hasInf = true;
+		const d32 = Math.abs(v - refF32Loop[i]);
+		const d64 = Math.abs(v - refF64[i]);
+		if (d32 > maxAbsDeltaVsF32Loop) maxAbsDeltaVsF32Loop = d32;
+		if (d64 > maxAbsDeltaVsF64) maxAbsDeltaVsF64 = d64;
+		const a = Math.abs(v);
+		if (a > outputMaxAbs) outputMaxAbs = a;
+	}
+
+	runtime.dataManager.free(h0);
+	runtime.dataManager.free(hSrc1);
+	runtime.dataManager.free(hDst);
+
+	return {
+		M,
+		K,
+		N,
+		src0Type,
+		status,
+		maxAbsDeltaVsF32Loop,
+		maxAbsDeltaVsF64,
+		outputMaxAbs,
+		hasNaN,
+		hasInf,
+		first8Got: Array.from(got.slice(0, 8)),
+		first8F32Loop: Array.from(refF32Loop.slice(0, 8)),
+	};
+}
+
+// Compare two f32 buffers (provided as Uint8Array views over the same
+// f32 layout) elementwise and report max abs delta + first 8 vals from
+// both. Used to compare captured production dst-after vs CPU f32 ref.
+function compareF32Buffers(
+	gotBytes: Uint8Array,
+	refF32: Float32Array,
+): {
+	maxAbsDelta: number;
+	hasNaN: boolean;
+	hasInf: boolean;
+	first8Got: number[];
+	first8Ref: number[];
+} {
+	const got = new Float32Array(
+		gotBytes.buffer,
+		gotBytes.byteOffset,
+		Math.min(gotBytes.byteLength / 4, refF32.length),
+	);
+	let maxAbsDelta = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	for (let i = 0; i < got.length; i++) {
+		const v = got[i];
+		if (Number.isNaN(v)) hasNaN = true;
+		else if (!Number.isFinite(v)) hasInf = true;
+		const d = Math.abs(v - refF32[i]);
+		if (d > maxAbsDelta) maxAbsDelta = d;
+	}
+	return {
+		maxAbsDelta,
+		hasNaN,
+		hasInf,
+		first8Got: Array.from(got.slice(0, 8)),
+		first8Ref: Array.from(refF32.slice(0, 8)),
+	};
+}
+
 // ----- SET_ROWS V-cache transpose self-test (Stage 4.6 D1) -----------------
 //
 // TinyLlama (no FA) writes the V cache via the transposed layout at
@@ -2460,6 +2798,17 @@ async function runSpike(): Promise<void> {
 		// headroom. Dump prints on stderr → __stderrLines via printErr.
 		mod._webllm_enable_node_dump(200);
 
+		// Stage 4.22 Probe 10 — arm one-shot capture of the first
+		// production Q4_0 MUL_MAT dispatch (Qcur-0). The selftests above
+		// exercise dispatchMatmul with synthetic Q4_0 inputs; they all
+		// completed and `await staging.mapAsync` drained the queue before
+		// we reach this point, so arming here guarantees the next eligible
+		// dispatch is a production prefill op.
+		(globalThis as unknown as {
+			__probe10Capture: { armed: boolean; result: unknown };
+		}).__probe10Capture = { armed: true, result: null };
+		log("     [probe10] capture armed (first Q4_0 MUL_MAT in prefill)");
+
 		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
 		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
 		const tPrefillStart = performance.now();
@@ -2472,6 +2821,134 @@ async function runSpike(): Promise<void> {
 			return;
 		}
 		log(`     prefill ${tPrefillMs.toFixed(0)} ms`);
+
+		// Stage 4.22 Probe 10 — wait for the capture's mapAsync promises
+		// to resolve, then replay the captured src0+src1 bytes through the
+		// synthetic Q4_0 matmul harness. Verdict G-1 (synthetic reproduces)
+		// vs G-2 (synthetic ≤1e-5).
+		try {
+			await runtime.device.queue.onSubmittedWorkDone();
+			// Yield once to let the mapAsync .then() callbacks run.
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			const probe10 = (globalThis as unknown as {
+				__probe10Capture?: {
+					armed: boolean;
+					result: {
+						M: number;
+						K: number;
+						N: number;
+						src0Type: number;
+						src0Bytes: Uint8Array | null;
+						src1Bytes: Uint8Array | null;
+						dstBeforeBytes: Uint8Array | null;
+						dstAfterBytes: Uint8Array | null;
+					} | null;
+				};
+			}).__probe10Capture;
+			const cap = probe10?.result;
+			if (!cap) {
+				log("     [probe10] no capture recorded — gate did not fire", "fail");
+			} else if (
+				!cap.src0Bytes ||
+				!cap.src1Bytes ||
+				!cap.dstBeforeBytes ||
+				!cap.dstAfterBytes
+			) {
+				log(
+					`     [probe10] capture incomplete: src0=${!!cap.src0Bytes} ` +
+						`src1=${!!cap.src1Bytes} dstBefore=${!!cap.dstBeforeBytes} ` +
+						`dstAfter=${!!cap.dstAfterBytes}`,
+					"fail",
+				);
+			} else {
+				log(
+					`     [probe10] captured M=${cap.M} K=${cap.K} N=${cap.N} ` +
+						`src0=${cap.src0Bytes.byteLength}B ` +
+						`src1=${cap.src1Bytes.byteLength}B ` +
+						`dstBefore=${cap.dstBeforeBytes.byteLength}B ` +
+						`dstAfter=${cap.dstAfterBytes.byteLength}B`,
+				);
+
+				// Replay the captured bytes through the synthetic harness.
+				const replay = await runMatmulFromBytes(
+					runtime,
+					cap.M,
+					cap.K,
+					cap.N,
+					cap.src0Type,
+					cap.src0Bytes,
+					cap.src1Bytes,
+				);
+				log(`MATMUL_PROBE10_REPLAY = ${JSON.stringify(replay)}`);
+
+				// Build the same f32 reference the replay used so we can
+				// score the captured production dst-after directly.
+				const src0Dequant =
+					cap.src0Type === GGML_TYPE_Q4_0
+						? dequantQ4_0Tile(cap.src0Bytes, cap.M, cap.K)
+						: dequantQ4_KTile(cap.src0Bytes, cap.M, cap.K);
+				const src1View = new Float32Array(
+					cap.src1Bytes.buffer,
+					cap.src1Bytes.byteOffset,
+					(cap.N * cap.K * 4) / 4,
+				);
+				const refF32Loop = new Float32Array(cap.M * cap.N);
+				for (let n = 0; n < cap.N; n++) {
+					for (let m = 0; m < cap.M; m++) {
+						let acc32 = Math.fround(0);
+						for (let k = 0; k < cap.K; k++) {
+							const a = src0Dequant[m * cap.K + k];
+							const b = src1View[n * cap.K + k];
+							acc32 = Math.fround(acc32 + Math.fround(a * b));
+						}
+						refF32Loop[n * cap.M + m] = acc32;
+					}
+				}
+				const captured = compareF32Buffers(cap.dstAfterBytes, refF32Loop);
+				log(
+					`MATMUL_PROBE10_CAPTURED_DELTA = ${JSON.stringify({
+						M: cap.M,
+						K: cap.K,
+						N: cap.N,
+						maxAbsDelta: captured.maxAbsDelta,
+						hasNaN: captured.hasNaN,
+						hasInf: captured.hasInf,
+						first8Got: captured.first8Got,
+						first8Ref: captured.first8Ref,
+					})}`,
+				);
+
+				// Verdict line. G-1: synthetic reproduces ≥ 1e-4 (within
+				// 2× of capturedDelta) ⇒ Stage 4.18 sweep missed an
+				// input/tile case. G-2: synthetic ≤ 1e-5 on the same
+				// bytes ⇒ dispatch-boundary bug.
+				const capturedDelta = captured.maxAbsDelta;
+				const syntheticDelta = replay.maxAbsDeltaVsF32Loop;
+				log(
+					`     [probe10] M=${cap.M} K=${cap.K} N=${cap.N} ` +
+						`capturedDelta=${capturedDelta.toExponential(3)} ` +
+						`syntheticDelta=${syntheticDelta.toExponential(3)}`,
+				);
+				let outcome: string;
+				if (syntheticDelta >= 1e-4 && syntheticDelta >= capturedDelta * 0.5) {
+					outcome =
+						"G-1 (synthetic reproduces — Stage 4.18 sweep missed input/tile case)";
+				} else if (syntheticDelta <= 1e-5) {
+					outcome =
+						"G-2 (synthetic ≤1e-5 — bug between dispatch site and shader execution)";
+				} else {
+					outcome =
+						`G-INDETERMINATE (capturedDelta=${capturedDelta.toExponential(3)} ` +
+						`syntheticDelta=${syntheticDelta.toExponential(3)} — neither boundary)`;
+				}
+				log(`     [probe10] OUTCOME: ${outcome}`);
+			}
+		} catch (err) {
+			log(
+				`     [probe10] replay threw: ${(err as Error).message}`,
+				"fail",
+			);
+		}
 
 		// Stage 4.2 Step 2 — manual GPU read of buf 11 at the offsets that
 		// jsepRead reported as NaN. If these reads return the SAME NaN, the

@@ -106,6 +106,31 @@ interface Stage415DivertEntry {
 	dstBytes: Uint8Array | null;
 }
 
+// Stage 4.22 Probe 10 — one-shot capture of the actual src0/src1/dst bytes
+// the kernel sees at the first eligible JSEP MUL_MAT dispatch in production
+// prefill. Armed by the spike harness (`globalThis.__probe10Capture.armed
+// = true`) just before `bridge.decode`, fires only once (auto-disarms),
+// and only matches Q4_0 src0 dispatches in the divert path. Captures into
+// staging buffers via separate command encoders submitted before/after the
+// kernel encoder so dst-before / dst-after are unambiguous. The mapAsync
+// promises resolve after `dispatchMatmul` returns; consumers must `await
+// runtime.device.queue.onSubmittedWorkDone()` then poll the result fields.
+export interface Probe10CaptureResult {
+	M: number;
+	K: number;
+	N: number;
+	src0Type: number;
+	src0Bytes: Uint8Array | null;
+	src1Bytes: Uint8Array | null;
+	dstBeforeBytes: Uint8Array | null;
+	dstAfterBytes: Uint8Array | null;
+}
+
+interface Probe10Global {
+	armed: boolean;
+	result: Probe10CaptureResult | null;
+}
+
 export interface JsepOpContext {
 	device: GPUDevice;
 	dataManager: GpuDataManager;
@@ -625,6 +650,109 @@ export function dispatchMatmul(
 			size: dstBytesNeeded,
 			usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
 		});
+
+		// Stage 4.22 Probe 10 — gated one-shot capture of the actual bytes
+		// the kernel sees. Gates on quantized (Q4_0 or Q4_K) src0 to avoid
+		// matching f32 MUL_MAT selftests but cover the actual production
+		// weight type — TinyLlama-Q4_0.gguf misleadingly stores Q4_K
+		// (type 12) tensors despite the filename. The auto-disarm ensures
+		// only the first eligible dispatch fires.
+		const probe10Global = globalThis as unknown as {
+			__probe10Capture?: Probe10Global;
+		};
+		const probe10 = probe10Global.__probe10Capture;
+		let probe10DstAfterStaging: GPUBuffer | null = null;
+		let probe10Result: Probe10CaptureResult | null = null;
+		let probe10DstSize = 0;
+		if (
+			probe10?.armed &&
+			(src0.type === GGML_TYPE_Q4_0 || src0.type === GGML_TYPE_Q4_K)
+		) {
+			probe10.armed = false;
+			const src0RowBytes = src0.nb[1];
+			const src0Size = M * src0RowBytes;
+			const src1Size = batchCount * N * K * 4;
+			probe10DstSize = dstBytesNeeded;
+
+			const src0Staging = ctx.device.createBuffer({
+				size: src0Size,
+				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+			});
+			const src1Staging = ctx.device.createBuffer({
+				size: src1Size,
+				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+			});
+			const dstBeforeStaging = ctx.device.createBuffer({
+				size: probe10DstSize,
+				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+			});
+			probe10Result = {
+				M,
+				K,
+				N,
+				src0Type: src0.type,
+				src0Bytes: null,
+				src1Bytes: null,
+				dstBeforeBytes: null,
+				dstAfterBytes: null,
+			};
+			probe10.result = probe10Result;
+
+			// PRE-encoder — copy src0/src1/dst-before into staging BEFORE
+			// the kernel encoder runs. Submission order on a single queue
+			// is FIFO, so the kernel encoder submitted next will execute
+			// after these copies.
+			const preEnc = ctx.device.createCommandEncoder();
+			preEnc.copyBufferToBuffer(
+				src0Rec.buffer,
+				src0.offset,
+				src0Staging,
+				0,
+				src0Size,
+			);
+			preEnc.copyBufferToBuffer(
+				src1Rec.buffer,
+				src1.offset,
+				src1Staging,
+				0,
+				src1Size,
+			);
+			preEnc.copyBufferToBuffer(
+				dstRec.buffer,
+				dst.offset,
+				dstBeforeStaging,
+				0,
+				probe10DstSize,
+			);
+			ctx.device.queue.submit([preEnc.finish()]);
+			const result = probe10Result;
+			void Promise.all([
+				src0Staging.mapAsync(GPUMapMode.READ, 0, src0Size),
+				src1Staging.mapAsync(GPUMapMode.READ, 0, src1Size),
+				dstBeforeStaging.mapAsync(GPUMapMode.READ, 0, probe10DstSize),
+			]).then(() => {
+				result.src0Bytes = new Uint8Array(
+					src0Staging.getMappedRange().slice(0),
+				);
+				result.src1Bytes = new Uint8Array(
+					src1Staging.getMappedRange().slice(0),
+				);
+				result.dstBeforeBytes = new Uint8Array(
+					dstBeforeStaging.getMappedRange().slice(0),
+				);
+				src0Staging.unmap();
+				src1Staging.unmap();
+				dstBeforeStaging.unmap();
+				src0Staging.destroy();
+				src1Staging.destroy();
+				dstBeforeStaging.destroy();
+			});
+
+			probe10DstAfterStaging = ctx.device.createBuffer({
+				size: probe10DstSize,
+				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+			});
+		}
 		const divertBindGroup = ctx.device.createBindGroup({
 			layout: bindGroupLayout,
 			entries: [
@@ -670,6 +798,31 @@ export function dispatchMatmul(
 			dstBytesNeeded,
 		);
 		ctx.device.queue.submit([enc.finish()]);
+		// Stage 4.22 Probe 10 — POST-kernel: encode + submit dst-after
+		// copy. Submission order is FIFO so this runs after the kernel
+		// encoder's copyBufferToBuffer landed dst back into dstRec.buffer.
+		if (probe10DstAfterStaging && probe10Result) {
+			const postEnc = ctx.device.createCommandEncoder();
+			postEnc.copyBufferToBuffer(
+				dstRec.buffer,
+				dst.offset,
+				probe10DstAfterStaging,
+				0,
+				probe10DstSize,
+			);
+			ctx.device.queue.submit([postEnc.finish()]);
+			const stagingAfter = probe10DstAfterStaging;
+			const resultAfter = probe10Result;
+			void stagingAfter
+				.mapAsync(GPUMapMode.READ, 0, probe10DstSize)
+				.then(() => {
+					resultAfter.dstAfterBytes = new Uint8Array(
+						stagingAfter.getMappedRange().slice(0),
+					);
+					stagingAfter.unmap();
+					stagingAfter.destroy();
+				});
+		}
 		// Stage 4.15 Probe 5 — gated per-divert-dispatch readback of
 		// (a) tempDst[0..16) and (b) dstRec.buffer[dst.offset..+16) to
 		// disambiguate kernel-bug vs copy-bug vs handle-mismatch.
