@@ -90,6 +90,22 @@ export interface JsepOpDescriptor {
 	srcs: JsepTensorMeta[];
 }
 
+// Stage 4.15 Probe 5 — captured per-divert-dispatch readback entry.
+// Populated when `globalThis.__stage415DivertProbe` is truthy. Lives in
+// `globalThis.__stage415DivertLog` (cap 32). The mapAsyncs resolve after
+// `dispatchMatmul` returns, so consumers must wait ~200ms after DONE
+// before inspecting `tempBytes` / `dstBytes`.
+interface Stage415DivertEntry {
+	divertIdx: number;
+	dstHandle: number;
+	dstOffset: number;
+	dstNe: [number, number, number, number];
+	src0Ne: [number, number, number, number];
+	src1Ne: [number, number, number, number];
+	tempBytes: Uint8Array | null;
+	dstBytes: Uint8Array | null;
+}
+
 export interface JsepOpContext {
 	device: GPUDevice;
 	dataManager: GpuDataManager;
@@ -654,6 +670,63 @@ export function dispatchMatmul(
 			dstBytesNeeded,
 		);
 		ctx.device.queue.submit([enc.finish()]);
+		// Stage 4.15 Probe 5 — gated per-divert-dispatch readback of
+		// (a) tempDst[0..16) and (b) dstRec.buffer[dst.offset..+16) to
+		// disambiguate kernel-bug vs copy-bug vs handle-mismatch.
+		const probeGlobal = globalThis as unknown as {
+			__stage415DivertProbe?: boolean;
+			__stage415DivertLog?: Stage415DivertEntry[];
+		};
+		if (probeGlobal.__stage415DivertProbe) {
+			if (!probeGlobal.__stage415DivertLog) {
+				probeGlobal.__stage415DivertLog = [];
+			}
+			const dbg = probeGlobal.__stage415DivertLog;
+			if (dbg.length < 32) {
+				const tempStaging = ctx.device.createBuffer({
+					size: 16,
+					usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+				});
+				const dstStaging = ctx.device.createBuffer({
+					size: 16,
+					usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+				});
+				const probeEnc = ctx.device.createCommandEncoder();
+				probeEnc.copyBufferToBuffer(tempDst, 0, tempStaging, 0, 16);
+				probeEnc.copyBufferToBuffer(
+					dstRec.buffer,
+					dst.offset,
+					dstStaging,
+					0,
+					16,
+				);
+				ctx.device.queue.submit([probeEnc.finish()]);
+				const meta: Stage415DivertEntry = {
+					divertIdx: dbg.length,
+					dstHandle: dst.bufHandle,
+					dstOffset: dst.offset,
+					dstNe: [dst.ne[0], dst.ne[1], dst.ne[2], dst.ne[3]],
+					src0Ne: [src0.ne[0], src0.ne[1], src0.ne[2], src0.ne[3]],
+					src1Ne: [src1.ne[0], src1.ne[1], src1.ne[2], src1.ne[3]],
+					tempBytes: null,
+					dstBytes: null,
+				};
+				dbg.push(meta);
+				void Promise.all([
+					tempStaging.mapAsync(GPUMapMode.READ),
+					dstStaging.mapAsync(GPUMapMode.READ),
+				]).then(() => {
+					meta.tempBytes = new Uint8Array(
+						tempStaging.getMappedRange().slice(0),
+					);
+					meta.dstBytes = new Uint8Array(dstStaging.getMappedRange().slice(0));
+					tempStaging.unmap();
+					dstStaging.unmap();
+					tempStaging.destroy();
+					dstStaging.destroy();
+				});
+			}
+		}
 		// destroy() after submit is documented-safe — pending GPU work is
 		// allowed to complete using the destroyed buffer's underlying
 		// memory.

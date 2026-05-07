@@ -1146,6 +1146,14 @@ async function runSpike(): Promise<void> {
 		});
 		(window as any).__gpuErrLog = gpuErrLog;
 
+		// Stage 4.15 — gate per-divert-dispatch readback in
+		// `dispatchMatmul` (src/inference/jsep/ops/matmul.ts). Must be set
+		// before the first MUL_MAT divert fires (model load + decode).
+		// Self-capped at 32 entries; deferred mapAsync drains during the
+		// post-DONE inspection window.
+		(globalThis as any).__stage415DivertProbe = true;
+		(globalThis as any).__stage415DivertLog = [];
+
 		// Stage 4.8 — initialize dispatchSetRows entry/exit log before
 		// installJsepCallbacks runs so the warmup + every selftest +
 		// production graph dispatch is captured.
