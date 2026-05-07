@@ -1058,9 +1058,28 @@ signal — but if it doesn't, the realistic envelope is another
 **Recommendation:** run 4.27 first (it's effectively free), then
 let the diff data drive the go / no-go conversation.
 
-### Next session pickup — Phase 3 Stage 4.27: cascade-source localization via `__stage417Checkpoints` per-layer diff (rerun on current code)
+**Update post-Stage-4.27 (2026-05-07 afternoon).** Stage 4.27 ran and
+landed Outcome **A** — the cascade is structurally identical to Stage
+4.17, *not* tighter and *not* different. Estimated remaining work:
+"2-3 more probes to localize the failing op" per the table above.
+Stage 4.28 (Probe 15) is the first of those probes; it tests the
+two highest-prior surviving hypotheses (output-projection weight
++ gain-vector byte-integrity) in a single allowlist-extension pass.
+Re-evaluate the JSEP go / no-go after Stage 4.28's outcome —
+Probe 15 either localizes the bug (closes the cycle in one more
+probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
+`node_dump_cb` for full-tensor stats (a structural change to the
+checkpoint framework, justifying a fresh trajectory assessment).
 
-Stage 4.26 closed Outcome **H-4-libllama-imprecise** — libllama's CPU `quantize_row_q8_K` → `vec_dot_q4_K_q8_K` path produces output `4.178e-2` from f64 truth on the captured production Q-proj inputs, vs webllm's WGSL kernel at `7.94e-6` from truth. **webllm is more accurate than the reference path that decodes correctly.** The matmul-precision investigation is closed: the cascade producing `GENERATED_TEXT = "inonic boso-"` is not driven by Q-projection numerical imprecision. Stage 4.27 pivots to localizing _which op_ in the prefill or decode path actually wedges the spike's output. The Stage 4.17 framework already captured `__stage417Checkpoints` for both the JSEP spike and the non-JSEP reference probe, with idx 11 `attn_out-0` flagged as the first checkpoint to cross 1e-3 (4.77e-3) and idx 12 `ffn_norm-0` exploding to 1.83e-1. **But that data is from 2026-05-07 morning; the codebase has moved through Stage 4.18–4.26 since.** Step 1 is to re-run both harnesses on the _current_ code, re-diff, and confirm whether the same divergence pattern still holds. If yes, Stage 4.27 deep-dives the first ≥1e-2-magnitude op (likely `attn_out-0` projection, `ffn_norm-0`, or one of `ffn_gate/up/down-0`). If no (e.g., post-Stage-4.4 H1 fix or post-Stage-4.5 H1-inverse fix shifted the picture), Stage 4.27 starts from the new first-divergent checkpoint. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.28: weight + gain-vector byte-integrity probe on `blk.0.attn_output.weight` + `blk.0.ffn_norm.weight`
+
+Stage 4.27 confirmed Outcome **A** (cascade trajectory **structurally identical** to Stage 4.17 — Stage 4.18 → 4.26 patch growth from 12 → 13 did not move any prefill checkpoint). Smoking-gun reproduces bit-for-bit: `attn_out-0` Δ=0.004773, `ffn_norm-0` Δ=0.183250, `result_norm` Δ=5.83, `result_output` Δ=6.61. Stage 4.26 has *since* ruled out matmul precision as the cascade source (libllama is the imprecise side at Q-proj; webllm is at f64 floor). The combination eliminates every numerical-precision hypothesis, leaving three structural suspects:
+
+1. **`blk.0.attn_output.weight` byte-integrity** — Stages 4.20/4.21 verified `attn_q.weight` and `attn_k.weight` are byte-exact end-to-end through `Module.jsepWrite` / `device.queue.writeBuffer`, but `attn_output.weight` was never directly probed. If the output-projection weight is mis-uploaded (allocator slot collision, offset bug specific to the `attn_output` tensor name pattern), the 4.77e-3 Δ surfaces exactly at `attn_out-0` with bit-clean upstream `Qcur` / `Kcur`.
+2. **`blk.0.ffn_norm.weight` gain-vector mis-load** — the +38× amplification from `attn_out-0` Δ=4.77e-3 to `ffn_norm-0` Δ=0.183 is the single most surprising number in the cascade. Pure RMSNorm (divide by `sqrt(mean(x²)+ε)`, multiply by per-channel gain) doesn't naturally amplify by 38×. Stage 4.3 identified the per-channel gain MUL as a load-bearing CPU-fallback step that reads from `host_mirror`; if `ffn_norm.weight` in `host_mirror` does not match the GGUF weight bytes the reference path consumes, the amplification is mathematically natural. **Highest-prior of the three.**
+3. **First8-window blindness on `kqv_out-0`** — both Stages 4.18 and 4.27 see `kqv_out-0` first8 = `V[pos=0]` because the causal mask pins position-0's softmax to `[1, 0, 0, …]`. Δ over positions 1–5 is unmonitored. If `kqv_out-0` carries a Δ ≥1e-3 outside first8, the cascade source is upstream of `attn_out-0` (FA/softmax/SET_ROWS for non-position-0 columns). Defer this to Stage 4.29 unless Probe 15 closes (1) and (2).
+
+START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -1068,84 +1087,73 @@ Stage 4.26 closed Outcome **H-4-libllama-imprecise** — libllama's CPU `quantiz
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.26 TODO closure commit>  docs(TODO): Stage 4.26 closed — queue Stage 4.27 cascade localization
-#   → <Stage 4.26 reports commit>       docs(reports): Stage 4.26 closure — Outcome H-4-libllama-imprecise
-#   → <Stage 4.26 feat commit>          feat(spike): Stage 4.26 Probe 14 — libllama Q4_K×Q8_K matmul precision shim
-#   → 02fb1ca                           docs(TODO): Stage 4.25 closed — queue Stage 4.26 libllama matmul precision probe
-#   → 67d720e                           docs(reports): Stage 4.25 closure — Outcome H-3b-structural
+#   → <Stage 4.27 TODO closure commit>   docs(TODO): Stage 4.27 closed — queue Stage 4.28 weight byte-integrity probe
+#   → <Stage 4.27 reports commit>        docs(reports): Stage 4.27 closure — Outcome A (cascade structurally identical to Stage 4.17)
+#   → 3d8853e                            docs(TODO): add Phase 3 trajectory assessment before Stage 4.27 brief
+#   → b8320e5                            docs(TODO): Stage 4.26 closed — queue Stage 4.27 cascade-source localization
+#   → 29e43ef                            feat(spike): Stage 4.26 Probe 14 — libllama Q4_K×Q8_K matmul precision shim
 
-# 2. Confirm llama.cpp tip (patch stack 13 unchanged from Stage 4.25/4.26).
+# 2. Confirm llama.cpp tip (patch stack 13 unchanged from Stage 4.25/4.26/4.27).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
 #   → ef89f9314   webllm-browser-patches   (patch stack 13)
 
-# 3. Smoke-server up on 8031.
+# 3. Smoke-server up on 8031 + reuse agentchrome session + spike + ref-probe tabs.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
-
-# 4. Reuse agentchrome session + spike + ref-probe tabs.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 [ -n "$PORT" ] || agentchrome connect --launch --headless
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
 REF_TAB=$(agentchrome --port "$PORT" tabs list   | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-ref-probe.html" in t.get("url","")), ""))' 2>/dev/null)
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 [ -n "$REF_TAB" ]   || REF_TAB=$(agentchrome   --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-
-# 5. Capture fresh checkpoints from BOTH paths (~5 min total).
-agentchrome --port "$PORT" navigate --tab "$SPIKE_TAB" "http://localhost:8031/p2-v2-spike.html?v=stage4.27-jsep&ingest=off"
-agentchrome --port "$PORT" page wait --tab "$SPIKE_TAB" --text "DONE" --timeout 360000
-agentchrome --port "$PORT" js exec --tab "$SPIKE_TAB" "JSON.stringify(window.__stage417Checkpoints)" \
-  > eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-jsep-checkpoints.txt
-
-agentchrome --port "$PORT" navigate --tab "$REF_TAB" "http://localhost:8031/p2-v2-ref-probe.html?v=stage4.27-ref"
-agentchrome --port "$PORT" page wait --tab "$REF_TAB" --text "DONE" --timeout 360000
-agentchrome --port "$PORT" js exec --tab "$REF_TAB" "JSON.stringify(window.__stage417Checkpoints)" \
-  > eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-ref-checkpoints.txt
 ```
 
-**One-line goal:** Diff the two fresh checkpoint dumps with `STAGE-4.17-diff.py`, identify the first checkpoint where the JSEP spike and the non-JSEP reference probe disagree by ≥1e-2 absolute (or ≥1e-1 relative on small-magnitude tensors), and characterize that op as the cascade source for "inonic boso-".
+**One-line goal:** Hash the bytes of `blk.0.attn_output.weight`, `blk.0.ffn_norm.weight`, `blk.0.ffn_gate.weight`, `blk.0.ffn_up.weight`, `blk.0.ffn_down.weight` at the latest point on the spike's upload chain (= post-`device.queue.writeBuffer` GPU readback, mirroring Stage 4.21's pattern) and compare against a JS-side `GgufParser` reference hash for each weight. The first hash mismatch is the cascade source.
 
-**One-line context:** Stage 4.17's first run identified `attn_out-0` (idx 11) as the first node crossing 1e-3 and `ffn_norm-0` (idx 12) at 1.83e-1, but that snapshot pre-dates the patch stack growing from 12 → 13 (Stage 4.16 EM_ASYNC_JS + Stage 4.4/4.5 host-mirror writeback fixes). Re-capture confirms whether those landmarks still hold — and now that we know libllama is the imprecise side at Q-proj, the spike's *more accurate* WGSL output should be the truth oracle within bounded error, so any divergence ≥1e-2 at the spike side is structural (wrong-buffer read, missing CPU-fallback writeback, KV-cache layout mismatch, RMSNorm gain-vector mis-upload, etc.), not numerical.
+**One-line context:** Stage 4.27 confirmed the spike's prefill cascade reproduces Stage 4.17's smoking-gun table bit-for-bit (`attn_out-0` 4.77e-3 → `ffn_norm-0` 0.183 → `result_norm` 5.83 → `result_output` 6.61). Stage 4.26 ruled out matmul precision; Stages 4.20/4.21 verified `attn_q.weight` + `attn_k.weight` byte-exact. The remaining structural suspects are output-projection weight + RMSNorm gain-vector byte-integrity, both of which can be tested with the same FNV-1a-32 + GPU-readback pattern Stage 4.21 already established.
 
-#### Stage 4.27 implementation sketch
+#### Stage 4.28 implementation sketch (Probe 15)
 
-1. **Bootstrap as above** — capture `STAGE-4.27-jsep-checkpoints.txt` and `STAGE-4.27-ref-checkpoints.txt`.
+1. **Extend the Stage 4.21 weight-readback pattern.** The Stage 4.21 spike reads `blk.0.attn_q.weight` / `blk.0.attn_k.weight` GPU buffers via `runtime.dataManager.get(bufHandle)` + `copyBufferToBuffer` + `mapAsync` + FNV-1a-32 and compares against the same hash computed at GGUF-parse time. The probe surface lives in `smoke-test/p2-v2-spike.src.ts` (search for `__probe9cReadback` or the Stage 4.21 commit). Add five new readback gates (one per weight name):
+   - `blk.0.attn_output.weight`
+   - `blk.0.ffn_norm.weight` ← **highest-prior**
+   - `blk.0.ffn_gate.weight`
+   - `blk.0.ffn_up.weight`
+   - `blk.0.ffn_down.weight`
+2. **Mirror the JS-side reference hash** from `GgufParser` for each new weight (Stage 4.21's pattern reads bytes via `parser.tensorBytes(name)` then FNV-1a-32). The reference hash is the GGUF file's authoritative byte stream.
+3. **Capture both halves** in two `STAGE-4.28-spike-output.txt` lines per weight: `[STAGE-4.28] <weight_name> ref_hash=0x<H1> gpu_readback_hash=0x<H2> match=<bool>`.
+4. **Run the spike** at `?v=stage4.28-probe15&ingest=off`, dump `window.__probe15Output` (or the existing Stage 4.21 surface, extended) to `STAGE-4.28-spike-output.txt`.
 
-2. **Diff with the existing `STAGE-4.17-diff.py`** (still in `eval/reports/p2-v2-option-a-prime-2026-05-06/`):
-   ```bash
-   cd eval/reports/p2-v2-option-a-prime-2026-05-06/
-   python3 STAGE-4.17-diff.py STAGE-4.27-jsep-checkpoints.txt STAGE-4.27-ref-checkpoints.txt \
-     > STAGE-4.27-diff.txt
-   ```
-   The script tabulates per-checkpoint max-abs first8 deltas. Look for the first idx where `max-abs-Δ ≥ 1e-2`; that's the working hypothesis for the cascade source.
+#### Files to read first
 
-3. **Characterize the failing op.** Three branches:
-   - **Op is a matmul** (e.g., `attn_out-0` output projection, `ffn_gate-0`, `ffn_up-0`, `ffn_down-0`, or `result_output` lm_head): re-use the Probe 10 capture pattern (M/K/N + src0/src1 byte capture from `__probe10Capture`) extended to fire on a per-shape gate matching the failing op. Run Probe 14 again on those bytes to confirm precision attribution; if libllama is also the imprecise side at this op, look for a structural cause (wrong src0 weight bucket, wrong src1 input, wrong dst buffer offset).
-   - **Op is an RMSNorm** (e.g., `ffn_norm-0`, `attn_norm-0`, `result_norm`): RMSNorm has TWO inputs — the activation tensor and the per-channel gain vector. Stage 4.3 already identified the per-channel gain MUL as a load-bearing CPU-fallback step that, post-Stage-4.4, reads from `host_mirror`. Verify the gain vector in `host_mirror` matches the GGUF weight bytes (FNV-1a-32 hash check on the captured bytes vs the loaded `attn_norm.weight` / `ffn_norm.weight` / `result_norm.weight` for the appropriate layer).
-   - **Op is something else** (FA, softmax, RoPE, SET_ROWS, GET_ROWS): look at the JSEP runOp wrapper instrumentation already landed in Stage 4.2 / 4.3. Capture pre-/post-op buffer state and compare to the reference path's CPU-computed expectation.
+- [`STAGE-4.21-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.21-RESULT.md) — Probe 9c GPU-readback pattern; copy this verbatim, just extend the gate list.
+- [`STAGE-4.20-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.20-RESULT.md) — JS-side `GgufParser` reference hash pattern.
+- [`STAGE-4.27-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-RESULT.md) — full smoking-gun table + suspect list.
+- `smoke-test/p2-v2-spike.src.ts` — Stage 4.21 readback gate (search `attn_q.weight` to locate; the gate lives near the JSEP `set_tensor` hook).
+- `src/inference/jsep/gguf-parser.ts` — `tensorBytes(name)` accessor for the JS-side reference.
 
-4. **Risk register.**
-   - **Reference probe drift.** The non-JSEP reference path runs against the `webllm-wasm.js` (non-JSEP) build, which uses the same WGSL kernels as the spike for matmul/RMSNorm. The "reference" is _not_ a different oracle — it's a different scheduler routing. Both paths use the same matmul kernel; the divergence MUST come from scheduling / op-routing differences (which ops run on JSEP vs CPU-fallback, which buffers are read/written), not kernel precision. Frame the diff with this in mind.
-   - **First8-window blindness.** Stage 4.17 noted that `kq_soft_max-0` and `kqv_out-0` looked bit-identical at first8 because the causal mask makes position-0 column trivial. Stage 4.27's diff should sample additional positions or capture full-tensor stats (mean, max-abs, NaN count) — extend `node_dump_cb` in `src/wasm/webgpu-bridge.cpp` if needed.
-   - **Stage 4.18–4.26 may have closed the gap.** Stage 4.4 fixed Bug A (canonical NaN cascade), Stage 4.5 fixed Bug C (GPU→host writeback), Stages 4.6–4.10 closed SET_ROWS divert correctness. The current "inonic boso-" failure may be a _smaller_ residual cascade than Stage 4.17's first capture — the diff may be tighter than it was. If the new diff shows < 1e-3 across all checkpoints, the bug is in decode (post-prefill KV-cache read or lm_head readback), not prefill.
+#### Risk register
 
-5. **Files to read first:**
-   - [`STAGE-4.17-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-RESULT.md) — original checkpoint framework, smoking-gun table, first-divergent-op analysis.
-   - [`STAGE-4.18-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.18-RESULT.md) — first8-window artifact analysis; full-tensor stats may be needed.
-   - `src/wasm/webgpu-bridge.cpp::node_dump_cb` — the cb_eval allowlist; extend to dump mean/max-abs if needed.
-   - `smoke-test/p2-v2-spike.src.ts::__stage417Checkpoints` — capture surface (line ~3582).
-   - `smoke-test/p2-v2-ref-probe.src.ts` — non-JSEP reference path.
+1. **`set_tensor` hook may not fire on `ffn_norm.weight`.** Stage 4.5 verified the Bug C writeback path; double-check that the JSEP path's `set_tensor` hook actually receives the gain-vector tensor (RMSNorm gain is small — `[2048]` for TinyLlama — and may be packed differently from the dense matmul weights). If the hook doesn't fire, fall back to a `cb_eval` weight-tap at first `llama_decode` entry by wrapping the weight in a no-op `ggml_view` + `ggml_dup` schedule.
+2. **Five weights × two hashes per weight = 10 numbers.** Triple-check the reference side uses the same byte ordering as the GPU upload (no implicit transpose, no f16-vs-f32 type confusion). Stage 4.21 already established the convention — copy it without modification.
+3. **All-five-pass branch closes (1) and (2) but does not close (3).** If Probe 15 returns five byte-exact matches, suspects 1 + 2 are dead and Stage 4.29 must extend `node_dump_cb` in `src/wasm/webgpu-bridge.cpp` to capture full-tensor stats (mean / max-abs / NaN-count) instead of first8 — the first8-window blindness on `kqv_out-0` (suspect 3) is the only remaining structural hypothesis after that branch.
+4. **Pre-emption risk.** Stage 4.23's risk register flagged "re-derive the upstream number's provenance" and that bullet preempted Probe 11 with the H-3 finding (writeback-gap framing was wrong). Same caution applies here: if the act of re-reading [`STAGE-4.21-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.21-RESULT.md) reveals a fact about the readback path that retroactively answers the cascade, take that finding as the closure even without running Probe 15.
 
-#### Exit criteria — Stage 4.27 closes when documented in `STAGE-4.27-RESULT.md`:
+#### Exit criteria — Stage 4.28 closes when documented in `STAGE-4.28-RESULT.md`
 
-- Fresh `STAGE-4.27-{jsep,ref}-checkpoints.txt` captured on the current code.
-- `STAGE-4.27-diff.txt` shows the first ≥1e-2-magnitude divergent checkpoint, with idx + name + shape + max-abs Δ.
-- Working hypothesis named for the failing op (matmul / RMSNorm / FA / softmax / SET_ROWS / KV-cache / lm_head).
-- Stage 4.28 paste-and-go brief queued for the chosen branch (deep-dive on the named op).
+- All five weight FNV-1a-32 hashes captured for both `gpu_readback` and JS-side `GgufParser` reference.
+- The first mismatch (if any) named, with the byte offset of the first divergent block.
+- Stage 4.29 paste-and-go brief queued for the chosen branch (see below).
 
-#### Branch on diff outcome
+#### Branch on Probe 15 outcome
 
-- **Diff matches Stage 4.17 pattern** (first ≥1e-3 at `attn_out-0`, ≥1e-1 at `ffn_norm-0`): the post-Stage-4.4/4.5/4.16 patch stack didn't close the cascade; the bug is structurally identical to what Stage 4.17 captured. Stage 4.28 deep-dives `attn_out-0` (output projection matmul) — re-use Probe 14 on its captured bytes.
-- **Diff is tighter than Stage 4.17** (no checkpoint reaches 1e-2 in prefill): the cascade is in decode. Stage 4.28 captures `LOGIT_STATS_STEP0` first8 from both paths and locates the divergence in lm_head / KV-cache.
-- **Diff is a different first-divergent op** (e.g., `Vcur-0` or `Kcur-0` at idx 3–7 now diverging): a downstream regression from a Stage 4.18–4.26 patch. Stage 4.28 bisects the patch stack.
+- **All five weights byte-exact** (Outcome P-15-clean): suspects 1 and 2 close. Stage 4.29 extends `node_dump_cb` to capture full-tensor stats and re-runs the Stage 4.27 checkpoint diff to defeat first8-window blindness on `kqv_out-0` (suspect 3).
+- **`ffn_norm.weight` mismatch** (Outcome P-15-gain): the gain-vector mis-load hypothesis confirms. Stage 4.29 traces the buggy upload path back to the responsible `set_tensor` / `host_mirror` fork (Stage 4.4 / 4.5 territory).
+- **`attn_output.weight` mismatch** (Outcome P-15-output-proj): the output-projection weight is mis-uploaded despite `attn_q.weight` / `attn_k.weight` being byte-exact. Stage 4.29 diffs the upload-time call sites for the three attention weights to find what makes `attn_output` route differently.
+- **One of `ffn_gate` / `ffn_up` / `ffn_down`** mismatches: same diagnosis as above but at the FFN matmul. Stage 4.29 deep-dives the FFN-block-specific upload path.
+
+### Earlier Stage 4.27 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.27 brief (paste-and-go bootstrap, fresh `__stage417Checkpoints` re-capture from spike + ref-probe, three-item risk register, three-outcome "matches Stage 4.17" / "tighter than Stage 4.17" / "different first-divergent op" branch table) lives in [`STAGE-4.27-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-RESULT.md). Outcome **A** CONFIRMED: cascade trajectory is structurally identical to Stage 4.17 — `attn_out-0` Δ=0.004773 (matches 4.77e-3), `ffn_norm-0` Δ=0.183250 (matches 1.83e-1), `result_norm` Δ=5.83, `result_output` Δ=6.61. The Stage 4.18 → 4.26 patch growth (12 → 13) did not move any prefill checkpoint. Combined with Stage 4.26's matmul-precision closure, every numerical-precision hypothesis is dead. Three structural suspects survive: (1) `attn_output.weight` byte-integrity, (2) `ffn_norm.weight` gain-vector mis-load (highest-prior, +38× amplification at `ffn_norm-0` is the load-bearing signal), (3) first8-window blindness on `kqv_out-0`. Stage 4.28 queues Probe 15: extend Stage 4.21's GPU-readback FNV-1a-32 pattern from `attn_q.weight` / `attn_k.weight` to five additional weights (`attn_output`, `ffn_norm`, `ffn_gate`, `ffn_up`, `ffn_down`) with JS-side `GgufParser` reference hashes, branching on the first mismatch. Collapsed at Stage 4.28 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.26 brief — collapsed (full text in closure report)
 
