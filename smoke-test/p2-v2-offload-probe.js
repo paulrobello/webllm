@@ -593,6 +593,49 @@ function dispatchMatmul(ctx, desc) {
     pass.end();
     enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstBytesNeeded);
     ctx.device.queue.submit([enc.finish()]);
+    const probeGlobal = globalThis;
+    if (probeGlobal.__stage415DivertProbe) {
+      if (!probeGlobal.__stage415DivertLog) {
+        probeGlobal.__stage415DivertLog = [];
+      }
+      const dbg = probeGlobal.__stage415DivertLog;
+      if (dbg.length < 32) {
+        const tempStaging = ctx.device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
+        const dstStaging = ctx.device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
+        const probeEnc = ctx.device.createCommandEncoder();
+        probeEnc.copyBufferToBuffer(tempDst, 0, tempStaging, 0, 16);
+        probeEnc.copyBufferToBuffer(dstRec.buffer, dst.offset, dstStaging, 0, 16);
+        ctx.device.queue.submit([probeEnc.finish()]);
+        const meta = {
+          divertIdx: dbg.length,
+          dstHandle: dst.bufHandle,
+          dstOffset: dst.offset,
+          dstNe: [dst.ne[0], dst.ne[1], dst.ne[2], dst.ne[3]],
+          src0Ne: [src0.ne[0], src0.ne[1], src0.ne[2], src0.ne[3]],
+          src1Ne: [src1.ne[0], src1.ne[1], src1.ne[2], src1.ne[3]],
+          tempBytes: null,
+          dstBytes: null
+        };
+        dbg.push(meta);
+        Promise.all([
+          tempStaging.mapAsync(GPUMapMode.READ),
+          dstStaging.mapAsync(GPUMapMode.READ)
+        ]).then(() => {
+          meta.tempBytes = new Uint8Array(tempStaging.getMappedRange().slice(0));
+          meta.dstBytes = new Uint8Array(dstStaging.getMappedRange().slice(0));
+          tempStaging.unmap();
+          dstStaging.unmap();
+          tempStaging.destroy();
+          dstStaging.destroy();
+        });
+      }
+    }
     tempDst.destroy();
     return 0;
   }
