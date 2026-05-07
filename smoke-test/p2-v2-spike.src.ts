@@ -204,6 +204,261 @@ async function runQ4KSelfTest(
 	runtime.dataManager.free(hd);
 }
 
+// Stage 4.3a: production-shape Q4_K MUL_MAT self-test --------------------
+//
+// Existing Q4K_SELFTEST exercises K=256 (single super-block per row). Real
+// MUL_MATs in the prefill graph use K=2048 (8 super-blocks per row) and the
+// divert path (dst aliases src1's buffer). This selftest covers both:
+//   B1 (no divert, M=64, K=2048, N=6)  — kernel correctness at production K
+//   B2 (divert,    M=64, K=2048, N=6)  — divert path correctness
+//
+// Outcome triage:
+//   B1 fails               → Q4_K kernel buggy at large K (per-super-block bug)
+//   B1 passes, B2 fails    → divert path buggy (tempDst lifecycle? cpyBuf2Buf?)
+//   both pass              → Bug A is upstream of MUL_MAT; pivot to 4.3b
+//
+// CPU reference uses the same packQ4_KSingle helper as Q4K_SELFTEST so any
+// dequant divergence with the WGSL kernel surfaces as cross-test inconsistency.
+
+interface MatmulSelfTestResult {
+	mode: "no-divert" | "divert";
+	M: number;
+	K: number;
+	N: number;
+	status: number;
+	maxAbsDelta: number;
+	hasNaN: boolean;
+	hasInf: boolean;
+	zeroCount: number;
+	first4Got: number[];
+	first4Ref: number[];
+	last4Got: number[];
+	last4Ref: number[];
+}
+
+function buildSyntheticQ4KMatrix(M: number, K: number): {
+	bytes: Uint8Array;
+	dequant: Float32Array;
+	rowBytes: number;
+} {
+	if (K % 256 !== 0) throw new Error(`K=${K} must be multiple of 256`);
+	const superBlocksPerRow = K / 256;
+	const rowBytes = superBlocksPerRow * 144;
+	const bytes = new Uint8Array(M * rowBytes);
+	const dequant = new Float32Array(M * K);
+
+	// Per-super-block parameters: deterministic, varied across rows + blocks.
+	for (let r = 0; r < M; r++) {
+		for (let sb = 0; sb < superBlocksPerRow; sb++) {
+			// Pick d/dmin/sc/m so dequant magnitudes stay in roughly the
+			// same range as the existing Q4K_SELFTEST (max ~40), but vary
+			// per (r, sb) so a stride bug shows up as cross-block leakage.
+			const d = 0.04 + 0.0001 * ((r + sb * 3) % 17);
+			const dmin = 0.008 + 0.0001 * ((r * 5 + sb) % 11);
+			const sc = new Uint8Array(8);
+			const m = new Uint8Array(8);
+			for (let i = 0; i < 8; i++) {
+				sc[i] = (4 + i * 7 + r + sb * 2) & 0x3f;
+				m[i] = (2 + i * 5 + r * 3 + sb) & 0x3f;
+			}
+			const nibbles = new Uint8Array(256);
+			for (let i = 0; i < 256; i++) {
+				nibbles[i] = (i + r + sb * 11) & 0xf;
+			}
+			const { bytes: blkBytes, dequant: blkDeq } = packQ4_KSingle(
+				d,
+				dmin,
+				sc,
+				m,
+				nibbles,
+			);
+			bytes.set(blkBytes, r * rowBytes + sb * 144);
+			dequant.set(blkDeq, r * K + sb * 256);
+		}
+	}
+
+	return { bytes, dequant, rowBytes };
+}
+
+async function runMatmulProductionSelfTest(
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+	mode: "no-divert" | "divert",
+): Promise<MatmulSelfTestResult> {
+	const M = 64;
+	const K = 2048;
+	const N = 6;
+
+	const {
+		bytes: q4Bytes,
+		dequant: src0Dequant,
+		rowBytes,
+	} = buildSyntheticQ4KMatrix(M, K);
+
+	// src1 in roughly the same range as RMSNORM output (~[-1.6, 1.6]).
+	const src1 = new Float32Array(N * K);
+	for (let n = 0; n < N; n++) {
+		for (let k = 0; k < K; k++) {
+			src1[n * K + k] = (((k * 13 + n * 7) % 31) - 15) * 0.1;
+		}
+	}
+
+	// CPU reference: dst[m,n] = sum_k src0_dequant[m,k] * src1[n,k]
+	// Output layout: [M, N] with nb[1] = M*4 (col-major in m for given n).
+	const reference = new Float32Array(M * N);
+	for (let n = 0; n < N; n++) {
+		for (let m = 0; m < M; m++) {
+			let acc = 0;
+			for (let k = 0; k < K; k++) {
+				acc += src0Dequant[m * K + k] * src1[n * K + k];
+			}
+			reference[n * M + m] = acc;
+		}
+	}
+
+	// In the divert variant we put src1 and dst into the same GPU buffer
+	// (different offsets) so dispatchMatmul fires the divert path.
+	const dstBytes = M * N * 4;
+	let h0: number;
+	let hSrc1: number;
+	let hDst: number;
+	let src1Offset = 0;
+	let dstOffset = 0;
+	if (mode === "no-divert") {
+		h0 = runtime.dataManager.alloc(q4Bytes.byteLength);
+		hSrc1 = runtime.dataManager.alloc(src1.byteLength);
+		hDst = runtime.dataManager.alloc(dstBytes);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(h0).buffer,
+			0,
+			q4Bytes,
+			0,
+			q4Bytes.byteLength,
+		);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc1).buffer,
+			0,
+			new Uint8Array(src1.buffer),
+			0,
+			src1.byteLength,
+		);
+	} else {
+		// One shared buffer holds src1 at offset 0 and dst at offset
+		// aligned past src1. 256-byte alignment matches the production
+		// allocator's GGML_JSEP_BUFFER_ALIGN.
+		h0 = runtime.dataManager.alloc(q4Bytes.byteLength);
+		const ALIGN = 256;
+		const src1Aligned = (src1.byteLength + ALIGN - 1) & ~(ALIGN - 1);
+		const sharedBytes = src1Aligned + dstBytes;
+		hSrc1 = runtime.dataManager.alloc(sharedBytes);
+		hDst = hSrc1; // alias — triggers divert
+		src1Offset = 0;
+		dstOffset = src1Aligned;
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(h0).buffer,
+			0,
+			q4Bytes,
+			0,
+			q4Bytes.byteLength,
+		);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc1).buffer,
+			0,
+			new Uint8Array(src1.buffer),
+			0,
+			src1.byteLength,
+		);
+		// Pre-fill the dst region with a sentinel (-7777) so a no-write
+		// failure shows up as that value rather than zero.
+		const sentinel = new Float32Array(dstBytes / 4);
+		sentinel.fill(-7777);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc1).buffer,
+			dstOffset,
+			new Uint8Array(sentinel.buffer),
+			0,
+			dstBytes,
+		);
+	}
+
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_MUL_MAT,
+		nSrc: 2,
+		dst: {
+			bufHandle: hDst,
+			offset: dstOffset,
+			type: GGML_TYPE_F32,
+			ne: [M, N, 1, 1],
+			nb: [4, 4 * M, 4 * M * N, 4 * M * N],
+		},
+		srcs: [
+			{
+				bufHandle: h0,
+				offset: 0,
+				type: GGML_TYPE_Q4_K,
+				ne: [K, M, 1, 1],
+				nb: [144, rowBytes, rowBytes * M, 0],
+			},
+			{
+				bufHandle: hSrc1,
+				offset: src1Offset,
+				type: GGML_TYPE_F32,
+				ne: [K, N, 1, 1],
+				nb: [4, 4 * K, 4 * K * N, 0],
+			},
+		],
+	};
+	const status = dispatchMatmul(runtime, desc);
+	runtime.encoderBatcher.flush();
+
+	const dstRec = runtime.dataManager.get(hDst);
+	const staging = runtime.device.createBuffer({
+		size: dstBytes,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	const enc = runtime.device.createCommandEncoder();
+	enc.copyBufferToBuffer(dstRec.buffer, dstOffset, staging, 0, dstBytes);
+	runtime.device.queue.submit([enc.finish()]);
+	await staging.mapAsync(GPUMapMode.READ, 0, dstBytes);
+	const got = new Float32Array(staging.getMappedRange().slice(0));
+	staging.unmap();
+	staging.destroy();
+
+	let maxAbsDelta = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	let zeroCount = 0;
+	for (let i = 0; i < got.length; i++) {
+		const v = got[i];
+		if (Number.isNaN(v)) hasNaN = true;
+		else if (!Number.isFinite(v)) hasInf = true;
+		else if (v === 0) zeroCount++;
+		const d = Math.abs(v - reference[i]);
+		if (d > maxAbsDelta) maxAbsDelta = d;
+	}
+
+	const result: MatmulSelfTestResult = {
+		mode,
+		M,
+		K,
+		N,
+		status,
+		maxAbsDelta,
+		hasNaN,
+		hasInf,
+		zeroCount,
+		first4Got: Array.from(got.slice(0, 4)),
+		first4Ref: Array.from(reference.slice(0, 4)),
+		last4Got: Array.from(got.slice(-4)),
+		last4Ref: Array.from(reference.slice(-4)),
+	};
+
+	runtime.dataManager.free(h0);
+	runtime.dataManager.free(hSrc1);
+	if (mode === "no-divert") runtime.dataManager.free(hDst);
+
+	return result;
+}
+
 // ----- RMS_NORM real-shape self-test ---------------------------------------
 //
 // Stage 3.5 Step 1: drive `dispatchRmsNorm` with a row whose column count
@@ -342,6 +597,186 @@ async function runRmsNormSelfTest(
 	runtime.dataManager.free(hOut);
 }
 
+// Stage 4.3a: multi-row RMS_NORM self-test --------------------------------
+//
+// Existing RMSNORM_SELFTEST drives a single row (rows=1). Real prefill ops
+// push rows=6 (the prompt batch) through this kernel. With workgroup_size
+// (1, 256), gid.x indexes the row; a per-thread row-sum bug or row-stride
+// bug would be invisible at rows=1 but produce cross-row contamination at
+// rows=6. This selftest exercises both the non-divert and divert variants.
+//
+// Outcome triage:
+//   A1 fails               → RMS_NORM kernel buggy at multi-row (gid.x indexing)
+//   A1 passes, A2 fails    → divert path buggy (separate from matmul divert)
+//   both pass              → RMS_NORM is fine; bug is downstream
+
+interface RmsNormMultiRowResult {
+	mode: "no-divert" | "divert";
+	rows: number;
+	cols: number;
+	status: number;
+	maxAbsDelta: number;
+	hasNaN: boolean;
+	hasInf: boolean;
+	zeroCount: number;
+	perRowMaxDelta: number[];
+}
+
+async function runRmsNormMultiRowSelfTest(
+	mod: MallocModule,
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+	mode: "no-divert" | "divert",
+): Promise<RmsNormMultiRowResult> {
+	const rows = 6;
+	const cols = 2048;
+	const eps = 1e-5;
+
+	// Distinct per-row patterns so a row-mix bug shows as cross-row leakage.
+	const x = new Float32Array(rows * cols);
+	for (let r = 0; r < rows; r++) {
+		for (let c = 0; c < cols; c++) {
+			x[r * cols + c] = ((c % 17) - 8) * 0.1 + r * 0.01;
+		}
+	}
+
+	// CPU reference: per-row inv_rms × x.
+	const reference = new Float32Array(rows * cols);
+	for (let r = 0; r < rows; r++) {
+		let sumSq = 0;
+		for (let c = 0; c < cols; c++) sumSq += x[r * cols + c] ** 2;
+		const inv = 1 / Math.sqrt(sumSq / cols + eps);
+		for (let c = 0; c < cols; c++) {
+			reference[r * cols + c] = x[r * cols + c] * inv;
+		}
+	}
+
+	const totalBytes = x.byteLength;
+	let hX: number;
+	let hOut: number;
+	let xOffset = 0;
+	let outOffset = 0;
+	if (mode === "no-divert") {
+		hX = runtime.dataManager.alloc(totalBytes);
+		hOut = runtime.dataManager.alloc(totalBytes);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hX).buffer,
+			0,
+			new Uint8Array(x.buffer),
+			0,
+			totalBytes,
+		);
+	} else {
+		// Shared buffer with x at offset 0, out at aligned offset past x.
+		const ALIGN = 256;
+		const xAligned = (totalBytes + ALIGN - 1) & ~(ALIGN - 1);
+		const sharedBytes = xAligned + totalBytes;
+		hX = runtime.dataManager.alloc(sharedBytes);
+		hOut = hX;
+		xOffset = 0;
+		outOffset = xAligned;
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hX).buffer,
+			0,
+			new Uint8Array(x.buffer),
+			0,
+			totalBytes,
+		);
+		const sentinel = new Float32Array(totalBytes / 4);
+		sentinel.fill(-7777);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hX).buffer,
+			outOffset,
+			new Uint8Array(sentinel.buffer),
+			0,
+			totalBytes,
+		);
+	}
+
+	const opParamsPtr = mod._malloc(4);
+	mod.HEAPF32[opParamsPtr >>> 2] = eps;
+
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_RMS_NORM,
+		nSrc: 1,
+		dst: {
+			bufHandle: hOut,
+			offset: outOffset,
+			type: GGML_TYPE_F32,
+			ne: [cols, rows, 1, 1],
+			nb: [4, 4 * cols, 4 * cols * rows, 0],
+		},
+		srcs: [
+			{
+				bufHandle: hX,
+				offset: xOffset,
+				type: GGML_TYPE_F32,
+				ne: [cols, rows, 1, 1],
+				nb: [4, 4 * cols, 4 * cols * rows, 0],
+			},
+		],
+	};
+
+	const status = dispatchRmsNorm(
+		{
+			device: runtime.device,
+			dataManager: runtime.dataManager,
+			encoderBatcher: runtime.encoderBatcher,
+			pipelineCache: runtime.pipelineCache,
+			bindGroupLayoutCache: runtime.bindGroupLayoutCache,
+		},
+		desc,
+		opParamsPtr,
+		mod.HEAPU8.buffer,
+	);
+	runtime.encoderBatcher.flush();
+
+	const outRec = runtime.dataManager.get(hOut);
+	const staging = runtime.device.createBuffer({
+		size: totalBytes,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	const enc = runtime.device.createCommandEncoder();
+	enc.copyBufferToBuffer(outRec.buffer, outOffset, staging, 0, totalBytes);
+	runtime.device.queue.submit([enc.finish()]);
+	await staging.mapAsync(GPUMapMode.READ, 0, totalBytes);
+	const got = new Float32Array(staging.getMappedRange().slice(0));
+	staging.unmap();
+	staging.destroy();
+
+	let maxAbsDelta = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	let zeroCount = 0;
+	const perRowMaxDelta = new Array<number>(rows).fill(0);
+	for (let r = 0; r < rows; r++) {
+		for (let c = 0; c < cols; c++) {
+			const v = got[r * cols + c];
+			if (Number.isNaN(v)) hasNaN = true;
+			else if (!Number.isFinite(v)) hasInf = true;
+			else if (v === 0) zeroCount++;
+			const d = Math.abs(v - reference[r * cols + c]);
+			if (d > maxAbsDelta) maxAbsDelta = d;
+			if (d > perRowMaxDelta[r]) perRowMaxDelta[r] = d;
+		}
+	}
+
+	mod._free(opParamsPtr);
+	runtime.dataManager.free(hX);
+	if (mode === "no-divert") runtime.dataManager.free(hOut);
+
+	return {
+		mode,
+		rows,
+		cols,
+		status,
+		maxAbsDelta,
+		hasNaN,
+		hasInf,
+		zeroCount,
+		perRowMaxDelta,
+	};
+}
+
 function log(msg: string, cls = ""): void {
 	const el = document.getElementById("log");
 	if (!el) return;
@@ -401,6 +836,36 @@ async function runSpike(): Promise<void> {
 		// stream is being zeroed at the first norm vs further downstream.
 		await runRmsNormSelfTest(mod as MallocModule, runtime);
 
+		// Stage 4.3a self-tests: production-shape multi-row RMS_NORM and
+		// production-shape Q4_K MUL_MAT, in both non-divert and divert
+		// configurations. The post-Stage-4.2 baseline confirmed Bug A
+		// (POSTPREFILL_BUF11 = canonical NaN at MUL_MAT dst offsets); these
+		// selftests localize whether the bug is in the kernel or the
+		// divert path.
+		const rmsMulti1 = await runRmsNormMultiRowSelfTest(
+			mod as MallocModule,
+			runtime,
+			"no-divert",
+		);
+		log(`RMSNORM_MULTIROW_NODIVERT = ${JSON.stringify(rmsMulti1)}`);
+		(window as any).__rmsNormMultiNoDivert = rmsMulti1;
+
+		const rmsMulti2 = await runRmsNormMultiRowSelfTest(
+			mod as MallocModule,
+			runtime,
+			"divert",
+		);
+		log(`RMSNORM_MULTIROW_DIVERT = ${JSON.stringify(rmsMulti2)}`);
+		(window as any).__rmsNormMultiDivert = rmsMulti2;
+
+		const matProd1 = await runMatmulProductionSelfTest(runtime, "no-divert");
+		log(`MATMUL_PROD_NODIVERT = ${JSON.stringify(matProd1)}`);
+		(window as any).__matmulProdNoDivert = matProd1;
+
+		const matProd2 = await runMatmulProductionSelfTest(runtime, "divert");
+		log(`MATMUL_PROD_DIVERT = ${JSON.stringify(matProd2)}`);
+		(window as any).__matmulProdDivert = matProd2;
+
 		log("[4/8] Initializing ggml-webgpu backend...");
 		const initStatus = await mod._webgpu_init();
 		if (initStatus !== 0) {
@@ -433,11 +898,37 @@ async function runSpike(): Promise<void> {
 		};
 		log(`     counters@load = ${JSON.stringify(counter0)}`);
 
+		// Find the JSEP activations buffer dynamically. The Stage 4.2 brief
+		// hardcoded handle 11 because that was the scratch buffer's handle
+		// in the post-model-load LIVE_BUFFERS list (4×128 MiB weights at
+		// handles 6-9, 16 MiB at 10, 64 MiB at 11). Stage 4.3a's selftests
+		// alloc/free buffers before model load, advancing the handle
+		// counter, so the activations buffer's handle drifts. Pick it as
+		// the smallest-handle live buffer that is NOT one of the 128 MiB
+		// weight buffers — i.e. bucket ≤ 8.
+		const dmAnyEarly = runtime.dataManager as unknown as {
+			handles: Map<number, { size: number; bucket: number }>;
+		};
+		let actHandle = -1;
+		let actSize = 0;
+		for (const [h, rec] of dmAnyEarly.handles.entries()) {
+			if (rec.bucket >= 9) continue; // skip 128 MiB weight buffers
+			if (rec.size >= 32 * 1024 * 1024) {
+				// 64 MiB scratch beats 16 MiB if both present.
+				if (rec.size > actSize) {
+					actHandle = h;
+					actSize = rec.size;
+				}
+			}
+		}
+		log(`ACT_BUF_HANDLE = ${actHandle} size=${actSize}`);
+
 		// Stage 4.2 — pre-prefill GPU buffer dump. Establishes the
-		// "initial state" of buf 11 at known JSEP offsets BEFORE any
-		// JSEP ops dispatch, so we can compare to the post-prefill state.
+		// "initial state" of the JSEP activations buffer at known offsets
+		// BEFORE any JSEP ops dispatch, so we can compare to the
+		// post-prefill state.
 		async function dumpBuf11Pre(off: number, size: number): Promise<number[]> {
-			const rec = runtime.dataManager.get(11);
+			const rec = runtime.dataManager.get(actHandle);
 			const staging = runtime.device.createBuffer({
 				size,
 				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
@@ -458,14 +949,33 @@ async function runSpike(): Promise<void> {
 		}
 		log(`PREPREFILL_BUF11 = ${JSON.stringify(preProbe)}`);
 
-		// Stage 4.2 Step 1 diagnostic — wrap jsepWrite/jsepRead to capture
-		// (handle, offset, size, first8 f32, first16 raw u8) for the first
-		// MAX_LOG calls AFTER model load (so weight uploads don't dominate).
-		// Goal: identify which CPU-fallback op is writing the corruption
-		// signature ([-5e-5, 142.08, ..., -7.4e+18]) into attn_q.src1.
-		// Remove before commit.
-		const MAX_LOG = 30;
+		// Stage 4.3b — wrap jsepWrite/jsepRead/jsepRunOp with a UNIFIED event
+		// sequence (`evtSeq`) so the three streams can be interleaved in the
+		// order JSEP actually called them. Stage 4.2's per-stream indices made
+		// it impossible to tell whether jsepWrite[i=1] happened before or after
+		// jsepRunOp[i=1]; with `seq` the answer is one comparison.
+		//
+		// Caps bumped from 30 → enough to cover the full prefill graph
+		// (1602 runOps, ~2400 writes, ~2400 reads). Full logs live on
+		// `window.__jsep*Log`; the page log emits a summary + a curated slice
+		// (entries that hit the activations buffer at offsets of interest).
+		const MAX_WRITE = 3000;
+		const MAX_READ = 3000;
+		const RUN_MAX = 1700;
+		// Per-runOp deferred dst readback: capture the first
+		// DST_PROBE_COUNT runOps' dst contents (first 8 f32 of dst at
+		// [dstO, dstO+32)). Probes scheduled via Promise.resolve().then(...)
+		// so they run AFTER the wasm sync chain returns, by which time the
+		// dispatch has been submitted (and for diverted ops, the destroy()
+		// has fired). For runOps writing to the same dst offset that gets
+		// overwritten by a LATER runOp before our probe runs, we lose
+		// isolation — that's fine for the first ~20 ops where dst offsets
+		// in buf19 mostly distinct (the runLog confirms that).
+		const DST_PROBE_COUNT = 30;
+
+		let evtSeq = 0;
 		type WrEntry = {
+			seq: number;
 			i: number;
 			handle: number;
 			offset: number;
@@ -488,7 +998,7 @@ async function runSpike(): Promise<void> {
 			s: number,
 		) => Promise<void>;
 		mod.jsepWrite = (h: number, o: number, p: number, s: number): void => {
-			if (writeLog.length < MAX_LOG) {
+			if (writeLog.length < MAX_WRITE) {
 				const n = Math.min(8, Math.floor(s / 4));
 				const first8 =
 					n > 0
@@ -498,6 +1008,7 @@ async function runSpike(): Promise<void> {
 					new Uint8Array(mod.HEAPU8.buffer, p, Math.min(16, s)),
 				);
 				writeLog.push({
+					seq: evtSeq++,
 					i: writeLog.length,
 					handle: h,
 					offset: o,
@@ -514,9 +1025,10 @@ async function runSpike(): Promise<void> {
 			p: number,
 			s: number,
 		): Promise<void> => {
-			const idx = readLog.length < MAX_LOG ? readLog.length : -1;
+			const idx = readLog.length < MAX_READ ? readLog.length : -1;
 			if (idx >= 0) {
 				readLog.push({
+					seq: evtSeq++,
 					i: idx,
 					handle: h,
 					offset: o,
@@ -560,6 +1072,7 @@ async function runSpike(): Promise<void> {
 		// blocks starting at [21], [40], etc.
 		const TBLK = 19;
 		type RunOpEntry = {
+			seq: number;
 			i: number;
 			op: number;
 			nSrc: number;
@@ -570,13 +1083,32 @@ async function runSpike(): Promise<void> {
 			divert: boolean;
 		};
 		const runLog: RunOpEntry[] = [];
-		const RUN_MAX = 30;
 		const runOpOrig = mod.jsepRunOp as (
 			d: number,
 			dw: number,
 			pp: number,
 			pl: number,
 		) => number;
+		// Stage 4.3b: per-runOp deferred dst readback. For the first
+		// DST_PROBE_COUNT runOps we schedule a read of dst[dstO..+32) via
+		// Promise.resolve().then(...). The .then runs on the next
+		// microtask — by then jsepRunOp has returned and the dispatch (or
+		// diverted submit) has been queued. The first runOp in the prefill
+		// graph that reads back canonical NaN at its dst is the first NaN
+		// producer.
+		const dstProbes: Array<{
+			i: number;
+			seq: number;
+			op: number;
+			dstH: number;
+			dstO: number;
+			divert: boolean;
+			first8: number[] | null;
+			err?: string;
+		}> = [];
+		const dstProbePromises: Promise<void>[] = [];
+		(window as any).__dstProbes = dstProbes;
+
 		mod.jsepRunOp = (
 			descriptorPtr: number,
 			descriptorWords: number,
@@ -584,6 +1116,7 @@ async function runSpike(): Promise<void> {
 			opParamsLen: number,
 		): number => {
 			let entry: RunOpEntry | null = null;
+			let probeI = -1;
 			if (runLog.length < RUN_MAX) {
 				const buf = mod.HEAPU8.buffer as ArrayBuffer;
 				const heap32 = new Int32Array(buf, 0, buf.byteLength >>> 2);
@@ -605,6 +1138,7 @@ async function runSpike(): Promise<void> {
 					(sr) => sr.h === dstH && srcs.length > 0,
 				);
 				entry = {
+					seq: evtSeq++,
 					i: runLog.length,
 					op,
 					nSrc,
@@ -615,6 +1149,18 @@ async function runSpike(): Promise<void> {
 					divert,
 				};
 				runLog.push(entry);
+				if (runLog.length <= DST_PROBE_COUNT) {
+					probeI = runLog.length - 1;
+					dstProbes.push({
+						i: probeI,
+						seq: entry.seq,
+						op,
+						dstH,
+						dstO,
+						divert,
+						first8: null,
+					});
+				}
 			}
 			const status = runOpOrig(
 				descriptorPtr,
@@ -623,6 +1169,45 @@ async function runSpike(): Promise<void> {
 				opParamsLen,
 			);
 			if (entry) entry.status = status;
+			// Schedule deferred dst readback. We capture dstH / dstO in
+			// closure because runLog/dstProbes get mutated by later calls.
+			if (probeI >= 0 && entry) {
+				const probe = dstProbes[probeI];
+				const captureDstH = entry.dstH;
+				const captureDstO = entry.dstO;
+				dstProbePromises.push(
+					Promise.resolve().then(async () => {
+						try {
+							const rec = runtime.dataManager.get(captureDstH);
+							const READ = 32;
+							const staging = runtime.device.createBuffer({
+								size: READ,
+								usage:
+									GPUBufferUsage.MAP_READ |
+									GPUBufferUsage.COPY_DST,
+							});
+							const enc = runtime.device.createCommandEncoder();
+							enc.copyBufferToBuffer(
+								rec.buffer,
+								captureDstO,
+								staging,
+								0,
+								READ,
+							);
+							runtime.device.queue.submit([enc.finish()]);
+							await staging.mapAsync(GPUMapMode.READ, 0, READ);
+							const data = new Float32Array(
+								staging.getMappedRange().slice(0),
+							);
+							staging.unmap();
+							staging.destroy();
+							probe.first8 = Array.from(data.slice(0, 8));
+						} catch (e) {
+							probe.err = (e as Error).message;
+						}
+					}),
+				);
+			}
 			return status;
 		};
 		(window as any).__jsepRunLog = runLog;
@@ -647,7 +1232,7 @@ async function runSpike(): Promise<void> {
 		// jsepRead synchronization (e.g., reading before the producing op
 		// dispatched).
 		async function dumpBuf11(off: number, size: number): Promise<number[]> {
-			const rec = runtime.dataManager.get(11);
+			const rec = runtime.dataManager.get(actHandle);
 			const staging = runtime.device.createBuffer({
 				size,
 				usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
@@ -773,9 +1358,58 @@ async function runSpike(): Promise<void> {
 			generatedText = `<detokenize failed: ${(e as Error).message}>`;
 		}
 
-		log(`JSEPRUN_LOG = ${JSON.stringify(runLog)}`);
-		log(`JSEPWRITE_LOG = ${JSON.stringify(writeLog)}`);
-		log(`JSEPREAD_LOG = ${JSON.stringify(readLog)}`);
+		// Stage 4.3b — wait for all per-runOp dst probes to complete
+		// before emitting the summary. Probe promises are pushed onto
+		// `dstProbePromises` as runOps fire; awaiting all settles every
+		// staging copy + mapAsync.
+		await Promise.allSettled(dstProbePromises);
+
+		// Emit summaries + first-30 slices on the page log (full data
+		// stays on `window.__jsep*Log` and `window.__dstProbes` for
+		// targeted `js exec` fetches). Inlining the full 1700-entry
+		// arrays would blow past agentchrome's 16 KB inline limit.
+		log(
+			`LOG_COUNTS = ${JSON.stringify({
+				runOps: runLog.length,
+				writes: writeLog.length,
+				reads: readLog.length,
+				dstProbes: dstProbes.length,
+			})}`,
+		);
+		log(`JSEPRUN_LOG_FIRST30 = ${JSON.stringify(runLog.slice(0, 30))}`);
+		log(`JSEPWRITE_LOG_FIRST30 = ${JSON.stringify(writeLog.slice(0, 30))}`);
+		log(`JSEPREAD_LOG_FIRST30 = ${JSON.stringify(readLog.slice(0, 30))}`);
+		log(`DST_PROBES = ${JSON.stringify(dstProbes)}`);
+		// Filter: all writes that hit the activations buffer at offsets
+		// the POSTPREFILL probe found NaN at (0, 528384, 1052672,
+		// 2101248, 4194304, 6295552, 17829888, 35655680). These are the
+		// CPU writebacks that pollute scratch.
+		const NAN_OFFSETS = new Set([
+			0, 524288, 528384, 1052672, 2101248, 4194304, 6295552, 17829888,
+			35655680,
+		]);
+		const writesToNanOffsets = writeLog.filter(
+			(w) => w.handle === actHandle && NAN_OFFSETS.has(w.offset),
+		);
+		log(
+			`WRITES_TO_NAN_OFFSETS_COUNT = ${writesToNanOffsets.length}`,
+		);
+		log(
+			`WRITES_TO_NAN_OFFSETS_FIRST20 = ${JSON.stringify(writesToNanOffsets.slice(0, 20))}`,
+		);
+		// First runOp whose dst probe came back as NaN (any of first8 NaN).
+		const firstNanProbe = dstProbes.find(
+			(p) => p.first8 !== null && p.first8.some((v) => Number.isNaN(v)),
+		);
+		log(`FIRST_NAN_DST_PROBE = ${JSON.stringify(firstNanProbe ?? null)}`);
+		// First runOp whose dst probe came back as all-zero (Bug B candidate
+		// — if lm_head's dst stays zero post-dispatch this surfaces here).
+		const firstZeroProbe = dstProbes.find(
+			(p) =>
+				p.first8 !== null &&
+				p.first8.every((v) => v === 0),
+		);
+		log(`FIRST_ALLZERO_DST_PROBE = ${JSON.stringify(firstZeroProbe ?? null)}`);
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`GENERATED_TEXT = ${JSON.stringify(generatedText)}`);
