@@ -971,7 +971,7 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.22 Probe 10: production-dispatch kernel-input capture. Stage 4.21 confirmed Outcome F-1 — the entire weight-upload chain (GGUF → `set_tensor` → `Module.jsepWrite` → `device.queue.writeBuffer` → JSEP `GPUBuffer`) is byte-identical end-to-end (`blk.0.attn_q.weight` GPU 0xf2f7188c, `blk.0.attn_k.weight` GPU 0x9399f36a — both match the C++ pre-upload hash). The 5.24e-4 production Qcur-0 delta vs the 1.68e-6 synthetic-sweep delta (312× gap) must therefore originate inside the dispatch / kernel-execution boundary at production conditions. Probe 10 captures the **actual** src0 (Q4_0 weight tile) + src1 (f32 activation tile) + dst bytes the kernel sees at the layer-0 Q-projection MUL_MAT dispatch in production prefill, then feeds those exact bytes back into the standalone Stage-4.18 Q4_0 synthetic harness. **Outcome G-1** (synthetic produces 5.24e-4 on the captured bytes): Stage 4.18 sweep missed an input-distribution / output-tile-boundary case at M=2048 — re-run sweep with denser sampling using captured-input statistics. **Outcome G-2** (synthetic still produces ≤1e-6 on the same bytes): the bug lives between the dispatch site and shader execution — pipeline cache key collision, bind-group binding offset mismatch, workgroup count off-by-one, or src0/src1 swap at the descriptor level. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.23 Probe 11: CPU-fallback writeback-gap localization. Stage 4.22 closed Outcome G-2 — the JSEP Q4_K MUL_MAT kernel is **bit-clean on production inputs**. Captured production Qcur-0 dst-after vs an f32 element-wise k-major reference: maxAbsDelta = 4.768e-7 (single ULP at outputMaxAbs=6.37). Synthetic replay through the same dispatchMatmul entry point with the captured src0+src1 bytes produces output that matches first-8 to ULP and the same 4.768e-7 reference delta. The dispatch / kernel-execution boundary is exonerated. **Surprise finding: TinyLlama-1.1b-chat-q4_0.gguf is actually Q4_K_M (Q4_K projections + Q6_K embeddings) despite the filename — Stage 4.18's "Q4_0 production-shape sweep" was an apples-vs-oranges baseline.** The 5.24e-4 Qcur-0 first8 delta from prior stages was therefore measured against libllama's CPU-fallback path through the Stage 4.4 dual-resident host mirror, not against an f32 ground truth. Probe 11 localizes the GPU→host writeback gap. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -979,13 +979,13 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -3
-#   → <Stage 4.21 TODO closure commit>  docs(TODO): Stage 4.21 closed — queue Stage 4.22 kernel-input capture
-#   → <Stage 4.21 reports commit>       docs(reports): Stage 4.21 closure — Outcome F-1 (GPU bytes bit-clean)
-#   → <Stage 4.21 feat commit>          feat(spike): Stage 4.21 — Probe 9c GPU-readback hash
+#   → <Stage 4.22 TODO closure commit>  docs(TODO): Stage 4.22 closed — queue Stage 4.23 CPU-fallback writeback gap
+#   → <Stage 4.22 reports commit>       docs(reports): Stage 4.22 closure — Outcome G-2 (kernel bit-clean on production)
+#   → <Stage 4.22 feat commit>          feat(spike): Stage 4.22 — Probe 10 production-dispatch kernel-input capture
 
 # 2. Confirm llama.cpp tip (patch stack unchanged at 13).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → ef89f9314   webllm-browser-patches   (patch stack 13 — no change from Stage 4.20)
+#   → ef89f9314   webllm-browser-patches   (patch stack 13 — no change from Stage 4.22)
 
 # 3. Smoke-server up on 8031.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
@@ -996,58 +996,113 @@ PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.loa
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 
-# 5. Reproduce Stage 4.21 post-state:
-agentchrome --port "$PORT" navigate --tab "$SPIKE_TAB" "http://localhost:8031/p2-v2-spike.html?v=stage4.22-replay"
-agentchrome --port "$PORT" page wait --tab "$SPIKE_TAB" --text OUTCOME --timeout 240000
-agentchrome --port "$PORT" page text --tab "$SPIKE_TAB" | grep -E "probe9b|probe9c|OUTCOME"
+# 5. Reproduce Stage 4.22 post-state:
+agentchrome --port "$PORT" navigate --tab "$SPIKE_TAB" "http://localhost:8031/p2-v2-spike.html?v=stage4.23-replay&ingest=off"
+agentchrome --port "$PORT" page wait --tab "$SPIKE_TAB" --text "DONE" --timeout 240000
+agentchrome --port "$PORT" page text --tab "$SPIKE_TAB" | grep -E "probe10|MATMUL_PROBE10"
 #   → expect:
-#     [probe9b] OUTCOME: F (hashes match — upload preserves bytes)
-#     [probe9c] OUTCOME: F-1 (GPU bytes match — upload chain bit-clean; kernel re-investigation)
+#     [probe10] M=2048 K=2048 N=6 capturedDelta=4.768e-7 syntheticDelta=4.768e-7
+#     [probe10] OUTCOME: G-2 (synthetic ≤1e-5 — bug between dispatch site and shader execution)
 ```
 
-**One-line goal:** Capture the live src0/src1/dst bytes at the first JSEP `Qcur-0` MUL_MAT dispatch in prefill and replay them through the standalone Stage-4.18 synthetic Q4_0 sweep harness. Verdict G-1 (synthetic reproduces 5.24e-4 ⇒ sweep gap) vs G-2 (synthetic ≤1e-6 ⇒ dispatch-boundary bug).
+**One-line goal:** Localize the first op in the layer-0 prefill chain whose CPU-fallback path consumes a stale `host_mirror` slice (or whose JSEP-side write fails to land in `host_mirror`), producing the upstream divergence that Stage 4.18 originally framed as a "Qcur-0 5.24e-4 first8 delta".
 
-**One-line context:** Stages 4.18-4.21 closed every upstream link of the upload chain; the only remaining suspect is the production dispatch/kernel boundary itself.
+**One-line context:** Stages 4.4 → 4.21 closed every link of the JSEP-side path (alloc, set_tensor, jsepWrite, GPU memory). Stage 4.22 closed the kernel itself. The remaining suspect is the CPU↔GPU mirror sync layer.
 
-#### Probe 10 implementation sketch
+#### Probe 11 implementation sketch
 
-1. **Identify the dispatch site.** Find the JSEP MUL_MAT op handler in `src/inference/jsep/ops/` (likely `mat-mul.ts` or similar; grep `MUL_MAT\|matmul`). Confirm it owns `src0Buf, src0Off, src1Buf, src1Off, dstBuf, dstOff` plus M/K/N + tile dims.
+1. **Identify the first CPU-fallback op in layer-0 prefill.** Walk
+   `JSEPRUN_LOG_FIRST30` from Stage 4.21's spike output (or capture
+   afresh) — entries whose op number does **not** match the JSEP
+   `supports_op` allow-list (set in `ggml-jsep.cpp` Task 9 + 10) are
+   either CPU-fallback or scheduler-internal (NONE/VIEW/RESHAPE/PERMUTE
+   /TRANSPOSE — fast-path nodes that don't compute). Filter to the
+   real fallback ops (typical suspects: GET_ROWS, MUL, ADD, ROPE if
+   not in JSEP, SOFT_MAX if not in JSEP).
 
-2. **Add a one-shot capture gate** keyed on a `globalThis.__captureNextMulMat: boolean` (or counter) so the spike harness arms it once just before `bridge.decode` and only the first eligible dispatch fires. Choose the trigger: dispatch index 0 (first MUL_MAT after prefill kernels start) is sufficient — Stage 4.19 confirmed Qcur-0 is the first JSEP-side op.
+2. **Add a per-op host-mirror vs GPU-buffer divergence probe.** After
+   each JSEP `runOp` returns, FNV-1a-32 hash the post-write slice in
+   the dual-resident `host_mirror` AND read the same byte range from
+   the GPU buffer via `copyBufferToBuffer` + `mapAsync`. If the
+   hashes diverge for a buffer that's about to feed a CPU-fallback
+   op, that's the smoking gun.
 
-3. **In the dispatch handler, pre-submit but post-bind**, encode three additional `copyBufferToBuffer` calls (one per src0/src1/dst) into staging buffers (size = exact ne[0]×ne[1]×elem-bytes for that tensor), `submit`, `await mapAsync`, copy bytes into a `globalThis.__capturedDispatch = {M, K, N, src0Bytes, src1Bytes, dstBytesBefore, dstBytesAfter, name}` blob. Capture dst BEFORE and AFTER the kernel run so the harness can compare against re-computing on the same inputs.
+3. **Cross-reference with Stage 4.4's "Bug C" diagnosis.**
+   Stage 4.4 noted `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}`
+   (op 42 = SET_ROWS; handle 18 = KV cache). After Stage 4.4 (F1
+   landed) and the subsequent stages, this specific allzero may have
+   shifted — re-run the post-prefill `dumpBuf11` probe and compare
+   against the Stage 4.21 baseline values to see if any production
+   op's output is still all-zero.
 
-4. **Replay through the synthetic harness.** Add `runMatmulQ4_0FromBytes(runtime, M, K, N, src0Bytes, src1Bytes)` next to the existing `runMatmulQ4_0Sweep` helper (same dispatch entry point as production — use the captured tile dims to ensure the same shader variant is selected) and compute `maxAbsDelta` vs an f32 elementwise loop reference.
-
-5. **Verdict line.**
-   - `[probe10] M=2048 K=2048 N=6 capturedDelta=… syntheticDelta=…`
-   - `[probe10] OUTCOME: G-1` if syntheticDelta ≥ 1e-4 (within 2× of capturedDelta)
-   - `[probe10] OUTCOME: G-2` if syntheticDelta ≤ 1e-5
+4. **Verdict line.**
+   - `[probe11] firstDivergeOp=<op> dstH=<h> dstO=<o> hostHash=<x> gpuHash=<y>`
+   - `[probe11] OUTCOME: H-1` if a divergence is found at a known
+     CPU-fallback boundary
+   - `[probe11] OUTCOME: H-2` if all sampled hashes agree (writeback
+     gap may be in Stage 4.4's H1/H2/H3 patches that landed but not
+     in the slices we sampled — extend the probe coverage)
 
 #### Files to read first
 
-- [`STAGE-4.21-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.21-RESULT.md) — Outcome F-1 confirmation + the G-1/G-2 split.
-- `smoke-test/p2-v2-spike.src.ts` — find `runMatmulQ4_0Sweep` (Stage 4.18 harness) for the synthetic-replay pattern. Add capture-arm + replay calls around `bridge.decode`.
-- `src/inference/jsep/ops/*.ts` — locate the MUL_MAT op handler (Q4_0 path). Add the gated capture branch BEFORE submit.
-- [`STAGE-4.18-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.18-RESULT.md) — review the Q4_0 sweep methodology (input-distribution, tile shapes) so you can frame G-1's "missed input distribution" diagnosis precisely.
+- [`STAGE-4.22-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.22-RESULT.md) — Outcome G-2 confirmation + the Q4_K-vs-Q4_0 surprise.
+- [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md) — F1 dual-resident host mirror landing + Bug C documentation.
+- `ggml/src/ggml-jsep/ggml-jsep.cpp` — `host_mirror` lifecycle in
+  `set_tensor` / `memset_tensor` / `clear` / `get_base`.
+- `smoke-test/p2-v2-spike.src.ts` — the post-prefill `dumpBuf11` block
+  + `JSEPRUN_LOG_FIRST30` capture pattern.
 
 #### Risk register
 
-- **Capturing dst BEFORE the kernel runs.** WebGPU command encoders are recorded in submission order; if the capture `copyBufferToBuffer` is encoded into the same encoder as the kernel dispatch and submitted together, the dst snapshot may already reflect the kernel write. Encode capture calls into a SEPARATE encoder, submit BEFORE the kernel encoder, and `await onSubmittedWorkDone()` between submits.
-- **Pipeline cache poisoning.** If you change MUL_MAT op handler code paths (even adding a gated branch), the WGSL cache key may move. Keep the capture branch behind a runtime flag that returns to the exact same shader-selection logic when the flag is off.
-- **Q4_0 src0 size.** Layer-0 wq is [2048, 2048] Q4_0 = 2,359,296 bytes; layer-0 wk is [256, 2048] Q4_0 = 294,912. src1 (`attn_norm-0`) is f32 [2048, 6] = 49,152 bytes. dst (`Qcur-0`) is f32 [2048, 6] = 49,152 bytes. Total capture ≤ 2.5 MiB — sub-millisecond on the GPU.
-- **Identifying the right dispatch.** If multiple MUL_MAT ops fire before Qcur-0 (none should per Stage 4.18 — JSEP runs only Q-proj, K-proj, Q×K^T, out-proj — but the spike's selftests run BEFORE prefill and may register dispatches in the JSEP runtime), gate on `op.name === "Qcur-0"` if the JSEP layer surfaces tensor names; otherwise gate on shape `(M=2048, K=2048, N=6)` AND a "post-warmup" counter.
+- **The 5.24e-4 number's actual provenance.** Probe 10 didn't reproduce
+  it against an f32 ground truth, so it must come from a different
+  reference. Before running Probe 11, **first re-derive the 5.24e-4
+  number explicitly** to confirm its provenance — load the model
+  through both JSEP and the CPU fallback (or just enable the existing
+  per-node dump from Stage 4.17) and diff them. If the number was
+  computed against the CPU-fallback path, Probe 11's hypothesis
+  (writeback gap) is on track. If it came from elsewhere (e.g., a
+  decode-step delta against a CPU-only reference run), the framing
+  shifts again.
+- **Q6_K is not in the JSEP `supports_op` allow-list.** Probe 11 should
+  also gate on / track Q6_K dispatches — `output.weight` is Q6_K and
+  is the lm_head. Stage 4.4 documented that lm_head's dispatch was
+  silently not landing. If lm_head is CPU-fallback (no Q6_K WGSL
+  kernel exists yet in matmul.ts), the host_mirror staleness theory
+  predicts that lm_head reads stale `lm_head_input`.
+- **Stage 4.18 sweep should be re-run with Q4_K** at production
+  shapes for completeness — the existing `MATMUL_Q4_0_SWEEP` only
+  covers Q4_0. A `MATMUL_Q4_K_SWEEP` at the same shapes characterizes
+  Q4_K precision empirically (expected ≤ 1e-6 vs f64 per Probe 10's
+  point measurement at the q-out-proj shape).
 
-#### Exit criteria — Stage 4.22 closes when documented in `STAGE-4.22-RESULT.md`:
+#### Exit criteria — Stage 4.23 closes when documented in `STAGE-4.23-RESULT.md`:
 
-- `[probe10] OUTCOME: G-1` or `G-2` is logged with concrete `capturedDelta` / `syntheticDelta` numbers.
-- All 6 spike selftests + 5 sweep selftests still PASS; `make checkall` green.
-- Either: a fix lands and `GENERATED_TEXT` flips toward "Paris"; OR closure documents the next probe (`Stage 4.23` paste-and-go brief) with the chosen branch's diagnostic plan.
+- A specific op + buffer + offset is identified as the writeback-gap
+  divergence point (Outcome H-1), or all sampled slices agree and
+  the probe is extended (Outcome H-2 → Stage 4.24).
+- All spike + sweep selftests still PASS; `make checkall` green.
+- Either: a fix lands and `GENERATED_TEXT` flips toward "Paris"; OR
+  closure documents the next probe (`Stage 4.24` paste-and-go brief)
+  with the chosen branch's diagnostic plan.
 
 #### Branch on outcome
 
-- **Outcome G-1 (synthetic reproduces 5.24e-4 on captured bytes):** the kernel itself is buggy at this specific input distribution / tile geometry. Stage 4.23 brief: extend the Stage-4.18 sweep with denser sampling around the input-byte statistics of the captured src0/src1 (e.g., scale ranges, sparsity, zero-block patterns). Also re-run the sweep at the dispatch's exact (M, K, N) with random restarts — the original sweep used a single seed.
-- **Outcome G-2 (synthetic ≤1e-6 on the same bytes):** the bug is between dispatch site and shader execution. Stage 4.23 brief: instrument the JSEP MUL_MAT handler to log the full dispatch parameter set (pipeline-cache key, bind-group offsets, workgroup count, push constants if any) at the captured-dispatch moment. Compare against a synthetic dispatch of the same shape. First check: are src0 and src1 bound at the right offsets? Q4_0 stride math is easy to off-by-one. Second check: is the workgroup count consistent with M=2048 / OPW=4 / WG_X=64?
+- **Outcome H-1 (writeback-gap divergence found):** the fix is to
+  bridge the GPU→host direction. Stage 4.4's H1/H2/H3 brief
+  enumerated the candidate strategies (unconditional read-back,
+  cpy_tensor hook, graph-walk pre-pass). Pick whichever the divergence
+  pattern points to.
+- **Outcome H-2 (all sampled hashes agree):** the writeback-gap
+  hypothesis is wrong, OR the gap exists in slices we didn't sample.
+  Stage 4.24 would expand probe coverage to all post-write slices
+  (FNV the entire buffer post-op), or pivot to a different hypothesis
+  — e.g., the JSEP scheduler routing CPU-fallback ops to the wrong
+  buffer entirely (rather than reading stale data from the right one).
+
+### Earlier Stage 4.22 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.22 brief (paste-and-go bootstrap, Probe 10 implementation sketch with capture-arm + pre/kernel/post encoders + mapAsync, four-item risk register, two-outcome G-1/G-2 branch table) lives in [`STAGE-4.22-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.22-RESULT.md). Outcome **G-2** CONFIRMED + the kernel exonerated on production inputs: capturedDelta = 4.768e-7 (single-ULP), syntheticDelta = 4.768e-7, first-8 outputs bit-identical between captured production and synthetic replay. **Surprise finding** — TinyLlama-1.1b-chat-q4_0.gguf actually contains Q4_K projections + Q6_K embeddings; the Stage 4.18 "Q4_0 production-shape sweep" was an apples-vs-oranges baseline. The 5.24e-4 framing from prior stages must have come from comparing against the CPU-fallback path (Stage 4.4 dual-resident `host_mirror`), not against an f32 ground truth. Stage 4.23 redirects the investigation to the GPU→host writeback gap. Collapsed at Stage 4.23 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.21 brief — collapsed (full text in closure report)
 
