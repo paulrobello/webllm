@@ -815,6 +815,63 @@ int32_t webllm_dequantize_q4_K(const void* src, float* dst, int32_t k) {
     return 0;
 }
 
+// Stage 4.26 Probe 14: libllama Q4_K × Q8_K matmul shim. Mirrors the path
+// inside ggml_compute_forward_mul_mat for type=Q4_K: each src1 row is
+// quantized f32 → block_q8_K via the CPU type traits' from_float, then
+// vec_dot_q4_K_q8_K is invoked once per (m, n) output element. dst layout
+// matches libllama: dst[n*M + m] (column-major within each output row).
+//
+// Used by the spike harness to score libllama's CPU matmul against an f64
+// reference on the same captured Q-projection inputs that Probe 10 already
+// scores the WGSL kernel against. Tells us whether libllama is the
+// imprecise side of the historical 5.24e-4 cross-module disagreement.
+//
+// Inputs:
+//   src0_q4k: M*K Q4_K weights (M rows × K cols, packed Q4_K super-blocks)
+//   src1_f32: N*K f32 activations (N rows × K cols)
+//   dst_f32:  M*N f32 outputs (libllama [M] = ne[0])
+// Returns 0 on success, -1 on bad args, -2 on missing type traits, -3 on
+// malloc failure.
+int32_t webllm_q4k_q8k_matmul(const void* src0_q4k, const float* src1_f32,
+                              float* dst_f32, int32_t M, int32_t K, int32_t N) {
+    if (!src0_q4k || !src1_f32 || !dst_f32) return -1;
+    if (M <= 0 || K <= 0 || N <= 0 || (K % 256) != 0) return -1;
+
+    const struct ggml_type_traits_cpu* q8_traits =
+        ggml_get_type_traits_cpu(GGML_TYPE_Q8_K);
+    const struct ggml_type_traits_cpu* q4_traits =
+        ggml_get_type_traits_cpu(GGML_TYPE_Q4_K);
+    if (!q8_traits || !q8_traits->from_float) return -2;
+    if (!q4_traits || !q4_traits->vec_dot) return -2;
+
+    const size_t nb_q4k_row = ggml_row_size(GGML_TYPE_Q4_K, (int64_t) K);
+    const size_t nb_q8k_row = ggml_row_size(GGML_TYPE_Q8_K, (int64_t) K);
+
+    void* src1_q8k = std::malloc((size_t) N * nb_q8k_row);
+    if (!src1_q8k) return -3;
+
+    for (int32_t n = 0; n < N; ++n) {
+        q8_traits->from_float(src1_f32 + (size_t) n * (size_t) K,
+                              (char*) src1_q8k + (size_t) n * nb_q8k_row,
+                              (int64_t) K);
+    }
+
+    for (int32_t n = 0; n < N; ++n) {
+        const char* vy = (const char*) src1_q8k + (size_t) n * nb_q8k_row;
+        for (int32_t m = 0; m < M; ++m) {
+            const char* vx = (const char*) src0_q4k + (size_t) m * nb_q4k_row;
+            q4_traits->vec_dot((int) K,
+                               &dst_f32[(size_t) n * (size_t) M + (size_t) m],
+                               /*bs=*/0,
+                               vx, /*bx=*/0,
+                               vy, /*by=*/0,
+                               /*nrc=*/1);
+        }
+    }
+    std::free(src1_q8k);
+    return 0;
+}
+
 void* webllm_create_context(void* model, int32_t n_ctx, int32_t embeddings,
                             int32_t pooling_type, int32_t flash_attn) {
     if (!model) return nullptr;

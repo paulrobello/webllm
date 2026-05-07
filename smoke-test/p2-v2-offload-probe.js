@@ -229,7 +229,7 @@ function typeName(t) {
       return `t${t}`;
   }
 }
-function buildMatmulShader(src0Type, src1Type, dstType) {
+function buildMatmulShader(src0Type, src1Type, dstType, kahan = false) {
   if (src1Type !== GGML_TYPE_F32 || dstType !== GGML_TYPE_F32) {
     throw new Error(`buildMatmulShader: unsupported (src1=${src1Type}, dst=${dstType}); ` + `Phase 2 requires src1=F32, dst=F32`);
   }
@@ -367,7 +367,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dst[dst_idx] = acc;
 }
 `;
-    case GGML_TYPE_Q4_K:
+    case GGML_TYPE_Q4_K: {
       return `${HEADER}
 const QK_K: u32 = ${QK_K}u;
 const Q4_K_BYTES_PER_BLOCK: u32 = ${Q4_K_BYTES_PER_BLOCK}u;
@@ -440,22 +440,39 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var acc: f32 = 0.0;
+    ${kahan ? "var compensation: f32 = 0.0;" : ""}
     for (var k: u32 = 0u; k < shape.K; k = k + 1u) {
         let a: f32 = load_q4_K(m, k, batch);
         let b: f32 = src1[(batch * shape.src1_batch_bytes + n * shape.src1_row_bytes) / 4u + k];
-        acc = acc + a * b;
+        ${kahan ? `// Neumaier-Kahan compensated summation. Recovers ~1 extra
+        // f32 mantissa bit per step over a length-K reduction by tracking
+        // the lost-low-order term in 'compensation'. WebGPU has no f64,
+        // so the correction lives entirely in f32 — single-step Kahan
+        // recovers the per-add rounding loss; cascading multiple
+        // consecutive losses (e.g. matched magnitudes) needs Neumaier's
+        // variant which we use here (always-keep-larger).
+        let term: f32 = a * b;
+        let t: f32 = acc + term;
+        if (abs(acc) >= abs(term)) {
+            compensation = compensation + ((acc - t) + term);
+        } else {
+            compensation = compensation + ((term - t) + acc);
+        }
+        acc = t;` : "acc = acc + a * b;"}
     }
+    ${kahan ? "acc = acc + compensation;" : ""}
     let dst_idx: u32 = (batch * shape.dst_batch_bytes + n * shape.dst_row_bytes) / 4u + m;
     dst[dst_idx] = acc;
 }
 `;
+    }
     default:
       throw new Error(`matmul: unsupported src0 type ${src0Type}`);
   }
 }
 var SHAPE_UNIFORM_BYTES = 12 * 4;
-function buildPipeline(device, src0Type, src1Type, dstType) {
-  const wgsl = buildMatmulShader(src0Type, src1Type, dstType);
+function buildPipeline(device, src0Type, src1Type, dstType, kahan = false) {
+  const wgsl = buildMatmulShader(src0Type, src1Type, dstType, kahan);
   const shaderModule = device.createShaderModule({ code: wgsl });
   const layout = device.createBindGroupLayout({
     entries: [
@@ -510,9 +527,16 @@ function dispatchMatmul(ctx, desc) {
   }
   const batchCount = Math.max(1, src1.ne[2]) * Math.max(1, src1.ne[3]);
   const ndim = batchCount > 1 ? 3 : 2;
-  const cacheKey = `mat-${typeName(src0.type)}-${typeName(src1.type)}-${typeName(dst.type)}-${ndim}`;
+  const kahanGlobal = globalThis;
+  let useKahan = false;
+  if (kahanGlobal.__stage425KahanArm && src0.type === GGML_TYPE_Q4_K && M === 2048 && K === 2048 && N === 6) {
+    useKahan = true;
+    kahanGlobal.__stage425KahanArm = false;
+    globalThis.__stage425KahanFired = true;
+  }
+  const cacheKey = `mat-${typeName(src0.type)}-${typeName(src1.type)}-${typeName(dst.type)}-${ndim}${useKahan ? "-kahan" : ""}`;
   const pipeline = ctx.pipelineCache.getOrCreate(cacheKey, (device) => {
-    const p = buildPipeline(device, src0.type, src1.type, dst.type);
+    const p = buildPipeline(device, src0.type, src1.type, dst.type, useKahan);
     ctx.bindGroupLayoutCache.set(cacheKey, p.getBindGroupLayout(0));
     return p;
   });

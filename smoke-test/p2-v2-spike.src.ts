@@ -3145,6 +3145,191 @@ async function runSpike(): Promise<void> {
 						`kahanVsKahanRef=${kahanRef.maxAbsDelta.toExponential(3)} ` +
 						`verdict: ${verdict}`,
 				);
+
+				// Stage 4.26 Probe 14 — score libllama's CPU Q4_K × Q8_K
+				// matmul against an f64 reference on the same captured
+				// production Q-projection inputs (cap.src0Bytes / cap.src1Bytes
+				// / src1View / src0Dequant). Mirrors Stage 4.24's
+				// `webllm_dequantize_q4_K` shim pattern: malloc src0/src1/dst,
+				// HEAPU8.set the captured bytes, call the shim, slice the
+				// result, free. The f64 reference accumulates in pure double
+				// precision over the JS-side dequant (already in
+				// `src0Dequant`). Verdict thresholds per Stage 4.26 brief:
+				//   ≥1e-4 → H-4-libllama-imprecise (libllama IS the imprecise
+				//          side; close matmul-precision investigation)
+				//   ≤1e-5 → H-4-libllama-precise   (both sides agree with
+				//          truth; bug is upstream src1 / RMSNorm)
+				//   else  → H-4-libllama-mid       (multi-source contributor)
+				if (cap.src0Type === GGML_TYPE_Q4_K) {
+					const dstShimSize = cap.M * cap.N * 4;
+					const src0Ptr = (mod as { _malloc: (n: number) => number })._malloc(
+						cap.src0Bytes.byteLength,
+					);
+					const src1Ptr = (mod as { _malloc: (n: number) => number })._malloc(
+						cap.src1Bytes.byteLength,
+					);
+					const dstShimPtr = (mod as { _malloc: (n: number) => number })._malloc(
+						dstShimSize,
+					);
+					if (!src0Ptr || !src1Ptr || !dstShimPtr) {
+						log(
+							`     [probe14] _malloc failed (src0=${src0Ptr} src1=${src1Ptr} dst=${dstShimPtr})`,
+							"fail",
+						);
+						if (src0Ptr) (mod as { _free: (p: number) => void })._free(src0Ptr);
+						if (src1Ptr) (mod as { _free: (p: number) => void })._free(src1Ptr);
+						if (dstShimPtr)
+							(mod as { _free: (p: number) => void })._free(dstShimPtr);
+					} else {
+						// Re-derive heap views after malloc (heap may have grown
+						// — same pattern as Probe 12).
+						const heapU8 = (mod as { HEAPU8: Uint8Array }).HEAPU8;
+						heapU8.set(cap.src0Bytes, src0Ptr);
+						heapU8.set(cap.src1Bytes, src1Ptr);
+						const status = (
+							mod as {
+								_webllm_q4k_q8k_matmul: (
+									s0: number,
+									s1: number,
+									d: number,
+									M: number,
+									K: number,
+									N: number,
+								) => number;
+							}
+						)._webllm_q4k_q8k_matmul(
+							src0Ptr,
+							src1Ptr,
+							dstShimPtr,
+							cap.M,
+							cap.K,
+							cap.N,
+						);
+						if (status !== 0) {
+							log(
+								`     [probe14] matmul shim status=${status} ` +
+									`(-1=bad-args -2=missing-cpu-traits -3=malloc-fail)`,
+								"fail",
+							);
+						} else {
+							const heapF32 = (mod as { HEAPF32: Float32Array }).HEAPF32;
+							const llamaOutput = new Float32Array(cap.M * cap.N);
+							llamaOutput.set(
+								heapF32.subarray(
+									dstShimPtr / 4,
+									dstShimPtr / 4 + cap.M * cap.N,
+								),
+							);
+
+							// f64 reference — pure double accumulation over
+							// the same JS-side dequant + raw src1 f32 values.
+							// No Math.fround; this is the truth oracle both
+							// modules are scored against.
+							const refF64 = new Float64Array(cap.M * cap.N);
+							for (let n = 0; n < cap.N; n++) {
+								for (let m = 0; m < cap.M; m++) {
+									let acc = 0;
+									const aRow = m * cap.K;
+									const bRow = n * cap.K;
+									for (let k = 0; k < cap.K; k++) {
+										acc += src0Dequant[aRow + k] * src1View[bRow + k];
+									}
+									refF64[n * cap.M + m] = acc;
+								}
+							}
+
+							let llamaVsF64Max = 0;
+							let llamaVsF64Idx = -1;
+							let nNaN = 0;
+							let nInf = 0;
+							for (let i = 0; i < cap.M * cap.N; i++) {
+								const v = llamaOutput[i];
+								if (Number.isNaN(v)) {
+									nNaN++;
+									continue;
+								}
+								if (!Number.isFinite(v)) {
+									nInf++;
+									continue;
+								}
+								const d = Math.abs(v - refF64[i]);
+								if (d > llamaVsF64Max) {
+									llamaVsF64Max = d;
+									llamaVsF64Idx = i;
+								}
+							}
+
+							// Cross-reference: re-score the WGSL captured dst
+							// against the same f64 reference for an apples-to-
+							// apples comparison (Probe 10 used an f32-loop
+							// reference; refresh against f64 here so both
+							// numbers in the closure share an oracle).
+							const wgslOutput = new Float32Array(
+								cap.dstAfterBytes.buffer,
+								cap.dstAfterBytes.byteOffset,
+								cap.M * cap.N,
+							);
+							let wgslVsF64Max = 0;
+							for (let i = 0; i < cap.M * cap.N; i++) {
+								const d = Math.abs(wgslOutput[i] - refF64[i]);
+								if (d > wgslVsF64Max) wgslVsF64Max = d;
+							}
+
+							let llamaVsWgslMax = 0;
+							let llamaVsWgslIdx = -1;
+							for (let i = 0; i < cap.M * cap.N; i++) {
+								const d = Math.abs(llamaOutput[i] - wgslOutput[i]);
+								if (d > llamaVsWgslMax) {
+									llamaVsWgslMax = d;
+									llamaVsWgslIdx = i;
+								}
+							}
+
+							let probe14Verdict: string;
+							if (llamaVsF64Max >= 1e-4) {
+								probe14Verdict =
+									"H-4-libllama-imprecise (libllama ≥1e-4 from f64 truth — close matmul-precision investigation; pivot to other ops in cascade)";
+							} else if (llamaVsF64Max <= 1e-5) {
+								probe14Verdict =
+									"H-4-libllama-precise (libllama ≤1e-5 from f64 truth — both sides accurate; cross-module gap must come from upstream src1 / RMSNorm divergence)";
+							} else {
+								probe14Verdict =
+									"H-4-libllama-mid (libllama between 1e-5 and 1e-4 from f64 truth — multi-source contribution; queue both upstream src1 re-capture AND libllama precision quantification)";
+							}
+
+							log(
+								`PROBE14_LLAMA_MATMUL_VS_F64 = ${JSON.stringify({
+									M: cap.M,
+									K: cap.K,
+									N: cap.N,
+									llamaVsF64Max,
+									llamaVsF64Idx,
+									wgslVsF64Max,
+									llamaVsWgslMax,
+									llamaVsWgslIdx,
+									nNaN,
+									nInf,
+									first8Llama: Array.from(llamaOutput.subarray(0, 8)),
+									first8Wgsl: Array.from(wgslOutput.subarray(0, 8)),
+									first8RefF64: Array.from(refF64.subarray(0, 8)),
+								})}`,
+							);
+							log(
+								`     [probe14] llamaVsF64=${llamaVsF64Max.toExponential(3)} ` +
+									`wgslVsF64=${wgslVsF64Max.toExponential(3)} ` +
+									`llamaVsWgsl=${llamaVsWgslMax.toExponential(3)} ` +
+									`verdict: ${probe14Verdict}`,
+							);
+						}
+						(mod as { _free: (p: number) => void })._free(src0Ptr);
+						(mod as { _free: (p: number) => void })._free(src1Ptr);
+						(mod as { _free: (p: number) => void })._free(dstShimPtr);
+					}
+				} else {
+					log(
+						`     [probe14] skipped — cap.src0Type=${cap.src0Type} ≠ Q4_K`,
+					);
+				}
 			}
 		} catch (err) {
 			log(
