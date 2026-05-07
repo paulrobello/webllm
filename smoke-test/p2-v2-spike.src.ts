@@ -15,6 +15,7 @@ import { installJsepCallbacks } from "../src/inference/jsep/index.js";
 import { createLlamaBridge } from "../src/inference/llama-bridge.js";
 import {
 	dispatchMatmul,
+	GGML_TYPE_F16,
 	GGML_TYPE_F32,
 	GGML_TYPE_Q4_K,
 	type JsepOpDescriptor,
@@ -22,8 +23,16 @@ import {
 import {
 	GGML_OP_MUL_MAT,
 	GGML_OP_RMS_NORM,
+	GGML_OP_SET_ROWS,
 } from "../src/inference/jsep/index.js";
 import { dispatchRmsNorm } from "../src/inference/jsep/ops/rms-norm.js";
+import { dispatchSetRows } from "../src/inference/jsep/ops/set-rows.js";
+
+// I64 indices type for SET_ROWS. Mirrors the ggml internal enum value
+// (`GGML_TYPE_I64 = 27`) — we don't import the constant from set-rows.ts
+// because it lives in a `__setRowsInternals` re-export not on the
+// public path.
+const GGML_TYPE_I64 = 27;
 
 // Same fixture as p0-spike.src.ts — "The capital of France is".
 const PROMPT_TOKEN_IDS = [1, 450, 7483, 310, 3444, 338];
@@ -459,6 +468,320 @@ async function runMatmulProductionSelfTest(
 	return result;
 }
 
+// ----- SET_ROWS V-cache transpose self-test (Stage 4.6 D1) -----------------
+//
+// TinyLlama (no FA) writes the V cache via the transposed layout at
+// `llama-kv-cache.cpp:1281`:
+//
+//     v_view = ggml_reshape_2d(v, 1, ggml_nelements(v))
+//     SET_ROWS dst:  F16 [1, N_total_cells]   (ne[0]=1)
+//     SET_ROWS src0: F32 [1, N_rows]          (one f32 per row)
+//     SET_ROWS src1: I64 [N_rows]             (each maps row → cell idx)
+//
+// The kernel writes one F16 cell per source row, addressing dst as
+// `array<atomic<u32>>` and merging into the appropriate halfword via
+// CAS (since two adjacent F16 cells share a u32 word and concurrent
+// writes to the pair would otherwise race). Existing kernel selftests
+// only exercise multi-element rows (RMSNORM/MATMUL); SET_ROWS at the
+// V-cache shape has never been verified against a CPU reference. If
+// the kernel writes the wrong cell, leaks bits across pair-mates, or
+// drops writes under contention, V-cache decode produces real-but-
+// wrong tokens — exactly the Stage 4.5 partial-flip symptom.
+//
+// This selftest covers:
+//   1. Indices that DO share a u32 word (0&1, 6&7) — atomic CAS race
+//   2. Indices in distinct words (2 alone in word 1, 4 alone in word 2)
+//   3. Pre-fill dst with a sentinel pattern; verify untargeted cells
+//      are PRESERVED (the divert path's pre-copy is load-bearing —
+//      drop of pre-copy would zero out untargeted cells)
+//
+// Outcome triage:
+//   FAIL with maxAbsDelta > 1e-3 on targeted cells → CAS encoding bug
+//   FAIL with non-target cells corrupted             → divert pre-copy bug
+//   FAIL with off-by-one cell offsets                → indices/stride bug
+//   PASS on both no-divert + divert                  → kernel is correct
+//                                                      (move to D2 or D3)
+
+interface SetRowsSelfTestResult {
+	mode: "no-divert" | "divert";
+	status: number;
+	N_CELLS: number;
+	N_ROWS: number;
+	indices: number[];
+	srcF32: number[];
+	preF16: number[];   // dst F16 cells before dispatch (decoded to f32)
+	postF16: number[];  // dst F16 cells after dispatch (decoded to f32)
+	expectedF16: number[]; // CPU reference: pre with target cells overwritten
+	maxAbsDeltaTargeted: number;
+	maxAbsDeltaUntargeted: number;
+	hasNaN: boolean;
+	hasInf: boolean;
+}
+
+async function runSetRowsVCacheSelfTest(
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+	mode: "no-divert" | "divert",
+): Promise<SetRowsSelfTestResult> {
+	// 16 F16 cells = 32 bytes = 8 u32 words. Adjacent index pairs that share
+	// a word: (0,1), (2,3), (4,5), (6,7), (8,9), (10,11), (12,13), (14,15).
+	// We target {0, 1, 6, 7} so two pair-mates collide on word 0 and word 3,
+	// while the rest of the buffer is left untargeted (must remain
+	// sentinel-valued post-dispatch).
+	const N_CELLS = 16;
+	const N_ROWS = 4;
+	const indices = [0n, 1n, 6n, 7n] as readonly bigint[];
+
+	// Source rows have distinguishable F32 values that survive F16 round-trip.
+	// f16(x) loses precision below ~1e-4 / above ~65504 / for denormals; pick
+	// values that f16 represents exactly (small integers + halves).
+	const srcF32 = new Float32Array(N_ROWS);
+	srcF32[0] = 0.5; // → f16 0x3800
+	srcF32[1] = -0.25; // → f16 0xb400
+	srcF32[2] = 1.5; // → f16 0x3e00
+	srcF32[3] = -3.0; // → f16 0xc200
+
+	// Sentinel: each cell pre-loaded with a distinct decodable F16 so we can
+	// detect (a) which cells were written and (b) whether untargeted cells
+	// were preserved. F16 representation of 100 + i*0.5 is exact for i<200.
+	const sentinelF32 = new Float32Array(N_CELLS);
+	for (let i = 0; i < N_CELLS; i++) sentinelF32[i] = 100 + i * 0.5;
+	const sentinelF16Bytes = new Uint8Array(N_CELLS * 2);
+	const sv = new DataView(sentinelF16Bytes.buffer);
+	for (let i = 0; i < N_CELLS; i++) {
+		sv.setUint16(i * 2, f32ToF16Bits(sentinelF32[i]), true);
+	}
+
+	// CPU reference: take the sentinel state, then overwrite each indexed
+	// cell with f32→f16(srcF32[row]). Compare the read-back F16 cells
+	// (decoded to f32) against this.
+	const expectedF16 = new Float32Array(N_CELLS);
+	expectedF16.set(sentinelF32);
+	for (let r = 0; r < N_ROWS; r++) {
+		const cellIdx = Number(indices[r]);
+		expectedF16[cellIdx] = f16BitsToF32(f32ToF16Bits(srcF32[r]));
+	}
+
+	// Indices buffer: I64 = 8 bytes per index. WGSL kernel reads only the
+	// low 32 bits (idx_pair_off * 2u + 0). We zero-fill the high half.
+	const indicesBytes = new Uint8Array(N_ROWS * 8);
+	const iv = new DataView(indicesBytes.buffer);
+	for (let r = 0; r < N_ROWS; r++) {
+		iv.setUint32(r * 8, Number(indices[r]) >>> 0, true); // low half
+		iv.setUint32(r * 8 + 4, 0, true); // high half
+	}
+
+	// Allocate buffers. In divert mode we co-locate src1 and dst into a
+	// single buffer so dst.bufHandle === src[2].bufHandle (the structural
+	// alias that ggml SET_ROWS always produces). The non-divert mode
+	// keeps them in separate buffers.
+	const srcF32Bytes = new Uint8Array(srcF32.buffer);
+	const dstByteSize = N_CELLS * 2;
+	const ALIGN = 256;
+	const srcF32Aligned = (srcF32Bytes.byteLength + ALIGN - 1) & ~(ALIGN - 1);
+	const indicesAligned = (indicesBytes.byteLength + ALIGN - 1) & ~(ALIGN - 1);
+
+	let hSrc0: number;
+	let hSrc1: number;
+	let hDst: number;
+	let dstOffset = 0;
+
+	if (mode === "no-divert") {
+		hSrc0 = runtime.dataManager.alloc(srcF32Bytes.byteLength);
+		hSrc1 = runtime.dataManager.alloc(indicesBytes.byteLength);
+		hDst = runtime.dataManager.alloc(dstByteSize);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc0).buffer,
+			0,
+			srcF32Bytes,
+			0,
+			srcF32Bytes.byteLength,
+		);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc1).buffer,
+			0,
+			indicesBytes,
+			0,
+			indicesBytes.byteLength,
+		);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hDst).buffer,
+			0,
+			sentinelF16Bytes,
+			0,
+			sentinelF16Bytes.byteLength,
+		);
+	} else {
+		// Shared buffer holds [src0 | indices | dst] at aligned offsets.
+		// Setting hDst = hSrc1 (with src1 at offset 0, dst at indicesAligned)
+		// and passing hSrc1 as src[2] in the descriptor triggers the divert
+		// path, mirroring the production case where v_view shares storage
+		// with the cache_v_l buffer.
+		hSrc0 = runtime.dataManager.alloc(srcF32Aligned);
+		const sharedSize = indicesAligned + dstByteSize;
+		hSrc1 = runtime.dataManager.alloc(sharedSize);
+		hDst = hSrc1;
+		dstOffset = indicesAligned;
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc0).buffer,
+			0,
+			srcF32Bytes,
+			0,
+			srcF32Bytes.byteLength,
+		);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc1).buffer,
+			0,
+			indicesBytes,
+			0,
+			indicesBytes.byteLength,
+		);
+		runtime.device.queue.writeBuffer(
+			runtime.dataManager.get(hSrc1).buffer,
+			dstOffset,
+			sentinelF16Bytes,
+			0,
+			sentinelF16Bytes.byteLength,
+		);
+	}
+
+	// Pre-dispatch readback (sanity check: did the sentinel land?).
+	const preStaging = runtime.device.createBuffer({
+		size: dstByteSize,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	{
+		const enc = runtime.device.createCommandEncoder();
+		enc.copyBufferToBuffer(
+			runtime.dataManager.get(hDst).buffer,
+			dstOffset,
+			preStaging,
+			0,
+			dstByteSize,
+		);
+		runtime.device.queue.submit([enc.finish()]);
+	}
+	await preStaging.mapAsync(GPUMapMode.READ, 0, dstByteSize);
+	const preBytes = new Uint8Array(preStaging.getMappedRange().slice(0));
+	preStaging.unmap();
+	preStaging.destroy();
+	const preF16 = new Float32Array(N_CELLS);
+	{
+		const dv = new DataView(preBytes.buffer);
+		for (let i = 0; i < N_CELLS; i++) {
+			preF16[i] = f16BitsToF32(dv.getUint16(i * 2, true));
+		}
+	}
+
+	// SET_ROWS descriptor — V-cache transpose layout (ne[0]=1).
+	// Per ggml semantics dst.bufHandle === src[2].bufHandle. We pass src[2]
+	// as a descriptor-only entry so the divert path's structural-alias
+	// detection fires.
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_SET_ROWS,
+		nSrc: 3,
+		dst: {
+			bufHandle: hDst,
+			offset: dstOffset,
+			type: GGML_TYPE_F16,
+			ne: [1, N_CELLS, 1, 1],
+			nb: [2, 2, 2 * N_CELLS, 2 * N_CELLS],
+		},
+		srcs: [
+			{
+				bufHandle: hSrc0,
+				offset: 0,
+				type: GGML_TYPE_F32,
+				ne: [1, N_ROWS, 1, 1],
+				nb: [4, 4, 4 * N_ROWS, 4 * N_ROWS],
+			},
+			{
+				bufHandle: hSrc1,
+				offset: 0,
+				type: GGML_TYPE_I64,
+				ne: [N_ROWS, 1, 1, 1],
+				nb: [8, 8 * N_ROWS, 8 * N_ROWS, 8 * N_ROWS],
+			},
+			{
+				// src[2] = a, the destination buffer. Same handle as dst
+				// (dst is view_tensor(a)) — this is what triggers divert.
+				bufHandle: hDst,
+				offset: dstOffset,
+				type: GGML_TYPE_F16,
+				ne: [1, N_CELLS, 1, 1],
+				nb: [2, 2, 2 * N_CELLS, 2 * N_CELLS],
+			},
+		],
+	};
+
+	const status = dispatchSetRows(runtime, desc);
+	runtime.encoderBatcher.flush();
+
+	// Read back the dst F16 cells.
+	const postStaging = runtime.device.createBuffer({
+		size: dstByteSize,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	{
+		const enc = runtime.device.createCommandEncoder();
+		enc.copyBufferToBuffer(
+			runtime.dataManager.get(hDst).buffer,
+			dstOffset,
+			postStaging,
+			0,
+			dstByteSize,
+		);
+		runtime.device.queue.submit([enc.finish()]);
+	}
+	await postStaging.mapAsync(GPUMapMode.READ, 0, dstByteSize);
+	const postBytes = new Uint8Array(postStaging.getMappedRange().slice(0));
+	postStaging.unmap();
+	postStaging.destroy();
+	const postF16 = new Float32Array(N_CELLS);
+	{
+		const dv = new DataView(postBytes.buffer);
+		for (let i = 0; i < N_CELLS; i++) {
+			postF16[i] = f16BitsToF32(dv.getUint16(i * 2, true));
+		}
+	}
+
+	const targetSet = new Set<number>(indices.map((b) => Number(b)));
+	let maxAbsDeltaTargeted = 0;
+	let maxAbsDeltaUntargeted = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	for (let i = 0; i < N_CELLS; i++) {
+		const v = postF16[i];
+		if (Number.isNaN(v)) hasNaN = true;
+		else if (!Number.isFinite(v)) hasInf = true;
+		const d = Math.abs(v - expectedF16[i]);
+		if (targetSet.has(i)) {
+			if (d > maxAbsDeltaTargeted) maxAbsDeltaTargeted = d;
+		} else if (d > maxAbsDeltaUntargeted) maxAbsDeltaUntargeted = d;
+	}
+
+	const result: SetRowsSelfTestResult = {
+		mode,
+		status,
+		N_CELLS,
+		N_ROWS,
+		indices: indices.map((b) => Number(b)),
+		srcF32: Array.from(srcF32),
+		preF16: Array.from(preF16),
+		postF16: Array.from(postF16),
+		expectedF16: Array.from(expectedF16),
+		maxAbsDeltaTargeted,
+		maxAbsDeltaUntargeted,
+		hasNaN,
+		hasInf,
+	};
+
+	runtime.dataManager.free(hSrc0);
+	runtime.dataManager.free(hSrc1);
+	if (mode === "no-divert") runtime.dataManager.free(hDst);
+
+	return result;
+}
+
 // ----- RMS_NORM real-shape self-test ---------------------------------------
 //
 // Stage 3.5 Step 1: drive `dispatchRmsNorm` with a row whose column count
@@ -865,6 +1188,20 @@ async function runSpike(): Promise<void> {
 		const matProd2 = await runMatmulProductionSelfTest(runtime, "divert");
 		log(`MATMUL_PROD_DIVERT = ${JSON.stringify(matProd2)}`);
 		(window as any).__matmulProdDivert = matProd2;
+
+		// Stage 4.6 D1: SET_ROWS V-cache transpose self-test. Drives the
+		// F32→F16 atomic-CAS path with adjacent indices that share u32
+		// words ({0,1} and {6,7}); CPU reference is the sentinel state
+		// with target cells overwritten by f32→f16(srcF32). PASS proves
+		// the kernel is correct; FAIL points at CAS encoding,
+		// indices/strides, or divert pre-copy.
+		const setRows1 = await runSetRowsVCacheSelfTest(runtime, "no-divert");
+		log(`SETROWS_VCACHE_NODIVERT = ${JSON.stringify(setRows1)}`);
+		(window as any).__setRowsNoDivert = setRows1;
+
+		const setRows2 = await runSetRowsVCacheSelfTest(runtime, "divert");
+		log(`SETROWS_VCACHE_DIVERT = ${JSON.stringify(setRows2)}`);
+		(window as any).__setRowsDivert = setRows2;
 
 		log("[4/8] Initializing ggml-webgpu backend...");
 		const initStatus = await mod._webgpu_init();
