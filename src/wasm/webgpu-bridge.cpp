@@ -731,6 +731,12 @@ void webllm_free_model(void* model) {
 // reference (`make wasm-build` produces "Paris" correctly; JSEP
 // produces "in" / "inonic boso-" gibberish post-Stage-4.16).
 static const char* const NODE_DUMP_ALLOWLIST[] = {
+    // Stage 4.19 Probe 9a: upstream-of-Q-projection inputs to localize
+    // where the 5.24e-4 Qcur-0 production delta originates. inp_embd
+    // is the embedding lookup output (cb il=-1, no suffix); attn_norm-0
+    // is the RMSNorm output that feeds Q/K/V projection at layer 0;
+    // l_out-0 is the residual-stream output after layer 0.
+    "inp_embd", "attn_norm-0", "l_out-0",
     "Qcur-0", "Kcur-0", "Vcur-0",
     "kq-0", "kq_soft_max-0", "kqv_out-0",
     "attn_out-0", "ffn_norm-0", "ffn_out-0",
