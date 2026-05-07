@@ -1146,6 +1146,38 @@ async function runSpike(): Promise<void> {
 		});
 		(window as any).__gpuErrLog = gpuErrLog;
 
+		// Stage 4.8 — initialize dispatchSetRows entry/exit log before
+		// installJsepCallbacks runs so the warmup + every selftest +
+		// production graph dispatch is captured.
+		const stage48SetRowsLog: Array<{ phase: string; data?: unknown }> = [];
+		(globalThis as any).__stage48SetRowsLog = stage48SetRowsLog;
+		(window as any).__stage48SetRowsLog = stage48SetRowsLog;
+
+		// Stage 4.8 — temp-dst capture state (buffers allocated post-device).
+		const stage48Captures = {
+			preKernelFirst8U16: null as number[] | null,
+			postKernelFirst8U16: null as number[] | null,
+			postCopyBackFirst8U16: null as number[] | null,
+			src0AtKernelTimeF32: null as number[] | null,
+			err: null as string | null,
+		};
+		(window as any).__stage48Captures = stage48Captures;
+
+		// Stage 4.8 — capture every console.error into a buffer so we
+		// don't miss dispatchSetRows validation failures past CDP's
+		// console-buffer cap.
+		const consoleErrors: string[] = [];
+		const origConsoleError = console.error.bind(console);
+		console.error = (...args: unknown[]) => {
+			try {
+				consoleErrors.push(args.map((a) => String(a)).join(" "));
+			} catch {
+				/* swallow */
+			}
+			origConsoleError(...args);
+		};
+		(window as any).__consoleErrors = consoleErrors;
+
 		log("[3/8] Installing JSEP callbacks (must precede webllm_load_model)...");
 		const runtime = installJsepCallbacks(mod, device);
 
@@ -1471,6 +1503,12 @@ async function runSpike(): Promise<void> {
 			dstNe: number[];
 			src0Ne: number[];
 			src1Ne: number[];
+			// Stage 4.8: full nb arrays so we can validate stride integrality
+			// when status=-1 fires (dispatchSetRows uses console.error which
+			// may be lost past CDP's buffer cap).
+			dstNb?: number[];
+			src0Nb?: number[];
+			src1Nb?: number[];
 			src0First8F32: number[] | null;
 			src1First8Idx: number[] | null;
 			dstPreFirst8U16: number[] | null;
@@ -1487,6 +1525,26 @@ async function runSpike(): Promise<void> {
 		const setRowsDiagPromises: Promise<void>[] = [];
 		(window as any).__setRowsDiag = setRowsDiag;
 		const GGML_OP_SET_ROWS_VAL = 42; // mirrors GGML_OP_SET_ROWS
+
+		// Stage 4.8 Step B sentinel probe — fires once on the FIRST
+		// SET_ROWS divert dispatch (Stage 4.7 R1: i=3, K-cache layer 0,
+		// dstO=0 silently no-ops). Writes a distinct u16 pattern into
+		// real-dst BEFORE the dispatch runs, then reads after. The
+		// pattern post-dispatch tells us which step inside the divert
+		// path (pre-copy / kernel / copy-back) failed.
+		let sentinelProbeDone = false;
+		const SENTINEL_PROBE_U16: number[] = [
+			0xbe01, 0xbe02, 0xbe03, 0xbe04, 0xbe05, 0xbe06, 0xbe07, 0xbe08,
+		];
+		const stage48Probe = {
+			triggered: false,
+			i: -1,
+			preWriteFirst8U16: null as number[] | null,
+			postWriteFirst8U16: null as number[] | null,
+			postDispatchFirst8U16: null as number[] | null,
+			err: null as string | null,
+		};
+		(window as any).__stage48Probe = stage48Probe;
 
 		// Stage 4.7 D2-tight: jsepRunOp is now async. graph_compute is in
 		// JSPI_EXPORTS (src/wasm/CMakeLists.txt) so the wasm side awaits the
@@ -1575,6 +1633,25 @@ async function runSpike(): Promise<void> {
 						heap32[src1W + 3 + 2],
 						heap32[src1W + 3 + 3],
 					];
+					// Stage 4.8: capture nb arrays (low halves of i64).
+					const dstNb = [
+						heap32[baseW + 2 + 11 + 0],
+						heap32[baseW + 2 + 11 + 1],
+						heap32[baseW + 2 + 11 + 2],
+						heap32[baseW + 2 + 11 + 3],
+					];
+					const src0Nb = [
+						heap32[src0W + 11 + 0],
+						heap32[src0W + 11 + 1],
+						heap32[src0W + 11 + 2],
+						heap32[src0W + 11 + 3],
+					];
+					const src1Nb = [
+						heap32[src1W + 11 + 0],
+						heap32[src1W + 11 + 1],
+						heap32[src1W + 11 + 2],
+						heap32[src1W + 11 + 3],
+					];
 					setRowsDiagEntry = {
 						i: runLog.length - 1,
 						seq: entry.seq,
@@ -1590,6 +1667,9 @@ async function runSpike(): Promise<void> {
 						dstNe,
 						src0Ne,
 						src1Ne,
+						dstNb,
+						src0Nb,
+						src1Nb,
 						src0First8F32: null,
 						src1First8Idx: null,
 						dstPreFirst8U16: null,
@@ -1606,6 +1686,43 @@ async function runSpike(): Promise<void> {
 				opParamsLen,
 			);
 			if (entry) entry.status = status;
+
+			// Stage 4.8 Step B sentinel probe — post-dispatch capture.
+			// Read real-dst at dstO right after the divert path returns to
+			// see what landed where the sentinel was written.
+			if (
+				stage48Probe.triggered &&
+				stage48Probe.postDispatchFirst8U16 === null &&
+				setRowsDiagEntry &&
+				setRowsDiagEntry.i === stage48Probe.i
+			) {
+				try {
+					const dev = runtime.device;
+					const READ_U16 = 16;
+					runtime.encoderBatcher.flush();
+					const dstRec = runtime.dataManager.get(setRowsDiagEntry.dstH);
+					const staging = dev.createBuffer({
+						size: READ_U16,
+						usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+					});
+					const enc = dev.createCommandEncoder();
+					enc.copyBufferToBuffer(
+						dstRec.buffer,
+						setRowsDiagEntry.dstO,
+						staging,
+						0,
+						READ_U16,
+					);
+					dev.queue.submit([enc.finish()]);
+					await staging.mapAsync(GPUMapMode.READ, 0, READ_U16);
+					const u16 = new Uint16Array(staging.getMappedRange().slice(0));
+					staging.unmap();
+					staging.destroy();
+					stage48Probe.postDispatchFirst8U16 = Array.from(u16);
+				} catch (e) {
+					stage48Probe.err = (e as Error).message;
+				}
+			}
 			// Schedule deferred dst readback. We capture dstH / dstO in
 			// closure because runLog/dstProbes get mutated by later calls.
 			if (probeI >= 0 && entry) {
@@ -1808,6 +1925,40 @@ async function runSpike(): Promise<void> {
 			return status;
 		}) as any;
 		(window as any).__jsepRunLog = runLog;
+
+		// Stage 4.8 — install divert hook RIGHT BEFORE decode. The hook
+		// captures pre-kernel/post-kernel/post-copy-back snapshots of the
+		// FIRST production divert dispatch (i=3, K-cache layer 0). All
+		// prior divert calls (warmup + selftests) have already run, so the
+		// "triggered" flag will fire on the production i=3.
+		// 8 rows × 16 bytes per row = 128 bytes per capture buffer.
+		const STAGE48_CAPTURE_SIZE = 128;
+		const __stage48PreKernelBuf = device.createBuffer({
+			size: STAGE48_CAPTURE_SIZE,
+			usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+		});
+		const __stage48PostKernelBuf = device.createBuffer({
+			size: STAGE48_CAPTURE_SIZE,
+			usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+		});
+		const __stage48PostCopyBackBuf = device.createBuffer({
+			size: STAGE48_CAPTURE_SIZE,
+			usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+		});
+		const __stage48Src0CaptureBuf = device.createBuffer({
+			size: STAGE48_CAPTURE_SIZE,
+			usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+		});
+		(globalThis as any).__stage48DivertHook = {
+			triggered: false,
+			preKernelBuf: __stage48PreKernelBuf,
+			postKernelBuf: __stage48PostKernelBuf,
+			postCopyBackBuf: __stage48PostCopyBackBuf,
+			src0CaptureBuf: __stage48Src0CaptureBuf,
+			capturedDstSize: 0,
+			capturedNe0: 0,
+			capturedNr: 0,
+		};
 
 		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
 		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
@@ -2017,6 +2168,46 @@ async function runSpike(): Promise<void> {
 		// TinyLlama prefill graph writes the K cache for the prompt's first
 		// layer; src[0] should contain F32 K-projection outputs after ROPE
 		// rotation — typical magnitudes are |x| < 5.
+		// Stage 4.8 — read back temp-dst captures from the FIRST production
+		// divert dispatch.
+		try {
+			await __stage48PreKernelBuf.mapAsync(GPUMapMode.READ, 0, 128);
+			stage48Captures.preKernelFirst8U16 = Array.from(
+				new Uint16Array(__stage48PreKernelBuf.getMappedRange().slice(0)),
+			);
+			__stage48PreKernelBuf.unmap();
+		} catch (e) {
+			stage48Captures.err = (e as Error).message;
+		}
+		try {
+			await __stage48PostKernelBuf.mapAsync(GPUMapMode.READ, 0, 128);
+			stage48Captures.postKernelFirst8U16 = Array.from(
+				new Uint16Array(__stage48PostKernelBuf.getMappedRange().slice(0)),
+			);
+			__stage48PostKernelBuf.unmap();
+		} catch (e) {
+			stage48Captures.err = (e as Error).message;
+		}
+		try {
+			await __stage48PostCopyBackBuf.mapAsync(GPUMapMode.READ, 0, 128);
+			stage48Captures.postCopyBackFirst8U16 = Array.from(
+				new Uint16Array(__stage48PostCopyBackBuf.getMappedRange().slice(0)),
+			);
+			__stage48PostCopyBackBuf.unmap();
+		} catch (e) {
+			stage48Captures.err = (e as Error).message;
+		}
+		try {
+			await __stage48Src0CaptureBuf.mapAsync(GPUMapMode.READ, 0, 128);
+			stage48Captures.src0AtKernelTimeF32 = Array.from(
+				new Float32Array(__stage48Src0CaptureBuf.getMappedRange().slice(0)),
+			);
+			__stage48Src0CaptureBuf.unmap();
+		} catch (e) {
+			stage48Captures.err = (e as Error).message;
+		}
+		log(`STAGE48_CAPTURES = ${JSON.stringify(stage48Captures)}`);
+
 		log(`SETROWS_DIAG_FIRST5 = ${JSON.stringify(setRowsDiag.slice(0, 5))}`);
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);

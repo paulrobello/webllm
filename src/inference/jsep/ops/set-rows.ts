@@ -260,8 +260,27 @@ export function dispatchSetRows(
 	ctx: JsepOpContext,
 	desc: JsepOpDescriptor,
 ): number {
+	// Stage 4.8 instrumentation — temporary entry log to trace which path
+	// returns -1 silently for the first production divert call.
+	const __stage48Log = (
+		globalThis as unknown as {
+			__stage48SetRowsLog?: Array<{ phase: string; data?: unknown }>;
+		}
+	).__stage48SetRowsLog;
+	if (__stage48Log)
+		__stage48Log.push({
+			phase: "entry",
+			data: {
+				nSrc: desc.nSrc,
+				op: desc.op,
+				dstH: desc.dst.bufHandle,
+				dstO: desc.dst.offset,
+			},
+		});
 	if (desc.nSrc !== 3) {
 		console.error(`dispatchSetRows: expected 3 srcs, got ${desc.nSrc}`);
+		if (__stage48Log)
+			__stage48Log.push({ phase: "ret-1-nsrc", data: desc.nSrc });
 		return -1;
 	}
 
@@ -271,18 +290,24 @@ export function dispatchSetRows(
 
 	if (src0.type !== GGML_TYPE_F32) {
 		console.error(`dispatchSetRows: src0 must be F32 (got type=${src0.type})`);
+		if (__stage48Log)
+			__stage48Log.push({ phase: "ret-1-src0type", data: src0.type });
 		return -1;
 	}
 	if (src1.type !== GGML_TYPE_I64 && src1.type !== GGML_TYPE_I32) {
 		console.error(
 			`dispatchSetRows: src1 must be I64 or I32 (got type=${src1.type})`,
 		);
+		if (__stage48Log)
+			__stage48Log.push({ phase: "ret-1-src1type", data: src1.type });
 		return -1;
 	}
 	if (dst.type !== GGML_TYPE_F16 && dst.type !== GGML_TYPE_F32) {
 		console.error(
 			`dispatchSetRows: dst must be F16 or F32 (got type=${dst.type})`,
 		);
+		if (__stage48Log)
+			__stage48Log.push({ phase: "ret-1-dsttype", data: dst.type });
 		return -1;
 	}
 
@@ -297,6 +322,11 @@ export function dispatchSetRows(
 		console.error(
 			`dispatchSetRows: dst ne[0]=${dst.ne[0]} != src0 ne[0]=${ne0}`,
 		);
+		if (__stage48Log)
+			__stage48Log.push({
+				phase: "ret-1-ne0mismatch",
+				data: { dst: dst.ne[0], src0: ne0 },
+			});
 		return -1;
 	}
 
@@ -338,6 +368,11 @@ export function dispatchSetRows(
 					`(src0.nb=[${src0.nb.join(",")}] src1.nb=[${src1.nb.join(",")}] ` +
 					`dst.nb=[${dst.nb.join(",")}] dstElemBytes=${dstElemBytes})`,
 			);
+			if (__stage48Log)
+				__stage48Log.push({
+					phase: "ret-1-stride",
+					data: { name, val },
+				});
 			return -1;
 		}
 	}
@@ -353,6 +388,7 @@ export function dispatchSetRows(
 	const bindGroupLayout = ctx.bindGroupLayoutCache.get(cacheKey);
 	if (!bindGroupLayout) {
 		console.error(`dispatchSetRows: missing bindGroupLayout for ${cacheKey}`);
+		if (__stage48Log) __stage48Log.push({ phase: "ret-1-bgl", data: cacheKey });
 		return -1;
 	}
 
@@ -434,6 +470,15 @@ export function dispatchSetRows(
 				`dispatchSetRows: divert would read past dst buffer end ` +
 					`(offset=${dst.offset} + size=${dstSize} > ${dstRec.size})`,
 			);
+			if (__stage48Log)
+				__stage48Log.push({
+					phase: "ret-1-divertOOB",
+					data: {
+						offset: dst.offset,
+						dstSize,
+						dstRecSize: dstRec.size,
+					},
+				});
 			return -1;
 		}
 
@@ -475,22 +520,105 @@ export function dispatchSetRows(
 		// its pre/post copies must live in a self-contained encoder.
 		ctx.encoderBatcher.flush();
 
+		const __stage48Hook = (
+			globalThis as unknown as {
+				__stage48DivertHook?: {
+					triggered: boolean;
+					// Capture buffers — 128 bytes each (64 F16 cells / 32 F32 cells),
+					// 16 bytes per row across nr rows.
+					preKernelBuf: GPUBuffer;
+					postKernelBuf: GPUBuffer;
+					postCopyBackBuf: GPUBuffer;
+					src0CaptureBuf: GPUBuffer;
+					capturedDstSize: number;
+					capturedNe0: number;
+					capturedNr: number;
+				};
+			}
+		).__stage48DivertHook;
+		const __stage48Capture = __stage48Hook && !__stage48Hook.triggered;
+		if (__stage48Capture && __stage48Hook) {
+			__stage48Hook.triggered = true;
+			__stage48Hook.capturedDstSize = dstSize;
+			__stage48Hook.capturedNe0 = ne0;
+			__stage48Hook.capturedNr = nr;
+		}
+
 		const enc = ctx.device.createCommandEncoder();
 		// Pre-copy real dst → temp so unwritten rows + the F16 atomic CAS
 		// path both see the correct prior state.
 		enc.copyBufferToBuffer(dstRec.buffer, dst.offset, tempDst, 0, dstSize);
+		// Stage 4.8 — pre-kernel snapshot: tempDst rows 0..nr-1 first 8 cells
+		// (8 F16 cells = 16 bytes per row, spaced ne0*2 bytes apart).
+		// Also capture src0 (the K data the kernel will read) at the SAME
+		// encoder timeline so we can see what the kernel saw.
+		if (__stage48Capture && __stage48Hook) {
+			const rowStrideBytes = ne0 * 2; // F16 cell stride
+			const src0RowStrideBytes = ne0 * 4; // F32 cell stride for src0
+			const rowsToCapture = Math.min(nr, 8);
+			for (let r = 0; r < rowsToCapture; r++) {
+				enc.copyBufferToBuffer(
+					tempDst,
+					r * rowStrideBytes,
+					__stage48Hook.preKernelBuf,
+					r * 16,
+					16,
+				);
+				// Capture 16 bytes (4 F32) per src0 row at start.
+				enc.copyBufferToBuffer(
+					src0Rec.buffer,
+					src0.offset + r * src0RowStrideBytes,
+					__stage48Hook.src0CaptureBuf,
+					r * 16,
+					16,
+				);
+			}
+		}
 		const pass = enc.beginComputePass();
 		pass.setPipeline(pipeline);
 		pass.setBindGroup(0, divertBindGroup);
 		pass.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
 		pass.end();
+		// Stage 4.8 — post-kernel snapshot: rows 0..nr-1 first 8 cells.
+		if (__stage48Capture && __stage48Hook) {
+			const rowStrideBytes = ne0 * 2;
+			const rowsToCapture = Math.min(nr, 8);
+			for (let r = 0; r < rowsToCapture; r++) {
+				enc.copyBufferToBuffer(
+					tempDst,
+					r * rowStrideBytes,
+					__stage48Hook.postKernelBuf,
+					r * 16,
+					16,
+				);
+			}
+		}
 		// Post-copy temp → real dst.
 		enc.copyBufferToBuffer(tempDst, 0, dstRec.buffer, dst.offset, dstSize);
+		// Stage 4.8 — post-copy-back snapshot: dst rows 0..nr-1.
+		if (__stage48Capture && __stage48Hook) {
+			const rowStrideBytes = ne0 * 2;
+			const rowsToCapture = Math.min(nr, 8);
+			for (let r = 0; r < rowsToCapture; r++) {
+				enc.copyBufferToBuffer(
+					dstRec.buffer,
+					dst.offset + r * rowStrideBytes,
+					__stage48Hook.postCopyBackBuf,
+					r * 16,
+					16,
+				);
+			}
+		}
 		ctx.device.queue.submit([enc.finish()]);
 		// destroy() after submit is documented-safe — pending GPU work is
 		// allowed to complete using the destroyed buffer's underlying
 		// memory.
 		tempDst.destroy();
+		if (__stage48Log)
+			__stage48Log.push({
+				phase: "ret-0-divert",
+				data: { dstSize, dispatchX, dispatchY, dispatchZ },
+			});
 		return 0;
 	}
 

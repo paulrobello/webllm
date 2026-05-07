@@ -266,6 +266,93 @@ export function installJsepCallbacks(
 		encoderBatcher.flush();
 	};
 
+	// Stage 4.8 warm-up: dispatch one throwaway SET_ROWS divert before any
+	// real graph traffic so the SET_ROWS pipeline + bind-group layout +
+	// temp-dst command-encoder path are all hot. Without this the first
+	// production divert dispatch (Stage 4.7 D2-tight: i=3, K-cache layer 0
+	// at dstO=0) silently no-ops — its dst stays at post-allocation zero.
+	// Cost: ~50 µs of GPU time amortised over model load. Bypasses the
+	// jsepRunOp callback so it doesn't perturb diagnostic wrappers.
+	{
+		const F32_BYTES = 4;
+		const I64_BYTES = 8;
+		const F16_BYTES = 2;
+		// Match the production K-cache layer 0 SET_ROWS shape so any
+		// shape-specific first-call compile/dispatch race is absorbed by
+		// the warm-up rather than i=3.
+		const NE0 = 256; // inner dim (head_dim * n_kv_heads)
+		const NR = 6; // matches prefill-token-count
+		const DST_ROWS = 512; // n_ctx
+		const srcAllocSize = NE0 * NR * F32_BYTES + NR * I64_BYTES; // 6192
+		const dstAllocSize = NE0 * DST_ROWS * F16_BYTES; // 262144
+		const srcHandle = dataManager.alloc(srcAllocSize);
+		const dstHandle = dataManager.alloc(dstAllocSize);
+		const desc = {
+			op: GGML_OP_SET_ROWS,
+			nSrc: 3,
+			dst: {
+				bufHandle: dstHandle,
+				offset: 0,
+				type: 1, // F16
+				ne: [NE0, DST_ROWS, 1, 1] as [number, number, number, number],
+				nb: [
+					F16_BYTES,
+					NE0 * F16_BYTES,
+					NE0 * DST_ROWS * F16_BYTES,
+					NE0 * DST_ROWS * F16_BYTES,
+				] as [number, number, number, number],
+			},
+			srcs: [
+				{
+					bufHandle: srcHandle,
+					offset: 0,
+					type: 0, // F32
+					ne: [NE0, NR, 1, 1] as [number, number, number, number],
+					nb: [
+						F32_BYTES,
+						NE0 * F32_BYTES,
+						NE0 * NR * F32_BYTES,
+						NE0 * NR * F32_BYTES,
+					] as [number, number, number, number],
+				},
+				{
+					bufHandle: srcHandle,
+					offset: NE0 * F32_BYTES,
+					type: 27, // I64
+					ne: [NR, 1, 1, 1] as [number, number, number, number],
+					nb: [I64_BYTES, NR * I64_BYTES, NR * I64_BYTES, NR * I64_BYTES] as [
+						number,
+						number,
+						number,
+						number,
+					],
+				},
+				{
+					bufHandle: dstHandle, // forces dispatchSetRows to take the divert path
+					offset: 0,
+					type: 1, // F16
+					ne: [NE0, DST_ROWS, 1, 1] as [number, number, number, number],
+					nb: [
+						F16_BYTES,
+						NE0 * F16_BYTES,
+						NE0 * DST_ROWS * F16_BYTES,
+						NE0 * DST_ROWS * F16_BYTES,
+					] as [number, number, number, number],
+				},
+			],
+		};
+		const ctx = {
+			device,
+			dataManager,
+			encoderBatcher,
+			pipelineCache,
+			bindGroupLayoutCache,
+		};
+		dispatchSetRows(ctx, desc);
+		dataManager.free(srcHandle);
+		dataManager.free(dstHandle);
+	}
+
 	return runtime;
 }
 
