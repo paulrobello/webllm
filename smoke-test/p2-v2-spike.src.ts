@@ -1990,6 +1990,12 @@ async function runSpike(): Promise<void> {
 			capturedNr: 0,
 		};
 
+		// Stage 4.17 Probe 7 — arm per-node first8 dump for the
+		// allowlisted layer-0 + final tensors. ~11 names × 6 forward
+		// passes (1 prefill + 5 decode) ≈ 66 entries; cap at 200 for
+		// headroom. Dump prints on stderr → __stderrLines via printErr.
+		mod._webllm_enable_node_dump(200);
+
 		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
 		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
 		const tPrefillStart = performance.now();
@@ -2239,6 +2245,14 @@ async function runSpike(): Promise<void> {
 		log(`STAGE48_CAPTURES = ${JSON.stringify(stage48Captures)}`);
 
 		log(`SETROWS_DIAG_FIRST5 = ${JSON.stringify(setRowsDiag.slice(0, 5))}`);
+		// Stage 4.17 Probe 7 — emit captured CHECKPOINT lines from stderr
+		// for diff against the non-JSEP reference run.
+		const checkpointLines = ((window as any).__stderrLines as string[])
+			.filter((s) => s.includes("[CHECKPOINT"));
+		log(`CHECKPOINT_COUNT = ${checkpointLines.length}`);
+		(window as any).__stage417Checkpoints = checkpointLines;
+		for (const line of checkpointLines) log(line);
+
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`GENERATED_TEXT = ${JSON.stringify(generatedText)}`);

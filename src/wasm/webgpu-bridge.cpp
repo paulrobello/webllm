@@ -719,6 +719,71 @@ void webllm_free_model(void* model) {
 // Threading is pinned to 1 — pthreads are not enabled in this
 // Emscripten build (CMakeLists.txt does not set
 // USE_PTHREADS / -pthread).
+// ── Stage 4.17 Probe 7: per-node checkpoint dump ────────────────────────
+// Backend-agnostic post-compute tensor inspection, gated on a runtime
+// counter armed by JS via webllm_enable_node_dump(N). Wired into
+// llama_context_params.cb_eval below; ggml-backend-sched copies tensor
+// data back to host buffer before the ask=false call so t->data is
+// host-readable regardless of underlying backend (CPU / WebGPU / JSEP).
+//
+// Allowlist focuses on layer-0 attention chain + final logits — the
+// minimum surface to localize where JSEP diverges from the non-JSEP
+// reference (`make wasm-build` produces "Paris" correctly; JSEP
+// produces "in" / "inonic boso-" gibberish post-Stage-4.16).
+static const char* const NODE_DUMP_ALLOWLIST[] = {
+    "Qcur-0", "Kcur-0", "Vcur-0",
+    "kq-0", "kq_soft_max-0", "kqv_out-0",
+    "attn_out-0", "ffn_norm-0", "ffn_out-0",
+    "result_norm", "result_output",
+    nullptr,
+};
+
+static int g_node_dump_remaining = 0;
+static int g_node_dump_idx = 0;
+
+static bool node_dump_name_match(const char* name) {
+    if (!name || !*name) return false;
+    for (const char* const* p = NODE_DUMP_ALLOWLIST; *p; ++p) {
+        if (std::strcmp(name, *p) == 0) return true;
+    }
+    return false;
+}
+
+static bool node_dump_cb(struct ggml_tensor* t, bool ask, void* /*user_data*/) {
+    if (g_node_dump_remaining <= 0) return false;
+    if (!t || !node_dump_name_match(t->name)) return false;
+    if (ask) return true;  // request that backend copy data back to host
+
+    // ask=false: t->data points to host-readable copy. ggml_get_f32_1d
+    // handles dequant for F16 / BF16 / quant types. Some intermediate
+    // tensors are non-contiguous (views) which ggml_get_f32_1d does NOT
+    // support — skip those rather than abort the decode.
+    float v[8] = {0};
+    int n = (int)ggml_nelements(t);
+    if (n > 8) n = 8;
+    if (ggml_is_contiguous(t)) {
+        for (int i = 0; i < n; ++i) v[i] = ggml_get_f32_1d(t, i);
+    }
+    fprintf(stderr,
+            "[CHECKPOINT idx=%d name=%s type=%d ne=[%lld,%lld,%lld,%lld] "
+            "contig=%d first8=[%g,%g,%g,%g,%g,%g,%g,%g]]\n",
+            g_node_dump_idx, t->name, (int)t->type,
+            (long long)t->ne[0], (long long)t->ne[1],
+            (long long)t->ne[2], (long long)t->ne[3],
+            ggml_is_contiguous(t) ? 1 : 0,
+            v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+    g_node_dump_idx++;
+    g_node_dump_remaining--;
+    return true;
+}
+
+// Arm the per-node dump for the next `max_dumps` matched-name nodes.
+// Idempotent: each call resets the counter and the printed idx.
+void webllm_enable_node_dump(int32_t max_dumps) {
+    g_node_dump_remaining = max_dumps > 0 ? max_dumps : 0;
+    g_node_dump_idx = 0;
+}
+
 void* webllm_create_context(void* model, int32_t n_ctx, int32_t embeddings,
                             int32_t pooling_type, int32_t flash_attn) {
     if (!model) return nullptr;
@@ -729,6 +794,8 @@ void* webllm_create_context(void* model, int32_t n_ctx, int32_t embeddings,
     cparams.flash_attn_type = (enum llama_flash_attn_type) flash_attn;
     cparams.n_threads = 1;
     cparams.n_threads_batch = 1;
+    cparams.cb_eval = node_dump_cb;
+    cparams.cb_eval_user_data = nullptr;
     return llama_init_from_model(static_cast<llama_model*>(model), cparams);
 }
 

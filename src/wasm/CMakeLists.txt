@@ -133,7 +133,8 @@ if(EMSCRIPTEN)
         "_webllm_state_seq_get_size,_webllm_state_seq_get_data,_webllm_state_seq_set_data,"
         "_webllm_get_embeddings,"
         "_webllm_perf_counter,"
-        "_webllm_synthetic_offload_probe,_webllm_synthetic_probe_log"
+        "_webllm_synthetic_offload_probe,_webllm_synthetic_probe_log,"
+        "_webllm_enable_node_dump"
     )
 
     # JSPI requires explicit listing of exports that may transitively call
