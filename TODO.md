@@ -917,6 +917,8 @@ Closure: [`STAGE-4.2-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/ST
 
 **Stage 4.4 CLOSED 2026-05-06 — `<pending>` + llama.cpp `<pending>` (P7 — F1 dual-resident host mirror in ggml-jsep.cpp; patch stack 6 → 7).** F1 implemented as designed: `ggml_backend_jsep_buffer_context` gains `void * host_mirror`; `alloc_buffer` allocates + zero-inits a parallel host-side mirror; `set_tensor` / `memset_tensor` / `clear` apply the operation to BOTH the host mirror AND the GPU buffer; `get_tensor` reads from the mirror only (drops the JS round-trip — `COUNTER_DELTAS.read` 1266 → **0**); **`get_base` returns `host_mirror` instead of the `0x2000` sentinel** (the load-bearing change so CPU-fallback ops dereferencing `tensor->data` land in real host RAM); `jsep_tensor_handle` updated to subtract `host_mirror` (offset value invariant). **PARTIAL OUTCOME A — Bug A FIXED.** `FIRST_NAN_DST_PROBE = null` (was first NaN at i=1), `LOGIT_STATS_STEP0.first8` = `[0.0060, 0.0047, -0.0102, 0.0138, -0.0149, 0.0099, -0.0029, -0.0056]` (was all-zero), `topId/topVal = 593/0.159`, `GENERATED_TOKENS = [593, 5871, 945, 16976, 25487]` (was `[0, 0, 0, 0, 0]` — five distinct non-zero ids), `POSTPREFILL_BUF11` carries real f32 at most offsets (was canonical NaN everywhere). The CPU-fallback per-channel RMSNorm gain (Stage 4.3's smoking-gun op between seq 2 and seq 3) now reads real attention-norm weights, killing the NaN cascade through every downstream op. All four kernel selftests still PASS. `make checkall` green. Per-token decode 23.22 ms (within noise of Stage-4.3 baseline 23.92 ms); F1 dual-write only impacts model-load wall time (134 weight uploads). **But:** decoded text = `"ntiuracinateenes"`, not `"Paris"` — partial flip. **Bug C surfaced (follow-on):** GPU→host writeback gap. JSEP ops write to the GPU buffer; the host mirror stays stale; downstream CPU-fallback ops dereference `tensor->data` (now points into mirror) and read the initial-zero contents, never updated by the GPU. Smoking-gun: `FIRST_ALLZERO_DST_PROBE = {i:3, op:42, dstH:18}` (op 42 = `GGML_OP_SET_ROWS`; handle 18 = KV cache); `COUNTER_DELTAS.read = 0` confirms the scheduler isn't inserting `get_tensor` calls to bridge JSEP→host (because `tensor->data` *is* a valid host pointer post-F1 — just not a *current* one). This is exactly the "cross-backend writes" caveat the Stage 4.4 brief footnoted, in the GPU→host direction (the brief flagged the host→GPU direction; the actual failure mode is the inverse). Closure: [`STAGE-4.4-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.4-RESULT.md). Stage 4.5 brief below queues the writeback fix (H1 unconditional / H2 cpy_tensor / H3 graph-walk pre-pass).
 
+**Stage 4.10 CLOSED 2026-05-07 — `<pending>` + llama.cpp `<pending>` (no patch — diagnostic instrumentation only in `ggml-jsep.cpp::ggml_backend_jsep_graph_compute`; patch stack unchanged at 8).** **HA strict-form REJECTED, refined HA' / HD CONFIRMED.** Per-graph_compute slice composition logged into `globalThis.__jsepGraphLog` (first 30 invocations × per-node `[op, dstH, dstO, src0H, src0O, src0Op, src1H, src1O, src1Op, src0VsOp]`). **Smoking gun:** slice 3 (the FIRST SET_ROWS slice) has `nodes[0] = {op:42, dstH:25, dstO:0, src0H:26, src0O:0, src0Op:0, s0VsOp:0, src1H:26, src1O:524288, src1Op:0}` and `nodes[4] = {op:42, dstH:25, dstO:262144, src0H:26, src0O:528384, src0Op:0, s0VsOp:0, ...}`. Both SET_ROWS' src0 have **`src0Op = GGML_OP_NONE = 0`** AND `s0VsOp = 0` — they are LEAF tensors in JSEP's split-cgraph view, not produced by any op visible to JSEP. The scheduler split treats `h26+0` (V data) and `h26+528384` (K data) as cross-backend boundary inputs; the producer chain lives in CPU subgraphs that should populate `host_mirror[26]+0..6144` via direct `tensor->data → host_mirror` writes (post-F1). HA's strict form is rejected: 3 JSEP graph_compute calls fire BEFORE slice 3 (slices 0/1/2 = RMS_NORM h26+0 → proj A h26+4194304 → proj B h26+4194304), with CPU subgraphs interleaved between them. Pre-SET_ROWS JSEP slices write to h26+0 (RMS_NORM, but content ≠ V/K data) and h26+4194304 (allocator-coalesced projection scratch); **none write the V/K-shaped data the SET_ROWS leaves expect at h26+0 / h26+528384**. HB weakened (s0VsOp=0 rules out view-src indirection); HC unlikely (Stage 4.9 callIdx 2-7 show stable K data implying no spurious clearing). The actual root cause appears to be **HD: cross-backend leaf without producer landing data in time** — the CPU CPY/MUL_MAT chain that should populate the leaves either doesn't fire before slice 3 or writes to a different absolute address. Stage 4.9 baseline reproduced bit-exactly (`GENERATED_TEXT="ntiuhuihnerquant"`, `topId/topVal=593/0.159`, 6 selftests PASS, `make checkall` green). Closure: [`STAGE-4.10-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.10-RESULT.md). Stage 4.11 brief below queues two probes in priority order: (1) inter-slice host_mirror snapshot to localize WHEN h26+0 gets populated; (2) CPU graph_compute instrumentation to localize WHICH CPU subgraph produces the data.
+
 **Stage 4.9 CLOSED 2026-05-07 — `<pending>` + llama.cpp `<pending>` (P8 — H1-inverse host→GPU writeback in `ggml_backend_jsep_graph_compute` per-runOp pre-pass; patch stack 7 → 8).** **Outcome C-2 — H1-inverse fires correctly but does not unblock Outcome A.** New `__h1invDiag` capture in `module.jsepWrite` (gated on the distinctive i=3-src0 signature `handle=26, offset=0, size=6144`) records the first 8 bytes of `host_mirror[hostPtr..]` for the eight load-bearing H1-inverse calls across one prefill + 5 decode steps. **Smoking gun:** `callIdx 0` (prefill i=3) and `callIdx 1` (decode-step-1 SET_ROWS) both report `first8F32 = [0, 0, 0, 0, 0, 0, 0, 0]`. `callIdx 2-7` report real F32 K data (`[7.19e-5, -2.05e-5, -3.38e-5, ...]`, magnitudes consistent with post-ROPE K). So at the FIRST two SET_ROWS dispatches, host_mirror[h26+0..6144] **is itself zero** — H1-inverse faithfully syncs zeros to GPU. Stage 4.8's framing ("CPU op chain updates host_mirror but not GPU") was structurally incomplete: in the load-bearing window, the CPU CPY+ROPE chain has **not yet written to host_mirror at the offset SET_ROWS reads from**. `LOGIT_STATS_STEP0` bit-identical to Stage 4.5 (`topId/topVal = 593/0.159`); `GENERATED_TEXT = "ntiuhuihnerquant"` bit-identical to Stage 4.5. Per-token decode 131.80 ms (vs 25.04 baseline; 5.3× regression from per-runOp pre-pass uploading every src tensor including weights). `COUNTER_DELTAS.write = 4404` (was ~134; +4270 H1-inverse fires). All 6 kernel selftests still PASS. `make checkall` green. H1-inverse stays despite not flipping Outcome A — it is the structurally correct symmetric counterpart to Stage 4.5 H1, and `callIdx 2-7` evidence shows the writeback gap is real for all but the first two dispatches. Optimization (dirty-bit tracking, sync only sources whose host_mirror changed) deferred to Phase 3 Stage 5+. Closure: [`STAGE-4.9-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.9-RESULT.md). Stage 4.10 brief below queues localization of the host_mirror-staleness root cause: WHY does CPU CPY+ROPE not write to `host_mirror[h26+0..6144]` before the first 2 SET_ROWS dispatches? Stage 4.9 diagnostic captures (`__h1invDiag`) retained in spike + jsep for Stage 4.10's first probe.
 
 **Stage 4.8 CLOSED 2026-05-07 — `<pending>` (no llama.cpp patch; spike + JSEP diagnostic instrumentation only).** Stage 4.7's "Reading R1" framing (i=3 SET_ROWS divert dispatch silently fails) was a misframing. The dispatcher, the kernel, the divert path are all correct. The bug is upstream: at i=3 dispatch time, `src0` (h26o0 — the K-projection-after-ROPE buffer) is **stale on the GPU side**. Step A (eager-warmup probe at engine init, two shapes) did NOT fix it — the bug isn't generic first-call cold-start. Step B (windowed temp-dst + src0 readback inside `dispatchSetRows`, gated on a `globalThis.__stage48DivertHook` flag set just before `bridge.decode()`) captured: pre-kernel temp-dst row 0..5 = all zeros (pre-copy of zero real-dst); **post-kernel temp-dst row 0 = all zeros**, rows 2..5 = sparse `0x8000` (= f16 -0.0) cells exactly where `src0` raw bytes show `00 00 00 80` (= f32 -0.0). The kernel is correct; it reads f32 from src0, packs via `pack2x16float`, atomic-CAS writes f16. The reads return mostly 0.0 (writes 0x0000 = no-op) and sparse -0.0 (writes 0x8000) because `src0`'s GPU region was never populated — i=2 (K-projection MUL_MAT) writes to h26o4194304, but i=3 reads from h26o0. The h26o4194304→h26o0 hop is a CPU-fallback op chain (likely `CPY` + ROPE) that updates host_mirror but **never writes back to the GPU buffer**. Stage 4.5 H1 adds GPU→host writeback after every JSEP runOp; the symmetric **host→GPU** writeback after every CPU-fallback op (flagged but not addressed by the Stage 4.4 brief) is the missing piece. Closure: [`STAGE-4.8-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.8-RESULT.md). False trail ruled out: an earlier Stage 4.8 sentinel-probe variant added awaits BEFORE `runOpOrig` and saw "status=-1" — this turned out to be JSPI **not** preserving the C-stack `desc` array (`ggml-jsep.cpp:409`, declared outside the for loop) across `EM_ASM_INT` Promise-await reentries. Diagnostic-only artifact; fix was to move all probe awaits to AFTER `runOpOrig`. Patch stack: 7 (unchanged). Stage 4.9 brief below queues the host→GPU writeback fix (H1-inverse, mirroring Stage 4.5 H1).
@@ -947,7 +949,7 @@ Every time a stage / phase / probe closes and gets recorded above:
 
 The discipline exists because every closing TODO update is the *handoff packet* for the next session — even if "the next session" is the same operator 10 minutes later. Treat it as if a teammate walking in cold has to pick up where you left off.
 
-### Next session pickup — Phase 3 Stage 4.10: localize host_mirror staleness for first 2 SET_ROWS dispatches. START HERE in a fresh session.
+### Next session pickup — Phase 3 Stage 4.11: localize the cross-backend leaf producer for `host_mirror[26]+0` and `[26]+528384`. START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
@@ -955,11 +957,11 @@ The discipline exists because every closing TODO update is the *handoff packet* 
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -1
-#   → <Stage 4.9 TODO closure commit> docs(TODO): Stage 4.9 closed — queue Stage 4.10 host_mirror staleness localization
+#   → <Stage 4.10 TODO closure commit> docs(TODO): Stage 4.10 closed — queue Stage 4.11 cross-backend leaf producer localization
 
 # 2. Confirm llama.cpp tip.
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → <H1-inverse commit>   webllm-browser-patches   (patch stack 8)
+#   → <Stage-4.10-instrumentation commit>   webllm-browser-patches   (patch stack 8)
 
 # 3. Smoke-server up on 8031.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
@@ -967,125 +969,146 @@ lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 # 4. Reuse agentchrome session + spike tab.
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next(t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t["url"]))' 2>/dev/null)
-[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.10-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -z "$TAB" ] && TAB=$(agentchrome --port "$PORT" tabs create "http://localhost:8031/p2-v2-spike.html?v=stage4.11-bootstrap" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "PORT=$PORT TAB=$TAB"
 
-# 5. Reproduce post-Stage-4.9 baseline:
-agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.10-replay" --tab "$TAB"
+# 5. Reproduce post-Stage-4.10 baseline:
+agentchrome --port "$PORT" navigate "http://localhost:8031/p2-v2-spike.html?v=stage4.11-replay" --tab "$TAB"
 until agentchrome --port "$PORT" js exec --tab "$TAB" 'document.getElementById("log").textContent.slice(-50)' 2>&1 | grep -qE "DONE|FAIL"; do sleep 3; done
-agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify(window.__h1invDiag.captures.slice(0,3).map(c=>({i:c.callIdx,first8F32:c.first8F32})))'
-#   → expect: callIdx 0 first8F32 = [0,0,0,0,0,0,0,0]
-#             callIdx 1 first8F32 = [0,0,0,0,0,0,0,0]
-#             callIdx 2 first8F32 = [7.19e-5, -2.05e-5, ...]
+agentchrome --port "$PORT" js exec --tab "$TAB" 'JSON.stringify({slices: globalThis.__jsepGraphLog.length, slice3SetRows: globalThis.__jsepGraphLog[3].nodes.filter(n=>n.op===42).map(n=>({src0H:n.src0H, src0O:n.src0O, src0Op:n.src0Op}))})'
+#   → expect: slices=30, slice3SetRows = [{src0H:26, src0O:0, src0Op:0}, {src0H:26, src0O:528384, src0Op:0}]
 ```
 
-**One-line goal:** identify WHY `host_mirror[h26+0..6144]` is zero at the FIRST 2 SET_ROWS dispatches (prefill i=3 + decode-step-1 SET_ROWS) but populated by the THIRD onward. The CPU CPY+ROPE chain that should write K-projection-after-ROPE there clearly runs **eventually** (or some other op fills h26+0 with K-shaped data), but not before the first 2 SET_ROWS dispatches need it.
+**One-line goal:** identify when (or whether) `host_mirror[26]+0` gets populated by a CPU producer between graph_compute calls. Stage 4.10 confirmed the SET_ROWS reads from a leaf in JSEP's cgraph view — the producer is in a CPU subgraph the JSEP backend never sees. We need to know if the CPU producer fires too late, writes to a different absolute address, or doesn't fire at all before slice 3.
 
-**One-line context:** Stage 4.9 banked H1-inverse (correctly written, fires correctly, syncs zeros from a stale host_mirror). The bug is upstream of the writeback. Three hypotheses to disambiguate (priority order — pick HA first):
+**One-line context:** Stage 4.10 ruled out HA strict-form (CPU subgraphs DO get scheduling time between JSEP slices) and HB (no view-src indirection). The bug is HD: cross-backend boundary leaf without a producer landing data at `host_mirror[26]+0..6144` and `host_mirror[26]+528384..6144` before JSEP's slice 3 runs.
 
-#### Implementation — Stage 4.10 (HA → HB → HC)
+#### Implementation — Stage 4.11 (Probe 1 first; Probe 2 only if Probe 1 confirms HD')
 
-**HA — Scheduler grouping: ggml-backend put SET_ROWS in a JSEP sub-graph BEFORE the CPU sub-graph that runs CPY+ROPE.** This would mean the first 2 prefill+decode steps run all JSEP ops first (including SET_ROWS with stale src0=h26o0), and CPU ops run AFTER. From decode-step-2 onward, h26o0 has been touched by something (possibly an earlier H1-inverse cycle or a JSEP op writing there) so it carries plausible K data. **Validation:** instrument the JSEP backend to log every `graph_compute` invocation with `cgraph->n_nodes` and the op-kinds of the first/last few nodes. If the first graph_compute call processes a long chain ending in SET_ROWS without an intervening CPU graph_compute, HA is confirmed.
+**Probe 1 — Inter-slice host_mirror snapshot (cheap; ~30 LOC).** At the END of `ggml_backend_jsep_graph_compute` (right before the final `return GGML_STATUS_SUCCESS`), dump `host_mirror[26]+0..16` and `host_mirror[26]+528384..16` into `globalThis.__interSliceLog` keyed by `s_jsepGraphCallIdx`. Do the same dump at the TOP of the function (right after the existing Stage 4.10 EM_ASM block) so we have BEFORE/AFTER snapshots per slice. Combined with the existing graph-log, we'll see:
 
-Implementation: in `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp::ggml_backend_jsep_graph_compute`, at function entry add `EM_ASM({...})` that pushes a record onto `globalThis.__jsepGraphLog`: `{n_nodes, firstOp, firstDst, lastOp, lastDst}`. Run spike, dump `__jsepGraphLog`. Look for the call whose chain reaches SET_ROWS (op=42) — if the same call ALSO has the K-projection MUL_MAT (op=29) earlier in its node list, HA confirmed (no CPU op in between).
+- If `host_mirror[26]+0..16` is zero at the END of slice 2 (and BEFORE slice 3) → **HD' confirmed**: no CPU subgraph ran between slice 2 and slice 3 to populate it. The CPU producer fires AFTER slice 3 (scheduler ordering bug, dependency-tracking gap, or the "leaf" classification is wrong).
+- If `host_mirror[26]+0..16` becomes non-zero at the END of slice 3 (and stays so for subsequent slices) → the CPU op is firing AFTER slice 3 (post-slice-3 between slices 3-4), and slice 3 reads pre-fill garbage. Investigate WHY the dependency isn't recognized.
+- If it's non-zero somewhere mid-prefill (e.g., between slice N and slice N+1 for N > 3) → first time real V/K data appears in host_mirror is mid-layer-2 or later — meaning ALL of layer 0's KV writes are with stale data.
 
-**HB — Different (handle, offset): the CPU CPY+ROPE writes to a DIFFERENT (handle, offset) than `(26, 0)`, and the scheduler then re-binds `i=3 src0` to that other tensor — but our descriptor still says `(26, 0)` because the descriptor is built from the SET_ROWS node's `src[0]` which somehow still points at `(26, 0)`.** This would be a mismatch between what ggml's allocator did and what our descriptor reports. **Validation:** in `ggml_jsep_write_tensor_block`, also pack the wasm-heap pointer of `tensor->data` as an extra debug field (or log via EM_ASM). Compare against `host_mirror + offset`. If they differ, HB confirmed.
-
-**HC — Set/clear ordering: `host_mirror[h26+0..6144]` got cleared AFTER i=0 RMS_NORM's H1 post-pass populated it, before i=3's H1-inverse fires.** Possibilities: (a) `ggml_backend_jsep_buffer_clear` called for buffer 26 at some scheduler-driven slot reset; (b) `memset_tensor(0)` for some tensor at h26+0; (c) `set_tensor` overwrote with a zero-valued source. **Validation:** instrument the four buffer-callback paths (`set_tensor`, `memset_tensor`, `clear`, `cpy_tensor`) to log every call with `(handle, offset, size)`. Run spike. Filter for handle=26, offset∈[0,6144). If any callback fires with zero data in this window between i=0 and the first H1-inverse, HC confirmed.
-
-#### Step 1 — Validate HA (most likely, cheapest probe)
-
-Add to `ggml-jsep.cpp::ggml_backend_jsep_graph_compute`, immediately after the `dev` declaration:
+Implementation sketch (file: `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp`, in `ggml_backend_jsep_graph_compute`, mirror the existing Stage 4.10 EM_ASM block):
 
 ```cpp
-#ifdef __EMSCRIPTEN__
+// Stage 4.11 Probe 1: at function entry (BEFORE the for-loop, AFTER the
+// existing Stage 4.10 graph-log block) and at function exit (right before
+// `return GGML_STATUS_SUCCESS`), snapshot host_mirror[26]+{0,528384} so we
+// can see when the cross-backend leaf data actually appears.
+// Same kMaxRecords cap as graph-log (30).
+
+// Pseudocode for ENTRY (similarly for EXIT):
 EM_ASM({
-    if (typeof globalThis.__jsepGraphLog === "undefined") {
-        globalThis.__jsepGraphLog = [];
+    if (typeof globalThis.__interSliceLog === "undefined") {
+        globalThis.__interSliceLog = [];
     }
-    if (globalThis.__jsepGraphLog.length < 30) {
-        const log = globalThis.__jsepGraphLog;
-        const ops = [];
-        const firstK = Math.min($0, 8);
-        for (let i = 0; i < firstK; ++i) {
-            ops.push(getValue($1 + i*4, "i32"));
+    if (globalThis.__interSliceLog.length < 60 /* 30 enter + 30 exit */) {
+        const tag = $0; // "enter" or "exit" encoded as 0 / 1
+        const slice = $1;
+        // Read host_mirror[h26]+0..32 (8 F32) and +528384..32 (8 F32)
+        const at0 = $2, at528 = $3;
+        const arr0   = new Float32Array(8);
+        const arr528 = new Float32Array(8);
+        for (let i = 0; i < 8; ++i) {
+            arr0[i]   = HEAPF32[(at0   >> 2) + i];
+            arr528[i] = HEAPF32[(at528 >> 2) + i];
         }
-        log.push({ idx: log.length, n_nodes: $0, firstOps: ops });
+        globalThis.__interSliceLog.push({
+            tag: tag === 0 ? "enter" : "exit",
+            slice: slice,
+            h26o0:      Array.from(arr0),
+            h26o528384: Array.from(arr528),
+        });
     }
-}, cgraph->n_nodes, /* hmm, cgraph->nodes is array of pointers... */ );
-#endif
+}, /* tag */ 0, s_jsepGraphCallIdx,
+   (int)(intptr_t)((char*)host_mirror_of_buf26 + 0),
+   (int)(intptr_t)((char*)host_mirror_of_buf26 + 528384));
 ```
 
-Hmm actually we need the op kinds. `cgraph->nodes[i]->op` requires walking the array. Easier: just before the for-loop, count and stash:
+To get `host_mirror_of_buf26`, walk the device's registered buffers list — but easier: add a static lookup that finds buffer-with-handle-26 once and caches it. Or just iterate on first invocation and store as a static. Or take a brute-force approach: walk `cgraph->nodes` for any tensor whose `buffer->context` has `handle==26`, take the first such, derive `host_mirror` from its context. Sketch:
 
 ```cpp
-#ifdef __EMSCRIPTEN__
-{
-    int sample[8] = {0};
-    int sample_n = cgraph->n_nodes < 8 ? cgraph->n_nodes : 8;
-    for (int k = 0; k < sample_n; ++k) {
-        sample[k] = (int) cgraph->nodes[k]->op;
+void * hm26 = nullptr;
+for (int k = 0; k < cgraph->n_nodes && !hm26; ++k) {
+    auto * t = cgraph->nodes[k];
+    if (t->buffer && t->buffer->context &&
+        t->buffer->iface.get_base == ggml_backend_jsep_buffer_get_base) {
+        auto * bctx = static_cast<ggml_backend_jsep_buffer_context *>(t->buffer->context);
+        if (bctx->handle == 26) { hm26 = bctx->host_mirror; }
     }
-    EM_ASM({
-        if (typeof globalThis.__jsepGraphLog === "undefined") {
-            globalThis.__jsepGraphLog = [];
+    // also check srcs
+    for (int s = 0; s < GGML_MAX_SRC && !hm26; ++s) {
+        if (t->src[s] && t->src[s]->buffer && t->src[s]->buffer->context &&
+            t->src[s]->buffer->iface.get_base == ggml_backend_jsep_buffer_get_base) {
+            auto * bctx = static_cast<ggml_backend_jsep_buffer_context *>(t->src[s]->buffer->context);
+            if (bctx->handle == 26) { hm26 = bctx->host_mirror; }
         }
-        if (globalThis.__jsepGraphLog.length < 30) {
-            const ops = [];
-            for (let i = 0; i < $1; ++i) {
-                ops.push(getValue($0 + i*4, "i32"));
-            }
-            globalThis.__jsepGraphLog.push({ idx: globalThis.__jsepGraphLog.length, n_nodes: $2, firstOps: ops });
-        }
-    }, (int)(intptr_t)sample, sample_n, cgraph->n_nodes);
+    }
 }
-#endif
+if (hm26) { /* emit EM_ASM */ }
 ```
 
-Use `getValue(addr, "i32")` to read each op-int. After spike, inspect `window.__jsepGraphLog`. If the first JSEP `graph_compute` call has `n_nodes >= 4` and `firstOps` includes both `29` (MUL_MAT) and `42` (SET_ROWS), HA confirmed: those ops are in ONE JSEP sub-graph with no CPU op between them — meaning the scheduler is NOT inserting CPU CPY+ROPE between K-projection and SET_ROWS for the first invocation.
+After running spike, in JS:
 
-If HA confirmed, the fix is to make `supports_op(SET_ROWS)` return false when the scheduler can't structurally insert the required CPU CPY+ROPE. Possibly by inspecting whether `op->src[0]->op == GGML_OP_NONE || produced-by-non-JSEP-backend`. Or simpler: return false when src[0]'s buffer is not yet populated (we can't easily detect that). Or: explicitly hand the post-ROPE flow to JSEP by adding ROPE/CPY support. The simplest is probably: **have the scheduler insert CPU sub-graphs by making ROPE be a JSEP op (call out to CPU via tensor->data, since the scheduler grouping is what's wrong).**
+```js
+JSON.stringify(globalThis.__interSliceLog.slice(0, 12).map(e => ({
+  slice: e.slice, tag: e.tag,
+  h26o0_first2: e.h26o0.slice(0,2),
+  h26o528384_first2: e.h26o528384.slice(0,2),
+})), null, 1);
+```
 
-But that's structural. For Stage 4.10, just CONFIRM HA. The structural fix is Stage 4.11.
+Look for the first `{slice: N, tag: "enter"}` or `{tag:"exit"}` entry where `h26o0_first2 != [0,0]` or `h26o528384_first2 != [0,0]`. That timestamp is when CPU populated the leaf — if it's >= slice 4, HD' confirmed.
 
-#### Exit criteria — Stage 4.10 closes when documented in `STAGE-4.10-RESULT.md`:
-
-- One of HA / HB / HC is confirmed via instrumentation (or all three rejected, surfacing HD).
-- `window.__jsepGraphLog` (or analogous evidence stash) is captured and quoted in the closure report.
-- The closure report names the load-bearing root cause and points at Stage 4.11's structural fix.
-- `make checkall` green.
-- Patch stack: 8 (unchanged — Stage 4.10 is diagnostic-only).
-
-#### Branch on outcome:
-
-- **HA confirmed (most likely):** Stage 4.11 brief queues structural fix. Probably "make scheduler insert the CPU sub-graph for CPY+ROPE before SET_ROWS" via either supports_op refinement or explicit ROPE delegation. Implementation cost: small to medium.
-- **HB confirmed (less likely):** Stage 4.11 brief queues fixing tensor->data ↔ (handle, offset) consistency in `ggml_jsep_write_tensor_block`.
-- **HC confirmed (unlikely):** Stage 4.11 brief queues fixing the spurious clear/memset path.
-- **All three rejected:** form HD/HE; Stage 4.11 deepens diagnostic capture (e.g. dump host_mirror[h26+0..16] at the END of every JSEP graph_compute; correlate with H1-inverse callIdx).
+**Probe 2 — CPU graph_compute instrumentation (~50 LOC + ggml-cpu rebuild).** Only if Probe 1 confirms HD'. Patch `ggml-cpu.c`'s top-level graph_compute function (likely `ggml_backend_cpu_graph_compute` or similar) to log per-call op composition + dst handles into `globalThis.__cpuGraphLog`. With both JSEP and CPU graph-logs, we can see the full interleaving and identify the CPU subgraph(s) that produce the data at h26+0 / h26+528384. If no such CPU subgraph exists, the producer is missing entirely (a libllama-side bug or a JSEP scheduler integration bug). If it exists but fires after slice 3, a scheduler ordering issue.
 
 #### Step 0 — verify state (only if the bootstrap block at the top failed)
 
 ```bash
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → <H1-inverse>   webllm-browser-patches   (patch stack 8)
+#   → <Stage-4.10-instrumentation>   webllm-browser-patches   (patch stack 8)
 
 git log --oneline -10
+#   → docs(TODO): Stage 4.10 closed — queue Stage 4.11 cross-backend leaf producer localization
+#   → docs(reports): Stage 4.10 closure — HA strict rejected; cross-backend leaf surfaces
+#   → chore(jsep): Stage 4.10 graph_compute slice instrumentation
 #   → docs(TODO): Stage 4.9 closed — queue Stage 4.10 host_mirror staleness localization
 #   → docs(reports): Stage 4.9 closure — H1-inverse lands; outcome C-2
-#   → chore(spike+jsep): Stage 4.9 H1-inverse + h1invDiag instrumentation
-#   → docs(TODO): Stage 4.8 closed — queue Stage 4.9 host→GPU writeback fix
-#   → docs(reports): Stage 4.8 closure — host→GPU writeback gap (H1-inverse)
 ```
 
 #### Spike state cheat sheet
 
-- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.10-<probe>`
-- **Per-token decode (post-Stage-4.9):** ~131 ms (5.3× regression from H1-inverse pre-pass; acceptable during diagnosis).
+- **Spike URL pattern:** `http://localhost:8031/p2-v2-spike.html?v=stage4.11-<probe>`
+- **Per-token decode (post-Stage-4.10):** ~127 ms (Stage 4.9 baseline; instrumentation overhead invisible).
 - **Built-in selftests:** 6 PASS.
-- **Build:** `make wasm-build-jsep` (or just `bun run build:jsep` + `bun build smoke-test/p2-v2-spike.src.ts ...` if no llama.cpp change).
+- **Build:** `make wasm-build-jsep`.
 - **`make checkall` must be green** before committing.
+- **Existing diagnostics retained:** `__jsepGraphLog` (Stage 4.10 — 30 slices × per-node metadata), `__h1invDiag` (Stage 4.9 — 8 captures of host_mirror[26+0..32] gated on size=6144). Stage 4.11 adds `__interSliceLog`.
 
-After Stage 4.10 closes (root-cause diagnosed), Stage 4.11 enacts the structural fix. After Stage 4.11 closes, the entire Stage 4.x sequence is finally cleared and Phase 3 can proceed.
+#### Exit criteria — Stage 4.11 closes when documented in `STAGE-4.11-RESULT.md`:
+
+- Probe 1 produces `__interSliceLog` data sufficient to determine WHEN (which graph_compute boundary) `host_mirror[26]+0..16` and `host_mirror[26]+528384..16` first transition from zero to real V/K data.
+- The closure report names the load-bearing root cause (HD' confirmed, OR HC if the data appears and then gets cleared, OR HA-flavor if the CPU subgraph is structurally absent).
+- Probe 2 ran only if Probe 1 didn't fully resolve the question (e.g., shows transitions but doesn't reveal the producer).
+- The closure report points at Stage 4.12's structural-fix queue with the most plausible fix shape (CPY-into-jsep_buft kernel, narrow offload_op re-enable, cpy_tensor_async wiring, or libllama device-pinning adjustment).
+- `make checkall` green.
+- Patch stack: 8 (Probe 1) or 9 (Probe 2 if it requires a separate ggml-cpu patch).
+
+#### Branch on outcome:
+
+- **HD' confirmed (CPU producer fires AFTER slice 3, most likely):** Stage 4.12 brief queues either (a) re-enabling a narrow offload_op path so the V/K projection stays on JSEP and avoids the cross-backend leaf, or (b) narrowing `supports_op` to also reject the SET_ROWS that depend on cross-backend leaves (would force the entire attention chain to CPU — likely a perf disaster but a correctness fallback).
+- **HC confirmed (data appears then gets cleared):** Stage 4.12 queues identifying the spurious clear/memset in `ggml_backend_jsep_buffer_clear` or `ggml_backend_jsep_buffer_memset_tensor`.
+- **HA-flavor confirmed (no CPU subgraph at all writes to h26+0 / h26+528384):** Stage 4.12 queues a libllama-side investigation — possibly the cgraph itself doesn't have a producer, meaning the V/K projection path under our `supports_buft = jsep_buft only` setup is broken. May need to revisit Stage 1.5's `supports_buft` narrowing.
+
+After Stage 4.11 closes (root-cause localized), Stage 4.12 enacts the structural fix. After Stage 4.12 closes, the entire Stage 4.x sequence is finally cleared and Phase 3 can proceed.
+
+### Earlier Stage 4.10 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.10 brief (paste-and-go bootstrap, three hypotheses HA/HB/HC with priorities, EM_ASM-based per-graph_compute slice metadata capture, branch-on-outcome) lives in [`STAGE-4.10-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.10-RESULT.md). HA strict-form REJECTED (3 JSEP graph_compute calls fire BEFORE slice 3, with CPU subgraphs interleaved). HB WEAKENED (no view-src indirection: `s0VsOp = 0`). HC unlikely (Stage 4.9 callIdx 2-7 stable). HD surfaced: cross-backend boundary leaf without producer landing data in time. Stage 4.11 brief above queues the inter-slice host_mirror snapshot probe to localize WHEN h26+0 gets populated. Collapsed at Stage 4.11 queue time to keep the active surface focused.
+
 
 ### Earlier Stage 4.9 brief — collapsed (full text in closure report)
 
