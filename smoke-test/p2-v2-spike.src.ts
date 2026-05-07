@@ -17,6 +17,7 @@ import {
 	dispatchMatmul,
 	GGML_TYPE_F16,
 	GGML_TYPE_F32,
+	GGML_TYPE_Q4_0,
 	GGML_TYPE_Q4_K,
 	type JsepOpDescriptor,
 } from "../src/inference/jsep/ops/matmul.js";
@@ -466,6 +467,238 @@ async function runMatmulProductionSelfTest(
 	if (mode === "no-divert") runtime.dataManager.free(hDst);
 
 	return result;
+}
+
+// ----- Stage 4.18 Probe 8a: Q4_0 production-shape matmul sweep -------------
+//
+// Stage 4.17 confirmed Outcome B (kernel-precision divergence) at the very
+// first compute node (Qcur-0, ne=[2048,6,1,1], Q4_0 weights). The 5.24e-4
+// max-abs first8 delta vs the CPU-fallback reference compounds across 22
+// layers into a +6 magnitude logits delta. This sweep characterizes the
+// JSEP Q4_0 matmul kernel's precision profile across all production shapes
+// used in TinyLlama-Q4_0:
+//   (2048, 2048, 6) — Q-proj / out-proj          (verified on JSEP per Probe 8b)
+//   (256,  2048, 6) — K-proj                       (V-proj routes to CPU)
+//   (5632, 2048, 6) — FFN gate / up               (NB: FFN routes to CPU per Probe 8b — measured for completeness)
+//   (2048, 5632, 6) — FFN down                    (CPU per 8b)
+//   (32000, 2048, 1) — lm_head                    (CPU per 8b)
+//
+// For each shape the harness reports BOTH:
+//   - delta vs f64 ground truth (sums in JS f64, "exact" floating-point)
+//   - delta vs f32 element-wise reference (sums in JS f32 with the same
+//     k-major order as the JSEP kernel; if JSEP matches this to ULP it
+//     means the kernel is mathematically identical to a CPU f32 single-
+//     pass loop and the precision delta is purely an f32-summation
+//     non-associativity artifact, not a kernel bug)
+//
+// Output magnitudes are NOT bounded — random Q4_0 weights × random src1
+// produce sums with normal magnitudes ~sqrt(K) × per-term-magnitude. We
+// report `outputMaxAbs` so callers can compute relative error.
+
+const QK4_0 = 32;
+const Q4_0_BYTES_PER_BLOCK = 18;
+
+// Pack one Q4_0 block (32 elements). Returns 18 bytes + 32 dequantized
+// values (post-roundtrip-through-f16 scale, matching the WGSL kernel's
+// dequant exactly).
+function packQ4_0Block(
+	d: number,
+	nibbles: Uint8Array,
+): { bytes: Uint8Array; dequant: Float32Array } {
+	if (nibbles.length !== QK4_0) throw new Error("Q4_0 block needs 32 nibbles");
+	const bytes = new Uint8Array(Q4_0_BYTES_PER_BLOCK);
+	const view = new DataView(bytes.buffer);
+	view.setUint16(0, f32ToF16Bits(d), true);
+	for (let i = 0; i < 16; i++) {
+		bytes[2 + i] = (nibbles[i] & 0xf) | ((nibbles[i + 16] & 0xf) << 4);
+	}
+	const decodedD = f16BitsToF32(f32ToF16Bits(d));
+	const dequant = new Float32Array(QK4_0);
+	for (let i = 0; i < QK4_0; i++) {
+		dequant[i] = (nibbles[i] - 8) * decodedD;
+	}
+	return { bytes, dequant };
+}
+
+function buildSyntheticQ4_0Matrix(
+	M: number,
+	K: number,
+	seed: number,
+): { bytes: Uint8Array; dequant: Float32Array; rowBytes: number } {
+	if (K % QK4_0 !== 0) throw new Error(`K=${K} must be multiple of 32`);
+	const blocksPerRow = K / QK4_0;
+	const rowBytes = blocksPerRow * Q4_0_BYTES_PER_BLOCK;
+	const bytes = new Uint8Array(M * rowBytes);
+	const dequant = new Float32Array(M * K);
+
+	// Mid-layer weight scales for TinyLlama Q4_0 land around 0.01-0.05;
+	// pick deterministic per-(row, block) values in that range so a
+	// stride bug shows up as cross-block leakage rather than uniform
+	// scaling.
+	const nibbles = new Uint8Array(QK4_0);
+	for (let r = 0; r < M; r++) {
+		for (let b = 0; b < blocksPerRow; b++) {
+			const d = 0.012 + 0.0008 * (((r * 7 + b * 13 + seed) % 31) / 31);
+			for (let i = 0; i < QK4_0; i++) {
+				nibbles[i] = (i * 5 + r * 3 + b * 11 + seed) & 0xf;
+			}
+			const { bytes: blkBytes, dequant: blkDeq } = packQ4_0Block(d, nibbles);
+			bytes.set(blkBytes, r * rowBytes + b * Q4_0_BYTES_PER_BLOCK);
+			dequant.set(blkDeq, r * K + b * QK4_0);
+		}
+	}
+	return { bytes, dequant, rowBytes };
+}
+
+interface MatmulQ4_0SweepResult {
+	M: number;
+	K: number;
+	N: number;
+	status: number;
+	maxAbsDeltaVsF64: number;
+	maxAbsDeltaVsF32Loop: number;
+	outputMaxAbs: number;
+	hasNaN: boolean;
+	hasInf: boolean;
+	first4Got: number[];
+	first4F64: number[];
+	first4F32Loop: number[];
+}
+
+async function runMatmulQ4_0Sweep(
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+	M: number,
+	K: number,
+	N: number,
+): Promise<MatmulQ4_0SweepResult> {
+	const seed = (M * 31) ^ (K * 7) ^ (N * 13);
+	const { bytes: q4Bytes, dequant: src0Dequant, rowBytes } =
+		buildSyntheticQ4_0Matrix(M, K, seed);
+	const src1 = new Float32Array(N * K);
+	for (let n = 0; n < N; n++) {
+		for (let k = 0; k < K; k++) {
+			src1[n * K + k] = (((k * 13 + n * 7 + seed) % 31) - 15) * 0.1;
+		}
+	}
+
+	// Reference 1 — f64 ground truth (JS Number is f64).
+	const refF64 = new Float64Array(M * N);
+	// Reference 2 — f32 element-wise k-major loop (matches JSEP kernel
+	// summation order; promote each accumulate via Math.fround to round-
+	// trip through f32).
+	const refF32Loop = new Float32Array(M * N);
+	for (let n = 0; n < N; n++) {
+		for (let m = 0; m < M; m++) {
+			let acc64 = 0;
+			let acc32 = Math.fround(0);
+			for (let k = 0; k < K; k++) {
+				const a = src0Dequant[m * K + k];
+				const b = src1[n * K + k];
+				acc64 += a * b;
+				acc32 = Math.fround(acc32 + Math.fround(a * b));
+			}
+			refF64[n * M + m] = acc64;
+			refF32Loop[n * M + m] = acc32;
+		}
+	}
+
+	const dstBytes = M * N * 4;
+	const h0 = runtime.dataManager.alloc(q4Bytes.byteLength);
+	const hSrc1 = runtime.dataManager.alloc(src1.byteLength);
+	const hDst = runtime.dataManager.alloc(dstBytes);
+	runtime.device.queue.writeBuffer(
+		runtime.dataManager.get(h0).buffer,
+		0,
+		q4Bytes,
+		0,
+		q4Bytes.byteLength,
+	);
+	runtime.device.queue.writeBuffer(
+		runtime.dataManager.get(hSrc1).buffer,
+		0,
+		new Uint8Array(src1.buffer),
+		0,
+		src1.byteLength,
+	);
+
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_MUL_MAT,
+		nSrc: 2,
+		dst: {
+			bufHandle: hDst,
+			offset: 0,
+			type: GGML_TYPE_F32,
+			ne: [M, N, 1, 1],
+			nb: [4, 4 * M, 4 * M * N, 4 * M * N],
+		},
+		srcs: [
+			{
+				bufHandle: h0,
+				offset: 0,
+				type: GGML_TYPE_Q4_0,
+				ne: [K, M, 1, 1],
+				nb: [Q4_0_BYTES_PER_BLOCK, rowBytes, rowBytes * M, 0],
+			},
+			{
+				bufHandle: hSrc1,
+				offset: 0,
+				type: GGML_TYPE_F32,
+				ne: [K, N, 1, 1],
+				nb: [4, 4 * K, 4 * K * N, 0],
+			},
+		],
+	};
+	const status = dispatchMatmul(runtime, desc);
+	runtime.encoderBatcher.flush();
+
+	const dstRec = runtime.dataManager.get(hDst);
+	const staging = runtime.device.createBuffer({
+		size: dstBytes,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	const enc = runtime.device.createCommandEncoder();
+	enc.copyBufferToBuffer(dstRec.buffer, 0, staging, 0, dstBytes);
+	runtime.device.queue.submit([enc.finish()]);
+	await staging.mapAsync(GPUMapMode.READ, 0, dstBytes);
+	const got = new Float32Array(staging.getMappedRange().slice(0));
+	staging.unmap();
+	staging.destroy();
+
+	let maxAbsDeltaVsF64 = 0;
+	let maxAbsDeltaVsF32Loop = 0;
+	let outputMaxAbs = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	for (let i = 0; i < got.length; i++) {
+		const v = got[i];
+		if (Number.isNaN(v)) hasNaN = true;
+		else if (!Number.isFinite(v)) hasInf = true;
+		const d64 = Math.abs(v - refF64[i]);
+		const d32 = Math.abs(v - refF32Loop[i]);
+		if (d64 > maxAbsDeltaVsF64) maxAbsDeltaVsF64 = d64;
+		if (d32 > maxAbsDeltaVsF32Loop) maxAbsDeltaVsF32Loop = d32;
+		const a = Math.abs(v);
+		if (a > outputMaxAbs) outputMaxAbs = a;
+	}
+
+	runtime.dataManager.free(h0);
+	runtime.dataManager.free(hSrc1);
+	runtime.dataManager.free(hDst);
+
+	return {
+		M,
+		K,
+		N,
+		status,
+		maxAbsDeltaVsF64,
+		maxAbsDeltaVsF32Loop,
+		outputMaxAbs,
+		hasNaN,
+		hasInf,
+		first4Got: Array.from(got.slice(0, 4)),
+		first4F64: Array.from(refF64.slice(0, 4)).map(Number),
+		first4F32Loop: Array.from(refF32Loop.slice(0, 4)),
+	};
 }
 
 // ----- SET_ROWS V-cache transpose self-test (Stage 4.6 D1) -----------------
@@ -1250,6 +1483,30 @@ async function runSpike(): Promise<void> {
 		const matProd2 = await runMatmulProductionSelfTest(runtime, "divert");
 		log(`MATMUL_PROD_DIVERT = ${JSON.stringify(matProd2)}`);
 		(window as any).__matmulProdDivert = matProd2;
+
+		// Stage 4.18 Probe 8a: per-shape Q4_0 matmul precision sweep.
+		// All 5 production shapes used in TinyLlama-Q4_0. Reports delta
+		// vs both f64 ground truth and f32 element-wise loop reference;
+		// the second tells us whether JSEP matches a CPU f32 single-pass
+		// loop bit-for-bit (i.e. kernel is mathematically equivalent and
+		// the precision is purely an f32-non-associativity feature, not
+		// a bug).
+		const q4_0SweepShapes: Array<[number, number, number, string]> = [
+			[2048, 2048, 6, "q-out-proj"],
+			[256, 2048, 6, "k-v-proj"],
+			[5632, 2048, 6, "ffn-gate-up"],
+			[2048, 5632, 6, "ffn-down"],
+			[32000, 2048, 1, "lm-head"],
+		];
+		const q4_0SweepResults: Array<MatmulQ4_0SweepResult & { tag: string }> =
+			[];
+		for (const [M, K, N, tag] of q4_0SweepShapes) {
+			const r = await runMatmulQ4_0Sweep(runtime, M, K, N);
+			const tagged = { tag, ...r };
+			q4_0SweepResults.push(tagged);
+			log(`MATMUL_Q4_0_SWEEP[${tag}] = ${JSON.stringify(tagged)}`);
+		}
+		(window as any).__matmulQ4_0Sweep = q4_0SweepResults;
 
 		// Stage 4.6 D1: SET_ROWS V-cache transpose self-test. Drives the
 		// F32→F16 atomic-CAS path with adjacent indices that share u32

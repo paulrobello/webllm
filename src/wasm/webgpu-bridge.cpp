@@ -764,10 +764,17 @@ static bool node_dump_cb(struct ggml_tensor* t, bool ask, void* /*user_data*/) {
     if (ggml_is_contiguous(t)) {
         for (int i = 0; i < n; ++i) v[i] = ggml_get_f32_1d(t, i);
     }
+    // Stage 4.18 Probe 8b: log the producing backend (CPU vs JSEP/WebGPU)
+    // so we can confirm or refute the "V runs on CPU" hypothesis from
+    // Stage 4.17. ggml_backend_buffer_name returns "CPU", "JSEP", or
+    // similar; that tells us which backend allocated the buffer that
+    // holds this tensor's data — i.e., which backend the scheduler
+    // routed the producing op to.
+    const char* buf_name = (t->buffer ? ggml_backend_buffer_name(t->buffer) : "<null>");
     fprintf(stderr,
-            "[CHECKPOINT idx=%d name=%s type=%d ne=[%lld,%lld,%lld,%lld] "
+            "[CHECKPOINT idx=%d name=%s type=%d backend=%s ne=[%lld,%lld,%lld,%lld] "
             "contig=%d first8=[%g,%g,%g,%g,%g,%g,%g,%g]]\n",
-            g_node_dump_idx, t->name, (int)t->type,
+            g_node_dump_idx, t->name, (int)t->type, buf_name,
             (long long)t->ne[0], (long long)t->ne[1],
             (long long)t->ne[2], (long long)t->ne[3],
             ggml_is_contiguous(t) ? 1 : 0,
