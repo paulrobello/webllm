@@ -3993,6 +3993,15 @@ async function runSpike(): Promise<void> {
 		log(`MODEL_LOAD_MS = ${tLoadMs.toFixed(0)}`);
 		log("DONE", "pass");
 
+		try {
+			await fetch("http://localhost:8032/STAGE-4.33-spike.txt", {
+				method: "POST",
+				body: ((window as any).__stderrLines as string[]).join("\n")
+			});
+		} catch (e) {
+			console.error("Failed to POST logs:", e);
+		}
+
 		// Expose for agentchrome `js exec` readout.
 		(window as any).__spikeResult = {
 			generatedIds,

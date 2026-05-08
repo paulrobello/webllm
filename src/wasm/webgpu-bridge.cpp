@@ -852,9 +852,10 @@ static bool node_dump_cb(struct ggml_tensor* t, bool ask, void* /*user_data*/) {
                 mean, abs_max, abs_min, nan_count, inf_count);
 
         // Stage 4.32 Probe 19: Element-wise dump for `kqv_out-0`.
+        // Stage 4.33 Probe 20: Element-wise dump for `kq-0`.
         // Emit one line per row of 16 elements to keep stderr volume
-        // manageable (12288 elements = 768 lines).
-        if (std::strcmp(t->name, "kqv_out-0") == 0) {
+        // manageable (kqv_out-0 12288 elements = 768 lines; kq-0 49152 = 3072 lines).
+        if (std::strcmp(t->name, "kqv_out-0") == 0 || std::strcmp(t->name, "kq-0") == 0) {
             for (int i = 0; i < total; i += 16) {
                 int count = std::min(16, total - i);
                 fprintf(stderr, "[CHECKPOINT-IDX-DUMP idx=%d name=%s start=%d count=%d values=[",

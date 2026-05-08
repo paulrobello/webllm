@@ -379,6 +379,15 @@ async function runRefProbe() {
     log(`TOTAL_PREFILL_MS = ${tPrefillMs.toFixed(0)}`);
     log(`MODEL_LOAD_MS = ${tLoadMs.toFixed(0)}`);
     log("DONE", "pass");
+    try {
+      await fetch("http://localhost:8032/STAGE-4.33-ref.txt", {
+        method: "POST",
+        body: window.__stderrLines.join(`
+`)
+      });
+    } catch (e) {
+      console.error("Failed to POST logs:", e);
+    }
     window.__refResult = {
       generatedIds,
       perTokenMs,
