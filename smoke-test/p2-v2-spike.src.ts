@@ -2127,7 +2127,7 @@ async function runSpike(): Promise<void> {
 			let verdict: string;
 			if (allMatch) {
 				verdict =
-					"P-21b-clean (kernel matches GQA reference uniformly — bug is in libllama-side descriptor packing)";
+					"P-21b-clean (kernel matches GQA reference uniformly — Stage 4.35 fix engaged, regression guard pass)";
 			} else if (head0Match && otherHeadsDiverge) {
 				verdict =
 					"P-21b-bug-reproduces (head 0 matches GQA reference; heads ≥1 diverge — kernel ignores GQA broadcast, needs `batch / r2` divide)";

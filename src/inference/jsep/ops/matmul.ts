@@ -209,7 +209,13 @@ function typeName(t: number): string {
  *   @binding(3) shape — uniform { M, K, N, batch_count, src0_stride1_bytes,
  *                                  src1_stride1_bytes, dst_stride1_bytes,
  *                                  src0_stride2_bytes, src1_stride2_bytes,
- *                                  dst_stride2_bytes, _pad0, _pad1 } (12 u32)
+ *                                  dst_stride2_bytes, r2, _pad1 } (12 u32)
+ *
+ * Stage 4.35 GQA-broadcast fix — `r2 = max(1, src1.ne[2] / src0.ne[2])` is
+ * the GQA repeat factor. Each `load_*` kernel computes the src0 batch index
+ * as `batch / r2` so n_q_head Q-heads in the same group all read the
+ * matching n_kv_head K/V slice. For non-broadcast dispatches (src1.ne[2]
+ * == src0.ne[2]) `r2 = 1` and the divide is a structural no-op.
  *
  * Stage 4.25 Probe 13 — when `kahan=true` (only honored for Q4_K), the
  * intra-thread K-loop accumulator uses Neumaier-corrected summation. The
@@ -241,7 +247,7 @@ struct Shape {
     src0_batch_bytes: u32,
     src1_batch_bytes: u32,
     dst_batch_bytes: u32,
-    _pad0: u32,
+    r2: u32,
     _pad1: u32,
 };
 
@@ -259,7 +265,8 @@ fn load_src0(m: u32, k: u32, batch: u32) -> f32 {
     let bytes_per_elem: u32 = 4u;
     let row_bytes: u32 = shape.src0_row_bytes;
     let batch_bytes: u32 = shape.src0_batch_bytes;
-    let byte_off: u32 = batch * batch_bytes + m * row_bytes + k * bytes_per_elem;
+    let src0_batch_idx: u32 = batch / shape.r2;
+    let byte_off: u32 = src0_batch_idx * batch_bytes + m * row_bytes + k * bytes_per_elem;
     let word_idx: u32 = byte_off / 4u;
     return bitcast<f32>(src0[word_idx]);
 }
@@ -290,7 +297,8 @@ fn load_src0(m: u32, k: u32, batch: u32) -> f32 {
     let bytes_per_elem: u32 = 2u;
     let row_bytes: u32 = shape.src0_row_bytes;
     let batch_bytes: u32 = shape.src0_batch_bytes;
-    let byte_off: u32 = batch * batch_bytes + m * row_bytes + k * bytes_per_elem;
+    let src0_batch_idx: u32 = batch / shape.r2;
+    let byte_off: u32 = src0_batch_idx * batch_bytes + m * row_bytes + k * bytes_per_elem;
     let word_idx: u32 = byte_off / 4u;
     let pair: vec2<f32> = unpack2x16float(src0[word_idx]);
     // Lane within the u32 word (0 or 1) — 2 f16 per u32.
@@ -333,7 +341,8 @@ const Q4_0_BYTES_PER_BLOCK: u32 = 18u;
 fn load_q4_0(m: u32, k: u32, batch: u32) -> f32 {
     let row_bytes: u32 = shape.src0_row_bytes;
     let batch_bytes: u32 = shape.src0_batch_bytes;
-    let row_byte_base: u32 = batch * batch_bytes + m * row_bytes;
+    let src0_batch_idx: u32 = batch / shape.r2;
+    let row_byte_base: u32 = src0_batch_idx * batch_bytes + m * row_bytes;
     let block_idx: u32 = k / QK4_0;
     let in_block: u32 = k % QK4_0;
     let block_byte_base: u32 = row_byte_base + block_idx * Q4_0_BYTES_PER_BLOCK;
@@ -415,7 +424,8 @@ fn q4k_unpack_scale_min(scales_byte_base: u32, is: u32) -> vec2<u32> {
 fn load_q4_K(m: u32, k: u32, batch: u32) -> f32 {
     let row_bytes: u32 = shape.src0_row_bytes;
     let batch_bytes: u32 = shape.src0_batch_bytes;
-    let row_byte_base: u32 = batch * batch_bytes + m * row_bytes;
+    let src0_batch_idx: u32 = batch / shape.r2;
+    let row_byte_base: u32 = src0_batch_idx * batch_bytes + m * row_bytes;
     let super_block_idx: u32 = k / QK_K;
     let in_super: u32 = k % QK_K;
     let block_byte_base: u32 = row_byte_base + super_block_idx * Q4_K_BYTES_PER_BLOCK;
@@ -579,6 +589,25 @@ export function dispatchMatmul(
 
 	const ndim = batchCount > 1 ? 3 : 2;
 
+	// Stage 4.35 — GQA broadcast factor. ggml's MUL_MAT semantics permit
+	// src0.ne[2] < src1.ne[2] when `src1.ne[2] % src0.ne[2] == 0`; each
+	// `src0` batch slot is then shared by `r2 = src1.ne[2] / src0.ne[2]`
+	// consecutive `src1` batch slots. The WGSL `load_*` kernels divide
+	// `batch` by `r2` to recover the src0 batch index. For non-broadcast
+	// dispatches (`src0.ne[2] == src1.ne[2]`) `r2 = 1` and the divide is a
+	// structural no-op — no precision impact on Q-projection / FFN /
+	// lm_head paths.
+	const src0_ne2 = Math.max(1, src0.ne[2]);
+	const src1_ne2 = Math.max(1, src1.ne[2]);
+	if (src1_ne2 % src0_ne2 !== 0) {
+		console.error(
+			`dispatchMatmul: GQA broadcast invariant violated — ` +
+				`src1.ne[2]=${src1_ne2} not a multiple of src0.ne[2]=${src0_ne2}`,
+		);
+		return -1;
+	}
+	const r2 = src1_ne2 / src0_ne2;
+
 	// Stage 4.34 Probe 21 — one-shot capture of the first MUL_MAT where
 	// src0.ne[2] !== src1.ne[2] (the GQA-broadcast case). Stashes ne / nb
 	// for both sources and dst into a global the spike harness reads back
@@ -696,7 +725,8 @@ export function dispatchMatmul(
 	shapeData[7] = src0.nb[2];
 	shapeData[8] = src1.nb[2];
 	shapeData[9] = dst.nb[2];
-	shapeData[10] = 0;
+	// Stage 4.35: r2 (GQA broadcast factor). _pad1 reserved for future use.
+	shapeData[10] = r2;
 	shapeData[11] = 0;
 	ctx.device.queue.writeBuffer(shapeBuffer, 0, shapeData);
 
