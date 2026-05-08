@@ -1073,11 +1073,11 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.30: post-load `tensor->data` byte-hash peek for `ffn_norm.weight` + `ffn_down.weight` (Probe 17)
+### Next session pickup — Phase 3 Stage 4.31: widen `node_dump_cb` for full-tensor stats on `kqv_out-0` (Probe 18, Shape A) — and Probe 18b queued on the clean branch
 
-Stage 4.29 confirmed Outcome **P-16-silent**: CPU hook armed and exported correctly (`[probe16] CPU weight-hash probe armed` line emitted, no "export missing" failure), but fired **0/7** during model load. Neither the JSEP buft (Stage 4.28: 5/7 fire) nor the default CPU buft in `ggml-backend.cpp` (this stage: 0/7) owns `ffn_norm.weight` and `ffn_down.weight`. With `GGML_CPU=OFF` in the JSEP build (`Makefile:139`), the most plausible owner is the GGUF mmap-direct host buft — `tensor->data` would point straight into the mmap'd file region and there is no `set_tensor` upload step to corrupt the bytes.
+Stage 4.30 confirmed Outcome **P-17-clean**: all **7/7** layer-0 weights byte-exact at `tensor->data` post-`loadModel` (`attn_q.weight` Q4_0 `0xf2f7188c`, `attn_k.weight` Q4_0 `0x9399f36a`, `attn_output.weight` Q4_0 `0xaae061b5`, `ffn_norm.weight` F32 `0xcba312e0`, `ffn_gate.weight` Q4_0 `0xafdfc33a`, `ffn_up.weight` Q4_0 `0x76f44e42`, `ffn_down.weight` Q6_K `0xd1429247`). All `size_data == size_ref` ⇒ no in-flight quant conversion (risk register #2 closed). Suspect 2 (`ffn_norm.weight` gain-vector mis-load) is **DEAD by direct measurement** on the GGUF mmap-direct buft. Risk register #1 (host_mirror out of sync for JSEP-resident weights) also did not fire — all 5 JSEP-resident weights' `tensor->data` (= host_mirror per Stage 4.4 F1) match GGUF refs.
 
-This makes suspect 2 (`ffn_norm.weight` gain-vector mis-load) **strongly indirect-evidence dead** (Stage 4.27's `attn_norm-0` bit-identical result also implies the CPU RMSNorm kernel + its gain-vector access is fine when input is clean), but it is **not closed by direct measurement**. Stage 4.30 closes it directly via a one-shot post-load `tensor->data` peek that hashes the bytes the CPU op actually reads, then pivots to either suspect 3 (kqv_out-0 first8-window blindness) or the upstream cascade source at Qcur-0 inputs.
+Surviving structural suspects: (3) first8-window blindness on `kqv_out-0`, and (4) cascade source upstream of `attn_out-0` (Qcur-0's INPUTS — `embd` post-`get_rows` and `attn_norm-0` output bytes the JSEP MUL_MAT actually reads). The cheaper of the two is suspect 3 — widening `node_dump_cb`'s window from first8 to full-tensor stats on `kqv_out-0` only requires editing the existing callback site; no new export. Run that first; on negative result (Outcome P-18-full-clean), pivot to Probe 18b (Shape B: hash `attn_norm-0` output bytes JSEP MUL_MAT reads at Qcur-0 execution time).
 
 START HERE in a fresh session.
 
@@ -1087,15 +1087,15 @@ START HERE in a fresh session.
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.29 TODO closure commit>     docs(TODO): Stage 4.29 closed — queue Stage 4.30 post-load tensor->data peek
-#   → <Stage 4.29 reports commit>          docs(reports): Stage 4.29 closure — Outcome P-16-silent
-#   → <Stage 4.29 spike commit>            feat(spike): Stage 4.29 Probe 16 — CPU-side set_tensor hook
-#   → dd8c104                              docs(TODO): Stage 4.28 closed — queue Stage 4.29 CPU-side weight-hash probe
-#   → fee50e9                              docs(reports): Stage 4.28 closure — Outcome P-15-jsep-bypass
+#   → <Stage 4.30 TODO closure commit>     docs(TODO): Stage 4.30 closed — queue Stage 4.31 widen node_dump_cb for kqv_out-0
+#   → <Stage 4.30 reports commit>          docs(reports): Stage 4.30 closure — Outcome P-17-clean
+#   → <Stage 4.30 spike commit>            feat(spike): Stage 4.30 Probe 17 — post-load tensor->data peek
+#   → 59b28a2                              docs(TODO): Stage 4.29 closed — queue Stage 4.30 post-load tensor->data peek
+#   → d7ae7e5                              docs(reports): Stage 4.29 closure — Outcome P-16-silent
 
-# 2. Confirm llama.cpp tip (patch stack 14 — Stage 4.29 added the CPU-side set_tensor hook in ggml-backend.cpp).
+# 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29; Stage 4.30 was webllm-only).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → <Stage 4.29 commit on top of 1d1d64f76>   webllm-browser-patches   (patch stack 14)
+#   → ebc7c3d82   webllm-browser-patches   (patch stack 14)
 
 # 3. Smoke-server up on 8031 + reuse agentchrome session + spike tab.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
@@ -1105,56 +1105,55 @@ SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;p
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 ```
 
-**One-line goal:** Add a `webllm_get_tensor_data_hash(name, *out_size)` export that walks `model->tensors_by_name`, FNV-1a-32-hashes `ggml_nbytes(t)` bytes from `t->data`, and returns the hash. Spike calls it for each of the 7 layer-0 weights post-`loadModel`, emits `[STAGE-4.30] <name> ref=<H1> data_peek=<H2> match=<bool>` lines, branches on the first mismatch.
+**One-line goal:** When `node_dump_cb` fires for a tensor whose name is `kqv_out-0`, expand the readback from the existing first-8-elements window to the full tensor and compute mean / abs-max / abs-min / NaN-count / Inf-count over all elements; push to `globalThis.__stage431Stats[name]` via EM_ASM. Spike compares JSEP and reference paths, synthesizes `P-18-{first8-blind, full-clean, full-dirty}`.
 
-**One-line context:** Stage 4.29 proved neither JSEP nor default-CPU `set_tensor` ever touches `ffn_norm.weight`/`ffn_down.weight`. The only remaining direct way to capture their bytes is to read `tensor->data` after `loadModel` completes. If the bytes match the GgufParser ref hash, suspect 2 is dead by direct measurement and the cascade source must be upstream (suspect 3 or pre-Qcur). If they don't, gain-vector mis-load is CONFIRMED via a non-set_tensor pathway.
+**One-line context:** Stage 4.30 closed suspect 2 by direct measurement. The remaining suspects are (3) first8-window blindness on `kqv_out-0` (cheap to test, run first) and (4) upstream cascade source at Qcur-0 inputs (Probe 18b, Shape B — queued on the P-18-full-clean branch).
 
-#### Stage 4.30 implementation sketch (Probe 17 — Shape A: post-load tensor->data peek)
+#### Stage 4.31 implementation sketch (Probe 18 — Shape A: full-tensor stats on `kqv_out-0`)
 
-1. **C++ export** (`src/wasm/webgpu-bridge.cpp`):
-   - Add `webllm_get_tensor_data_hash(model_handle, tensor_name, out_size_ptr) → uint32_t`.
-   - Walk `model->tensors_by_name` (or whichever struct libllama exposes by name); on hit, FNV-1a-32-hash `ggml_nbytes(t)` bytes from `t->data`, write `ggml_nbytes(t)` to `*out_size_ptr`, return the hash.
-   - Use the same FNV-1a-32 helper Stage 4.20/4.29 already have (or copy locally — it's 7 lines).
-2. **CMakeLists export.** Add `_webllm_get_tensor_data_hash` to `src/wasm/CMakeLists.txt:EXPORTED_FUNCTIONS` (unconditional — `webgpu-bridge.cpp` ships in every build).
-3. **JS spike harness** (`smoke-test/p2-v2-spike.src.ts`):
-   - Post-`loadModel`, after the existing Stage 4.29 verdict block, walk `targetNames`. For each name:
-     - Allocate a 4-byte `out_size` buffer with `mod._malloc(4)`.
-     - Call `mod._webllm_get_tensor_data_hash(modelHandle, ptr_to_name_utf8, out_size_ptr)`.
-     - Read `mod.HEAPU32[out_size_ptr >> 2]`.
-     - Free both.
-   - Emit `[STAGE-4.30] <name> ref=0x<H1> data_peek=0x<H2> size_data=<N> size_ref=<M> match=<bool>` per weight.
-   - Synthesize `[STAGE-4.30] OUTCOME: P-17-{clean,gain,ffn-down,jsep-deep,other}`.
-4. **Run the spike** at `?v=stage4.30-probe17&ingest=off`, dump verdict to `STAGE-4.30-spike-output.txt`.
+1. **C++ side** (`src/wasm/webgpu-bridge.cpp:node_dump_cb`):
+   - Locate the existing first-8-elements readback that powers `__stage417Checkpoints`.
+   - When `tensor->name == "kqv_out-0"`, also read back the FULL tensor (`ggml_nbytes(t)` bytes) and compute mean / abs-max / abs-min / NaN-count / Inf-count over all elements.
+   - Push to `globalThis.__stage431Stats[name]` via EM_ASM. Keep the existing first-8 readback intact so Stage 4.27's checkpoint diff still works.
+2. **JS spike side** (`smoke-test/p2-v2-spike.src.ts`):
+   - After the existing Stage 4.27 checkpoint diff block, walk `__stage431Stats["kqv_out-0"]` from both JSEP and reference runs.
+   - Emit `[STAGE-4.31] kqv_out-0 reference={mean: X, abs_max: Y, ...} jsep={mean: X', ...} delta_mean=... delta_abs_max=...`.
+   - Synthesize `[STAGE-4.31] OUTCOME: P-18-{first8-blind, full-clean, full-dirty}`.
+3. **Run the spike** at `?v=stage4.31-probe18&ingest=off`, dump verdict to `STAGE-4.31-spike-output.txt`.
 
 #### Files to read first
 
-- [`STAGE-4.29-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.29-RESULT.md) — P-16-silent classification + mmap-direct framing + full Stage 4.30 brief expansion.
-- [`STAGE-4.20-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.20-RESULT.md) — JSEP `set_tensor` hook pattern; Probe 17's tensor-data peek follows the same FNV-1a-32 + EM_ASM-push idiom but at a different point.
-- `src/wasm/webgpu-bridge.cpp` — target file for the new export.
-- `~/Repos/llama.cpp/include/llama.h` — find the API for resolving a tensor by name (`llama_get_model_tensor` or equivalent).
-- `smoke-test/p2-v2-spike.src.ts` — Stage 4.29 verdict block (search `[STAGE-4.29]`); extend with the data-peek loop.
+- [`STAGE-4.30-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.30-RESULT.md) — P-17-clean classification + suspect-2 closure + Stage 4.31 brief expansion + Probe 18b (Shape B) queued for the clean branch.
+- [`STAGE-4.27-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-RESULT.md) — Stage 4.17 cascade re-capture (`attn_out-0` Δ=4.77e-3 first-divergent op); reference for Stage 4.31's full-tensor scope expansion.
+- [`STAGE-4.17-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-RESULT.md) — original 96-checkpoint cascade build-up that named `kqv_out-0` as a candidate first8-blind site.
+- `src/wasm/webgpu-bridge.cpp:node_dump_cb` (current callback site for tensor stats).
+- `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-jsep.cpp:compute_op` (Shape B target if Shape A is clean).
 
 #### Risk register
 
-1. **`tensor->data` may be a sentinel pointer for JSEP-resident weights.** Stage 4.4's F1 host_mirror fix means JSEP-resident tensors have `tensor->data` pointing into the host mirror (a separate allocation kept in sync via dual-write in `ggml_backend_jsep_buffer_set_tensor`). For the 5 JSEP-resident weights, the post-load peek should match ref — but if it doesn't, the host_mirror is out of sync, which would be a separate bug worth knowing about (re-opens suspect 1).
-2. **Q6_K weight may be quant-converted in flight.** If libllama's loader converts Q6_K to a different runtime format on load, the post-load `tensor->data` bytes won't match the GGUF Q6_K bytes. Diagnosis: check `tensor->type` post-load (returnable via a small helper `webllm_get_tensor_type`) and compare against the GGUF metadata's tensor type. Same-type ⇒ direct mmap; different-type ⇒ in-flight conversion (the hash comparison would need a post-conversion reference).
-3. **Even if all 7 hashes match,** the cascade source isn't localized — only suspect 2 closes. Stage 4.31 then has to widen the kqv_out-0 first8-window blindness check (suspect 3) OR probe the 5.24e-4 disagreement at Qcur-0's INPUTS (`attn_norm-0` output bytes the JSEP MUL_MAT actually reads).
-4. **Pre-emption risk.** If locating the API for tensor-by-name resolution reveals a fact about libllama's weight-loading path that retroactively answers the cascade (e.g., a known-dirty in-flight conversion path for Q6_K), take that finding as the closure even without running Probe 17.
+1. **`kqv_out-0` may not have first8-blindness — full-tensor scope might also be clean.** That's the negative-result branch (Outcome P-18-full-clean). Stage 4.31b (Shape B) is the queued follow-on for that case; brief is in [`STAGE-4.30-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.30-RESULT.md) under "Probe 18b implementation sketch".
+2. **`__stage417Checkpoints` may not cache `kqv_out-0`.** Stage 4.27's checkpoint dictionary is keyed by node name; if `kqv_out-0` isn't in the cb_eval allowlist, Stage 4.31 must extend it (cheap; one string in `node_dump_cb`).
+3. **Reference path divergence drift.** Stages 4.17 / 4.27 used a non-JSEP reference build to compute the truth values. Patch stack growth from 13 → 14 (Stage 4.29 added the CPU-side hook, no kernel change) does NOT affect the reference path, so delta values from Stage 4.27 should still be load-bearing for Stage 4.31. Sanity-check by re-running Stage 4.27's first-divergent-op cascade and confirming `attn_out-0` still reads Δ=4.77e-3 before trusting the Stage 4.31 deltas.
+4. **The 5.24e-4 at Qcur-0 may be coming from rotary embedding inputs we haven't probed.** Q-projection's downstream path includes RoPE before reaching `kqv_out-0`. If `kqv_out-0` is full-clean and `attn_norm-0` (Q-proj's src1) is clean, the next candidate is RoPE position embeddings (`inp_pos`). Stage 4.31c (Shape C) would extend the input-bytes-as-read probe to RoPE inputs.
 
-#### Exit criteria — Stage 4.30 closes when documented in `STAGE-4.30-RESULT.md`
+#### Exit criteria — Stage 4.31 closes when documented in `STAGE-4.31-RESULT.md`
 
-- All 7 layer-0 weight FNV-1a-32 hashes captured via post-load `tensor->data` peek and compared against JS-side `GgufParser` reference.
-- The `ffn_norm.weight` byte-integrity question answered by direct measurement:
-  - **CLEAN**: gain-vector mis-load (suspect 2) is dead. Pivot Stage 4.31 to suspect 3 (first8-window blindness on `kqv_out-0`) or the upstream cascade source at Qcur-0 inputs.
-  - **DIRTY**: gain-vector mis-load CONFIRMED via direct measurement. Stage 4.31 traces the buggy upload byte trajectory back to where mmap → CPU-op-read picks up corruption.
-- Stage 4.31 paste-and-go brief queued for the chosen branch.
+- `kqv_out-0` full-tensor stats captured for both JSEP and reference paths; verdict on whether first8-blindness was hiding a real divergence.
+- One of:
+  - **P-18-first8-blind**: full-tensor delta exceeds 1e-3 while first8 was clean. Suspect 3 CONFIRMED. Stage 4.32 traces the kernel-output divergence at the disagreement window.
+  - **P-18-full-clean**: full-tensor delta within noise (≤1e-5). Suspect 3 dies. Run Probe 18b (Shape B). Stage 4.32 picks based on Shape B's outcome.
+  - **P-18-full-dirty**: full-tensor delta also large but spread across the tensor (not localized). Re-frame as kernel-arithmetic disagreement at scale; rerun Stage 4.26's libllama-vs-WGSL precision probe at `kqv_out-0` inputs.
+- Stage 4.32 paste-and-go brief queued for the chosen branch.
 
-#### Branch on Probe 17 outcome
+#### Branch on Probe 18 outcome
 
-- **All 7 match** (Outcome P-17-clean): suspect 2 dies by direct measurement. Stage 4.31 widens `node_dump_cb` to capture full-tensor stats on `kqv_out-0` (suspect 3) OR probes the upstream cascade source by hashing `attn_norm-0` output bytes the JSEP MUL_MAT reads (the actual Q-projection `src1`).
-- **`ffn_norm.weight` mismatches** (Outcome P-17-gain): the gain-vector mis-load CONFIRMED. Stage 4.31 traces the buggy upload byte trajectory back to where mmap → CPU-op-read picks up corruption.
-- **`ffn_down.weight` mismatches** (Outcome P-17-ffn-down): Q6_K upload path is the suspect. Stage 4.31 deep-dives the Q6_K upload + dispatch path.
-- **A JSEP-resident weight mismatches** (Outcome P-17-jsep-deep): Stage 4.4's host_mirror is out of sync with the JSEP GPU buffer. Re-opens suspect 1 via a different mechanism.
+- **P-18-first8-blind** (suspect 3 hot): Stage 4.32 captures the full-tensor diff at idx-by-idx scale to localize where the kernel-output disagreement starts; re-uses Stage 4.27's first-divergent-op walk on a sliding window.
+- **P-18-full-clean** (suspect 3 dies): Stage 4.32 = Probe 18b (Shape B) — hash `attn_norm-0` output bytes the JSEP MUL_MAT reads at Qcur execution time.
+- **P-18-full-dirty** (kernel arithmetic at scale): Stage 4.32 re-runs Stage 4.26's WGSL-vs-libllama matmul precision probe but at `kqv_out-0` inputs (post-RoPE Q × K^T) instead of Q-projection (Q4_K × f32).
+
+### Earlier Stage 4.30 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.30 brief (paste-and-go bootstrap, Probe 17 implementation sketch with `webllm_get_tensor_data_hash` C++ export via `llama_internal_get_tensor_map` forward decl + spike-side per-weight peek loop with stringToUTF8 / heap-rederive plumbing, four-item risk register, five-outcome P-17-{clean,gain,ffn-down,jsep-deep,other} branch table) lives in [`STAGE-4.30-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.30-RESULT.md). Outcome **P-17-clean** CONFIRMED: all **7/7** layer-0 weights byte-exact at `tensor->data` post-`loadModel`. `size_data == size_ref` for every weight (Q6_K not in-flight converted; risk register #2 closed). Suspect 2 (`ffn_norm.weight` gain-vector mis-load) is DEAD by direct measurement — the 8 KiB F32 gain vector the layer-0 RMSNorm op reads is bit-identical to the GGUF tensor data at every byte. Risk register #1 (host_mirror out of sync for JSEP-resident weights) also did not fire — Stage 4.4 F1's host_mirror is in sync with the JSEP GPU buffer at the time of the post-load peek for all 5 JSEP-resident weights. Cascade source must lie upstream of layer-0 weight bytes themselves; survivors are suspect 3 (first8-window blindness on `kqv_out-0`) and suspect 4 (cascade source upstream of `attn_out-0` — Qcur-0's INPUTS). Stage 4.31 queues Probe 18 Shape A (widen `node_dump_cb` to full-tensor stats on `kqv_out-0`) and queues Probe 18b Shape B (hash `attn_norm-0` output bytes JSEP MUL_MAT reads at Qcur-0 execution time) on the P-18-full-clean branch. Collapsed at Stage 4.31 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.29 brief — collapsed (full text in closure report)
 
