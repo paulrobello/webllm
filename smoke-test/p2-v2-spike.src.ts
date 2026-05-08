@@ -2299,6 +2299,151 @@ async function runSpike(): Promise<void> {
 			log(`     [probe9c] GPU-readback hash threw: ${(err as Error).message}`, "fail");
 		}
 
+		// Stage 4.30 Probe 17 — post-load tensor->data byte-hash peek.
+		//
+		// Stage 4.29 (Outcome P-16-silent) confirmed neither the JSEP
+		// set_tensor hook (5/7 fire) nor the default CPU set_tensor hook
+		// (0/7 fire) ever touches blk.0.ffn_norm.weight or
+		// blk.0.ffn_down.weight during model load. With GGML_CPU=OFF in
+		// the JSEP build, the most plausible owner is the GGUF mmap-
+		// direct host buft — tensor->data points straight into MEMFS
+		// bytes with no upload step. This block reads tensor->data
+		// post-loadModel via the new `webllm_get_tensor_data_hash`
+		// export and FNV-1a-32-hashes ggml_nbytes(t) bytes for each of
+		// the 7 layer-0 weights, then compares against the JS-side
+		// GgufParser reference already computed into __weightHashRef in
+		// Stage 4.20.
+		//
+		// CLEAN ⇒ suspect 2 (ffn_norm.weight gain-vector mis-load) DEAD
+		//          by direct measurement; pivot Stage 4.31 to suspect 3
+		//          (kqv_out-0 first8-window blindness) or upstream
+		//          cascade source at Qcur-0 inputs.
+		// DIRTY ⇒ gain-vector mis-load CONFIRMED via a non-set_tensor
+		//          pathway; Stage 4.31 traces the buggy upload byte
+		//          trajectory back to mmap → CPU-op-read corruption.
+		try {
+			const stage430Names = [
+				"blk.0.attn_q.weight",
+				"blk.0.attn_k.weight",
+				"blk.0.attn_output.weight",
+				"blk.0.ffn_norm.weight",
+				"blk.0.ffn_gate.weight",
+				"blk.0.ffn_up.weight",
+				"blk.0.ffn_down.weight",
+			];
+			const refMap430 = (globalThis as any).__weightHashRef as
+				| Record<string, { fnv1a: number; offset: number; size: number }>
+				| undefined;
+			const getHash = (mod as any)._webllm_get_tensor_data_hash as
+				| ((m: number, namePtr: number, outSizePtr: number) => number)
+				| undefined;
+			const stage430Lines: string[] = [];
+			let firstMismatch430: string | null = null;
+			let peekFiredCount = 0;
+			let peekByteCleanCount = 0;
+			const peekDirtyNames: string[] = [];
+			if (typeof getHash !== "function") {
+				log(
+					"     [STAGE-4.30] _webllm_get_tensor_data_hash export missing — old build?",
+					"fail",
+				);
+			} else {
+				const mAny = mod as {
+					_malloc: (n: number) => number;
+					_free: (p: number) => void;
+					stringToUTF8: (s: string, ptr: number, max: number) => void;
+					lengthBytesUTF8: (s: string) => number;
+					HEAPU8: Uint8Array;
+				};
+				for (const name of stage430Names) {
+					const nameLen = mAny.lengthBytesUTF8(name) + 1;
+					const namePtr = mAny._malloc(nameLen);
+					const outSizePtr = mAny._malloc(4);
+					if (!namePtr || !outSizePtr) {
+						log(
+							`     [STAGE-4.30] _malloc failed (namePtr=${namePtr} outSizePtr=${outSizePtr})`,
+							"fail",
+						);
+						if (namePtr) mAny._free(namePtr);
+						if (outSizePtr) mAny._free(outSizePtr);
+						continue;
+					}
+					mAny.stringToUTF8(name, namePtr, nameLen);
+					// Re-derive the U32 view AFTER each malloc — heap-grow
+					// detaches prior ArrayBuffers; mAny.HEAPU8 is re-bound
+					// by Emscripten on growth.
+					new Uint32Array(mAny.HEAPU8.buffer)[outSizePtr >>> 2] = 0;
+					const h = getHash(model, namePtr, outSizePtr) >>> 0;
+					const sz =
+						new Uint32Array(mAny.HEAPU8.buffer)[outSizePtr >>> 2] >>> 0;
+					mAny._free(namePtr);
+					mAny._free(outSizePtr);
+					const r = refMap430?.[name];
+					const refHex = r
+						? `0x${(r.fnv1a >>> 0).toString(16).padStart(8, "0")}`
+						: "<missing>";
+					const exportFired = !(sz === 0 && h === 0);
+					const dataHex = exportFired
+						? `0x${h.toString(16).padStart(8, "0")}`
+						: "<missing>";
+					const sizeMatch = !!r && sz === r.size;
+					const hashMatch = !!r && (h >>> 0) === (r.fnv1a >>> 0);
+					const match = exportFired && sizeMatch && hashMatch;
+					if (exportFired) {
+						peekFiredCount += 1;
+						if (match) peekByteCleanCount += 1;
+						else peekDirtyNames.push(name);
+					}
+					stage430Lines.push(
+						`[STAGE-4.30] ${name} ref=${refHex} data_peek=${dataHex} ` +
+							`size_data=${sz} size_ref=${r?.size ?? -1} match=${match}`,
+					);
+					if (!match && firstMismatch430 === null) {
+						firstMismatch430 = name;
+					}
+				}
+			}
+			(globalThis as any).__stage430Lines = stage430Lines;
+			(globalThis as any).__stage430FirstMismatch = firstMismatch430;
+			(globalThis as any).__stage430PeekFiredCount = peekFiredCount;
+			(globalThis as any).__stage430PeekByteCleanCount = peekByteCleanCount;
+			(globalThis as any).__stage430PeekDirtyNames = peekDirtyNames;
+			for (const line of stage430Lines) {
+				log(`     ${line}`, line.endsWith("match=true") ? "ok" : "fail");
+			}
+			log(
+				`     [STAGE-4.30] tensor->data peek fired on ${peekFiredCount}/${stage430Names.length} weights ` +
+					`(${peekByteCleanCount} byte-clean, ${peekDirtyNames.length} dirty)`,
+				peekFiredCount > 0 ? "ok" : "fail",
+			);
+			let outcome430: string;
+			if (peekFiredCount === 0) {
+				outcome430 =
+					"P-17-other (export never returned non-zero — model handle bad, name resolution failed, or tensor->data null)";
+			} else if (firstMismatch430 === null) {
+				outcome430 =
+					"P-17-clean (all 7 layer-0 weights byte-exact at tensor->data; suspect 2 gain-vector mis-load DEAD by direct measurement; pivot Stage 4.31 to suspect 3 first8-window blindness on kqv_out-0 OR upstream cascade source at Qcur-0 inputs)";
+			} else if (firstMismatch430 === "blk.0.ffn_norm.weight") {
+				outcome430 =
+					"P-17-gain (ffn_norm.weight tensor->data hash mismatch — gain-vector mis-load CONFIRMED via non-set_tensor pathway; trace mmap → CPU-op-read corruption in Stage 4.31)";
+			} else if (firstMismatch430 === "blk.0.ffn_down.weight") {
+				outcome430 =
+					"P-17-ffn-down (ffn_down.weight Q6_K tensor->data hash mismatch — Q6_K upload + dispatch path corruption; deep-dive Q6_K-specific path in Stage 4.31)";
+			} else {
+				outcome430 = `P-17-jsep-deep (${firstMismatch430} mismatches — JSEP-resident weight host_mirror out of sync with GPU buffer; reopens suspect 1 via different mechanism)`;
+			}
+			log(
+				`     [STAGE-4.30] OUTCOME: ${outcome430}`,
+				firstMismatch430 === null && peekFiredCount > 0 ? "ok" : "fail",
+			);
+			(globalThis as any).__stage430Outcome = outcome430;
+		} catch (err) {
+			log(
+				`     [STAGE-4.30] tensor->data peek threw: ${(err as Error).message}`,
+				"fail",
+			);
+		}
+
 		const ctx = await bridge.createContext(model, { nCtx: 512 });
 
 		// Snapshot counters AFTER model load so model-load JSEP traffic

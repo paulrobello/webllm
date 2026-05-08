@@ -8,7 +8,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <utility>
 #include <vector>
+
+// Stage 4.30 Probe 17 forward decl — internal llama.cpp helper exposing
+// llama_model::tensors_by_name without pulling in src/llama-model.h.
+// Defined in llama-model.cpp; declared in src/llama-model.h. Used by
+// `webllm_get_tensor_data_hash` below to resolve a tensor by name and
+// FNV-1a-32-hash the bytes the kernel actually reads from t->data
+// post-load. Has C++ linkage (returns std::vector<...> &) so it must
+// be declared outside the extern "C" block.
+const std::vector<std::pair<std::string, ggml_tensor *>> &
+llama_internal_get_tensor_map(const struct llama_model * model);
 
 static ggml_backend_t g_backend = nullptr;
 static std::vector<struct ggml_context*> g_ctx_stack;
@@ -869,6 +881,45 @@ int32_t webllm_q4k_q8k_matmul(const void* src0_q4k, const float* src1_f32,
         }
     }
     std::free(src1_q8k);
+    return 0;
+}
+
+// Stage 4.30 Probe 17: post-load tensor->data byte-hash peek.
+//
+// Resolves `name` against llama_model::tensors_by_name (via the internal
+// `llama_internal_get_tensor_map` helper) and FNV-1a-32-hashes
+// `ggml_nbytes(t)` bytes from `t->data`. Writes the byte count to
+// `*out_size_ptr` if non-null, and returns the hash (0 on miss).
+//
+// Used by the spike harness to compare against a JS-side `GgufParser`
+// reference hash of the same tensor's GGUF bytes. Closes suspect 2
+// (`ffn_norm.weight` gain-vector mis-load) by direct measurement on the
+// non-set_tensor pathway that Stage 4.29's CPU-side hook did not see
+// (Outcome P-16-silent: 0/7 fires for the bypass-weights, GGUF mmap-
+// direct host buft owns them).
+//
+//   CLEAN (hash matches): suspect 2 dies; pivot to suspect 3 / pre-Qcur.
+//   DIRTY (hash mismatch): mis-load CONFIRMED via mmap → CPU-op path.
+uint32_t webllm_get_tensor_data_hash(void* model_handle, const char* name,
+                                     uint32_t* out_size_ptr) {
+    if (out_size_ptr) *out_size_ptr = 0;
+    if (!model_handle || !name) return 0;
+    const llama_model* model = static_cast<const llama_model*>(model_handle);
+    const auto& tensors = llama_internal_get_tensor_map(model);
+    for (const auto& kv : tensors) {
+        if (kv.first != name) continue;
+        const ggml_tensor* t = kv.second;
+        if (!t || !t->data) return 0;
+        const size_t nbytes = ggml_nbytes(t);
+        const uint8_t* bytes = static_cast<const uint8_t*>(t->data);
+        uint32_t h = 2166136261u;
+        for (size_t i = 0; i < nbytes; ++i) {
+            h ^= bytes[i];
+            h *= 16777619u;
+        }
+        if (out_size_ptr) *out_size_ptr = (uint32_t) nbytes;
+        return h;
+    }
     return 0;
 }
 
