@@ -36,10 +36,47 @@ import { dispatchSetRows } from "../src/inference/jsep/ops/set-rows.js";
 // public path.
 const GGML_TYPE_I64 = 27;
 
-// Same fixture as p0-spike.src.ts — "The capital of France is".
-const PROMPT_TOKEN_IDS = [1, 450, 7483, 310, 3444, 338];
+// Stage 4.36 — canonical-6 JSEP parity sweep. `?model=<key>` URL param
+// selects which GGUF to load. Default is `tinyllama` (the Stage 4.35
+// reference). Subset chosen for the wasm32 4 GiB JSEP heap cap: 7B+
+// models (mistral-7b-q4ks, llama-3.1-8b-iq3m, qwen3-8b-iq3m) exceed the
+// cap and require a separate wasm-mem64 JSEP build path.
+const MODEL_REGISTRY: Record<
+	string,
+	{ ggufUrl: string; promptText: string }
+> = {
+	tinyllama: {
+		ggufUrl: "/models/tinyllama-1.1b-chat-q4_0.gguf",
+		promptText: "The capital of France is",
+	},
+	"qwen3-0.6b": {
+		ggufUrl: "/models/qwen3-0.6b-q4f16.gguf",
+		promptText: "The capital of France is",
+	},
+	"qwen3-1.7b": {
+		ggufUrl: "/models/qwen3-1.7b-q4f16.gguf",
+		promptText: "The capital of France is",
+	},
+};
+
+function resolveModelKey(): string {
+	const params = new URLSearchParams(window.location.search);
+	return params.get("model") ?? "tinyllama";
+}
+
+const MODEL_KEY = resolveModelKey();
+const MODEL_ENTRY = MODEL_REGISTRY[MODEL_KEY];
+if (!MODEL_ENTRY) {
+	throw new Error(
+		`Unknown model key '${MODEL_KEY}'. Known keys: ${Object.keys(MODEL_REGISTRY).join(", ")}`,
+	);
+}
 const N_GENERATE = 5;
-const GGUF_URL = "/models/tinyllama-1.1b-chat-q4_0.gguf";
+const GGUF_URL = MODEL_ENTRY.ggufUrl;
+// Tokenized at runtime via `bridge.tokenize` after loadModel — Stage 4.36
+// generalized away from TinyLlama's hardcoded `[1, 450, 7483, 310, 3444,
+// 338]`. Populated inside `runP2V2Spike` before [7/8].
+let promptTokenIds: number[] = [];
 
 // ----- Q4_K kernel self-test ------------------------------------------------
 
@@ -3509,8 +3546,20 @@ async function runSpike(): Promise<void> {
 			true;
 		log("     [probe21] kq-MUL_MAT descriptor capture armed (first src0.ne[2]!=src1.ne[2])");
 
-		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
-		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
+		// Stage 4.36 — tokenize the prompt per-model now that the model
+		// is loaded. parseSpecial:true preserves any model-specific
+		// chat-template tokens; addBos:true matches the previous hardcoded
+		// behaviour (TinyLlama's BOS=1 was the first id).
+		const tokenizedPrompt = bridge.tokenize(model, MODEL_ENTRY.promptText, {
+			addBos: true,
+			parseSpecial: true,
+		});
+		promptTokenIds = Array.from(tokenizedPrompt);
+		log(
+			`     [stage4.36] model=${MODEL_KEY} promptText="${MODEL_ENTRY.promptText}" promptIds=${JSON.stringify(promptTokenIds)}`,
+		);
+		log(`[7/8] Decoding prompt (${promptTokenIds.length} tokens)...`);
+		const promptTokens = new Int32Array(promptTokenIds);
 		const tPrefillStart = performance.now();
 		let status = await bridge.decode(ctx, promptTokens, 0);
 		const tPrefillMs = performance.now() - tPrefillStart;
@@ -4133,7 +4182,7 @@ async function runSpike(): Promise<void> {
 
 		log(`[8/8] Greedy decoding ${N_GENERATE} tokens...`);
 		const generatedIds: number[] = [];
-		let nPast = PROMPT_TOKEN_IDS.length;
+		let nPast = promptTokenIds.length;
 		const tDecodeStart = performance.now();
 		const logitStats: Array<{
 			step: number;
@@ -4379,6 +4428,9 @@ async function runSpike(): Promise<void> {
 			);
 		}
 
+		log(`MODEL_KEY = ${MODEL_KEY}`);
+		log(`PROMPT_TEXT = ${JSON.stringify(MODEL_ENTRY.promptText)}`);
+		log(`PROMPT_IDS = ${JSON.stringify(promptTokenIds)}`);
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`GENERATED_TEXT = ${JSON.stringify(generatedText)}`);
@@ -4401,6 +4453,9 @@ async function runSpike(): Promise<void> {
 
 		// Expose for agentchrome `js exec` readout.
 		(window as any).__spikeResult = {
+			modelKey: MODEL_KEY,
+			promptText: MODEL_ENTRY.promptText,
+			promptIds: promptTokenIds,
 			generatedIds,
 			generatedText,
 			perTokenMs,

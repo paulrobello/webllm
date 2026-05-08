@@ -15,11 +15,41 @@
 
 import { createLlamaBridge } from "../src/inference/llama-bridge.js";
 
-// Same fixture as p2-v2-spike.src.ts and p0-spike.src.ts —
-// "The capital of France is".
-const PROMPT_TOKEN_IDS = [1, 450, 7483, 310, 3444, 338];
+// Stage 4.36 — canonical-6 reference capture. `?model=<key>` URL param
+// matches the JSEP spike's registry; non-JSEP webllm-wasm.js is the
+// parity reference for `generatedIds[0]`.
+const MODEL_REGISTRY: Record<
+	string,
+	{ ggufUrl: string; promptText: string }
+> = {
+	tinyllama: {
+		ggufUrl: "/models/tinyllama-1.1b-chat-q4_0.gguf",
+		promptText: "The capital of France is",
+	},
+	"qwen3-0.6b": {
+		ggufUrl: "/models/qwen3-0.6b-q4f16.gguf",
+		promptText: "The capital of France is",
+	},
+	"qwen3-1.7b": {
+		ggufUrl: "/models/qwen3-1.7b-q4f16.gguf",
+		promptText: "The capital of France is",
+	},
+};
+
+function resolveModelKey(): string {
+	const params = new URLSearchParams(window.location.search);
+	return params.get("model") ?? "tinyllama";
+}
+
+const MODEL_KEY = resolveModelKey();
+const MODEL_ENTRY = MODEL_REGISTRY[MODEL_KEY];
+if (!MODEL_ENTRY) {
+	throw new Error(
+		`Unknown model key '${MODEL_KEY}'. Known keys: ${Object.keys(MODEL_REGISTRY).join(", ")}`,
+	);
+}
 const N_GENERATE = 5;
-const GGUF_URL = "/models/tinyllama-1.1b-chat-q4_0.gguf";
+const GGUF_URL = MODEL_ENTRY.ggufUrl;
 
 function log(msg: string, cls = ""): void {
 	const el = document.getElementById("log");
@@ -76,8 +106,18 @@ async function runRefProbe(): Promise<void> {
 		// Stage 4.17 Probe 7 — same dump arming as JSEP spike.
 		mod._webllm_enable_node_dump(200);
 
-		log(`[5/7] Prefill (${PROMPT_TOKEN_IDS.length} tokens)...`);
-		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
+		// Stage 4.36 — tokenize the prompt per-model. Replaces the
+		// previously hardcoded TinyLlama token IDs.
+		const tokenizedPrompt = bridge.tokenize(model, MODEL_ENTRY.promptText, {
+			addBos: true,
+			parseSpecial: true,
+		});
+		const promptTokenIds = Array.from(tokenizedPrompt);
+		log(
+			`     [stage4.36] model=${MODEL_KEY} promptText="${MODEL_ENTRY.promptText}" promptIds=${JSON.stringify(promptTokenIds)}`,
+		);
+		log(`[5/7] Prefill (${promptTokenIds.length} tokens)...`);
+		const promptTokens = new Int32Array(promptTokenIds);
 		const tPrefillStart = performance.now();
 		const status = await bridge.decode(ctx, promptTokens, 0);
 		const tPrefillMs = performance.now() - tPrefillStart;
@@ -91,7 +131,7 @@ async function runRefProbe(): Promise<void> {
 
 		log(`[6/7] Greedy ${N_GENERATE}-token decode...`);
 		const generatedIds: number[] = [];
-		let nPast = PROMPT_TOKEN_IDS.length;
+		let nPast = promptTokenIds.length;
 		const tDecodeStart = performance.now();
 		const logitsStep0Stats: { topId: number; topVal: number } = {
 			topId: -1,
@@ -171,6 +211,9 @@ async function runRefProbe(): Promise<void> {
 					`abs_min=${s.abs_min} nan=${s.nan} inf=${s.inf}`,
 			);
 		}
+		log(`MODEL_KEY = ${MODEL_KEY}`);
+		log(`PROMPT_TEXT = ${JSON.stringify(MODEL_ENTRY.promptText)}`);
+		log(`PROMPT_IDS = ${JSON.stringify(promptTokenIds)}`);
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitsStep0Stats)}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`PER_TOKEN_MS = ${perTokenMs.toFixed(2)}`);
@@ -188,6 +231,9 @@ async function runRefProbe(): Promise<void> {
 		}
 
 		(window as any).__refResult = {
+			modelKey: MODEL_KEY,
+			promptText: MODEL_ENTRY.promptText,
+			promptIds: promptTokenIds,
 			generatedIds,
 			perTokenMs,
 			totalPrefillMs: tPrefillMs,
