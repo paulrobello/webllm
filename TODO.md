@@ -1073,30 +1073,25 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.35: ship the WGSL GQA-broadcast fix + Probe 21b as a regression guard
+### Next session pickup — Phase 3 Stage 4.36: canonical-6 JSEP parity sweep
 
-Stage 4.34 confirmed **P-21-explicit-divide-needed** + **P-21b-bug-reproduces**. Probe 21 captured ggml passing `src0.nb=[2, 512, 128, 262144]` for the kq MUL_MAT — the **permuted K-cache layout** (dim-fast=2, head-medium=128, pos-slow=512). Probe 21b's host-CPU selftest demonstrated in isolation that the kernel matches a GQA-correct reference *only* on Q-head 0 (Δ=9.5e-6, f32 noise) and diverges on every other head (Δ=4.35–56.5 across heads 1–31). The kernel computes head selection via `batch * src0.nb[2]` directly which, under this permuted layout, walks both head-fast (correct for batches 0–3) and pos-slow (wrong for batches ≥ 4) dimensions simultaneously. Fix: explicit `src0_batch_idx = batch / r2` divide, where `r2 = src1.ne[2] / src0.ne[2]`. Closure: [`STAGE-4.34-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.34-RESULT.md). Raw artifact: [`STAGE-4.34-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.34-spike-output.txt).
+Stage 4.35 shipped the WGSL kqv MUL_MAT GQA-broadcast fix (`src0_batch_idx = batch / shape.r2` in all four `load_*` kernels; `r2 = src1.ne[2] / src0.ne[2]` packed into the shape uniform). Probe 21b reports `P-21b-clean` uniformly across all 32 Q-heads (`maxAbsDeltaVsGqa = 3.81e-5`, six orders of magnitude below the pre-fix 5.65e+1). JSEP spike's `GENERATED_TOKENS[0] === 3681` ("Paris") matches the non-JSEP `webllm-wasm.js` reference exactly for the "capital of France" prompt on TinyLlama-1.1b-chat-q4_0; full output `"Paris.\n\n2"` is coherent. `make checkall` green: 747 pass, 0 fail. Closure: [`STAGE-4.35-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.35-RESULT.md). Raw artifact: [`STAGE-4.35-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.35-spike-output.txt).
 
-Surviving structural suspects after Stage 4.34:
-1. ❌ Output-projection (`attn_output.weight`) byte-integrity — closed Stage 4.28 / 4.30.
-2. ❌ `ffn_norm.weight` gain-vector mis-load — closed Stage 4.30.
-3. ❌ first8-window blindness on `kqv_out-0` — closed Stage 4.31.
-4. ❌ Divergence at `kq-0` (Q × K^T) — confirmed Stage 4.32, localized Stage 4.33, root cause Stage 4.34.
-5. ❌ WGSL kqv MUL_MAT GQA broadcast — root cause confirmed Stage 4.34 (kernel-level, in-isolation reproduction). **Stage 4.35 ships the fix.**
+Phase 3 JSEP causal-LM decode reaches parity for the lead model. Stage 4.36 broadens coverage to the canonical-6 fleet and (if uneventful) closes Phase 3.
 
 START HERE in a fresh session.
 
 **Paste-and-go bootstrap (run this first, no thinking required):**
 
 ```bash
-# 1. Confirm working tree.
+# 1. Confirm working tree at Stage 4.35 closure tip.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.34 TODO closure commit>     docs(TODO): Stage 4.34 closed — queue Stage 4.35 GQA-broadcast fix
-#   → <Stage 4.34 reports commit>          docs(reports): Stage 4.34 closure — Outcome P-21-explicit-divide-needed
-#   → <Stage 4.34 spike commit>            feat(spike): Stage 4.34 Probe 21 + 21b — kq-shape kernel selftest
-#   → e3b658c                              docs(TODO): Stage 4.33 closed — queue Stage 4.34 WGSL kqv MUL_MAT GQA-broadcast probe
-#   → 6fd66eb                              docs(reports): Stage 4.33 closure — Outcome P-20-block-bounded
+#   → <Stage 4.35 TODO closure commit>     docs(TODO): Stage 4.35 closed — queue Stage 4.36 canonical-6 JSEP parity sweep
+#   → <Stage 4.35 reports commit>          docs(reports): Stage 4.35 closure — fix shipped, Paris decode parity
+#   → <Stage 4.35 fix commit>              fix(jsep/matmul): WGSL kqv MUL_MAT GQA broadcast (r2 divide)
+#   → 34e58db                              docs(TODO): Stage 4.34 closed — queue Stage 4.35 GQA-broadcast fix
+#   → 6cf1d1a                              docs(reports): Stage 4.34 closure — Outcome P-21-explicit-divide-needed
 
 # 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
@@ -1107,63 +1102,51 @@ lsof -nP -iTCP:8031 -sTCP:LISTEN 2>/dev/null | head -2 || make smoke-serve &
 lsof -nP -iTCP:8032 -sTCP:LISTEN 2>/dev/null | head -2 || python3 log_receiver.py &
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 [ -n "$PORT" ] || agentchrome connect --launch --headless
-SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
-[ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 ```
 
-**One-line goal:** Add an `r2` u32 to the matmul `Shape` uniform (`SHAPE_UNIFORM_BYTES` 12u32 → 13u32 or repurpose a `_pad` slot), populate it as `Math.max(1, src1.ne[2] / Math.max(1, src0.ne[2]))` in `dispatchMatmul`'s shape pack, and replace `batch * shape.src0_batch_bytes` with `(batch / shape.r2) * shape.src0_batch_bytes` in all four WGSL `load_*` helpers (f32, f16, q4_0, q4_K). Verify Probe 21b reports `head0Match=true AND maxAbsDeltaVsGqa < 1e-3` (uniformly correct across all 32 heads), then re-run the full spike and verify `__spikeResult.generatedIds[0] === 3681` (matches the non-JSEP reference output for the "Paris" prompt).
+**One-line goal:** Confirm Stage 4.35's GQA-broadcast fix generalizes across the canonical-6 fleet (qwen3-0.6b, qwen3-1.7b, mistral-7b-instruct-v0.3-q4ks, llama-3.1-8b-instruct-iq3m, qwen3-8b-iq3m — TinyLlama already verified). For each model: run JSEP spike + non-JSEP ref-probe on the same prompt; verify `generatedIds[0]` matches. The kqv kernel is below the model boundary, so this is a regression-test sweep, not a new investigation.
 
-**One-line context:** Stage 4.34 confirmed via static read + in-isolation host-CPU selftest that the WGSL kqv MUL_MAT kernel ignores GQA broadcast — under the permuted K-cache layout it walks head-fast for batches 0–3 (coincidentally correct) and pos-slow for batches ≥ 4 (wrong). Probe 21b stays in tree as a permanent regression guard; Stage 4.35's fix should make it pass.
+**One-line context:** The kqv kernel correctness was the load-bearing Phase 3 blocker. With it fixed and TinyLlama at parity, the remaining canonical-6 should fall through automatically — they exercise the same kernel via `dispatchMatmul`. If any model fails, the failure pattern (kqv vs non-kqv, GQA ratio specific) localizes the next investigation immediately.
 
-#### Stage 4.35 implementation sketch
+#### Stage 4.36 implementation sketch
 
-1. **TS uniform layout** (`src/inference/jsep/ops/matmul.ts:495`):
-   - Bump `SHAPE_UNIFORM_BYTES` from `12 * 4` to `13 * 4` (or repurpose `_pad0`/`_pad1`). Add `r2: u32` to the WGSL `Shape` struct.
-   - In `dispatchMatmul` (line 634+), set `shapeData[10] = Math.max(1, Math.floor(src1.ne[2] / Math.max(1, src0.ne[2])))` (replacing `_pad0`).
-   - Cast: `const r2 = ...` before the `shapeData` writes; assert `r2 >= 1` and `src1.ne[2] % src0.ne[2] === 0` (ggml's broadcast invariant).
+1. **Spike harness — model parametrization.** Currently `p2-v2-spike.src.ts` is hardcoded to TinyLlama. Either:
+   - **Option A (cheap):** add a `?model=<key>` URL param + lookup table mapping to GGUF path + reference token, run 6 iterations of the existing harness manually.
+   - **Option B (heavier):** extend the spike harness to loop the canonical-6 with a single navigation. Preferred if the loop is cheap to wire.
 
-2. **WGSL kernels** (lines 267-487) — in all four `load_*` helpers (f32, f16, q4_0, q4_K), change:
-   ```wgsl
-   let row_byte_base: u32 = batch * shape.src0_batch_bytes + m * shape.src0_row_bytes;
-   ```
-   to:
-   ```wgsl
-   let src0_batch_idx: u32 = batch / shape.r2;
-   let row_byte_base: u32 = src0_batch_idx * shape.src0_batch_bytes + m * shape.src0_row_bytes;
-   ```
-   For non-broadcast paths `r2 = 1` so the divide reduces to the existing behaviour — no precision impact on Q-projection / FFN / lm_head dispatches.
+2. **Reference token capture.** For each canonical-6 model, pre-capture the non-JSEP `webllm-wasm.js` reference's `generatedIds[0]` for a stable prompt ("The capital of France is" works for all). Store in a JSON manifest under `eval/reports/p2-v2-option-a-prime-2026-05-06/canonical6-refs.json`.
 
-3. **Verify with Probe 21b first** (cheap):
-   - Build, navigate spike to `?v=stage4.35-fix-1`.
-   - Filter log for `[probe21b]`. Check: `OUTCOME: P-21b-clean (kernel matches GQA reference uniformly)`.
-   - If `P-21b-bug-reproduces` persists, the fix didn't engage — debug `r2` packing and uniform offset arithmetic before continuing.
+3. **Per-model verification.** For each model: `genJSEP === genRef` ⇒ pass. Aggregate into a 6-row table in `STAGE-4.36-RESULT.md`.
 
-4. **Verify "Paris" decode** (full e2e):
-   - Same run. Check `GENERATED_TOKENS[0]` and `GENERATED_TEXT`. Reference behaviour (non-JSEP `webllm-wasm.js`): `generatedIds[0] === 3681 ("Paris")` for the "The capital of France is" prompt.
-   - If the first token still mismatches the ref, run the existing `__stage417Checkpoints` framework against the ref-probe to find the next divergent op (Stage 4.27's per-layer diff). The fix may have unblocked kq but uncovered a downstream cascade.
+4. **Probe 21b is universal.** It runs synthetic shapes regardless of model. Re-run only once per session to catch any kernel-cache regression.
 
-5. **Run `make checkall` to verify no regressions** (fmt + lint + typecheck + 747 tests).
+5. **`make checkall` green.**
 
 #### Files to read first
 
-- [`STAGE-4.34-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.34-RESULT.md) — full kernel + descriptor analysis, layout interpretation, per-head delta data.
-- `src/inference/jsep/ops/matmul.ts:267-487` — the four WGSL kernels.
-- `src/inference/jsep/ops/matmul.ts:543-740` — `dispatchMatmul`, shape uniform packing.
-- `smoke-test/p2-v2-spike.src.ts:218-470` — `runKqGqaSelfTest` (Probe 21b) — keep in tree as the regression guard.
+- [`STAGE-4.35-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.35-RESULT.md) — fix details + per-head delta table.
+- `src/inference/jsep/ops/matmul.ts:267-487` — the four `load_*` kernels (regression-guard surface).
+- `eval/models.ts` — canonical-6 GGUF registrations and contextLength.
+- `smoke-test/p2-v2-spike.src.ts` — current TinyLlama harness; the surface to parametrize.
 
 #### Risk register
 
-1. **Other GQA-correct paths may already be set up upstream** — e.g., for FFN dispatches `src1.ne[2] == src0.ne[2] == 1`, so `r2 = 1` and the divide is a no-op. But for dispatches where ggml is already passing a *contiguous* batch-stride (`nb[2] = M * nb[1]`) under a non-permuted layout, a dispatched `batch / r2` divide would *break* that path (it'd read from the wrong batch slice). **Mitigation:** the GQA broadcast invariant is `ne12 % ne02 == 0` AND `ne12 != ne02`. When `ne12 == ne02`, `r2 = 1` and the divide is structurally a no-op. So the fix is safe on every non-broadcast path. Assert this in `dispatchMatmul` before the dispatch.
-2. **fix unblocks kq but reveals downstream cascade.** Stage 4.27's per-layer first-divergent-op framework remains the fallback. Plan Stage 4.36 as either "fix landed + 'Paris' decode confirmed (close)" *or* "fix landed but cascade continues — re-run 4.27's framework on the patched kernel".
-3. **WGSL u32 divide on hot path** — modern GPUs handle u32 division fine but at small cost. For `r2 = 1` (the common case) the division is `batch / 1 = batch` and most compilers strength-reduce. For broadcasted dispatches the divide adds a few cycles per workgroup invocation; on TinyLlama's 22 layers × 6 prefill positions × 32 heads × 256 K-positions = ~1M extra divides per prefill — well below the noise floor of the existing kernel.
-4. **Probe 21b's perHeadStairStep heuristic was wrong.** Stage 4.34's first verdict misclassified P-21b as indeterminate because it relied on per-head non-zero count (which only stair-steps in production where K-cache has unwritten regions). The diagnostic that *does* work in synthetic isolation is per-head Δ vs the GQA reference (head 0 matches; heads 1+ diverge). Keep the Probe 21b verdict logic at this signal — don't revert to stair-step counts when filling synthetic data.
+1. **Larger models stress the kernel cache differently.** llama-3.1-8b and qwen3-8b run more dispatches per token (650+ vs TinyLlama's ~250). The fix is mathematically identical regardless of dispatch count, but kernel-cache pressure or pipeline-key collisions could surface a different failure pattern. **Mitigation:** if 8B fails but 0.6B passes, suspect cache/pipeline-key issues, not the math.
+2. **GQA ratio differs across models.** Qwen3-0.6B has GQA 1:1 (n_kv_head==n_q_head, r2=1) so the divide is a no-op there. Qwen3-1.7B is 16:8 (r2=2). Mistral-7B is 32:8 (r2=4). Llama-3.1-8B is 32:8 (r2=4). Qwen3-8B is 32:4 (r2=8). **Mitigation:** TinyLlama already exercised r2=8 (16:4 GQA in the q4_0 build); the math is identical for r2=2 and r2=4.
+3. **Memory budget for 8B IQ3_M on 16 GB hardware floor.** The spike harness historically targets the canonical 16 GB floor; 8B IQ3_M (~3.6 GB) plus KV cache + Three.js coexistence assumption could OOM the spike on lower-end hardware. **Mitigation:** if the harness OOMs at 8B, fall back to the 5-model subset (qwen3-0.6b through llama-3.1-8b) and note the constraint in the closure.
+4. **Reference probe drift.** Non-JSEP `webllm-wasm.js` is the parity reference; if its token generation has drifted between the original TinyLlama capture and the canonical-6 capture, the test fails for the wrong reason. **Mitigation:** re-capture refs in the same session as the JSEP test.
 
-#### Exit criteria — Stage 4.35 closes when documented in `STAGE-4.35-RESULT.md`
+#### Exit criteria — Stage 4.36 closes when documented in `STAGE-4.36-RESULT.md`
 
-- Probe 21b reports `head0Match=true` AND `maxAbsDeltaVsGqa < 1e-3` (uniformly correct).
-- Full spike `GENERATED_TOKENS[0]` matches the non-JSEP ref-probe's `generatedIds[0]` (= `3681` for "Paris", or whatever the reference produces for the spike's prompt).
+- All canonical-6 models report `generatedIds[0]` matching the non-JSEP reference, OR a documented and explained failure subset.
+- Probe 21b regression guard re-confirmed `P-21b-clean`.
 - `make checkall` green.
-- Stage 4.36 paste-and-go brief queued OR (if "Paris" lands and no downstream cascade) a "Phase 3 closed — JSEP causal-LM decode reaches parity" closure stub queued.
+- **If sweep is uneventful:** queue a "Phase 3 closed — JSEP causal-LM decode reaches parity" closure stub and archive the Stage 4.x stage-by-stage block from `TODO.md` to `TODO_ARCHIVE.md` per the TODO archival cadence.
+- **If sweep surfaces failures:** queue Stage 4.37 brief with the failing-model investigation plan.
+
+### Earlier Stage 4.35 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.35 brief (paste-and-go bootstrap, three-step implementation sketch with TS uniform layout + four-WGSL-kernel divide + Probe 21b verification, four-item risk register, exit criteria) lives in [`STAGE-4.35-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.35-RESULT.md). Outcome **P-21b-clean** + **Paris-decode-parity** CONFIRMED: Probe 21b reports `maxAbsDeltaVsGqa = 3.81e-5` uniformly across all 32 Q-heads (six orders of magnitude below the pre-fix 5.65e+1); JSEP spike's `GENERATED_TOKENS = [3681, 29889, 13, 13, 29906]` (`"Paris.\n\n2"`) matches the non-JSEP reference for the "capital of France" prompt on TinyLlama-1.1b-chat-q4_0. `make checkall` green: 747 pass, 0 fail. Phase 3 JSEP causal-LM decode reaches parity for the lead model; Stage 4.36 broadens coverage to the canonical-6 fleet. Collapsed at Stage 4.36 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.34 brief — collapsed (full text in closure report)
 
