@@ -1,0 +1,28 @@
+{
+  "comment": "Stage 4.36 — non-JSEP webllm-wasm.js reference first-tokens for the canonical-6 JSEP parity sweep. Captured 2026-05-08 via smoke-test/p2-v2-ref-probe.html?model=<key>. Subset chosen for the wasm32 4 GiB JSEP heap cap: 7B+ models (mistral-7b-q4ks, llama-3.1-8b-iq3m, qwen3-8b-iq3m) exceed the cap and require a separate wasm-mem64 JSEP build path.",
+  "promptText": "The capital of France is",
+  "tokenizerOptions": { "addBos": true, "parseSpecial": true },
+  "refs": {
+    "tinyllama": {
+      "ggufUrl": "/models/tinyllama-1.1b-chat-q4_0.gguf",
+      "promptIds": [1, 450, 7483, 310, 3444, 338],
+      "generatedIds": [3681, 29889, 13, 13, 29906],
+      "generatedText": "Paris.\n\n2",
+      "source": "STAGE-4.35-RESULT.md (Stage 4.35 spike vs Stage 4.17 ref)"
+    },
+    "qwen3-0.6b": {
+      "ggufUrl": "/models/qwen3-0.6b-q4f16.gguf",
+      "promptIds": [785, 6722, 315, 9625, 374],
+      "generatedIds": [12095, 13, 576, 6722, 315],
+      "logitStep0": { "topId": 12095, "topVal": 17.334632873535156 },
+      "source": "p2-v2-ref-probe.html?model=qwen3-0.6b"
+    },
+    "qwen3-1.7b": {
+      "ggufUrl": "/models/qwen3-1.7b-q4f16.gguf",
+      "promptIds": [785, 6722, 315, 9625, 374],
+      "generatedIds": [12095, 13, 576, 6722, 315],
+      "logitStep0": { "topId": 12095, "topVal": 22.912303924560547 },
+      "source": "p2-v2-ref-probe.html?model=qwen3-1.7b"
+    }
+  }
+}
