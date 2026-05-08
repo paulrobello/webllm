@@ -1073,18 +1073,16 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.34: WGSL kqv MUL_MAT GQA-broadcast localization (Probe 21 Shape A — read the kernel; Probe 21b Shape B — host-CPU selftest at kq-0 shape)
+### Next session pickup — Phase 3 Stage 4.35: ship the WGSL GQA-broadcast fix + Probe 21b as a regression guard
 
-Stage 4.33 confirmed Outcome **P-20-block-bounded**: JSEP `kq-0` non-zero coverage degrades in a clean stair-step by head index — heads 0–3 are full (36/36), heads 4–7 missing 6 (1 K-pos × 6 Q-rows), heads 8–11 missing 12, …, heads 24–31 entirely zero (0/36). 4-head bands match TinyLlama's `n_head_kv=4`; 6-step degradation matches the prefill sequence length. Total: 504/1152 active non-zeros on JSEP vs 1152/1152 on ref. The pattern implicates the WGSL kqv MUL_MAT kernel's GQA broadcast logic, not an outright batch-indexing failure (OOB-zero would zero *all* heads ≥ 4, not stair-step them).
+Stage 4.34 confirmed **P-21-explicit-divide-needed** + **P-21b-bug-reproduces**. Probe 21 captured ggml passing `src0.nb=[2, 512, 128, 262144]` for the kq MUL_MAT — the **permuted K-cache layout** (dim-fast=2, head-medium=128, pos-slow=512). Probe 21b's host-CPU selftest demonstrated in isolation that the kernel matches a GQA-correct reference *only* on Q-head 0 (Δ=9.5e-6, f32 noise) and diverges on every other head (Δ=4.35–56.5 across heads 1–31). The kernel computes head selection via `batch * src0.nb[2]` directly which, under this permuted layout, walks both head-fast (correct for batches 0–3) and pos-slow (wrong for batches ≥ 4) dimensions simultaneously. Fix: explicit `src0_batch_idx = batch / r2` divide, where `r2 = src1.ne[2] / src0.ne[2]`. Closure: [`STAGE-4.34-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.34-RESULT.md). Raw artifact: [`STAGE-4.34-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.34-spike-output.txt).
 
-Surviving structural suspects after Stage 4.33:
+Surviving structural suspects after Stage 4.34:
 1. ❌ Output-projection (`attn_output.weight`) byte-integrity — closed Stage 4.28 / 4.30.
 2. ❌ `ffn_norm.weight` gain-vector mis-load — closed Stage 4.30.
 3. ❌ first8-window blindness on `kqv_out-0` — closed Stage 4.31.
-4. ❌ Divergence at `kq-0` (Q × K^T) — confirmed Stage 4.32, localized Stage 4.33.
-5. ✅ **WGSL kqv MUL_MAT GQA broadcast — CONFIRMED.** Stage 4.34 narrows the kernel-level source:
-    - **Probe 21 (Shape A — read the kernel):** Inspect `dispatchMatmul` shape uniform packing (`shape.src0_batch_bytes` = `src0.nb[2]`) and the WGSL `load_*` row/batch indexing. Determine whether ggml's stride-based GQA broadcast is honoured or whether the kernel needs an explicit `src0_batch = batch / r2` divide.
-    - **Probe 21b (Shape B — host-CPU selftest):** Add a JS-side selftest gated by `__stage434SelftestArm` that runs `dispatchMatmul` against known-good f32 inputs at the kq-0 shape (M=256, K=64, N=6, src0.ne[2]=4, src1.ne[2]=32) and compares against a host-CPU MUL_MAT reference. Confirms whether the kernel-as-built has the GQA bug independent of any libllama wiring.
+4. ❌ Divergence at `kq-0` (Q × K^T) — confirmed Stage 4.32, localized Stage 4.33, root cause Stage 4.34.
+5. ❌ WGSL kqv MUL_MAT GQA broadcast — root cause confirmed Stage 4.34 (kernel-level, in-isolation reproduction). **Stage 4.35 ships the fix.**
 
 START HERE in a fresh session.
 
@@ -1094,92 +1092,82 @@ START HERE in a fresh session.
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.33 TODO closure commit>     docs(TODO): Stage 4.33 closed — Outcome P-20-block-bounded
-#   → <Stage 4.33 reports commit>          docs(reports): Stage 4.33 closure — stair-step kq-0 by head
-#   → a1f0baf                              feat(spike): Stage 4.33 Probe 20 — widen kq-0 dump + auto-upload stderr
-#   → a61edef                              feat(spike): Stage 4.32 Probe 19 — kq-0/kqv_out-0 element-wise capture
-#   → 03e541b                              docs(TODO): Stage 4.31 closed — queue Stage 4.32 idx-by-idx kqv_out-0 diff
+#   → <Stage 4.34 TODO closure commit>     docs(TODO): Stage 4.34 closed — queue Stage 4.35 GQA-broadcast fix
+#   → <Stage 4.34 reports commit>          docs(reports): Stage 4.34 closure — Outcome P-21-explicit-divide-needed
+#   → <Stage 4.34 spike commit>            feat(spike): Stage 4.34 Probe 21 + 21b — kq-shape kernel selftest
+#   → e3b658c                              docs(TODO): Stage 4.33 closed — queue Stage 4.34 WGSL kqv MUL_MAT GQA-broadcast probe
+#   → 6fd66eb                              docs(reports): Stage 4.33 closure — Outcome P-20-block-bounded
 
 # 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
 #   → ebc7c3d82   webllm-browser-patches   (patch stack 14)
 
-# 3. Smoke-server up on 8031, log_receiver on 8032, agentchrome session + both tabs.
+# 3. Smoke-server up on 8031, log_receiver on 8032, agentchrome session + spike + ref tabs.
 lsof -nP -iTCP:8031 -sTCP:LISTEN 2>/dev/null | head -2 || make smoke-serve &
 lsof -nP -iTCP:8032 -sTCP:LISTEN 2>/dev/null | head -2 || python3 log_receiver.py &
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 [ -n "$PORT" ] || agentchrome connect --launch --headless
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
-REF_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-ref-probe.html" in t.get("url","")), ""))' 2>/dev/null)
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-[ -n "$REF_TAB" ] || REF_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 ```
 
-**One-line goal:** Read `dispatchMatmul` and the WGSL kernel; determine whether ggml's stride-based GQA broadcast is honoured by `shape.src0_batch_bytes` (P-21-stride-trick) or whether the kernel needs an explicit `src0_batch = batch / r2` divide (P-21-explicit-divide-needed). Optionally arm Probe 21b (host-CPU selftest) to confirm the bug in isolation. Synthesise `P-21-{stride-trick, explicit-divide-needed, other}` and queue Stage 4.35 (the fix or upstream-investigation branch).
+**One-line goal:** Add an `r2` u32 to the matmul `Shape` uniform (`SHAPE_UNIFORM_BYTES` 12u32 → 13u32 or repurpose a `_pad` slot), populate it as `Math.max(1, src1.ne[2] / Math.max(1, src0.ne[2]))` in `dispatchMatmul`'s shape pack, and replace `batch * shape.src0_batch_bytes` with `(batch / shape.r2) * shape.src0_batch_bytes` in all four WGSL `load_*` helpers (f32, f16, q4_0, q4_K). Verify Probe 21b reports `head0Match=true AND maxAbsDeltaVsGqa < 1e-3` (uniformly correct across all 32 heads), then re-run the full spike and verify `__spikeResult.generatedIds[0] === 3681` (matches the non-JSEP reference output for the "Paris" prompt).
 
-**One-line context:** Stage 4.33 confirmed P-20-block-bounded — the WGSL kqv MUL_MAT kernel produces a stair-step zero pattern by head index that matches GQA 8:1 (32 Q-heads / 4 K-heads = 8) but mis-truncates somewhere. Probe 21 finds the truncation site; Probe 21b is the kernel-isolated selftest that proves causality before any fix is shipped.
+**One-line context:** Stage 4.34 confirmed via static read + in-isolation host-CPU selftest that the WGSL kqv MUL_MAT kernel ignores GQA broadcast — under the permuted K-cache layout it walks head-fast for batches 0–3 (coincidentally correct) and pos-slow for batches ≥ 4 (wrong). Probe 21b stays in tree as a permanent regression guard; Stage 4.35's fix should make it pass.
 
-#### Stage 4.34 implementation sketch (Probe 21 Shape A — read the kernel)
+#### Stage 4.35 implementation sketch
 
-1. **TS side (read-only inspection)** — confirm in `src/inference/jsep/ops/matmul.ts:543-740` (`dispatchMatmul`):
-   - Line 564–578 — shape-and-batch derivation. Note: `batchCount = Math.max(1, src1.ne[2]) * Math.max(1, src1.ne[3])` uses **src1 only**, ignoring src0 batch dim. For GQA src0.ne[2]=4 < src1.ne[2]=32.
-   - Line 630–651 — shape uniform packing. `shapeData[7] = src0.nb[2]` is passed to the WGSL kernel as `shape.src0_batch_bytes`. Check whether ggml sets `src0.nb[2]` to encode the GQA broadcast (e.g. `nb02 / r2`, or 0 for no advance, or wrap-style stride).
-   - Line 657–659 — dispatch grid. `dispatchZ = batchCount` covers all 32 Q-heads.
-2. **WGSL side (read-only inspection)** — at `matmul.ts:267-487`, `load_f32 / load_f16 / load_q4_0 / load_q4_K` all use the same idiom:
+1. **TS uniform layout** (`src/inference/jsep/ops/matmul.ts:495`):
+   - Bump `SHAPE_UNIFORM_BYTES` from `12 * 4` to `13 * 4` (or repurpose `_pad0`/`_pad1`). Add `r2: u32` to the WGSL `Shape` struct.
+   - In `dispatchMatmul` (line 634+), set `shapeData[10] = Math.max(1, Math.floor(src1.ne[2] / Math.max(1, src0.ne[2])))` (replacing `_pad0`).
+   - Cast: `const r2 = ...` before the `shapeData` writes; assert `r2 >= 1` and `src1.ne[2] % src0.ne[2] === 0` (ggml's broadcast invariant).
+
+2. **WGSL kernels** (lines 267-487) — in all four `load_*` helpers (f32, f16, q4_0, q4_K), change:
    ```wgsl
    let row_byte_base: u32 = batch * shape.src0_batch_bytes + m * shape.src0_row_bytes;
    ```
-   No GQA-aware divide. Confirm: does `batch * src0_batch_bytes` produce the right offset when `src0.ne[2] < src1.ne[2]`? Check three cases of how ggml could be passing nb[2]:
-   - **Case A (stride-trick zero):** ggml sets src0.nb[2] = 0 for the broadcasted dim — then `batch * 0 = 0` and the kernel always reads K-head 0. Would zero out heads 1–31, not stair-step.
-   - **Case B (stride-trick wrap):** ggml sets src0.nb[2] = original nb[2] but the runtime expects modular indexing — kernel reads off-the-end memory for batch ≥ 4. OOB reads typically zero, would also produce all-zeros for heads ≥ 4.
-   - **Case C (no broadcast set up — normal stride):** ggml leaves src0.nb[2] at its un-broadcasted value (a 4-head stride). Then `batch=4` reads memory adjacent to K-head 3 — *some* of which contains valid data from the K cache or scratch arena. This could produce the observed stair-step if the adjacent memory happens to contain values that align partially with the next 4 heads, etc. Most likely correct hypothesis given the *progressive* degradation.
+   to:
+   ```wgsl
+   let src0_batch_idx: u32 = batch / shape.r2;
+   let row_byte_base: u32 = src0_batch_idx * shape.src0_batch_bytes + m * shape.src0_row_bytes;
+   ```
+   For non-broadcast paths `r2 = 1` so the divide reduces to the existing behaviour — no precision impact on Q-projection / FFN / lm_head dispatches.
 
-3. **Console-log inspection at runtime (gated):** add a one-shot `console.log` at `dispatchMatmul:578-579` printing `{src0_ne: src0.ne, src0_nb: src0.nb, src1_ne: src1.ne, src1_nb: src1.nb, dst_ne: dst.ne, dst_nb: dst.nb, batchCount}` for the first MUL_MAT where `src0.ne[2] !== src1.ne[2]`. Spike harness reads back via `agentchrome js exec` to confirm what nb[2] ggml is actually passing for the kq MUL_MAT.
+3. **Verify with Probe 21b first** (cheap):
+   - Build, navigate spike to `?v=stage4.35-fix-1`.
+   - Filter log for `[probe21b]`. Check: `OUTCOME: P-21b-clean (kernel matches GQA reference uniformly)`.
+   - If `P-21b-bug-reproduces` persists, the fix didn't engage — debug `r2` packing and uniform offset arithmetic before continuing.
 
-4. **Run** at `?v=stage4.34-probe21` on the spike page only (ref isn't needed for Probe 21).
+4. **Verify "Paris" decode** (full e2e):
+   - Same run. Check `GENERATED_TOKENS[0]` and `GENERATED_TEXT`. Reference behaviour (non-JSEP `webllm-wasm.js`): `generatedIds[0] === 3681 ("Paris")` for the "The capital of France is" prompt.
+   - If the first token still mismatches the ref, run the existing `__stage417Checkpoints` framework against the ref-probe to find the next divergent op (Stage 4.27's per-layer diff). The fix may have unblocked kq but uncovered a downstream cascade.
 
-#### Stage 4.34b implementation sketch (Probe 21b Shape B — host-CPU selftest)
-
-(Run *if* Probe 21's static read leaves ambiguity — Probe 21b confirms the bug in isolation.)
-
-1. **TS side**: add a function `selftestKqShape(ctx)` to `dispatchMatmul`'s test path that:
-   - Allocates two GPUBuffers (`src0`: 64*256*4 floats, `src1`: 64*6*32 floats) with deterministic content (`fill(idx => Math.sin(idx * 0.01))` works).
-   - Calls `dispatchMatmul` with a hand-built descriptor matching kq's shape (M=256, K=64, N=6, src0.ne=[64,256,4,1], src1.ne=[64,6,32,1], dst.ne=[256,6,32,1]) and sets `src0.nb[2]` to whatever Probe 21 found ggml is passing.
-   - Reads dst back, computes a host-CPU reference (32-head loop with explicit `src0_head = head / 8`), reports per-head non-zero count + max-abs-delta.
-2. Gated by `globalThis.__stage434SelftestArm = true` set in the spike harness; auto-disarms after one run.
-3. **Outcome:** if the selftest reproduces the same stair-step on synthetic inputs, the bug is in the kernel definitively. If the selftest produces uniformly correct output, the bug is in how libllama is packing the descriptor (something about the kq path specifically).
+5. **Run `make checkall` to verify no regressions** (fmt + lint + typecheck + 747 tests).
 
 #### Files to read first
 
-- [`STAGE-4.33-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.33-RESULT.md) — P-20-block-bounded classification + per-head non-zero stair-step table + GQA-broadcast diagnosis.
-- [`STAGE-4.33-pattern.py`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.33-pattern.py) — head/Q-position breakdown helper; reusable for Stage 4.34 if a recapture is needed.
-- `src/inference/jsep/ops/matmul.ts:543-740` — `dispatchMatmul`, shape uniform packing, dispatch grid.
-- `src/inference/jsep/ops/matmul.ts:267-487` — WGSL kernels (f32, f16, q4_0, q4_K). All four use `batch * batch_bytes + m * row_bytes` directly.
-- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:compute_op` — JSEP backend's MUL_MAT dispatch site. Determines what nb[2] ends up being passed to JSEP for the kq MUL_MAT (and whether the broadcast is meant to be applied on the libllama side or the kernel side).
-- `~/Repos/llama.cpp/ggml/src/ggml.c::ggml_mul_mat` — canonical ggml MUL_MAT semantics including the `ne12 % ne02 == 0` broadcast rule.
+- [`STAGE-4.34-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.34-RESULT.md) — full kernel + descriptor analysis, layout interpretation, per-head delta data.
+- `src/inference/jsep/ops/matmul.ts:267-487` — the four WGSL kernels.
+- `src/inference/jsep/ops/matmul.ts:543-740` — `dispatchMatmul`, shape uniform packing.
+- `smoke-test/p2-v2-spike.src.ts:218-470` — `runKqGqaSelfTest` (Probe 21b) — keep in tree as the regression guard.
 
 #### Risk register
 
-1. **Probe 21 may close ambiguous.** Static reading of the kernel + JS dispatch may not distinguish whether ggml's nb[2] is encoding the broadcast or whether the kernel just hasn't hit the right kq-shape combination yet. **Mitigation:** always run Probe 21b (selftest) — it's <50 LOC and removes the ambiguity. Don't ship a fix on Probe 21 alone.
-2. **Selftest input choice may pick a "lucky" pattern.** Deterministic sinusoidal fill could happen to mask the bug if the K-broadcast lands on aligned values. **Mitigation:** also seed with `(idx * 1664525 + 1013904223) & 0xffffffff` (LCG for reproducible-pseudorandom) and check both fills produce the same per-head non-zero stair-step.
-3. **Fix landing in the WGSL kernel changes precision.** Even if `src0_batch = batch / r2` is the right fix for kq, it changes the kernel for *all* MUL_MAT dispatches that call this function. Other GQA-correct paths (e.g. the f32 attention output projection) may have already worked because their broadcast was set up upstream. **Mitigation:** read `shape.src0_batch_bytes` and only branch the divide when the shape hints GQA (`src1.ne[2] / src0.ne[2] > 1`). Probe 21b's selftest must cover both broadcast and non-broadcast cases before the fix lands.
-4. **A "fix" might unblock kq-0 but reveal a downstream bug.** kq is the first attention matmul; once it's clean, the ffn_down or output_norm path may surface the *next* divergence. **Mitigation:** plan Stage 4.35 as either "ship the fix + verify spike's `__spikeResult.generatedIds[0] === 3681` (matches ref)" *or* "fix lands but cascade continues — re-run Stage 4.27's first-divergent-op cascade on the fixed code". Don't promise wedge → fix in one stage.
+1. **Other GQA-correct paths may already be set up upstream** — e.g., for FFN dispatches `src1.ne[2] == src0.ne[2] == 1`, so `r2 = 1` and the divide is a no-op. But for dispatches where ggml is already passing a *contiguous* batch-stride (`nb[2] = M * nb[1]`) under a non-permuted layout, a dispatched `batch / r2` divide would *break* that path (it'd read from the wrong batch slice). **Mitigation:** the GQA broadcast invariant is `ne12 % ne02 == 0` AND `ne12 != ne02`. When `ne12 == ne02`, `r2 = 1` and the divide is structurally a no-op. So the fix is safe on every non-broadcast path. Assert this in `dispatchMatmul` before the dispatch.
+2. **fix unblocks kq but reveals downstream cascade.** Stage 4.27's per-layer first-divergent-op framework remains the fallback. Plan Stage 4.36 as either "fix landed + 'Paris' decode confirmed (close)" *or* "fix landed but cascade continues — re-run 4.27's framework on the patched kernel".
+3. **WGSL u32 divide on hot path** — modern GPUs handle u32 division fine but at small cost. For `r2 = 1` (the common case) the division is `batch / 1 = batch` and most compilers strength-reduce. For broadcasted dispatches the divide adds a few cycles per workgroup invocation; on TinyLlama's 22 layers × 6 prefill positions × 32 heads × 256 K-positions = ~1M extra divides per prefill — well below the noise floor of the existing kernel.
+4. **Probe 21b's perHeadStairStep heuristic was wrong.** Stage 4.34's first verdict misclassified P-21b as indeterminate because it relied on per-head non-zero count (which only stair-steps in production where K-cache has unwritten regions). The diagnostic that *does* work in synthetic isolation is per-head Δ vs the GQA reference (head 0 matches; heads 1+ diverge). Keep the Probe 21b verdict logic at this signal — don't revert to stair-step counts when filling synthetic data.
 
-#### Exit criteria — Stage 4.34 closes when documented in `STAGE-4.34-RESULT.md`
+#### Exit criteria — Stage 4.35 closes when documented in `STAGE-4.35-RESULT.md`
 
-- Probe 21 reports the actual `src0.nb[2]` value ggml passes for the kq MUL_MAT (single number, single line).
-- Either: Probe 21b selftest reproduces the stair-step at the kq shape (kernel bug confirmed), OR Probe 21b selftest produces uniformly correct output (kernel is clean; bug is in libllama-side descriptor packing).
-- One of:
-  - **P-21-stride-trick**: ggml sets src0.nb[2] to encode the broadcast and the kernel honours it for some heads but truncates. Stage 4.35 identifies the truncation site (likely a u32 wrap or an unsigned underflow in the row_byte calculation).
-  - **P-21-explicit-divide-needed**: ggml expects the consumer to do `src0_batch = batch / r2`. Stage 4.35 ships the one-line WGSL fix + Probe 21b selftest as a regression guard.
-  - **P-21-other**: kernel + stride trick are clean. Stage 4.35 = inspect ggml-jsep.cpp's descriptor packing for the kq path specifically.
-- Stage 4.35 paste-and-go brief queued for the chosen branch.
+- Probe 21b reports `head0Match=true` AND `maxAbsDeltaVsGqa < 1e-3` (uniformly correct).
+- Full spike `GENERATED_TOKENS[0]` matches the non-JSEP ref-probe's `generatedIds[0]` (= `3681` for "Paris", or whatever the reference produces for the spike's prompt).
+- `make checkall` green.
+- Stage 4.36 paste-and-go brief queued OR (if "Paris" lands and no downstream cascade) a "Phase 3 closed — JSEP causal-LM decode reaches parity" closure stub queued.
 
-#### Branch on Probe 21 outcome
+### Earlier Stage 4.34 brief — collapsed (full text in closure report)
 
-- **P-21-stride-trick** (suspect: WGSL truncation under broadcast): Stage 4.35 narrows the truncation site by adding a per-head `console.log(batch, src0_offset, dst_idx)` in the kernel via a debug build. Bug is local to one of the four `load_*` shaders.
-- **P-21-explicit-divide-needed** (suspect: WGSL doesn't divide for GQA): Stage 4.35 ships the one-line fix `let src0_batch_idx: u32 = batch / shape.r2;` (with `shape.r2` added to the uniform) + the Probe 21b selftest as a permanent regression guard.
-- **P-21-other** (suspect: libllama-side descriptor packing for kq specifically): Stage 4.35 inspects `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:compute_op` for how the descriptor's nb[2] is set when `ne12 != ne02`.
+Full step-by-step Stage 4.34 brief (paste-and-go bootstrap, Probe 21 Shape A read-the-kernel sketch with `__stage434Probe21Arm` one-shot capture in `dispatchMatmul`, three case-table for nb[2]={0, M·nb[1], other}, Probe 21b Shape B host-CPU selftest sketch with `runKqGqaSelfTest` at kq's exact shape M=256 K=64 N=6 src0.ne[2]=4 src1.ne[2]=32, four-item risk register, three-outcome P-21-{stride-trick, explicit-divide-needed, other} branch table) lives in [`STAGE-4.34-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.34-RESULT.md). Outcome **P-21-explicit-divide-needed** + **P-21b-bug-reproduces** CONFIRMED: Probe 21 captured `src0.nb=[2, 512, 128, 262144]` for the kq MUL_MAT — the **permuted K-cache layout** (dim-fast=2, head-medium=128, pos-slow=512), with `nb[2]=128` neither 0 nor `M·nb[1]=131072` (the brief's classifier missed this case as "other"). Probe 21b's host-CPU selftest at the captured kq shape produced uniform 1536-non-zero output per head (synthetic src0 fully populated) but `maxAbsDeltaVsGqa = 56.5` with **head 0 matching GQA reference at Δ=9.5e-6 (f32 noise)** and **every other head diverging by Δ=4.35–56.5** — kernel-level bug confirmed in isolation. Root cause: WGSL kernels compute `batch * src0.nb[2]` directly which under the permuted layout walks both head-fast (correct for batches 0–3) and pos-slow (wrong for batches ≥ 4) dimensions. Stage 4.35 ships the fix: explicit `src0_batch_idx = batch / r2` divide (where `r2 = src1.ne[2] / src0.ne[2]`) in all four `load_*` WGSL kernels, plus Probe 21b as a permanent regression guard. Collapsed at Stage 4.35 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.33 brief — collapsed (full text in closure report)
 
