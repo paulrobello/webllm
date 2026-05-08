@@ -3936,6 +3936,52 @@ async function runSpike(): Promise<void> {
 		(window as any).__stage417Checkpoints = checkpointLines;
 		for (const line of checkpointLines) log(line);
 
+		// Stage 4.31 Probe 18 Shape A — parse the `[CHECKPOINT-FULL ...]`
+		// lines emitted by node_dump_cb for `kqv_out-0` (mean / abs_max /
+		// abs_min / NaN / Inf over the FULL tensor, defeating the
+		// first8-window blindness Stage 4.27 flagged on this op). Both
+		// the JSEP spike and the non-JSEP ref-probe emit these — diff is
+		// computed offline by a Python helper that compares
+		// `__stage431Stats` from the two runs and synthesises
+		// P-18-{first8-blind, full-clean, full-dirty}.
+		const stage431Pat =
+			/\[CHECKPOINT-FULL idx=(\d+) name=(\S+) n_elements=(\d+) finite=(\d+) mean=(\S+) abs_max=(\S+) abs_min=(\S+) nan=(\d+) inf=(\d+)\]/;
+		const stage431Stats: Array<{
+			idx: number;
+			name: string;
+			n_elements: number;
+			finite: number;
+			mean: number;
+			abs_max: number;
+			abs_min: number;
+			nan: number;
+			inf: number;
+		}> = [];
+		for (const line of (window as any).__stderrLines as string[]) {
+			const m = line.match(stage431Pat);
+			if (!m) continue;
+			stage431Stats.push({
+				idx: +m[1],
+				name: m[2],
+				n_elements: +m[3],
+				finite: +m[4],
+				mean: Number(m[5]),
+				abs_max: Number(m[6]),
+				abs_min: Number(m[7]),
+				nan: +m[8],
+				inf: +m[9],
+			});
+		}
+		(window as any).__stage431Stats = stage431Stats;
+		log(`STAGE431_STATS_COUNT = ${stage431Stats.length}`);
+		for (const s of stage431Stats) {
+			log(
+				`[STAGE-4.31] idx=${s.idx} name=${s.name} n=${s.n_elements} ` +
+					`finite=${s.finite} mean=${s.mean} abs_max=${s.abs_max} ` +
+					`abs_min=${s.abs_min} nan=${s.nan} inf=${s.inf}`,
+			);
+		}
+
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitStats[0])}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`GENERATED_TEXT = ${JSON.stringify(generatedText)}`);

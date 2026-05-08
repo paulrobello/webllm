@@ -130,6 +130,47 @@ async function runRefProbe(): Promise<void> {
 		(window as any).__refCheckpoints = checkpointLines;
 		log(`CHECKPOINT_COUNT = ${checkpointLines.length}`);
 		for (const line of checkpointLines) log(line);
+
+		// Stage 4.31 Probe 18 Shape A — parse the same `[CHECKPOINT-FULL ...]`
+		// lines on the non-JSEP reference path. The diff against the JSEP
+		// spike's `__stage431Stats` is computed offline.
+		const stage431Pat =
+			/\[CHECKPOINT-FULL idx=(\d+) name=(\S+) n_elements=(\d+) finite=(\d+) mean=(\S+) abs_max=(\S+) abs_min=(\S+) nan=(\d+) inf=(\d+)\]/;
+		const stage431Stats: Array<{
+			idx: number;
+			name: string;
+			n_elements: number;
+			finite: number;
+			mean: number;
+			abs_max: number;
+			abs_min: number;
+			nan: number;
+			inf: number;
+		}> = [];
+		for (const line of (window as any).__stderrLines as string[]) {
+			const m = line.match(stage431Pat);
+			if (!m) continue;
+			stage431Stats.push({
+				idx: +m[1],
+				name: m[2],
+				n_elements: +m[3],
+				finite: +m[4],
+				mean: Number(m[5]),
+				abs_max: Number(m[6]),
+				abs_min: Number(m[7]),
+				nan: +m[8],
+				inf: +m[9],
+			});
+		}
+		(window as any).__stage431Stats = stage431Stats;
+		log(`STAGE431_STATS_COUNT = ${stage431Stats.length}`);
+		for (const s of stage431Stats) {
+			log(
+				`[STAGE-4.31] idx=${s.idx} name=${s.name} n=${s.n_elements} ` +
+					`finite=${s.finite} mean=${s.mean} abs_max=${s.abs_max} ` +
+					`abs_min=${s.abs_min} nan=${s.nan} inf=${s.inf}`,
+			);
+		}
 		log(`LOGIT_STATS_STEP0 = ${JSON.stringify(logitsStep0Stats)}`);
 		log(`GENERATED_TOKENS = ${JSON.stringify(generatedIds)}`);
 		log(`PER_TOKEN_MS = ${perTokenMs.toFixed(2)}`);

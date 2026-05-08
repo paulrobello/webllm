@@ -4,6 +4,7 @@
 #include "ggml-cpu.h"
 #include "ggml-webgpu.h"
 #include "llama.h"
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -797,6 +798,52 @@ static bool node_dump_cb(struct ggml_tensor* t, bool ask, void* /*user_data*/) {
             (long long)t->ne[2], (long long)t->ne[3],
             ggml_is_contiguous(t) ? 1 : 0,
             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+
+    // Stage 4.31 Probe 18 Shape A: widen the readback for `kqv_out-0`
+    // from the 8-element first8 window to the full tensor and emit
+    // mean / abs-max / abs-min / NaN-count / Inf-count over every
+    // element. Targets the suspected first8-window blindness — the
+    // post-attention output's first8 is dominated by V[pos=0] (which
+    // multiplies the position-0 softmax row that the causal mask pins
+    // to [1, 0, 0, …]); positions 1+ are unmonitored by the existing
+    // first8 dump. Only fires for `kqv_out-0` and only when contiguous;
+    // every other allowlisted tensor keeps the cheap first8-only path.
+    if (std::strcmp(t->name, "kqv_out-0") == 0 && ggml_is_contiguous(t)) {
+        int total = (int) ggml_nelements(t);
+        double sum_v = 0.0;
+        double abs_max = 0.0;
+        double abs_min = 0.0;
+        bool abs_min_set = false;
+        int nan_count = 0;
+        int inf_count = 0;
+        for (int i = 0; i < total; ++i) {
+            float x = ggml_get_f32_1d(t, i);
+            if (std::isnan(x)) {
+                nan_count++;
+                continue;
+            }
+            if (std::isinf(x)) {
+                inf_count++;
+                continue;
+            }
+            sum_v += (double) x;
+            double ax = std::fabs((double) x);
+            if (ax > abs_max) abs_max = ax;
+            if (!abs_min_set || ax < abs_min) {
+                abs_min = ax;
+                abs_min_set = true;
+            }
+        }
+        int finite = total - nan_count - inf_count;
+        double mean = finite > 0 ? sum_v / (double) finite : 0.0;
+        if (!abs_min_set) abs_min = 0.0;
+        fprintf(stderr,
+                "[CHECKPOINT-FULL idx=%d name=%s n_elements=%d finite=%d "
+                "mean=%.9g abs_max=%.9g abs_min=%.9g nan=%d inf=%d]\n",
+                g_node_dump_idx, t->name, total, finite,
+                mean, abs_max, abs_min, nan_count, inf_count);
+    }
+
     g_node_dump_idx++;
     g_node_dump_remaining--;
     return true;
