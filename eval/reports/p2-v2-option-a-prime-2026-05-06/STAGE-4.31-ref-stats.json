@@ -1,0 +1,88 @@
+{
+  "stage431Stats": [
+    {
+      "idx": 11,
+      "name": "kqv_out-0",
+      "n_elements": 12288,
+      "finite": 12288,
+      "mean": -0.00051776277,
+      "abs_max": 0.117064722,
+      "abs_min": 4.47267666e-7,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 29,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.000221451595,
+      "abs_max": 0.0517739505,
+      "abs_min": 4.58792783e-7,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 47,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.000444970097,
+      "abs_max": 0.0771947205,
+      "abs_min": 0.0000012461096,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 65,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.000686495596,
+      "abs_max": 0.178341463,
+      "abs_min": 2.67813448e-7,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 83,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.000639002956,
+      "abs_max": 0.267645359,
+      "abs_min": 4.34694812e-7,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 101,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.000712355932,
+      "abs_max": 0.114167295,
+      "abs_min": 1.1708471e-7,
+      "nan": 0,
+      "inf": 0
+    }
+  ],
+  "stderrFull": [
+    "[CHECKPOINT-FULL idx=11 name=kqv_out-0 n_elements=12288 finite=12288 mean=-0.00051776277 abs_max=0.117064722 abs_min=4.47267666e-07 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=29 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.000221451595 abs_max=0.0517739505 abs_min=4.58792783e-07 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=47 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.000444970097 abs_max=0.0771947205 abs_min=1.2461096e-06 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=65 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.000686495596 abs_max=0.178341463 abs_min=2.67813448e-07 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=83 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.000639002956 abs_max=0.267645359 abs_min=4.34694812e-07 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=101 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.000712355932 abs_max=0.114167295 abs_min=1.1708471e-07 nan=0 inf=0]"
+  ],
+  "generatedIds": [
+    3681,
+    29889,
+    13,
+    13,
+    29906
+  ],
+  "perTokenMs": 156.0399999976158,
+  "totalPrefillMs": 2469.399999976158,
+  "modelLoadMs": 807.6999999880791
+}

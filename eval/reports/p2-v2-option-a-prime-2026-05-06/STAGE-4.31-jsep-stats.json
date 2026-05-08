@@ -1,0 +1,89 @@
+{
+  "stage431Stats": [
+    {
+      "idx": 11,
+      "name": "kqv_out-0",
+      "n_elements": 12288,
+      "finite": 12288,
+      "mean": -0.0000676190481,
+      "abs_max": 0.0495885201,
+      "abs_min": 0,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 29,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.000872768641,
+      "abs_max": 0.69581604,
+      "abs_min": 0,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 47,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.00102779241,
+      "abs_max": 0.622721374,
+      "abs_min": 0,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 65,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": -0.000424801568,
+      "abs_max": 0.759730101,
+      "abs_min": 0,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 83,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": 0.000333909952,
+      "abs_max": 0.91934973,
+      "abs_min": 0,
+      "nan": 0,
+      "inf": 0
+    },
+    {
+      "idx": 101,
+      "name": "kqv_out-0",
+      "n_elements": 2048,
+      "finite": 2048,
+      "mean": 0.000705493591,
+      "abs_max": 0.859191358,
+      "abs_min": 0,
+      "nan": 0,
+      "inf": 0
+    }
+  ],
+  "stderrFull": [
+    "[CHECKPOINT-FULL idx=11 name=kqv_out-0 n_elements=12288 finite=12288 mean=-6.76190481e-05 abs_max=0.0495885201 abs_min=0 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=29 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.000872768641 abs_max=0.69581604 abs_min=0 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=47 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.00102779241 abs_max=0.622721374 abs_min=0 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=65 name=kqv_out-0 n_elements=2048 finite=2048 mean=-0.000424801568 abs_max=0.759730101 abs_min=0 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=83 name=kqv_out-0 n_elements=2048 finite=2048 mean=0.000333909952 abs_max=0.91934973 abs_min=0 nan=0 inf=0]",
+    "[CHECKPOINT-FULL idx=101 name=kqv_out-0 n_elements=2048 finite=2048 mean=0.000705493591 abs_max=0.859191358 abs_min=0 nan=0 inf=0]"
+  ],
+  "generatedText": "inonic boso-",
+  "generatedIds": [
+    297,
+    8927,
+    13601,
+    29877,
+    29899
+  ],
+  "perTokenMs": 322.44000000953673,
+  "totalPrefillMs": 621.3999999761581,
+  "modelLoadMs": 380.39999997615814
+}
