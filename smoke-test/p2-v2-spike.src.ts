@@ -1899,6 +1899,24 @@ async function runSpike(): Promise<void> {
 			log("     [probe9b] weight-hash export missing — non-JSEP build?", "fail");
 		}
 
+		// Stage 4.29 Probe 16 — arm the CPU-side set_tensor weight-hash
+		// probe alongside the JSEP one. Stage 4.28 (P-15-jsep-bypass)
+		// confirmed `blk.0.ffn_norm.weight` (F32) and `blk.0.ffn_down.weight`
+		// (Q6_K) bypass the JSEP set_tensor hook entirely — they live on
+		// the CPU buft, so we need a parallel CPU-side probe to test
+		// suspect 2 (gain-vector mis-load). The export ships in every
+		// build (CPU backend is unconditional), unlike the JSEP probe.
+		(globalThis as any).__cpuWeightHashLog = [];
+		const setCpuWeightHashProbe = (mod as any)._ggml_cpu_set_weight_hash_probe as
+			| ((enable: number) => void)
+			| undefined;
+		if (typeof setCpuWeightHashProbe === "function") {
+			setCpuWeightHashProbe(1);
+			log("     [probe16] CPU weight-hash probe armed");
+		} else {
+			log("     [probe16] CPU weight-hash export missing — old build?", "fail");
+		}
+
 		const t0 = performance.now();
 		const model = await bridge.loadModel(buf);
 		const tLoadMs = performance.now() - t0;
@@ -1913,6 +1931,10 @@ async function runSpike(): Promise<void> {
 		// follow-on probe).
 		if (typeof setWeightHashProbe === "function") {
 			setWeightHashProbe(0);
+		}
+		// Stage 4.29 Probe 16 — disarm CPU probe.
+		if (typeof setCpuWeightHashProbe === "function") {
+			setCpuWeightHashProbe(0);
 		}
 		try {
 			const gguf = GgufParser.parse(buf);
@@ -2161,6 +2183,118 @@ async function runSpike(): Promise<void> {
 				outcome = `P-15-other (${firstMismatch} first mismatch — unexpected; revisit upload path for that tensor)`;
 			}
 			log(`     [STAGE-4.28] OUTCOME: ${outcome}`, firstMismatch === null ? "ok" : "fail");
+
+			// Stage 4.29 Probe 16 — unify the JSEP and CPU set_tensor logs
+			// into a single per-weight verdict line. For each of the 7
+			// targetNames, look up:
+			//   ref_hash      = JS-side GgufParser FNV-1a-32 over the same
+			//                   bytes (already in __weightHashRef from
+			//                   Stage 4.20/4.28).
+			//   jsep_pre_hash = JSEP set_tensor pre-upload hash, if the
+			//                   tensor was JSEP-resident (refMap from
+			//                   __weightHashLog).
+			//   jsep_gpu_hash = post-writeBuffer GPU readback hash, if
+			//                   JSEP-resident (gpuMap from probe9c).
+			//   cpu_pre_hash  = CPU set_tensor post-memcpy hash, if the
+			//                   tensor was CPU-buft-resident
+			//                   (__cpuWeightHashLog from this stage).
+			// match = at least one captured hash matches ref AND every
+			// captured hash matches ref. A weight that appears in neither
+			// log emits match=false with all captured hashes "<missing>"
+			// — that's the P-16-silent escalation case.
+			const stage429Names = stage428Names; // identical 7-name allowlist
+			const cpuLog = (globalThis as any).__cpuWeightHashLog as Array<{
+				name: string;
+				offset: number;
+				size: number;
+				fnv1a_pre: number;
+			}>;
+			const cpuMap: Record<string, { fnv1a_pre: string; size: number }> = {};
+			for (const e of cpuLog) {
+				cpuMap[e.name] = {
+					fnv1a_pre: `0x${(e.fnv1a_pre >>> 0).toString(16).padStart(8, "0")}`,
+					size: e.size,
+				};
+			}
+			const stage429Lines: string[] = [];
+			let firstMismatch429: string | null = null;
+			let cpuFiredCount = 0;
+			let cpuByteCleanCount = 0;
+			let cpuDirtyNames: string[] = [];
+			for (const name of stage429Names) {
+				const r = refMap?.[name];
+				const jsepPre = (globalThis as any).__weightHashLog
+					.find((e: { name: string; fnv1a_pre: number }) => e.name === name) as
+					| { name: string; fnv1a_pre: number }
+					| undefined;
+				const jsepPreHex = jsepPre
+					? `0x${(jsepPre.fnv1a_pre >>> 0).toString(16).padStart(8, "0")}`
+					: "<missing>";
+				const jsepGpuHex = gpuMap[name]?.fnv1a_gpu ?? "<missing>";
+				const cpuPreHex = cpuMap[name]?.fnv1a_pre ?? "<missing>";
+				const refHex = r ? `0x${(r.fnv1a >>> 0).toString(16).padStart(8, "0")}` : "<missing>";
+				if (cpuMap[name]) {
+					cpuFiredCount += 1;
+					if (cpuPreHex === refHex) {
+						cpuByteCleanCount += 1;
+					} else {
+						cpuDirtyNames.push(name);
+					}
+				}
+				const captured = [jsepPreHex, jsepGpuHex, cpuPreHex].filter((h) => h !== "<missing>");
+				const anyCaptured = captured.length > 0;
+				const allMatchRef = anyCaptured && captured.every((h) => h === refHex);
+				const match = !!r && anyCaptured && allMatchRef;
+				stage429Lines.push(
+					`[STAGE-4.29] ${name} ref_hash=${refHex} ` +
+						`jsep_pre_hash=${jsepPreHex} jsep_gpu_hash=${jsepGpuHex} ` +
+						`cpu_pre_hash=${cpuPreHex} match=${match}`,
+				);
+				if (!match && firstMismatch429 === null) {
+					firstMismatch429 = name;
+				}
+			}
+			(globalThis as any).__stage429Lines = stage429Lines;
+			(globalThis as any).__stage429FirstMismatch = firstMismatch429;
+			(globalThis as any).__stage429CpuFiredCount = cpuFiredCount;
+			(globalThis as any).__stage429CpuByteCleanCount = cpuByteCleanCount;
+			(globalThis as any).__stage429CpuDirtyNames = cpuDirtyNames;
+			for (const line of stage429Lines) {
+				log(`     ${line}`, line.endsWith("match=true") ? "ok" : "fail");
+			}
+			log(
+				`     [STAGE-4.29] CPU hook fired on ${cpuFiredCount}/${stage429Names.length} weights ` +
+					`(${cpuByteCleanCount} byte-clean, ${cpuDirtyNames.length} dirty)`,
+				cpuFiredCount > 0 ? "ok" : "fail",
+			);
+			let outcome429: string;
+			if (cpuFiredCount === 0) {
+				// CPU hook fired zero times — the bypass weights don't live
+				// on CPU buft either. Brief's risk-register #1 escalation
+				// path: instrument untargeted set_tensor logging to identify
+				// which buft owns ffn_norm / ffn_down, or fall back to
+				// Shape B (cb_eval weight-tap).
+				outcome429 = "P-16-silent (CPU hook never fired — bypass weights are not on CPU buft; escalate to untargeted set_tensor logging or Shape B)";
+			} else if (firstMismatch429 === null) {
+				// All 7 weights byte-clean across whichever buft owns each
+				// (5 JSEP + 2 CPU, or some other split). Suspect 2
+				// (ffn_norm.weight gain-vector mis-load) is dead.
+				outcome429 = "P-16-clean (all 7 layer-0 weights byte-exact across JSEP + CPU bufts; suspect 2 gain-vector mis-load DEAD; pivot Stage 4.30 to suspect 3 first8-window blindness on kqv_out-0)";
+			} else if (firstMismatch429 === "blk.0.ffn_norm.weight") {
+				// CPU pre-upload hash differs from GGUF reference — the
+				// gain vector was corrupted before reaching the CPU op.
+				outcome429 = "P-16-gain (ffn_norm.weight CPU buft hash mismatch — gain-vector mis-load CONFIRMED; trace upload byte trajectory in Stage 4.30)";
+			} else if (firstMismatch429 === "blk.0.ffn_down.weight") {
+				// Q6_K weight upload path corruption. The Q6_K-specific
+				// upload + dispatch path is the suspect.
+				outcome429 = "P-16-ffn-down (ffn_down.weight CPU buft hash mismatch — Q6_K upload path corruption; deep-dive Q6_K-specific path in Stage 4.30)";
+			} else {
+				outcome429 = `P-16-other (${firstMismatch429} first mismatch — unexpected; revisit upload path for that tensor)`;
+			}
+			log(
+				`     [STAGE-4.29] OUTCOME: ${outcome429}`,
+				firstMismatch429 === null && cpuFiredCount > 0 ? "ok" : "fail",
+			);
 		} catch (err) {
 			log(`     [probe9c] GPU-readback hash threw: ${(err as Error).message}`, "fail");
 		}

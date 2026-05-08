@@ -136,7 +136,12 @@ if(EMSCRIPTEN)
         "_webllm_synthetic_offload_probe,_webllm_synthetic_probe_log,"
         "_webllm_enable_node_dump,"
         "_webllm_dequantize_q4_K,"
-        "_webllm_q4k_q8k_matmul"
+        "_webllm_q4k_q8k_matmul,"
+        # Stage 4.29 Probe 16 — CPU-side set_tensor weight-hash probe.
+        # Lives in ggml-backend.cpp, which ships in every build (unlike
+        # the JSEP-only _ggml_jsep_set_weight_hash_probe export below),
+        # so no WEBLLM_BACKEND_JSEP gating needed.
+        "_ggml_cpu_set_weight_hash_probe"
     )
 
     # Stage 4.20 Probe 9b — JSEP-only export. The C++ symbol lives in
