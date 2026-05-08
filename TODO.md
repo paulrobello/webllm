@@ -1073,17 +1073,18 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.33: element-wise `kq-0` divergence localization (Probe 20, Shape A) — and Probe 20b (Shape B) hash-check
+### Next session pickup — Phase 3 Stage 4.34: WGSL kqv MUL_MAT GQA-broadcast localization (Probe 21 Shape A — read the kernel; Probe 21b Shape B — host-CPU selftest at kq-0 shape)
 
-Stage 4.32 confirmed Outcome **P-19-upstream-cascade**: the divergence originates at or before the first attention matmul (`kq-0`, Q×K^T). JSEP `kq-0` AbsMax = 31.98 vs Ref 52.93 (Δ=20.95); the resulting `kqv_out-0` is 87.5% zero on JSEP (longest zero run: 1792). Stage 4.31's first8-blindness hypothesis is upgraded to a structural attention divergence.
+Stage 4.33 confirmed Outcome **P-20-block-bounded**: JSEP `kq-0` non-zero coverage degrades in a clean stair-step by head index — heads 0–3 are full (36/36), heads 4–7 missing 6 (1 K-pos × 6 Q-rows), heads 8–11 missing 12, …, heads 24–31 entirely zero (0/36). 4-head bands match TinyLlama's `n_head_kv=4`; 6-step degradation matches the prefill sequence length. Total: 504/1152 active non-zeros on JSEP vs 1152/1152 on ref. The pattern implicates the WGSL kqv MUL_MAT kernel's GQA broadcast logic, not an outright batch-indexing failure (OOB-zero would zero *all* heads ≥ 4, not stair-step them).
 
-Surviving structural suspects after Stage 4.32:
+Surviving structural suspects after Stage 4.33:
 1. ❌ Output-projection (`attn_output.weight`) byte-integrity — closed Stage 4.28 / 4.30.
 2. ❌ `ffn_norm.weight` gain-vector mis-load — closed Stage 4.30.
 3. ❌ first8-window blindness on `kqv_out-0` — closed Stage 4.31.
-4. ✅ **Divergence at `kq-0` (Q×K^T) — CONFIRMED.** Stage 4.33 narrows the source:
-    - **Probe 20 (Shape A):** element-wise capture for `kq-0` (n=49152), find first divergent index and structural pattern.
-    - **Probe 20b (Shape B):** hash `Qcur-0` and `Kcur-0` bytes *at the moment they are read by the JSEP kq-0 matmul* (EM_ASM peek) to localize if corruption happens during the transfer from their producing ops or inside the matmul kernel itself.
+4. ❌ Divergence at `kq-0` (Q × K^T) — confirmed Stage 4.32, localized Stage 4.33.
+5. ✅ **WGSL kqv MUL_MAT GQA broadcast — CONFIRMED.** Stage 4.34 narrows the kernel-level source:
+    - **Probe 21 (Shape A — read the kernel):** Inspect `dispatchMatmul` shape uniform packing (`shape.src0_batch_bytes` = `src0.nb[2]`) and the WGSL `load_*` row/batch indexing. Determine whether ggml's stride-based GQA broadcast is honoured or whether the kernel needs an explicit `src0_batch = batch / r2` divide.
+    - **Probe 21b (Shape B — host-CPU selftest):** Add a JS-side selftest gated by `__stage434SelftestArm` that runs `dispatchMatmul` against known-good f32 inputs at the kq-0 shape (M=256, K=64, N=6, src0.ne[2]=4, src1.ne[2]=32) and compares against a host-CPU MUL_MAT reference. Confirms whether the kernel-as-built has the GQA bug independent of any libllama wiring.
 
 START HERE in a fresh session.
 
@@ -1093,18 +1094,19 @@ START HERE in a fresh session.
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.32 TODO closure commit>     docs(TODO): Stage 4.32 closed — Outcome P-19-upstream-cascade
-#   → <Stage 4.32 reports commit>          docs(reports): Stage 4.32 closure — kq-0 Delta=20.95
-#   → <Stage 4.32 spike commit>            feat(spike): Stage 4.32 Probe 19 — kq-0/kqv_out-0 element-wise capture
+#   → <Stage 4.33 TODO closure commit>     docs(TODO): Stage 4.33 closed — Outcome P-20-block-bounded
+#   → <Stage 4.33 reports commit>          docs(reports): Stage 4.33 closure — stair-step kq-0 by head
+#   → a1f0baf                              feat(spike): Stage 4.33 Probe 20 — widen kq-0 dump + auto-upload stderr
+#   → a61edef                              feat(spike): Stage 4.32 Probe 19 — kq-0/kqv_out-0 element-wise capture
 #   → 03e541b                              docs(TODO): Stage 4.31 closed — queue Stage 4.32 idx-by-idx kqv_out-0 diff
-#   → 7357c32                              docs(reports): Stage 4.31 closure — Outcome P-18-first8-blind
 
 # 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
 #   → ebc7c3d82   webllm-browser-patches   (patch stack 14)
 
-# 3. Smoke-server up on 8031 + reuse agentchrome session + both spike + ref-probe tabs.
-lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
+# 3. Smoke-server up on 8031, log_receiver on 8032, agentchrome session + both tabs.
+lsof -nP -iTCP:8031 -sTCP:LISTEN 2>/dev/null | head -2 || make smoke-serve &
+lsof -nP -iTCP:8032 -sTCP:LISTEN 2>/dev/null | head -2 || python3 log_receiver.py &
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 [ -n "$PORT" ] || agentchrome connect --launch --headless
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
@@ -1112,59 +1114,80 @@ REF_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;pri
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 [ -n "$REF_TAB" ] || REF_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 ```
-[ -n "$REF_TAB" ] || REF_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-```
 
-**One-line goal:** Capture every element of the prefill `kqv_out-0` (idx 11, n=12288) on both JSEP and reference paths; compute per-index `|jsep[i] - ref[i]|`; find the first divergent index, the longest contiguous JSEP-zero run, and the per-row max-abs-delta. Synthesise `P-19-{row-bounded, block-bounded, upstream-cascade}` based on the structural pattern.
+**One-line goal:** Read `dispatchMatmul` and the WGSL kernel; determine whether ggml's stride-based GQA broadcast is honoured by `shape.src0_batch_bytes` (P-21-stride-trick) or whether the kernel needs an explicit `src0_batch = batch / r2` divide (P-21-explicit-divide-needed). Optionally arm Probe 21b (host-CPU selftest) to confirm the bug in isolation. Synthesise `P-21-{stride-trick, explicit-divide-needed, other}` and queue Stage 4.35 (the fix or upstream-investigation branch).
 
-**One-line context:** Stage 4.31 closed suspect 3 (the existence of first8-window blindness on `kqv_out-0`); Stage 4.32 closes it down to a *reproducible failure mode* — row-bounded tile-coverage gap, block-bounded subgroup-coverage gap, or upstream cascade from `kq-0` / `kq_soft_max-0`. Probe 19 is element-wise diff; Probe 19b (Shape B) is a one-line allowlist extension that tells us whether the upstream Q×K^T also has first8-window blindness.
+**One-line context:** Stage 4.33 confirmed P-20-block-bounded — the WGSL kqv MUL_MAT kernel produces a stair-step zero pattern by head index that matches GQA 8:1 (32 Q-heads / 4 K-heads = 8) but mis-truncates somewhere. Probe 21 finds the truncation site; Probe 21b is the kernel-isolated selftest that proves causality before any fix is shipped.
 
-#### Stage 4.32 implementation sketch (Probe 19 — Shape A: element-wise `kqv_out-0` capture)
+#### Stage 4.34 implementation sketch (Probe 21 Shape A — read the kernel)
 
-1. **C++ side** (`src/wasm/webgpu-bridge.cpp:node_dump_cb`): when `tensor->name == "kqv_out-0"` and `ggml_is_contiguous(t)`, walk every element and emit one `[CHECKPOINT-IDX-DUMP idx=N name=kqv_out-0 row=R first16=[…]]` stderr line per row R. For prefill (`[2048, 6, 1, 1]`) that's 6 rows of 16 elements per dump = 6 lines per pass; for decode (`[2048, 1, 1, 1]`) 1 row × however many indices we want to span. Cheap and parses cleanly offline. Alternative if rows-of-16 aren't enough: emit a denser per-row dump (e.g. 64 contiguous indices stride 32) or expose a `webllm_arm_kqv_capture(int)` export that copies the full tensor into a JS-owned `Float32Array` via `EM_ASM`.
-2. **JS spike + ref side**: each page already filters `[CHECKPOINT…]` lines into `__stderrLines`; no parser change needed. Capture both runs' lines, save under `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.32-{jsep,ref}-kqv.txt`.
-3. **Diff script** (`STAGE-4.32-diff.py`): load both captures; per-index abs delta on idx 11; find first divergent index, longest contiguous JSEP-zero run, per-row max-abs-delta. Synthesise `P-19-{row-bounded, block-bounded, scattered, upstream-cascade}`.
-4. **Run** at `?v=stage4.32-probe19` on both pages.
+1. **TS side (read-only inspection)** — confirm in `src/inference/jsep/ops/matmul.ts:543-740` (`dispatchMatmul`):
+   - Line 564–578 — shape-and-batch derivation. Note: `batchCount = Math.max(1, src1.ne[2]) * Math.max(1, src1.ne[3])` uses **src1 only**, ignoring src0 batch dim. For GQA src0.ne[2]=4 < src1.ne[2]=32.
+   - Line 630–651 — shape uniform packing. `shapeData[7] = src0.nb[2]` is passed to the WGSL kernel as `shape.src0_batch_bytes`. Check whether ggml sets `src0.nb[2]` to encode the GQA broadcast (e.g. `nb02 / r2`, or 0 for no advance, or wrap-style stride).
+   - Line 657–659 — dispatch grid. `dispatchZ = batchCount` covers all 32 Q-heads.
+2. **WGSL side (read-only inspection)** — at `matmul.ts:267-487`, `load_f32 / load_f16 / load_q4_0 / load_q4_K` all use the same idiom:
+   ```wgsl
+   let row_byte_base: u32 = batch * shape.src0_batch_bytes + m * shape.src0_row_bytes;
+   ```
+   No GQA-aware divide. Confirm: does `batch * src0_batch_bytes` produce the right offset when `src0.ne[2] < src1.ne[2]`? Check three cases of how ggml could be passing nb[2]:
+   - **Case A (stride-trick zero):** ggml sets src0.nb[2] = 0 for the broadcasted dim — then `batch * 0 = 0` and the kernel always reads K-head 0. Would zero out heads 1–31, not stair-step.
+   - **Case B (stride-trick wrap):** ggml sets src0.nb[2] = original nb[2] but the runtime expects modular indexing — kernel reads off-the-end memory for batch ≥ 4. OOB reads typically zero, would also produce all-zeros for heads ≥ 4.
+   - **Case C (no broadcast set up — normal stride):** ggml leaves src0.nb[2] at its un-broadcasted value (a 4-head stride). Then `batch=4` reads memory adjacent to K-head 3 — *some* of which contains valid data from the K cache or scratch arena. This could produce the observed stair-step if the adjacent memory happens to contain values that align partially with the next 4 heads, etc. Most likely correct hypothesis given the *progressive* degradation.
 
-#### Stage 4.32b implementation sketch (Probe 19b — Shape B: full-tensor probe on `kq-0` + `kq_soft_max-0`)
+3. **Console-log inspection at runtime (gated):** add a one-shot `console.log` at `dispatchMatmul:578-579` printing `{src0_ne: src0.ne, src0_nb: src0.nb, src1_ne: src1.ne, src1_nb: src1.nb, dst_ne: dst.ne, dst_nb: dst.nb, batchCount}` for the first MUL_MAT where `src0.ne[2] !== src1.ne[2]`. Spike harness reads back via `agentchrome js exec` to confirm what nb[2] ggml is actually passing for the kq MUL_MAT.
 
-(Run *first* if Probe 19's element-wise capture is heavier than expected — Probe 19b is a one-line allowlist extension.)
+4. **Run** at `?v=stage4.34-probe21` on the spike page only (ref isn't needed for Probe 21).
 
-1. **C++ side**: change the `std::strcmp(t->name, "kqv_out-0") == 0` gate in `node_dump_cb` to a 3-name match (`kq-0`, `kq_soft_max-0`, `kqv_out-0`). Same `[CHECKPOINT-FULL …]` emission format.
-2. **TS side**: no change — `__stage431Stats` parser already accepts arbitrary names.
-3. **Diff**: aggregate-stat side-by-side. If `kq-0` carries a >1e-3 `abs_max` delta, the cascade originates at Q×K^T and `kqv_out-0` is faithfully amplifying upstream corruption. If only `kqv_out-0` diverges, the bug is in V × softmax (the later mat-mul on the chain) and Probe 19 narrows it further.
+#### Stage 4.34b implementation sketch (Probe 21b Shape B — host-CPU selftest)
+
+(Run *if* Probe 21's static read leaves ambiguity — Probe 21b confirms the bug in isolation.)
+
+1. **TS side**: add a function `selftestKqShape(ctx)` to `dispatchMatmul`'s test path that:
+   - Allocates two GPUBuffers (`src0`: 64*256*4 floats, `src1`: 64*6*32 floats) with deterministic content (`fill(idx => Math.sin(idx * 0.01))` works).
+   - Calls `dispatchMatmul` with a hand-built descriptor matching kq's shape (M=256, K=64, N=6, src0.ne=[64,256,4,1], src1.ne=[64,6,32,1], dst.ne=[256,6,32,1]) and sets `src0.nb[2]` to whatever Probe 21 found ggml is passing.
+   - Reads dst back, computes a host-CPU reference (32-head loop with explicit `src0_head = head / 8`), reports per-head non-zero count + max-abs-delta.
+2. Gated by `globalThis.__stage434SelftestArm = true` set in the spike harness; auto-disarms after one run.
+3. **Outcome:** if the selftest reproduces the same stair-step on synthetic inputs, the bug is in the kernel definitively. If the selftest produces uniformly correct output, the bug is in how libllama is packing the descriptor (something about the kq path specifically).
 
 #### Files to read first
 
-- [`STAGE-4.31-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.31-RESULT.md) — P-18-first8-blind classification + JSEP / ref aggregate-stat side-by-side + Stage 4.32 brief expansion + Probe 19b queued for the upstream-cascade branch.
-- [`STAGE-4.27-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-RESULT.md) — smoking-gun cascade table; Stage 4.31 has just demoted row 12 (`attn_out-0` Δ=4.77e-3) from "first divergence" to "first divergence projected through first8".
-- `src/wasm/webgpu-bridge.cpp:node_dump_cb` — current callback site. Stage 4.32 either extends the kqv-only probe to per-row dumps, or extends the name allowlist to add `kq-0` / `kq_soft_max-0`.
-- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:compute_op` — JSEP backend's MUL_MAT dispatch site. Reach for this if Stage 4.32 narrows divergence to the V × softmax mat-mul specifically.
-- `src/inference/jsep/ops/matmul.ts` — WGSL kqv MUL_MAT pipeline selection. Reach for this if Stage 4.32 narrows divergence to a tile-bounds / subgroup-coverage bug.
+- [`STAGE-4.33-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.33-RESULT.md) — P-20-block-bounded classification + per-head non-zero stair-step table + GQA-broadcast diagnosis.
+- [`STAGE-4.33-pattern.py`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.33-pattern.py) — head/Q-position breakdown helper; reusable for Stage 4.34 if a recapture is needed.
+- `src/inference/jsep/ops/matmul.ts:543-740` — `dispatchMatmul`, shape uniform packing, dispatch grid.
+- `src/inference/jsep/ops/matmul.ts:267-487` — WGSL kernels (f32, f16, q4_0, q4_K). All four use `batch * batch_bytes + m * row_bytes` directly.
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:compute_op` — JSEP backend's MUL_MAT dispatch site. Determines what nb[2] ends up being passed to JSEP for the kq MUL_MAT (and whether the broadcast is meant to be applied on the libllama side or the kernel side).
+- `~/Repos/llama.cpp/ggml/src/ggml.c::ggml_mul_mat` — canonical ggml MUL_MAT semantics including the `ne12 % ne02 == 0` broadcast rule.
 
 #### Risk register
 
-1. **`kqv_out-0` element-wise capture is heavy.** 12288 × 4 B = 48 KiB prefill + 5 × 8 KiB = 40 KiB decode = 88 KiB / run. Fits in `globalThis` but `agentchrome js exec` JSON serialisation may slow above ~1 MiB. Mitigation: per-row stderr dump (6 + 5 = 11 lines / run) + offline Python parse. Already-cheap; preferred default.
-2. **Decode-step alignment between JSEP and ref runs.** The two runs generate different tokens at step 0 (JSEP → 297, ref → 3681). Decode steps 1+ feed different inputs to each model and aren't directly comparable. Stage 4.32 must focus on **idx 11 (prefill)** — the only forward pass where both runs receive the same input. Decode-step divergences are *consequence*, not cause; treat them as out-of-scope.
-3. **Reference path drift across patch-stack growth.** Patch-stack 13 → 14 (Stage 4.29 CPU-side hook) does not affect the reference build's correctness. The non-JSEP `webllm-wasm.{js,wasm}` is the authoritative truth source. Sanity-check by re-running Stage 4.27's first-divergent-op cascade on the current build before trusting Stage 4.32 deltas.
-4. **`abs_min = 0.0` could be a false positive in aggregate.** With f32 outputs and 12288 elements, the chance of one accidental exact 0.0 is non-zero. Stage 4.32's element-wise capture must include a per-pass *zero count + zero-index list* to distinguish "one accidental zero" from "a contiguous block of zeros". Only the latter implicates the kernel.
+1. **Probe 21 may close ambiguous.** Static reading of the kernel + JS dispatch may not distinguish whether ggml's nb[2] is encoding the broadcast or whether the kernel just hasn't hit the right kq-shape combination yet. **Mitigation:** always run Probe 21b (selftest) — it's <50 LOC and removes the ambiguity. Don't ship a fix on Probe 21 alone.
+2. **Selftest input choice may pick a "lucky" pattern.** Deterministic sinusoidal fill could happen to mask the bug if the K-broadcast lands on aligned values. **Mitigation:** also seed with `(idx * 1664525 + 1013904223) & 0xffffffff` (LCG for reproducible-pseudorandom) and check both fills produce the same per-head non-zero stair-step.
+3. **Fix landing in the WGSL kernel changes precision.** Even if `src0_batch = batch / r2` is the right fix for kq, it changes the kernel for *all* MUL_MAT dispatches that call this function. Other GQA-correct paths (e.g. the f32 attention output projection) may have already worked because their broadcast was set up upstream. **Mitigation:** read `shape.src0_batch_bytes` and only branch the divide when the shape hints GQA (`src1.ne[2] / src0.ne[2] > 1`). Probe 21b's selftest must cover both broadcast and non-broadcast cases before the fix lands.
+4. **A "fix" might unblock kq-0 but reveal a downstream bug.** kq is the first attention matmul; once it's clean, the ffn_down or output_norm path may surface the *next* divergence. **Mitigation:** plan Stage 4.35 as either "ship the fix + verify spike's `__spikeResult.generatedIds[0] === 3681` (matches ref)" *or* "fix lands but cascade continues — re-run Stage 4.27's first-divergent-op cascade on the fixed code". Don't promise wedge → fix in one stage.
 
-#### Exit criteria — Stage 4.32 closes when documented in `STAGE-4.32-RESULT.md`
+#### Exit criteria — Stage 4.34 closes when documented in `STAGE-4.34-RESULT.md`
 
-- Element-wise `kqv_out-0` (prefill, idx=11) deltas computed for both runs.
-- First-divergent-index identified.
-- Structural pattern classified (contiguous zero range, striped, scattered, upstream-cascade).
+- Probe 21 reports the actual `src0.nb[2]` value ggml passes for the kq MUL_MAT (single number, single line).
+- Either: Probe 21b selftest reproduces the stair-step at the kq shape (kernel bug confirmed), OR Probe 21b selftest produces uniformly correct output (kernel is clean; bug is in libllama-side descriptor packing).
 - One of:
-  - **P-19-row-bounded**: divergence aligns to row boundaries (every 2048-th index OR every 6-th index) → kqv MUL_MAT tile-bounds bug. Stage 4.33 instruments the JSEP MUL_MAT dispatch coverage.
-  - **P-19-block-bounded**: divergence aligns to a smaller block (16 / 32 / 64) → WGSL workgroup / subgroup coverage bug. Stage 4.33 inspects `src/inference/jsep/ops/matmul.ts` pipeline selection.
-  - **P-19-upstream-cascade**: the divergence pattern matches what V × softmax(Q×K^T) would produce if `kq-0` or `kq_soft_max-0` were corrupt, not from a kqv kernel bug. Stage 4.33 = Probe 19b (full-tensor probe up the attention sub-graph).
-- Stage 4.33 paste-and-go brief queued for the chosen branch.
+  - **P-21-stride-trick**: ggml sets src0.nb[2] to encode the broadcast and the kernel honours it for some heads but truncates. Stage 4.35 identifies the truncation site (likely a u32 wrap or an unsigned underflow in the row_byte calculation).
+  - **P-21-explicit-divide-needed**: ggml expects the consumer to do `src0_batch = batch / r2`. Stage 4.35 ships the one-line WGSL fix + Probe 21b selftest as a regression guard.
+  - **P-21-other**: kernel + stride trick are clean. Stage 4.35 = inspect ggml-jsep.cpp's descriptor packing for the kq path specifically.
+- Stage 4.35 paste-and-go brief queued for the chosen branch.
 
-#### Branch on Probe 19 outcome
+#### Branch on Probe 21 outcome
 
-- **P-19-row-bounded** (suspect: kqv MUL_MAT tile-bounds bug): Stage 4.33 captures the WGSL dispatch + grid + bind-group layout for the `kqv_out-0` MUL_MAT specifically.
-- **P-19-block-bounded** (suspect: WGSL workgroup coverage): Stage 4.33 inspects `src/inference/jsep/ops/matmul.ts` pipeline selection logic for the V × softmax shape.
-- **P-19-upstream-cascade** (suspect: Q × K^T or softmax): Stage 4.33 = Probe 19b, extending the full-tensor probe up the attention sub-graph.
+- **P-21-stride-trick** (suspect: WGSL truncation under broadcast): Stage 4.35 narrows the truncation site by adding a per-head `console.log(batch, src0_offset, dst_idx)` in the kernel via a debug build. Bug is local to one of the four `load_*` shaders.
+- **P-21-explicit-divide-needed** (suspect: WGSL doesn't divide for GQA): Stage 4.35 ships the one-line fix `let src0_batch_idx: u32 = batch / shape.r2;` (with `shape.r2` added to the uniform) + the Probe 21b selftest as a permanent regression guard.
+- **P-21-other** (suspect: libllama-side descriptor packing for kq specifically): Stage 4.35 inspects `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:compute_op` for how the descriptor's nb[2] is set when `ne12 != ne02`.
+
+### Earlier Stage 4.33 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.33 brief (paste-and-go bootstrap, Probe 20 implementation sketch with C++ filter widening to `kq-0` element-wise IDX-DUMP + JS fetch-POST upload to `localhost:8032`, four-item risk register, three-outcome P-20-{row-bounded, block-bounded, upstream-cascade} branch table) lives in [`STAGE-4.33-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.33-RESULT.md). Outcome **P-20-block-bounded** CONFIRMED: JSEP `kq-0` non-zero coverage stair-steps by head — heads 0–3 full (36/36), heads 4–7 missing 6 (1 K-pos × 6 Q-rows), heads 8–11 missing 12, …, heads 24–31 entirely zero (0/36). 4-head bands match `n_head_kv=4`; 6-step degradation matches prefill seq length. Total: 504/1152 active non-zeros on JSEP vs 1152/1152 on ref. Implicates the WGSL kqv MUL_MAT kernel's GQA broadcast logic — `dispatchMatmul`'s shape uniform packs `shape.src0_batch_bytes = src0.nb[2]` and the `load_*` kernels all use `batch * src0_batch_bytes + m * src0_row_bytes` without a GQA-aware divide. Stage 4.34 queues Probe 21 (Shape A: read the kernel + log ggml's actual nb[2] at the kq MUL_MAT) and Probe 21b (Shape B: host-CPU selftest at kq's exact shape M=256 K=64 N=6 src0.ne[2]=4 src1.ne[2]=32 to confirm the bug in isolation). Collapsed at Stage 4.34 queue time to keep the active surface focused.
+
+### Earlier Stage 4.32 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.32 brief (paste-and-go bootstrap, Probe 19 implementation sketch with `kqv_out-0` element-wise IDX-DUMP via `node_dump_cb` per-row stderr lines + JS spike & ref-probe parse blocks, Probe 19b Shape B as a one-line allowlist extension to `kq-0` + `kq_soft_max-0`, four-item risk register, four-outcome P-19-{row-bounded, block-bounded, scattered, upstream-cascade} branch table) lives in [`STAGE-4.32-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.32-RESULT.md). Outcome **P-19-upstream-cascade** CONFIRMED: `kq-0` AbsMax = 31.98 (JSEP) vs 52.93 (ref) Δ=20.95 — divergence originates at or before the first attention matmul Q × K^T, not inside the kqv (V × softmax) kernel. `kqv_out-0` is 87.5% zero on JSEP (longest contiguous JSEP-zero run: 1792). Stage 4.31's first8-blindness hypothesis upgraded to a structural attention divergence. Stage 4.33 queues Probe 20 (Shape A: element-wise `kq-0` capture, classify as row-bounded / block-bounded / upstream-cascade) and Probe 20b (Shape B: hash `Qcur-0` and `Kcur-0` bytes at `kq-0` matmul read time). Collapsed at Stage 4.34 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.31 brief — collapsed (full text in closure report)
 
