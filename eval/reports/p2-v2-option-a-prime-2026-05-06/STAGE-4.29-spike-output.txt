@@ -1,0 +1,179 @@
+[1/8] Initializing JSEP WASM module...
+[2/8] Acquiring WebGPU device...
+[3/8] Installing JSEP callbacks (must precede webllm_load_model)...
+MATMUL_PROD_NODIVERT = {
+MATMUL_PROD_DIVERT = {
+MATMUL_Q4_0_SWEEP[q-out-proj] = {
+MATMUL_Q4_0_SWEEP[k-v-proj] = {
+MATMUL_Q4_0_SWEEP[ffn-gate-up] = {
+MATMUL_Q4_0_SWEEP[ffn-down] = {
+MATMUL_Q4_0_SWEEP[lm-head] = {
+[4/8] Initializing ggml-webgpu backend...
+[5/8] Fetching GGUF from /models/tinyllama-1.1b-chat-q4_0.gguf...
+     loaded 637.8 MiB
+[6/8] Loading model + creating context...
+     [probe9b] weight-hash probe armed
+     [probe16] CPU weight-hash probe armed
+     model loaded in 439 ms; vocab = 32000
+     [probe9b] blk.0.attn_q.weight: pre=0xf2f7188c ref=0xf2f7188c size_pre=2359296 size_ref=2359296 match=true
+     [probe9b] blk.0.attn_k.weight: pre=0x9399f36a ref=0x9399f36a size_pre=294912 size_ref=294912 match=true
+     [probe9b] blk.0.attn_output.weight: pre=0xaae061b5 ref=0xaae061b5 size_pre=2359296 size_ref=2359296 match=true
+     [probe9b] blk.0.ffn_norm.weight: pre=<missing> ref=0xcba312e0 size_pre=-1 size_ref=8192 match=false
+     [probe9b] blk.0.ffn_gate.weight: pre=0xafdfc33a ref=0xafdfc33a size_pre=6488064 size_ref=6488064 match=true
+     [probe9b] blk.0.ffn_up.weight: pre=0x76f44e42 ref=0x76f44e42 size_pre=6488064 size_ref=6488064 match=true
+     [probe9b] blk.0.ffn_down.weight: pre=<missing> ref=0xd1429247 size_pre=-1 size_ref=9461760 match=false
+     [probe9b] OUTCOME: E (hash mismatch — upload corruption)
+     [probe9c] blk.0.attn_q.weight: pre=0xf2f7188c gpu=0xf2f7188c size=2359296 match=true
+     [probe9c] blk.0.attn_k.weight: pre=0x9399f36a gpu=0x9399f36a size=294912 match=true
+     [probe9c] blk.0.attn_output.weight: pre=0xaae061b5 gpu=0xaae061b5 size=2359296 match=true
+     [probe9c] blk.0.ffn_gate.weight: pre=0xafdfc33a gpu=0xafdfc33a size=6488064 match=true
+     [probe9c] blk.0.ffn_up.weight: pre=0x76f44e42 gpu=0x76f44e42 size=6488064 match=true
+     [probe9c] OUTCOME: F-1 (GPU bytes match — upload chain bit-clean; kernel re-investigation)
+     [STAGE-4.28] blk.0.attn_q.weight ref_hash=0xf2f7188c gpu_readback_hash=0xf2f7188c match=true
+     [STAGE-4.28] blk.0.attn_k.weight ref_hash=0x9399f36a gpu_readback_hash=0x9399f36a match=true
+     [STAGE-4.28] blk.0.attn_output.weight ref_hash=0xaae061b5 gpu_readback_hash=0xaae061b5 match=true
+     [STAGE-4.28] blk.0.ffn_norm.weight ref_hash=0xcba312e0 gpu_readback_hash=<missing> match=false
+     [STAGE-4.28] blk.0.ffn_gate.weight ref_hash=0xafdfc33a gpu_readback_hash=0xafdfc33a match=true
+     [STAGE-4.28] blk.0.ffn_up.weight ref_hash=0x76f44e42 gpu_readback_hash=0x76f44e42 match=true
+     [STAGE-4.28] blk.0.ffn_down.weight ref_hash=0xd1429247 gpu_readback_hash=<missing> match=false
+     [STAGE-4.28] OUTCOME: P-15-gain (ffn_norm.weight gain-vector mis-load CONFIRMED; trace upload path)
+     [STAGE-4.29] blk.0.attn_q.weight ref_hash=0xf2f7188c jsep_pre_hash=0xf2f7188c jsep_gpu_hash=0xf2f7188c cpu_pre_hash=<missing> match=true
+     [STAGE-4.29] blk.0.attn_k.weight ref_hash=0x9399f36a jsep_pre_hash=0x9399f36a jsep_gpu_hash=0x9399f36a cpu_pre_hash=<missing> match=true
+     [STAGE-4.29] blk.0.attn_output.weight ref_hash=0xaae061b5 jsep_pre_hash=0xaae061b5 jsep_gpu_hash=0xaae061b5 cpu_pre_hash=<missing> match=true
+     [STAGE-4.29] blk.0.ffn_norm.weight ref_hash=0xcba312e0 jsep_pre_hash=<missing> jsep_gpu_hash=<missing> cpu_pre_hash=<missing> match=false
+     [STAGE-4.29] blk.0.ffn_gate.weight ref_hash=0xafdfc33a jsep_pre_hash=0xafdfc33a jsep_gpu_hash=0xafdfc33a cpu_pre_hash=<missing> match=true
+     [STAGE-4.29] blk.0.ffn_up.weight ref_hash=0x76f44e42 jsep_pre_hash=0x76f44e42 jsep_gpu_hash=0x76f44e42 cpu_pre_hash=<missing> match=true
+     [STAGE-4.29] blk.0.ffn_down.weight ref_hash=0xd1429247 jsep_pre_hash=<missing> jsep_gpu_hash=<missing> cpu_pre_hash=<missing> match=false
+     [STAGE-4.29] CPU hook fired on 0/7 weights (0 byte-clean, 0 dirty)
+     [STAGE-4.29] OUTCOME: P-16-silent (CPU hook never fired — bypass weights are not on CPU buft; escalate to untargeted set_tensor logging or Shape B)
+     [probe10] capture armed (first Q4_0 MUL_MAT in prefill)
+     [probe13] kahan accumulator armed (Qcur-0 layer 0 only)
+[7/8] Decoding prompt (6 tokens)...
+     [probe10] captured M=2048 K=2048 N=6 src0=2359296B src1=49152B dstBefore=49152B dstAfter=49152B
+MATMUL_PROBE10_REPLAY = {
+MATMUL_PROBE10_CAPTURED_DELTA = {
+     [probe10] M=2048 K=2048 N=6 capturedDelta=4.768e-7 syntheticDelta=4.768e-7
+     [probe10] OUTCOME: G-2 (synthetic ≤1e-5 — bug between dispatch site and shader execution)
+PROBE12_DEQUANT_DELTA = {
+     [probe12] dequantDeltaMax=0.000e+0 maxIdx=-1 OUTCOME: H-3b
+MATMUL_PROBE13_DELTA = {
+     [probe13] kahanArm=true kahanFired=true capturedDelta=0.000e+0 baseline=5.242e-04 kahanVsKahanRef=8.106e-6 verdict: H-3b-structural (Kahan ≈ baseline — accumulation order is not the disagreement source; cascade mitigation needed)
+PROBE14_LLAMA_MATMUL_VS_F64 = {
+     [probe14] llamaVsF64=4.178e-2 wgslVsF64=7.944e-6 llamaVsWgsl=4.178e-2 verdict: H-4-libllama-imprecise (libllama ≥1e-4 from f64 truth — close matmul-precision investigation; pivot to other ops in cascade)
+POSTPREFILL_BUF11 = {
+LIVE_BUFFERS = [{
+GPU_ERR_LOG = []
+GPU_ERR_COUNT = 0
+[8/8] Greedy decoding 5 tokens...
+[CHECKPOINT idx=0 name=attn_norm-0 type=0 backend=CPU ne=[2048,6,1,1] contig=1 first8=[0.00140494,0.00310924,-0.0350295,-0.0290991,-0.00200305,-0.0150325,0.000736544,-1.96938e-05]]
+[CHECKPOINT idx=1 name=Qcur-0 type=0 backend=jsep_buf ne=[2048,6,1,1] contig=1 first8=[-0.0161895,0.00484894,-0.0157384,-0.0244936,-0.00762007,0.0405341,-0.00967809,0.0454386]]
+[CHECKPOINT idx=2 name=Qcur-0 type=0 backend=jsep_buf ne=[64,32,6,1] contig=1 first8=[-0.0161895,0.00484894,-0.0157384,-0.0244936,-0.00762007,0.0405341,-0.00967809,0.0454386]]
+[CHECKPOINT idx=3 name=Qcur-0 type=0 backend=CPU ne=[64,32,6,1] contig=1 first8=[-0.0161895,0.00484894,-0.0157384,-0.0244936,-0.00762007,0.0405341,-0.00967809,0.0454386]]
+[CHECKPOINT idx=4 name=Vcur-0 type=0 backend=CPU ne=[256,6,1,1] contig=1 first8=[-0.000799429,-0.000393569,0.001038,0.00120484,-0.00283836,0.00250341,-0.00146567,0.00088547]]
+[CHECKPOINT idx=5 name=Vcur-0 type=0 backend=CPU ne=[64,4,6,1] contig=1 first8=[-0.000799429,-0.000393569,0.001038,0.00120484,-0.00283836,0.00250341,-0.00146567,0.00088547]]
+[CHECKPOINT idx=6 name=Kcur-0 type=0 backend=jsep_buf ne=[256,6,1,1] contig=1 first8=[0.0177006,0.03492,-0.0450317,0.0191396,0.00918949,0.0365833,-0.00612901,0.0199734]]
+[CHECKPOINT idx=7 name=Kcur-0 type=0 backend=jsep_buf ne=[64,4,6,1] contig=1 first8=[0.0177006,0.03492,-0.0450317,0.0191396,0.00918949,0.0365833,-0.00612901,0.0199734]]
+[CHECKPOINT idx=8 name=Kcur-0 type=0 backend=CPU ne=[64,4,6,1] contig=1 first8=[0.0177006,0.03492,-0.0450317,0.0191396,0.00918949,0.0365833,-0.00612901,0.0199734]]
+[CHECKPOINT idx=9 name=kq-0 type=0 backend=jsep_buf ne=[256,6,32,1] contig=1 first8=[-0.00589119,-1.17794,-1.14038,-1.17064,-1.00481,-1.03933,0,0]]
+[CHECKPOINT idx=10 name=kq_soft_max-0 type=0 backend=CPU ne=[256,6,32,1] contig=1 first8=[1,0,0,0,0,0,0,0]]
+[CHECKPOINT idx=11 name=kqv_out-0 type=0 backend=CPU ne=[2048,6,1,1] contig=1 first8=[-0.000799656,-0.000393629,0.0010376,0.00120449,-0.00283813,0.00250435,-0.0014658,0.000885487]]
+[CHECKPOINT idx=12 name=attn_out-0 type=0 backend=jsep_buf ne=[2048,6,1,1] contig=1 first8=[-8.71058e-05,0.000484195,-0.000157344,-0.00127649,-0.000162906,-0.000302948,4.11428e-05,-9.90906e-05]]
+[CHECKPOINT idx=13 name=ffn_norm-0 type=0 backend=CPU ne=[2048,6,1,1] contig=1 first8=[-0.0232928,0.0410026,-0.0470651,0.132306,0.018754,0.0653525,0.0119751,-0.00223701]]
+[CHECKPOINT idx=14 name=ffn_out-0 type=0 backend=CPU ne=[2048,6,1,1] contig=1 first8=[0.000945187,-0.00207572,0.000503224,0.00940793,-0.00119904,0.00328059,0.00528194,0.000229939]]
+[CHECKPOINT idx=15 name=l_out-0 type=0 backend=CPU ne=[2048,6,1,1] contig=1 first8=[-0.000442015,0.000312724,-0.00159509,0.0119583,-9.85692e-05,0.00680449,0.00594559,0.00011249]]
+[CHECKPOINT idx=16 name=result_norm type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-3.56711,-2.48009,-0.361248,-0.425728,0.909661,2.55189,-1.51634,0.199505]]
+[CHECKPOINT idx=17 name=result_output type=0 backend=CPU ne=[32000,1,1,1] contig=1 first8=[-8.38574,-8.11212,1.13743,-5.40506,-5.61984,-4.41264,-6.29962,-7.71073]]
+[CHECKPOINT idx=18 name=attn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.00362113,-0.00802189,-0.0389529,-0.0202436,0.00233015,0.00306805,-0.00336854,-0.00305414]]
+[CHECKPOINT idx=19 name=Qcur-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[0.0945703,-0.0621667,0.140607,0.121433,0.02795,-0.166947,0.0531925,-0.209778]]
+[CHECKPOINT idx=20 name=Qcur-0 type=0 backend=jsep_buf ne=[64,32,1,1] contig=1 first8=[0.0945703,-0.0621667,0.140607,0.121433,0.02795,-0.166947,0.0531925,-0.209778]]
+[CHECKPOINT idx=21 name=Qcur-0 type=0 backend=CPU ne=[64,32,1,1] contig=1 first8=[0.0734332,-0.086115,0.0889619,-0.163102,-0.0656575,0.156018,0.0768619,0.202308]]
+[CHECKPOINT idx=22 name=Vcur-0 type=0 backend=CPU ne=[256,1,1,1] contig=1 first8=[0.00121584,-0.00170466,0.000189625,0.000793125,0.0017571,-0.00243482,-0.00162875,0.00040916]]
+[CHECKPOINT idx=23 name=Vcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[0.00121584,-0.00170466,0.000189625,0.000793125,0.0017571,-0.00243482,-0.00162875,0.00040916]]
+[CHECKPOINT idx=24 name=Kcur-0 type=0 backend=jsep_buf ne=[256,1,1,1] contig=1 first8=[-0.199038,-0.792083,0.594016,-0.292173,-0.281596,-0.467595,-0.258807,-0.3696]]
+[CHECKPOINT idx=25 name=Kcur-0 type=0 backend=jsep_buf ne=[64,4,1,1] contig=1 first8=[-0.199038,-0.792083,0.594016,-0.292173,-0.281596,-0.467595,-0.258807,-0.3696]]
+[CHECKPOINT idx=26 name=Kcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[-0.412431,-0.70492,-0.411154,-0.518819,0.166303,0.519889,0.424081,0.154081]]
+[CHECKPOINT idx=27 name=kq-0 type=0 backend=jsep_buf ne=[256,1,32,1] contig=1 first8=[0.0965895,6.42797,5.41122,4.90203,5.89024,4.97422,5.20305,0]]
+[CHECKPOINT idx=28 name=kq_soft_max-0 type=0 backend=CPU ne=[256,1,32,1] contig=1 first8=[0.0783126,0.172799,0.152176,0.142792,0.161566,0.144086,0.148267,0]]
+[CHECKPOINT idx=29 name=kqv_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.000294207,0.00117482,-0.000656529,0.000729286,3.62344e-05,0.00148676,-0.00214352,-0.00150119]]
+[CHECKPOINT idx=30 name=attn_out-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[-0.0210432,-0.00865132,-0.0194998,0.0232468,-0.00547195,-0.00746223,0.0152716,0.00346493]]
+[CHECKPOINT idx=31 name=ffn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0639342,-0.0931416,-0.151587,0.420807,-0.0413549,-0.0474522,0.0452642,-0.0148854]]
+[CHECKPOINT idx=32 name=ffn_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.00697132,-0.000257369,0.00448448,0.0287966,-0.014324,0.0332612,-0.000798316,0.00850412]]
+[CHECKPOINT idx=33 name=l_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0206354,-0.0197278,-0.0197683,0.0579061,-0.0230324,0.024079,0.00820379,0.00569954]]
+[CHECKPOINT idx=34 name=result_norm type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-4.30088,-0.613737,0.622221,4.54947,0.449147,1.23071,-0.50379,3.15561]]
+[CHECKPOINT idx=35 name=result_output type=0 backend=CPU ne=[32000,1,1,1] contig=1 first8=[-0.938244,-0.876284,-1.56642,-0.401886,-0.509304,0.281877,-0.842835,-1.82489]]
+[CHECKPOINT idx=36 name=attn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.000380232,-0.00340253,0.0561668,-0.0368348,0.008796,-0.0156269,0.00470691,0.0042676]]
+[CHECKPOINT idx=37 name=Qcur-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[0.0282425,0.0441387,-0.0473594,-0.0287829,-0.0450964,0.0995466,-0.0395494,0.0515234]]
+[CHECKPOINT idx=38 name=Qcur-0 type=0 backend=jsep_buf ne=[64,32,1,1] contig=1 first8=[0.0282425,0.0441387,-0.0473594,-0.0287829,-0.0450964,0.0995466,-0.0395494,0.0515234]]
+[CHECKPOINT idx=39 name=Qcur-0 type=0 backend=CPU ne=[64,32,1,1] contig=1 first8=[-0.00770647,0.0518312,-0.0489555,0.0259756,0.102635,-0.0375392,0.0291235,-0.0580572]]
+[CHECKPOINT idx=40 name=Vcur-0 type=0 backend=CPU ne=[256,1,1,1] contig=1 first8=[0.0024176,-0.00230968,-0.000644154,0.00525118,0.000845258,-0.00167734,-0.000209063,0.00202156]]
+[CHECKPOINT idx=41 name=Vcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[0.0024176,-0.00230968,-0.000644154,0.00525118,0.000845258,-0.00167734,-0.000209063,0.00202156]]
+[CHECKPOINT idx=42 name=Kcur-0 type=0 backend=jsep_buf ne=[256,1,1,1] contig=1 first8=[-0.158499,-0.594149,0.356441,-0.223713,-0.219684,-0.246867,-0.187681,-0.224337]]
+[CHECKPOINT idx=43 name=Kcur-0 type=0 backend=jsep_buf ne=[64,4,1,1] contig=1 first8=[-0.158499,-0.594149,0.356441,-0.223713,-0.219684,-0.246867,-0.187681,-0.224337]]
+[CHECKPOINT idx=44 name=Kcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[0.270855,-0.552061,-0.0099383,-0.420712,-0.0223211,0.329706,0.226619,0.184919]]
+[CHECKPOINT idx=45 name=kq-0 type=0 backend=jsep_buf ne=[256,1,32,1] contig=1 first8=[0.0357244,1.14636,0.635258,0.449519,0.987924,0.232035,0.279968,0.277608]]
+[CHECKPOINT idx=46 name=kq_soft_max-0 type=0 backend=CPU ne=[256,1,32,1] contig=1 first8=[0.117747,0.135283,0.12691,0.123998,0.13263,0.120672,0.121397,0.121362]]
+[CHECKPOINT idx=47 name=kqv_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.000538502,0.000667265,-0.00054576,0.00131918,-3.68144e-05,0.0011347,-0.00183486,-0.000934548]]
+[CHECKPOINT idx=48 name=attn_out-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[-0.0125618,-0.00784298,-0.00628731,0.0189136,-0.00780364,0.00127668,0.0141434,0.00336639]]
+[CHECKPOINT idx=49 name=ffn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0546108,-0.0612461,0.0242997,0.438577,-0.109314,0.0664129,0.119367,0.0775937]]
+[CHECKPOINT idx=50 name=ffn_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.00181564,0.00341333,-0.00591505,-0.00163103,-0.00088585,0.0259515,0.000621655,0.00880655]]
+[CHECKPOINT idx=51 name=l_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0119764,-0.0117157,-0.00132094,0.0342198,-0.0280872,0.0411376,0.0286744,0.0260823]]
+[CHECKPOINT idx=52 name=result_norm type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-3.10477,-0.199505,0.387375,3.58808,1.45107,0.191607,-0.146609,2.43424]]
+[CHECKPOINT idx=53 name=result_output type=0 backend=CPU ne=[32000,1,1,1] contig=1 first8=[-3.767,-3.51356,-0.177136,-1.173,-2.14186,-1.32141,-2.74474,-3.33956]]
+[CHECKPOINT idx=54 name=attn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.00618934,-0.00426518,-0.00951608,0.0119362,0.00414155,0.026641,-0.00802438,-0.00951204]]
+[CHECKPOINT idx=55 name=Qcur-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[-0.120011,0.0107442,0.00317636,-0.115697,-0.0505459,-0.0191671,-0.0239988,-0.00964553]]
+[CHECKPOINT idx=56 name=Qcur-0 type=0 backend=jsep_buf ne=[64,32,1,1] contig=1 first8=[-0.120011,0.0107442,0.00317636,-0.115697,-0.0505459,-0.0191671,-0.0239988,-0.00964553]]
+[CHECKPOINT idx=57 name=Qcur-0 type=0 backend=CPU ne=[64,32,1,1] contig=1 first8=[0.00683167,-0.120297,-0.0293725,-0.111952,-0.00801369,0.0534607,0.0211384,0.0149046]]
+[CHECKPOINT idx=58 name=Vcur-0 type=0 backend=CPU ne=[256,1,1,1] contig=1 first8=[0.00227779,0.00228076,0.00177138,0.00127511,-0.00079583,-9.867e-05,0.00670705,-0.00415882]]
+[CHECKPOINT idx=59 name=Vcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[0.00227779,0.00228076,0.00177138,0.00127511,-0.00079583,-9.867e-05,0.00670705,-0.00415882]]
+[CHECKPOINT idx=60 name=Kcur-0 type=0 backend=jsep_buf ne=[256,1,1,1] contig=1 first8=[0.00482507,0.143488,-0.171941,0.0471244,0.0721491,0.185949,-0.00575291,0.0355131]]
+[CHECKPOINT idx=61 name=Kcur-0 type=0 backend=jsep_buf ne=[64,4,1,1] contig=1 first8=[0.00482507,0.143488,-0.171941,0.0471244,0.0721491,0.185949,-0.00575291,0.0355131]]
+[CHECKPOINT idx=62 name=Kcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[-0.142663,-0.0161038,-0.151847,0.0934191,0.166423,-0.109937,0.0137634,-0.0332392]]
+[CHECKPOINT idx=63 name=kq-0 type=0 backend=jsep_buf ne=[256,1,32,1] contig=1 first8=[-0.0346702,-1.13371,-1.27709,-1.52531,-1.13972,-1.40746,-1.04953,-0.956049]]
+[CHECKPOINT idx=64 name=kq_soft_max-0 type=0 backend=CPU ne=[256,1,32,1] contig=1 first8=[0.125445,0.109343,0.1074,0.104119,0.109261,0.105664,0.110499,0.111798]]
+[CHECKPOINT idx=65 name=kqv_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.000757391,0.000770743,-0.000194545,0.00134474,-0.000182944,0.000962664,-0.000773408,-0.00120459]]
+[CHECKPOINT idx=66 name=attn_out-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[-0.00642686,-0.00719314,-0.000553971,0.0192386,-0.00700068,0.0079632,0.0137785,0.00156167]]
+[CHECKPOINT idx=67 name=ffn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.0623892,-0.0640854,-0.0128462,0.129719,-0.0629573,-0.0802768,-0.0569801,-0.141729]]
+[CHECKPOINT idx=68 name=ffn_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.00598035,0.00983841,-0.00840849,0.0232589,-0.00793256,0.0093406,0.0162751,0.00232047]]
+[CHECKPOINT idx=69 name=l_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.0244347,-0.00870263,-0.0112531,0.0356783,-0.0262811,-0.0121587,0.000591185,-0.0346376]]
+[CHECKPOINT idx=70 name=result_norm type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-2.93771,0.0347537,0.300458,3.64061,2.03417,-0.0963857,0.0298645,2.13472]]
+[CHECKPOINT idx=71 name=result_output type=0 backend=CPU ne=[32000,1,1,1] contig=1 first8=[-4.26043,-3.68895,0.486818,-1.54729,-2.62842,-1.98703,-3.21394,-3.69455]]
+[CHECKPOINT idx=72 name=attn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.00180306,0.00568467,0.0893894,-0.0152847,0.0084777,0.00655419,-0.00110366,-0.0017899]]
+[CHECKPOINT idx=73 name=Qcur-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[0.0909052,0.0438142,-0.04535,0.0495811,-0.0351271,0.115251,0.00167411,0.0725831]]
+[CHECKPOINT idx=74 name=Qcur-0 type=0 backend=jsep_buf ne=[64,32,1,1] contig=1 first8=[0.0909052,0.0438142,-0.04535,0.0495811,-0.0351271,0.115251,0.00167411,0.0725831]]
+[CHECKPOINT idx=75 name=Qcur-0 type=0 backend=CPU ne=[64,32,1,1] contig=1 first8=[-0.100883,-0.00245672,-0.0627887,0.0239266,0.0963143,0.07239,0.0428094,-0.0586384]]
+[CHECKPOINT idx=76 name=Vcur-0 type=0 backend=CPU ne=[256,1,1,1] contig=1 first8=[-0.00566916,0.00345199,0.00181019,0.000340903,-0.00117147,-0.00133576,0.00293814,0.00416784]]
+[CHECKPOINT idx=77 name=Vcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[-0.00566916,0.00345199,0.00181019,0.000340903,-0.00117147,-0.00133576,0.00293814,0.00416784]]
+[CHECKPOINT idx=78 name=Kcur-0 type=0 backend=jsep_buf ne=[256,1,1,1] contig=1 first8=[-0.258759,-0.821736,0.575379,-0.380524,-0.37362,-0.420158,-0.265963,-0.315199]]
+[CHECKPOINT idx=79 name=Kcur-0 type=0 backend=jsep_buf ne=[64,4,1,1] contig=1 first8=[-0.258759,-0.821736,0.575379,-0.380524,-0.37362,-0.420158,-0.265963,-0.315199]]
+[CHECKPOINT idx=80 name=Kcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[0.574416,0.642069,0.684993,-0.0815169,-0.522526,0.207586,0.0194607,0.411956]]
+[CHECKPOINT idx=81 name=kq-0 type=0 backend=jsep_buf ne=[256,1,32,1] contig=1 first8=[0.068624,2.16154,1.61838,1.44389,2.04701,1.54414,1.43758,1.24024]]
+[CHECKPOINT idx=82 name=kq_soft_max-0 type=0 backend=CPU ne=[256,1,32,1] contig=1 first8=[0.083987,0.109101,0.10194,0.0997403,0.10755,0.100998,0.0996617,0.0972333]]
+[CHECKPOINT idx=83 name=kqv_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[0.00014763,0.00110904,-7.47013e-05,0.0012117,-0.000181795,0.000756895,-0.000482129,-0.000806739]]
+[CHECKPOINT idx=84 name=attn_out-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[-0.000228004,-0.00345646,0.0112542,-0.00284448,-0.0107137,0.00445674,0.0096413,-0.00734255]]
+[CHECKPOINT idx=85 name=ffn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0175787,0.0205477,0.129291,0.0247903,-0.099903,0.00240466,0.033709,-0.0539726]]
+[CHECKPOINT idx=86 name=ffn_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0114098,0.00254431,-0.0265092,-0.011269,-0.00363472,0.0162012,-0.00636612,-0.00376755]]
+[CHECKPOINT idx=87 name=l_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0155783,0.00731014,-0.00355769,-0.00936627,-0.0269765,0.0167175,0.00107225,-0.0150506]]
+[CHECKPOINT idx=88 name=result_norm type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-2.59761,0.176455,-0.182073,3.59377,1.79941,-0.215804,-0.11685,2.17409]]
+[CHECKPOINT idx=89 name=result_output type=0 backend=CPU ne=[32000,1,1,1] contig=1 first8=[-4.78042,-4.39758,1.1221,-1.01858,-2.30397,-1.76992,-3.24647,-3.46752]]
+[CHECKPOINT idx=90 name=attn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-5.26024e-05,0.00332225,-0.10665,-0.0305733,-0.00322595,0.00240927,0.000840871,0.00076239]]
+[CHECKPOINT idx=91 name=Qcur-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[0.206555,-0.160918,0.385654,0.29525,0.234818,-0.487099,0.226708,-0.515228]]
+[CHECKPOINT idx=92 name=Qcur-0 type=0 backend=jsep_buf ne=[64,32,1,1] contig=1 first8=[0.206555,-0.160918,0.385654,0.29525,0.234818,-0.487099,0.226708,-0.515228]]
+[CHECKPOINT idx=93 name=Qcur-0 type=0 backend=CPU ne=[64,32,1,1] contig=1 first8=[-0.260857,0.0226511,-0.142772,0.464239,-0.113024,-0.528801,-0.561058,0.045492]]
+[CHECKPOINT idx=94 name=Vcur-0 type=0 backend=CPU ne=[256,1,1,1] contig=1 first8=[-0.00276389,0.00130645,0.00428981,-0.00133352,-0.000459951,0.00076818,0.000371966,0.00288469]]
+[CHECKPOINT idx=95 name=Vcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[-0.00276389,0.00130645,0.00428981,-0.00133352,-0.000459951,0.00076818,0.000371966,0.00288469]]
+[CHECKPOINT idx=96 name=Kcur-0 type=0 backend=jsep_buf ne=[256,1,1,1] contig=1 first8=[-0.257645,-1.1232,0.838392,-0.313182,-0.320139,-0.725167,-0.27862,-0.572684]]
+[CHECKPOINT idx=97 name=Kcur-0 type=0 backend=jsep_buf ne=[64,4,1,1] contig=1 first8=[-0.257645,-1.1232,0.838392,-0.313182,-0.320139,-0.725167,-0.27862,-0.572684]]
+[CHECKPOINT idx=98 name=Kcur-0 type=0 backend=CPU ne=[64,4,1,1] contig=1 first8=[-0.394861,1.08261,0.585098,0.677233,-0.697434,-0.376752,-0.371371,0.517377]]
+[CHECKPOINT idx=99 name=kq-0 type=0 backend=jsep_buf ne=[256,1,32,1] contig=1 first8=[0.241447,12.0161,10.0141,9.66222,10.9042,9.18644,8.60526,7.09489]]
+[CHECKPOINT idx=100 name=kq_soft_max-0 type=0 backend=CPU ne=[256,1,32,1] contig=1 first8=[0.0303494,0.132238,0.102962,0.0985314,0.11508,0.0928423,0.0863366,0.0714829]]
+[CHECKPOINT idx=101 name=kqv_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.000155811,0.0012979,0.00016617,0.000835845,-4.76888e-05,0.000898295,-0.00064985,-0.000760872]]
+[CHECKPOINT idx=102 name=attn_out-0 type=0 backend=jsep_buf ne=[2048,1,1,1] contig=1 first8=[-0.000692616,-0.00476763,0.0113308,-0.00175389,-0.0124256,0.00582383,0.0114937,-0.00827268]]
+[CHECKPOINT idx=103 name=ffn_norm-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.00258679,-0.00127858,-0.0100007,0.0970538,-0.0356178,0.0218283,0.0620248,-0.0336187]]
+[CHECKPOINT idx=104 name=ffn_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0134452,-0.00614951,-0.0276271,-0.0143582,0.000890289,0.0186925,-0.00318819,-0.000266334]]
+[CHECKPOINT idx=105 name=l_out-0 type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-0.0140305,-0.00643249,-0.0293212,-0.00725008,-0.00705065,0.0231645,0.00987191,-0.00697261]]
+[CHECKPOINT idx=106 name=result_norm type=0 backend=CPU ne=[2048,1,1,1] contig=1 first8=[-2.70871,0.301312,0.0157158,3.27324,2.10908,-0.243493,0.167686,1.92165]]
+[CHECKPOINT idx=107 name=result_output type=0 backend=CPU ne=[32000,1,1,1] contig=1 first8=[-5.90597,-5.37401,2.0548,-1.31765,-2.88339,-2.69223,-4.00039,-4.19351]]
+GENERATED_TEXT = 
+PER_TOKEN_MS = 299.20
+TOTAL_DECODE_MS = 1496
+TOTAL_PREFILL_MS = 559
