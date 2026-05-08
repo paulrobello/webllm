@@ -1073,15 +1073,11 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.29: CPU-side `set_tensor` hook for `ffn_norm.weight` + `ffn_down.weight` byte-integrity (Probe 16)
+### Next session pickup — Phase 3 Stage 4.30: post-load `tensor->data` byte-hash peek for `ffn_norm.weight` + `ffn_down.weight` (Probe 17)
 
-Stage 4.28 closed Suspect 1 (`attn_output.weight` byte-integrity) — bit-clean end-to-end through JSEP `set_tensor` → `device.queue.writeBuffer`. Five layer-0 weights (`attn_q`, `attn_k`, `attn_output`, `ffn_gate`, `ffn_up`) all hash bit-identical between GGUF parse, JSEP set_tensor pre-upload, and GPU readback. Two weights (`ffn_norm.weight` F32 8 KiB, `ffn_down.weight` Q6_K 9.4 MiB) bypass the JSEP `set_tensor` hook entirely — they live on a non-JSEP buft (almost certainly CPU/host buft, consistent with Stage 4.27's smoking-gun table showing `ffn_norm-0` runs on `backend=CPU`).
+Stage 4.29 confirmed Outcome **P-16-silent**: CPU hook armed and exported correctly (`[probe16] CPU weight-hash probe armed` line emitted, no "export missing" failure), but fired **0/7** during model load. Neither the JSEP buft (Stage 4.28: 5/7 fire) nor the default CPU buft in `ggml-backend.cpp` (this stage: 0/7) owns `ffn_norm.weight` and `ffn_down.weight`. With `GGML_CPU=OFF` in the JSEP build (`Makefile:139`), the most plausible owner is the GGUF mmap-direct host buft — `tensor->data` would point straight into the mmap'd file region and there is no `set_tensor` upload step to corrupt the bytes.
 
-**Surviving suspects after Stage 4.28:**
-
-1. ❌ `attn_output.weight` byte-integrity — **closed** (bit-clean).
-2. **`ffn_norm.weight` gain-vector mis-load on the CPU buft side** — still highest-prior given the +38× amplification at `ffn_norm-0`. The JSEP probe is silent here because the tensor isn't on JSEP. Probe 16 hooks the CPU backend's `set_tensor` to test this.
-3. First8-window blindness on `kqv_out-0` — unchanged.
+This makes suspect 2 (`ffn_norm.weight` gain-vector mis-load) **strongly indirect-evidence dead** (Stage 4.27's `attn_norm-0` bit-identical result also implies the CPU RMSNorm kernel + its gain-vector access is fine when input is clean), but it is **not closed by direct measurement**. Stage 4.30 closes it directly via a one-shot post-load `tensor->data` peek that hashes the bytes the CPU op actually reads, then pivots to either suspect 3 (kqv_out-0 first8-window blindness) or the upstream cascade source at Qcur-0 inputs.
 
 START HERE in a fresh session.
 
@@ -1091,15 +1087,15 @@ START HERE in a fresh session.
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.28 TODO closure commit>     docs(TODO): Stage 4.28 closed — queue Stage 4.29 CPU-side weight-hash probe
-#   → <Stage 4.28 reports commit>          docs(reports): Stage 4.28 closure — Outcome P-15-jsep-bypass
-#   → <Stage 4.28 spike commit>            feat(spike): Stage 4.28 Probe 15 — extend weight allowlist 2 → 7
-#   → 8500c9b                              docs(TODO): Stage 4.27 closed — queue Stage 4.28 weight byte-integrity probe
-#   → f5438ae                              docs(reports): Stage 4.27 closure — Outcome A (cascade structurally identical to Stage 4.17)
+#   → <Stage 4.29 TODO closure commit>     docs(TODO): Stage 4.29 closed — queue Stage 4.30 post-load tensor->data peek
+#   → <Stage 4.29 reports commit>          docs(reports): Stage 4.29 closure — Outcome P-16-silent
+#   → <Stage 4.29 spike commit>            feat(spike): Stage 4.29 Probe 16 — CPU-side set_tensor hook
+#   → dd8c104                              docs(TODO): Stage 4.28 closed — queue Stage 4.29 CPU-side weight-hash probe
+#   → fee50e9                              docs(reports): Stage 4.28 closure — Outcome P-15-jsep-bypass
 
-# 2. Confirm llama.cpp tip (patch stack 13 — Stage 4.28 amends P10 in place rather than adding a new patch).
+# 2. Confirm llama.cpp tip (patch stack 14 — Stage 4.29 added the CPU-side set_tensor hook in ggml-backend.cpp).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → <Stage 4.28 commit on top of ef89f9314>   webllm-browser-patches   (patch stack 13)
+#   → <Stage 4.29 commit on top of 1d1d64f76>   webllm-browser-patches   (patch stack 14)
 
 # 3. Smoke-server up on 8031 + reuse agentchrome session + spike tab.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
@@ -1109,59 +1105,60 @@ SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;p
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 ```
 
-**One-line goal:** Add a CPU-side `set_tensor` hook mirroring Stage 4.20's JSEP probe pattern, gated on the same 7-name allowlist, pushing to `globalThis.__cpuWeightHashLog`. The JS spike then unifies both logs and emits per-weight `[STAGE-4.29] <name> ref_hash=<H1> jsep_pre_hash=<H2> jsep_gpu_hash=<H3> cpu_pre_hash=<H4> match=<bool>` lines. The first hash mismatch (or untracked weight) is the cascade source.
+**One-line goal:** Add a `webllm_get_tensor_data_hash(name, *out_size)` export that walks `model->tensors_by_name`, FNV-1a-32-hashes `ggml_nbytes(t)` bytes from `t->data`, and returns the hash. Spike calls it for each of the 7 layer-0 weights post-`loadModel`, emits `[STAGE-4.30] <name> ref=<H1> data_peek=<H2> match=<bool>` lines, branches on the first mismatch.
 
-**One-line context:** Stage 4.28 proved 5 of 7 layer-0 weights are byte-clean on the JSEP path; the remaining 2 (`ffn_norm`, `ffn_down`) are not JSEP-resident. Whether they're byte-clean on CPU buft is untested. The brief's risk-register #1 anticipated this exact case ("set_tensor hook may not fire on ffn_norm.weight... If the hook doesn't fire, fall back to a CPU-side hook OR cb_eval weight-tap"). Probe 16 takes the cheaper of the two fallbacks.
+**One-line context:** Stage 4.29 proved neither JSEP nor default-CPU `set_tensor` ever touches `ffn_norm.weight`/`ffn_down.weight`. The only remaining direct way to capture their bytes is to read `tensor->data` after `loadModel` completes. If the bytes match the GgufParser ref hash, suspect 2 is dead by direct measurement and the cascade source must be upstream (suspect 3 or pre-Qcur). If they don't, gain-vector mis-load is CONFIRMED via a non-set_tensor pathway.
 
-#### Stage 4.29 implementation sketch (Probe 16 — Shape A: CPU-side hook)
+#### Stage 4.30 implementation sketch (Probe 17 — Shape A: post-load tensor->data peek)
 
-1. **Locate the CPU backend's `set_tensor` impl.** Likely candidates (search by `memcpy((char*)buffer->data + offset, data, size)`):
-   - `~/Repos/llama.cpp/ggml/src/ggml-backend.cpp::ggml_backend_cpu_buffer_set_tensor`
-   - or `~/Repos/llama.cpp/ggml/src/ggml-cpu/ggml-cpu.cpp` / `ggml-cpu-buffer.cpp`
-   The function is the CPU-buft equivalent of `ggml_backend_jsep_buffer_set_tensor` Stage 4.20 already patched.
-2. **Mirror Stage 4.20's hook layout:**
-   - `static int g_cpu_weight_hash_probe = 0` file-scope flag.
-   - `extern "C" EMSCRIPTEN_KEEPALIVE void ggml_cpu_set_weight_hash_probe(int)` toggle export.
-   - Reuse Stage 4.20's `weight_hash_fnv1a` if it's accessible across translation units, or duplicate the 7-line FNV-1a-32 helper locally.
-   - Inside CPU `set_tensor`, gate on the same 7-name allowlist (copy-paste the `std::strcmp` block); on match, hash the bytes and `EM_ASM`-push to `globalThis.__cpuWeightHashLog`.
-3. **CMakeLists export gating.** `src/wasm/CMakeLists.txt` — append `_ggml_cpu_set_weight_hash_probe` to `EXPORTED_FUNCTIONS`. Unlike the JSEP export, the CPU backend ships in every build, so no `WEBLLM_BACKEND_JSEP` gating needed.
-4. **JS spike harness.**
-   - `globalThis.__cpuWeightHashLog = []` before `loadModel`.
-   - `mod._ggml_cpu_set_weight_hash_probe?.(1)` before `loadModel`.
-   - `mod._ggml_cpu_set_weight_hash_probe?.(0)` after `loadModel`.
-   - Walk `__cpuWeightHashLog`, compute the same JS-side `GgufParser` ref hash (already supports F32 and Q6_K from Stage 4.28's `elemBytes` extension).
-   - Synthesize a unified `[STAGE-4.29]` block: each of the 7 weights now has at least one of `jsep_pre`, `jsep_gpu`, `cpu_pre` hashes; the first weight whose `ref_hash` doesn't match any captured hash is the suspect.
-5. **Run the spike** at `?v=stage4.29-probe16&ingest=off`, dump verdict to `STAGE-4.29-spike-output.txt`.
+1. **C++ export** (`src/wasm/webgpu-bridge.cpp`):
+   - Add `webllm_get_tensor_data_hash(model_handle, tensor_name, out_size_ptr) → uint32_t`.
+   - Walk `model->tensors_by_name` (or whichever struct libllama exposes by name); on hit, FNV-1a-32-hash `ggml_nbytes(t)` bytes from `t->data`, write `ggml_nbytes(t)` to `*out_size_ptr`, return the hash.
+   - Use the same FNV-1a-32 helper Stage 4.20/4.29 already have (or copy locally — it's 7 lines).
+2. **CMakeLists export.** Add `_webllm_get_tensor_data_hash` to `src/wasm/CMakeLists.txt:EXPORTED_FUNCTIONS` (unconditional — `webgpu-bridge.cpp` ships in every build).
+3. **JS spike harness** (`smoke-test/p2-v2-spike.src.ts`):
+   - Post-`loadModel`, after the existing Stage 4.29 verdict block, walk `targetNames`. For each name:
+     - Allocate a 4-byte `out_size` buffer with `mod._malloc(4)`.
+     - Call `mod._webllm_get_tensor_data_hash(modelHandle, ptr_to_name_utf8, out_size_ptr)`.
+     - Read `mod.HEAPU32[out_size_ptr >> 2]`.
+     - Free both.
+   - Emit `[STAGE-4.30] <name> ref=0x<H1> data_peek=0x<H2> size_data=<N> size_ref=<M> match=<bool>` per weight.
+   - Synthesize `[STAGE-4.30] OUTCOME: P-17-{clean,gain,ffn-down,jsep-deep,other}`.
+4. **Run the spike** at `?v=stage4.30-probe17&ingest=off`, dump verdict to `STAGE-4.30-spike-output.txt`.
 
 #### Files to read first
 
-- [`STAGE-4.20-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.20-RESULT.md) — JSEP `set_tensor` hook pattern; copy this verbatim into the CPU backend.
-- [`STAGE-4.28-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.28-RESULT.md) — 5/7 byte-clean on JSEP, 2/7 bypass; full Stage 4.29 brief expansion.
-- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp` — Stage 4.20 hook (lines 115-143 + 321-340) is the pattern to mirror.
-- `~/Repos/llama.cpp/ggml/src/ggml-backend.cpp` (or wherever the CPU buft impl lives) — target file for the new hook.
-- `smoke-test/p2-v2-spike.src.ts` — Stage 4.28 verdict block (search `STAGE-4.28]`); extend to merge `__cpuWeightHashLog`.
+- [`STAGE-4.29-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.29-RESULT.md) — P-16-silent classification + mmap-direct framing + full Stage 4.30 brief expansion.
+- [`STAGE-4.20-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.20-RESULT.md) — JSEP `set_tensor` hook pattern; Probe 17's tensor-data peek follows the same FNV-1a-32 + EM_ASM-push idiom but at a different point.
+- `src/wasm/webgpu-bridge.cpp` — target file for the new export.
+- `~/Repos/llama.cpp/include/llama.h` — find the API for resolving a tensor by name (`llama_get_model_tensor` or equivalent).
+- `smoke-test/p2-v2-spike.src.ts` — Stage 4.29 verdict block (search `[STAGE-4.29]`); extend with the data-peek loop.
 
 #### Risk register
 
-1. **CPU backend may not be linked in the JSEP-only build.** If the JSEP-only build path strips the CPU buft to a minimal shim, the hook may compile but never fire. Diagnosis: log every `set_tensor` call (untargeted, capped to first 50 invocations) and inspect tensor names / buft handles to confirm `ffn_norm.weight` lands on whichever buft the hook targets. If silent, escalate to Shape B (cb_eval weight-tap via no-op `ggml_view + ggml_dup`).
-2. **Even if both weights hash byte-clean,** the cascade source isn't localized. Stage 4.30 then has to widen the kqv_out-0 first8-window blindness check (suspect 3) — extend `node_dump_cb` to capture max-abs over the full tensor or sample positions 1-5 explicitly.
-3. **Q6_K-specific path for `ffn_down.weight`.** Stage 4.22 surprise finding (TinyLlama is Q4_K projections + Q6_K embeddings) means `ffn_down.weight` is Q6_K. If ggml-webgpu doesn't implement a Q6_K kernel, the FFN-down matmul falls back to CPU at op-dispatch time — which is structural behavior, not a bug. The byte-integrity probe still fires (we're hashing upload bytes, not op execution); but a clean hash combined with a known-CPU dispatch path means suspect 2 closes for ffn_down too.
-4. **Pre-emption risk.** Stage 4.23's risk register flagged "re-derive the upstream number's provenance" and that bullet preempted Probe 11. Same caution applies: if locating the CPU `set_tensor` impl reveals a fact about the upload path that retroactively answers the cascade (e.g. "CPU buft is allocated as a different ggml type than the GGUF source — quant conversion at upload time"), take that finding as the closure even without running Probe 16.
+1. **`tensor->data` may be a sentinel pointer for JSEP-resident weights.** Stage 4.4's F1 host_mirror fix means JSEP-resident tensors have `tensor->data` pointing into the host mirror (a separate allocation kept in sync via dual-write in `ggml_backend_jsep_buffer_set_tensor`). For the 5 JSEP-resident weights, the post-load peek should match ref — but if it doesn't, the host_mirror is out of sync, which would be a separate bug worth knowing about (re-opens suspect 1).
+2. **Q6_K weight may be quant-converted in flight.** If libllama's loader converts Q6_K to a different runtime format on load, the post-load `tensor->data` bytes won't match the GGUF Q6_K bytes. Diagnosis: check `tensor->type` post-load (returnable via a small helper `webllm_get_tensor_type`) and compare against the GGUF metadata's tensor type. Same-type ⇒ direct mmap; different-type ⇒ in-flight conversion (the hash comparison would need a post-conversion reference).
+3. **Even if all 7 hashes match,** the cascade source isn't localized — only suspect 2 closes. Stage 4.31 then has to widen the kqv_out-0 first8-window blindness check (suspect 3) OR probe the 5.24e-4 disagreement at Qcur-0's INPUTS (`attn_norm-0` output bytes the JSEP MUL_MAT actually reads).
+4. **Pre-emption risk.** If locating the API for tensor-by-name resolution reveals a fact about libllama's weight-loading path that retroactively answers the cascade (e.g., a known-dirty in-flight conversion path for Q6_K), take that finding as the closure even without running Probe 17.
 
-#### Exit criteria — Stage 4.29 closes when documented in `STAGE-4.29-RESULT.md`
+#### Exit criteria — Stage 4.30 closes when documented in `STAGE-4.30-RESULT.md`
 
-- All 7 layer-0 weight FNV-1a-32 hashes captured (5 via JSEP set_tensor + 2 via CPU set_tensor) and compared against JS-side `GgufParser` reference.
-- The `ffn_norm.weight` byte-integrity question answered:
-  - **CLEAN**: gain-vector mis-load (suspect 2) is dead. Pivot Stage 4.30 to suspect 3 (first8-window blindness on `kqv_out-0`).
-  - **DIRTY**: gain-vector mis-load CONFIRMED. Stage 4.30 traces the buggy upload byte trajectory.
-- Stage 4.30 paste-and-go brief queued for the chosen branch.
+- All 7 layer-0 weight FNV-1a-32 hashes captured via post-load `tensor->data` peek and compared against JS-side `GgufParser` reference.
+- The `ffn_norm.weight` byte-integrity question answered by direct measurement:
+  - **CLEAN**: gain-vector mis-load (suspect 2) is dead. Pivot Stage 4.31 to suspect 3 (first8-window blindness on `kqv_out-0`) or the upstream cascade source at Qcur-0 inputs.
+  - **DIRTY**: gain-vector mis-load CONFIRMED via direct measurement. Stage 4.31 traces the buggy upload byte trajectory back to where mmap → CPU-op-read picks up corruption.
+- Stage 4.31 paste-and-go brief queued for the chosen branch.
 
-#### Branch on Probe 16 outcome
+#### Branch on Probe 17 outcome
 
-- **Both bypass-weights byte-clean on CPU buft** (Outcome P-16-clean): suspect 2 dies. Stage 4.30 extends `node_dump_cb` to capture full-tensor stats (mean / max-abs / NaN-count) instead of first8 — addresses suspect 3 (`kqv_out-0` first8-window blindness).
-- **`ffn_norm.weight` CPU-buft hash mismatch** (Outcome P-16-gain): the gain-vector mis-load CONFIRMED on CPU buft. Stage 4.30 traces the buggy upload byte trajectory back to where the CPU `set_tensor` writes data that diverges from the GGUF source.
-- **`ffn_down.weight` CPU-buft hash mismatch** (Outcome P-16-ffn-down): Q6_K weight upload path is the suspect. Stage 4.30 deep-dives the Q6_K-specific upload + dispatch path.
-- **CPU hook silent** (Outcome P-16-silent): the CPU buft isn't where ffn_norm / ffn_down land. Stage 4.30 escalates to Shape B (cb_eval weight-tap) or first instruments untargeted `set_tensor` logging to identify which buft owns those tensors.
+- **All 7 match** (Outcome P-17-clean): suspect 2 dies by direct measurement. Stage 4.31 widens `node_dump_cb` to capture full-tensor stats on `kqv_out-0` (suspect 3) OR probes the upstream cascade source by hashing `attn_norm-0` output bytes the JSEP MUL_MAT reads (the actual Q-projection `src1`).
+- **`ffn_norm.weight` mismatches** (Outcome P-17-gain): the gain-vector mis-load CONFIRMED. Stage 4.31 traces the buggy upload byte trajectory back to where mmap → CPU-op-read picks up corruption.
+- **`ffn_down.weight` mismatches** (Outcome P-17-ffn-down): Q6_K upload path is the suspect. Stage 4.31 deep-dives the Q6_K upload + dispatch path.
+- **A JSEP-resident weight mismatches** (Outcome P-17-jsep-deep): Stage 4.4's host_mirror is out of sync with the JSEP GPU buffer. Re-opens suspect 1 via a different mechanism.
+
+### Earlier Stage 4.29 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.29 brief (paste-and-go bootstrap, Probe 16 implementation sketch with CPU-side `ggml_backend_cpu_buffer_set_tensor` hook mirroring Stage 4.20's JSEP probe pattern + `_ggml_cpu_set_weight_hash_probe` export + JS spike `__cpuWeightHashLog` unification, four-item risk register, four-outcome P-16-{clean,gain,ffn-down,silent} branch table) lives in [`STAGE-4.29-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.29-RESULT.md). Outcome **P-16-silent** CONFIRMED: CPU hook armed and exported correctly (`[probe16] CPU weight-hash probe armed` line emitted, no "export missing" failure), but fired **0/7** during model load. Neither the JSEP buft (5/7 fire) nor the default CPU buft in `ggml-backend.cpp` (0/7) owns `ffn_norm.weight` and `ffn_down.weight`. With `GGML_CPU=OFF` in the JSEP build (`Makefile:139`), the most plausible owner is the GGUF mmap-direct host buft — `tensor->data` would point straight into the mmap'd file region and there is no `set_tensor` upload step to corrupt the bytes. Combined with Stage 4.27's `attn_norm-0` bit-identical result (the other layer-0 RMSNorm output), suspect 2 (`ffn_norm.weight` gain-vector mis-load) is **strongly indirect-evidence dead** but not closed by direct measurement. Stage 4.30 closes it directly via a one-shot post-load `tensor->data` peek (Probe 17, Shape A: `webllm_get_tensor_data_hash` export + spike-side per-weight peek loop) and pivots to suspect 3 / pre-Qcur cascade source on the clean branch. Collapsed at Stage 4.30 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.28 brief — collapsed (full text in closure report)
 
