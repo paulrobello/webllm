@@ -1073,15 +1073,17 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.32: element-wise `kqv_out-0` divergence localization (Probe 19, Shape A) — and Probe 19b queued on the clean branch
+### Next session pickup — Phase 3 Stage 4.33: element-wise `kq-0` divergence localization (Probe 20, Shape A) — and Probe 20b (Shape B) hash-check
 
-Stage 4.31 confirmed Outcome **P-18-first8-blind**: every JSEP `kqv_out-0` forward pass diverges from the non-JSEP reference at full-tensor scope by 0.05-0.66 on `abs_max` (1000× the existing first8 ceiling). JSEP `abs_min = 0.0` on every pass vs ref `~4e-7`, signalling at least one contiguous block of zero outputs. The first8 window the existing `node_dump_cb` was reading (= `V[pos=0]` weighted by causal-mask-pinned position-0 softmax row) coincidentally agreed across runs; positions 1+ were unmonitored and that's where the cascade lives. **Stage 4.27's "first divergent op = `attn_out-0` Δ=4.77e-3" is a first8 projection of a much larger upstream divergence at `kqv_out-0` itself.**
+Stage 4.32 confirmed Outcome **P-19-upstream-cascade**: the divergence originates at or before the first attention matmul (`kq-0`, Q×K^T). JSEP `kq-0` AbsMax = 31.98 vs Ref 52.93 (Δ=20.95); the resulting `kqv_out-0` is 87.5% zero on JSEP (longest zero run: 1792). Stage 4.31's first8-blindness hypothesis is upgraded to a structural attention divergence.
 
-Surviving structural suspects after Stage 4.31:
+Surviving structural suspects after Stage 4.32:
 1. ❌ Output-projection (`attn_output.weight`) byte-integrity — closed Stage 4.28 / 4.30.
 2. ❌ `ffn_norm.weight` gain-vector mis-load — closed Stage 4.30.
-3. ✅ **first8-window blindness on `kqv_out-0` — CONFIRMED at full-tensor scope.** Stage 4.32 narrows the window further: per-element capture for idx 11 (prefill), find the first index where JSEP and reference diverge, classify the structural pattern (row-bounded / block-bounded / scattered).
-4. **Upstream cascade source — `kq-0` / `kq_soft_max-0` may *also* carry first8-window blindness.** Stage 4.27 row 9 reported `kq-0` first8 Δ=0.0119 (already non-trivial). Probe 19b (Shape B) extends the full-tensor probe up the attention sub-graph to disambiguate "kqv MUL_MAT bug" vs "Q×K^T or softmax bug propagating downstream".
+3. ❌ first8-window blindness on `kqv_out-0` — closed Stage 4.31.
+4. ✅ **Divergence at `kq-0` (Q×K^T) — CONFIRMED.** Stage 4.33 narrows the source:
+    - **Probe 20 (Shape A):** element-wise capture for `kq-0` (n=49152), find first divergent index and structural pattern.
+    - **Probe 20b (Shape B):** hash `Qcur-0` and `Kcur-0` bytes *at the moment they are read by the JSEP kq-0 matmul* (EM_ASM peek) to localize if corruption happens during the transfer from their producing ops or inside the matmul kernel itself.
 
 START HERE in a fresh session.
 
@@ -1091,13 +1093,13 @@ START HERE in a fresh session.
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.31 TODO closure commit>     docs(TODO): Stage 4.31 closed — queue Stage 4.32 idx-by-idx kqv_out-0 diff
-#   → <Stage 4.31 reports commit>          docs(reports): Stage 4.31 closure — Outcome P-18-first8-blind
-#   → <Stage 4.31 spike commit>            feat(spike): Stage 4.31 Probe 18 Shape A — kqv_out-0 full-tensor stats
-#   → cf134e8                              docs(TODO): Stage 4.30 closed — queue Stage 4.31 widen node_dump_cb for kqv_out-0
-#   → 52242a7                              docs(reports): Stage 4.30 closure — Outcome P-17-clean
+#   → <Stage 4.32 TODO closure commit>     docs(TODO): Stage 4.32 closed — Outcome P-19-upstream-cascade
+#   → <Stage 4.32 reports commit>          docs(reports): Stage 4.32 closure — kq-0 Delta=20.95
+#   → <Stage 4.32 spike commit>            feat(spike): Stage 4.32 Probe 19 — kq-0/kqv_out-0 element-wise capture
+#   → 03e541b                              docs(TODO): Stage 4.31 closed — queue Stage 4.32 idx-by-idx kqv_out-0 diff
+#   → 7357c32                              docs(reports): Stage 4.31 closure — Outcome P-18-first8-blind
 
-# 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29; Stage 4.31 was webllm-only).
+# 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
 #   → ebc7c3d82   webllm-browser-patches   (patch stack 14)
 
@@ -1108,6 +1110,8 @@ PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.loa
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
 REF_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-ref-probe.html" in t.get("url","")), ""))' 2>/dev/null)
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -n "$REF_TAB" ] || REF_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+```
 [ -n "$REF_TAB" ] || REF_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 ```
 

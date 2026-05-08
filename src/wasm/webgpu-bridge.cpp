@@ -808,7 +808,15 @@ static bool node_dump_cb(struct ggml_tensor* t, bool ask, void* /*user_data*/) {
     // to [1, 0, 0, …]); positions 1+ are unmonitored by the existing
     // first8 dump. Only fires for `kqv_out-0` and only when contiguous;
     // every other allowlisted tensor keeps the cheap first8-only path.
-    if (std::strcmp(t->name, "kqv_out-0") == 0 && ggml_is_contiguous(t)) {
+    //
+    // Stage 4.32 Probe 19b: extend aggregate stats to `kq-0` and
+    // `kq_soft_max-0` to localize if the divergence originates upstream
+    // of the V x softmax mat-mul.
+    if (ggml_is_contiguous(t) && (
+        std::strcmp(t->name, "kqv_out-0") == 0 ||
+        std::strcmp(t->name, "kq-0") == 0 ||
+        std::strcmp(t->name, "kq_soft_max-0") == 0)) {
+
         int total = (int) ggml_nelements(t);
         double sum_v = 0.0;
         double abs_max = 0.0;
@@ -842,6 +850,21 @@ static bool node_dump_cb(struct ggml_tensor* t, bool ask, void* /*user_data*/) {
                 "mean=%.9g abs_max=%.9g abs_min=%.9g nan=%d inf=%d]\n",
                 g_node_dump_idx, t->name, total, finite,
                 mean, abs_max, abs_min, nan_count, inf_count);
+
+        // Stage 4.32 Probe 19: Element-wise dump for `kqv_out-0`.
+        // Emit one line per row of 16 elements to keep stderr volume
+        // manageable (12288 elements = 768 lines).
+        if (std::strcmp(t->name, "kqv_out-0") == 0) {
+            for (int i = 0; i < total; i += 16) {
+                int count = std::min(16, total - i);
+                fprintf(stderr, "[CHECKPOINT-IDX-DUMP idx=%d name=%s start=%d count=%d values=[",
+                        g_node_dump_idx, t->name, i, count);
+                for (int j = 0; j < count; ++j) {
+                    fprintf(stderr, "%s%.9g", (j == 0 ? "" : ","), ggml_get_f32_1d(t, i + j));
+                }
+                fprintf(stderr, "]]\n");
+            }
+        }
     }
 
     g_node_dump_idx++;
