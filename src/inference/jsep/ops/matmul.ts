@@ -579,6 +579,56 @@ export function dispatchMatmul(
 
 	const ndim = batchCount > 1 ? 3 : 2;
 
+	// Stage 4.34 Probe 21 — one-shot capture of the first MUL_MAT where
+	// src0.ne[2] !== src1.ne[2] (the GQA-broadcast case). Stashes ne / nb
+	// for both sources and dst into a global the spike harness reads back
+	// to verify what nb[2] ggml is actually packing for the kq MUL_MAT.
+	// Auto-disarms after one capture so Stage 4.34 can re-arm later if
+	// needed without touching the production decode path.
+	const probe21Global = globalThis as unknown as {
+		__stage434Probe21Arm?: boolean;
+		__stage434Probe21?: {
+			M: number;
+			K: number;
+			N: number;
+			batchCount: number;
+			src0_type: number;
+			src0_ne: number[];
+			src0_nb: number[];
+			src1_ne: number[];
+			src1_nb: number[];
+			dst_ne: number[];
+			dst_nb: number[];
+		};
+	};
+	if (
+		probe21Global.__stage434Probe21Arm &&
+		!probe21Global.__stage434Probe21 &&
+		src0.ne[2] !== src1.ne[2]
+	) {
+		probe21Global.__stage434Probe21 = {
+			M: M,
+			K: K,
+			N: N,
+			batchCount,
+			src0_type: src0.type,
+			src0_ne: [...src0.ne],
+			src0_nb: [...src0.nb],
+			src1_ne: [...src1.ne],
+			src1_nb: [...src1.nb],
+			dst_ne: [...dst.ne],
+			dst_nb: [...dst.nb],
+		};
+		probe21Global.__stage434Probe21Arm = false;
+		console.log(
+			`[stage4.34-probe21] kq MUL_MAT descriptor captured: ` +
+				`M=${M} K=${K} N=${N} batchCount=${batchCount} src0_type=${src0.type} ` +
+				`src0_ne=[${src0.ne.join(",")}] src0_nb=[${src0.nb.join(",")}] ` +
+				`src1_ne=[${src1.ne.join(",")}] src1_nb=[${src1.nb.join(",")}] ` +
+				`dst_ne=[${dst.ne.join(",")}] dst_nb=[${dst.nb.join(",")}]`,
+		);
+	}
+
 	// Stage 4.25 Probe 13 — gated Kahan-summed accumulator path. Armed by
 	// the spike via `globalThis.__stage425KahanArm`; auto-disarms after
 	// first eligible dispatch so only Qcur-0 layer 0 (M=2048, K=2048, N=6,

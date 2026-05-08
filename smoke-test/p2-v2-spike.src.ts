@@ -470,6 +470,278 @@ async function runMatmulProductionSelfTest(
 	return result;
 }
 
+// ----- Stage 4.34 Probe 21b: kq-shape GQA-broadcast host-CPU selftest -----
+//
+// Stage 4.33 confirmed P-20-block-bounded: JSEP `kq-0` non-zero coverage
+// stair-steps by Q-head — heads 0–3 full, heads 4–7 missing 6, …, heads
+// 24–31 entirely zero. Stage 4.34 Probe 21 captured ggml passing
+// src0.nb=[2, 512, 128, 262144] for the kq MUL_MAT (F16, permuted K-cache
+// layout: dim-fast, head-medium, pos-slow). The WGSL kernel computes
+// `byte_off = batch * src0.nb[2] + m * src0.nb[1] + k * elsize` directly,
+// which under this layout walks 4 batches per pos — the same stair-step
+// observed in production.
+//
+// This selftest replays kq's exact dispatch shape against synthetic F32
+// inputs in the same permuted layout and compares dispatchMatmul's output
+// against a host-CPU reference computed via the GQA-correct formula
+// (k_head = batch / r2). PASS = uniformly correct (kernel is fine; libllama
+// must be packing descriptor differently). FAIL = per-head stair-step
+// matches the production pattern.
+//
+// Outcome class:
+//   P-21b-bug-reproduces: stair-step non-zero count by head ⇒ kernel bug
+//   confirmed in isolation, fix is `batch / r2` divide in all 4 load_*
+//   kernels.
+//   P-21b-clean: kernel matches GQA reference uniformly ⇒ bug is in
+//   libllama-side descriptor packing for the kq MUL_MAT specifically.
+
+interface KqGqaSelfTestResult {
+	M: number;
+	K: number;
+	N: number;
+	src0_ne2: number;
+	src1_ne2: number;
+	r2: number;
+	status: number;
+	hasNaN: boolean;
+	hasInf: boolean;
+	maxAbsDeltaVsGqa: number;
+	maxAbsDeltaVsByteFormula: number;
+	perHeadNonZero: number[];
+	perHeadMaxAbsDeltaVsGqa: number[];
+	perHeadStairStep: boolean;
+}
+
+async function runKqGqaSelfTest(
+	runtime: import("../src/inference/jsep/index.js").JsepRuntime,
+): Promise<KqGqaSelfTestResult> {
+	// kq MUL_MAT shape (matches Stage 4.34 Probe 21 capture).
+	const M = 256; // K-cache positions (= dst.ne[0])
+	const K = 64; // head_dim
+	const N = 6; // current Q positions
+	const src0_ne2 = 4; // n_kv_head
+	const src1_ne2 = 32; // n_q_head
+	const r2 = src1_ne2 / src0_ne2; // GQA repeat factor = 8
+
+	// Permuted K-cache layout: [head_dim, n_kv_pos, n_kv_head], dim-fast,
+	// head-medium, pos-slow. Same logical nb pattern as the captured F16
+	// case but in F32 (4 bytes/elem) so the values can be read directly.
+	const src0_dim_stride = 4; // f32
+	const src0_head_stride = K * 4; // 256 bytes (head-medium)
+	const src0_pos_stride = src0_ne2 * K * 4; // 1024 bytes (pos-slow, holds all 4 heads)
+	const src0Bytes = src0_ne2 * M * K * 4; // 262144 = 256 KiB
+
+	// Deterministic content varied across (head, pos, dim) so a stride bug
+	// shows up as cross-head or cross-pos leakage.
+	const src0F32 = new Float32Array(src0_ne2 * M * K);
+	for (let h = 0; h < src0_ne2; h++) {
+		for (let p = 0; p < M; p++) {
+			for (let d = 0; d < K; d++) {
+				// Layout in our buffer: byte = p * pos_stride + h * head_stride + d * 4
+				const idx = (p * src0_pos_stride + h * src0_head_stride + d * 4) / 4;
+				src0F32[idx] =
+					Math.sin(d * 0.013) +
+					0.07 * (h + 1) +
+					0.003 * (p % 11) -
+					0.0001 * p;
+			}
+		}
+	}
+
+	// src1 = Q. Layout standard contiguous: [head_dim, n_q_pos, n_q_head].
+	const src1F32 = new Float32Array(K * N * src1_ne2);
+	for (let b = 0; b < src1_ne2; b++) {
+		for (let n = 0; n < N; n++) {
+			for (let k = 0; k < K; k++) {
+				src1F32[b * N * K + n * K + k] =
+					Math.cos(k * 0.011) + 0.05 * b - 0.04 * n;
+			}
+		}
+	}
+
+	// Allocate GPU buffers via runtime.dataManager and upload.
+	const h0 = runtime.dataManager.alloc(src0Bytes);
+	const hSrc1 = runtime.dataManager.alloc(src1F32.byteLength);
+	const dstBytes = M * N * src1_ne2 * 4;
+	const hDst = runtime.dataManager.alloc(dstBytes);
+	runtime.device.queue.writeBuffer(
+		runtime.dataManager.get(h0).buffer,
+		0,
+		new Uint8Array(src0F32.buffer),
+		0,
+		src0Bytes,
+	);
+	runtime.device.queue.writeBuffer(
+		runtime.dataManager.get(hSrc1).buffer,
+		0,
+		new Uint8Array(src1F32.buffer),
+		0,
+		src1F32.byteLength,
+	);
+
+	const desc: JsepOpDescriptor = {
+		op: GGML_OP_MUL_MAT,
+		nSrc: 2,
+		dst: {
+			bufHandle: hDst,
+			offset: 0,
+			type: GGML_TYPE_F32,
+			ne: [M, N, src1_ne2, 1],
+			nb: [4, M * 4, M * N * 4, M * N * src1_ne2 * 4],
+		},
+		srcs: [
+			{
+				bufHandle: h0,
+				offset: 0,
+				type: GGML_TYPE_F32,
+				ne: [K, M, src0_ne2, 1],
+				// Permuted: nb[1]=pos_stride (= ne2*K*elsize), nb[2]=head_stride (= K*elsize).
+				nb: [4, src0_pos_stride, src0_head_stride, src0Bytes],
+			},
+			{
+				bufHandle: hSrc1,
+				offset: 0,
+				type: GGML_TYPE_F32,
+				ne: [K, N, src1_ne2, 1],
+				nb: [4, K * 4, K * N * 4, K * N * src1_ne2 * 4],
+			},
+		],
+	};
+
+	const status = dispatchMatmul(runtime, desc);
+	runtime.encoderBatcher.flush();
+
+	const dstRec = runtime.dataManager.get(hDst);
+	const staging = runtime.device.createBuffer({
+		size: dstBytes,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+	});
+	const enc = runtime.device.createCommandEncoder();
+	enc.copyBufferToBuffer(dstRec.buffer, 0, staging, 0, dstBytes);
+	runtime.device.queue.submit([enc.finish()]);
+	await staging.mapAsync(GPUMapMode.READ, 0, dstBytes);
+	const got = new Float32Array(staging.getMappedRange().slice(0));
+	staging.unmap();
+	staging.destroy();
+
+	// GQA-correct reference: dst[m, n, b] = sum_k src0[head=b/r2, pos=m, dim=k] * src1[k, n, b]
+	const refGqa = new Float32Array(M * N * src1_ne2);
+	for (let b = 0; b < src1_ne2; b++) {
+		const k_head = Math.floor(b / r2);
+		for (let n = 0; n < N; n++) {
+			for (let m = 0; m < M; m++) {
+				let acc = 0;
+				for (let k = 0; k < K; k++) {
+					const src0_idx =
+						(m * src0_pos_stride +
+							k_head * src0_head_stride +
+							k * 4) /
+						4;
+					acc +=
+						src0F32[src0_idx] * src1F32[b * N * K + n * K + k];
+				}
+				refGqa[b * N * M + n * M + m] = acc;
+			}
+		}
+	}
+
+	// Byte-formula reference: dst[m, n, b] = sum_k src0_buf[byte_off] * src1[k, n, b]
+	// where byte_off = b * src0.nb[2] + m * src0.nb[1] + k * 4 (matches the
+	// current WGSL kernel exactly, no GQA divide). For batch ≥ 4 this reads
+	// off the end of the 4-head buffer — modulo the buffer size, but we
+	// allocated exactly src0Bytes, so anything past is OOB and the WGSL
+	// kernel returns 0 (out-of-bounds storage read in WebGPU returns 0).
+	const refBytes = new Float32Array(M * N * src1_ne2);
+	const totalSrc0Elems = src0F32.length;
+	for (let b = 0; b < src1_ne2; b++) {
+		for (let n = 0; n < N; n++) {
+			for (let m = 0; m < M; m++) {
+				let acc = 0;
+				for (let k = 0; k < K; k++) {
+					const elem_idx =
+						(b * src0_head_stride +
+							m * src0_pos_stride +
+							k * 4) /
+						4;
+					const v =
+						elem_idx < totalSrc0Elems ? src0F32[elem_idx] : 0;
+					acc += v * src1F32[b * N * K + n * K + k];
+				}
+				refBytes[b * N * M + n * M + m] = acc;
+			}
+		}
+	}
+
+	let maxAbsDeltaVsGqa = 0;
+	let maxAbsDeltaVsByteFormula = 0;
+	let hasNaN = false;
+	let hasInf = false;
+	const perHeadNonZero = new Array(src1_ne2).fill(0);
+	const perHeadMaxAbsDeltaVsGqa = new Array(src1_ne2).fill(0);
+	for (let b = 0; b < src1_ne2; b++) {
+		for (let n = 0; n < N; n++) {
+			for (let m = 0; m < M; m++) {
+				const idx = b * N * M + n * M + m;
+				const v = got[idx];
+				if (Number.isNaN(v)) hasNaN = true;
+				else if (!Number.isFinite(v)) hasInf = true;
+				if (v !== 0) perHeadNonZero[b]++;
+				const dGqa = Math.abs(v - refGqa[idx]);
+				const dByte = Math.abs(v - refBytes[idx]);
+				if (dGqa > maxAbsDeltaVsGqa) maxAbsDeltaVsGqa = dGqa;
+				if (dByte > maxAbsDeltaVsByteFormula)
+					maxAbsDeltaVsByteFormula = dByte;
+				if (dGqa > perHeadMaxAbsDeltaVsGqa[b])
+					perHeadMaxAbsDeltaVsGqa[b] = dGqa;
+			}
+		}
+	}
+
+	// Stair-step heuristic: heads 0..(r2-1) within an early band should have
+	// the highest non-zero count; heads at the high end should have the
+	// lowest. Specifically, expect monotonic-non-increasing per-head count
+	// across the 4-head bands [0..3], [4..7], ..., [28..31].
+	const bandCounts: number[] = [];
+	for (let band = 0; band < src1_ne2; band += src0_ne2) {
+		let bandSum = 0;
+		for (let i = 0; i < src0_ne2; i++) bandSum += perHeadNonZero[band + i];
+		bandCounts.push(bandSum);
+	}
+	let perHeadStairStep = true;
+	for (let i = 1; i < bandCounts.length; i++) {
+		if (bandCounts[i] > bandCounts[i - 1]) {
+			perHeadStairStep = false;
+			break;
+		}
+	}
+	// Strict stair-step also requires the last band to be strictly less than
+	// the first (otherwise the kernel could be uniformly correct).
+	if (bandCounts[bandCounts.length - 1] >= bandCounts[0]) {
+		perHeadStairStep = false;
+	}
+
+	runtime.dataManager.free(h0);
+	runtime.dataManager.free(hSrc1);
+	runtime.dataManager.free(hDst);
+
+	return {
+		M,
+		K,
+		N,
+		src0_ne2,
+		src1_ne2,
+		r2,
+		status,
+		hasNaN,
+		hasInf,
+		maxAbsDeltaVsGqa,
+		maxAbsDeltaVsByteFormula,
+		perHeadNonZero,
+		perHeadMaxAbsDeltaVsGqa,
+		perHeadStairStep,
+	};
+}
+
 // ----- Stage 4.18 Probe 8a: Q4_0 production-shape matmul sweep -------------
 //
 // Stage 4.17 confirmed Outcome B (kernel-precision divergence) at the very
@@ -1823,6 +2095,63 @@ async function runSpike(): Promise<void> {
 		log(`MATMUL_PROD_DIVERT = ${JSON.stringify(matProd2)}`);
 		(window as any).__matmulProdDivert = matProd2;
 
+		// Stage 4.34 Probe 21b — kq-shape GQA-broadcast host-CPU selftest.
+		// Replays the exact MUL_MAT shape Probe 21 captured (M=256, K=64,
+		// N=6, src0.ne[2]=4, src1.ne[2]=32) against synthetic F32 inputs in
+		// the permuted K-cache layout (dim-fast, head-medium, pos-slow) and
+		// compares dispatchMatmul output against both the GQA-correct
+		// reference (k_head = batch / r2) and the byte-formula reference
+		// (no GQA divide — what the kernel currently computes). Verdict
+		// P-21b-bug-reproduces if per-head non-zero count stair-steps;
+		// P-21b-clean if uniformly correct.
+		const kqSelfTest = await runKqGqaSelfTest(runtime);
+		log(`STAGE434_PROBE21B = ${JSON.stringify(kqSelfTest)}`);
+		(window as any).__stage434KqSelfTest = kqSelfTest;
+		{
+			// The diagnostic signal is per-head Δ vs GQA reference. With the
+			// GQA-correct kernel, all 32 heads should match the reference to
+			// f32 noise (~1e-5 over a length-64 reduction). With the buggy
+			// kernel, head 0 matches by coincidence (b=0 maps to k_head=0 by
+			// both conventions), every other head diverges because the
+			// kernel computes head selection via `b * nb[2]` (which under
+			// the permuted K-cache layout walks both head-fast and pos-slow
+			// dimensions). Specifically:
+			//   - kernel reads K[head = b % src0_ne2, pos = m + b/src0_ne2, k]
+			//   - GQA reference reads K[head = b / r2, pos = m, k]
+			// Only b=0 makes both indices coincide.
+			const head0Match = kqSelfTest.perHeadMaxAbsDeltaVsGqa[0] < 1e-3;
+			const otherHeadsDiverge = kqSelfTest.perHeadMaxAbsDeltaVsGqa
+				.slice(1)
+				.some((d) => d > 1e-1);
+			const allMatch = kqSelfTest.maxAbsDeltaVsGqa < 1e-3;
+			let verdict: string;
+			if (allMatch) {
+				verdict =
+					"P-21b-clean (kernel matches GQA reference uniformly — bug is in libllama-side descriptor packing)";
+			} else if (head0Match && otherHeadsDiverge) {
+				verdict =
+					"P-21b-bug-reproduces (head 0 matches GQA reference; heads ≥1 diverge — kernel ignores GQA broadcast, needs `batch / r2` divide)";
+			} else {
+				verdict =
+					`P-21b-indeterminate (gqaΔ=${kqSelfTest.maxAbsDeltaVsGqa.toExponential(3)} ` +
+					`head0Match=${head0Match} otherHeadsDiverge=${otherHeadsDiverge})`;
+			}
+			log(
+				`     [probe21b] perHeadNonZero=[${kqSelfTest.perHeadNonZero.join(",")}]`,
+			);
+			log(
+				`     [probe21b] perHeadMaxAbsDeltaVsGqa=[${kqSelfTest.perHeadMaxAbsDeltaVsGqa.map((d) => d.toExponential(2)).join(",")}]`,
+			);
+			log(
+				`     [probe21b] gqaΔ=${kqSelfTest.maxAbsDeltaVsGqa.toExponential(3)} ` +
+					`byteFormulaΔ=${kqSelfTest.maxAbsDeltaVsByteFormula.toExponential(3)} ` +
+					`head0Match=${head0Match} otherHeadsDiverge=${otherHeadsDiverge}`,
+			);
+			log(`     [probe21b] OUTCOME: ${verdict}`);
+			(globalThis as unknown as { __stage434Probe21bVerdict?: string }).__stage434Probe21bVerdict =
+				verdict;
+		}
+
 		// Stage 4.18 Probe 8a: per-shape Q4_0 matmul precision sweep.
 		// All 5 production shapes used in TinyLlama-Q4_0. Reports delta
 		// vs both f64 ground truth and f32 element-wise loop reference;
@@ -3172,6 +3501,14 @@ async function runSpike(): Promise<void> {
 			true;
 		log("     [probe13] kahan accumulator armed (Qcur-0 layer 0 only)");
 
+		// Stage 4.34 Probe 21 — arm one-shot capture of the first MUL_MAT
+		// where src0.ne[2] !== src1.ne[2] (the GQA-broadcast case = kq).
+		// dispatchMatmul auto-disarms after first fire and stashes the
+		// descriptor metadata in `__stage434Probe21`.
+		(globalThis as unknown as { __stage434Probe21Arm: boolean }).__stage434Probe21Arm =
+			true;
+		log("     [probe21] kq-MUL_MAT descriptor capture armed (first src0.ne[2]!=src1.ne[2])");
+
 		log(`[7/8] Decoding prompt (${PROMPT_TOKEN_IDS.length} tokens)...`);
 		const promptTokens = new Int32Array(PROMPT_TOKEN_IDS);
 		const tPrefillStart = performance.now();
@@ -3688,6 +4025,66 @@ async function runSpike(): Promise<void> {
 		} catch (err) {
 			log(
 				`     [probe10] replay threw: ${(err as Error).message}`,
+				"fail",
+			);
+		}
+
+		// Stage 4.34 Probe 21 — emit captured kq MUL_MAT descriptor and
+		// classify the GQA-broadcast strategy ggml is using:
+		//   stride-trick-zero: src0_nb[2] == 0 (zero-stride broadcast)
+		//   stride-trick-wrap: src0_nb[2] is the byte product (wrap-style)
+		//   normal-stride:     src0_nb[2] is the un-broadcasted stride
+		//                       (kernel needs explicit `batch / r2` divide)
+		try {
+			const probe21 = (globalThis as unknown as {
+				__stage434Probe21?: {
+					M: number;
+					K: number;
+					N: number;
+					batchCount: number;
+					src0_type: number;
+					src0_ne: number[];
+					src0_nb: number[];
+					src1_ne: number[];
+					src1_nb: number[];
+					dst_ne: number[];
+					dst_nb: number[];
+				};
+			}).__stage434Probe21;
+			if (!probe21) {
+				log(
+					"     [probe21] no GQA-broadcast MUL_MAT captured (gate did not fire)",
+					"fail",
+				);
+			} else {
+				log(`STAGE434_PROBE21 = ${JSON.stringify(probe21)}`);
+				const r2 = probe21.src1_ne[2] / probe21.src0_ne[2];
+				// Expected non-broadcasted batch stride = src0_nb[1] * src0_ne[1].
+				const expectedFlatBatchBytes =
+					probe21.src0_nb[1] * probe21.src0_ne[1];
+				const observedBatchBytes = probe21.src0_nb[2];
+				let outcome: string;
+				if (observedBatchBytes === 0) {
+					outcome =
+						"P-21-stride-trick-zero (src0_nb[2]==0, kernel reads K-head 0 for all batches)";
+				} else if (observedBatchBytes === expectedFlatBatchBytes) {
+					outcome =
+						`P-21-explicit-divide-needed (src0_nb[2]=${observedBatchBytes} ` +
+						`== nb[1]*ne[1]=${expectedFlatBatchBytes}; kernel must divide ` +
+						`batch by r2=${r2})`;
+				} else {
+					outcome =
+						`P-21-other (src0_nb[2]=${observedBatchBytes} ≠ 0 and ` +
+						`≠ nb[1]*ne[1]=${expectedFlatBatchBytes}; r2=${r2})`;
+				}
+				log(`     [probe21] r2=${r2} expected_flat_batch_bytes=${expectedFlatBatchBytes} src0_nb[2]=${observedBatchBytes}`);
+				log(`     [probe21] OUTCOME: ${outcome}`);
+				(globalThis as unknown as { __stage434Probe21Outcome?: string }).__stage434Probe21Outcome =
+					outcome;
+			}
+		} catch (err) {
+			log(
+				`     [probe21] verdict synthesis threw: ${(err as Error).message}`,
 				"fail",
 			);
 		}
