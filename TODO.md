@@ -1073,76 +1073,42 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.36: canonical-6 JSEP parity sweep
+### Stage 4.36 closed — Phase 3 closed for testable subset (2026-05-08)
 
-Stage 4.35 shipped the WGSL kqv MUL_MAT GQA-broadcast fix (`src0_batch_idx = batch / shape.r2` in all four `load_*` kernels; `r2 = src1.ne[2] / src0.ne[2]` packed into the shape uniform). Probe 21b reports `P-21b-clean` uniformly across all 32 Q-heads (`maxAbsDeltaVsGqa = 3.81e-5`, six orders of magnitude below the pre-fix 5.65e+1). JSEP spike's `GENERATED_TOKENS[0] === 3681` ("Paris") matches the non-JSEP `webllm-wasm.js` reference exactly for the "capital of France" prompt on TinyLlama-1.1b-chat-q4_0; full output `"Paris.\n\n2"` is coherent. `make checkall` green: 747 pass, 0 fail. Closure: [`STAGE-4.35-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.35-RESULT.md). Raw artifact: [`STAGE-4.35-spike-output.txt`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.35-spike-output.txt).
+Canonical-6 JSEP parity sweep ran on the testable subset of the
+canonical-6 (TinyLlama r2=8 from Stage 4.35; qwen3-0.6b r2=2;
+qwen3-1.7b r2=2 added this stage). All three match the non-JSEP
+`webllm-wasm.js` reference at `generatedIds[0]` and across all 5
+greedy-decode tokens; both Qwen3 models predict
+`[12095,13,576,6722,315]` (" Paris. The capital of") matching ref.
+Probe 21b regression guard re-confirmed `P-21b-clean` (synthetic
+shapes, dispatch-agnostic). `make checkall` green: 747 pass, 0 fail.
+Closure: [`STAGE-4.36-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.36-RESULT.md).
+Reference manifest: [`canonical6-refs.json`](eval/reports/p2-v2-option-a-prime-2026-05-06/canonical6-refs.json).
 
-Phase 3 JSEP causal-LM decode reaches parity for the lead model. Stage 4.36 broadens coverage to the canonical-6 fleet and (if uneventful) closes Phase 3.
+The remaining canonical-6 entries (mistral-7b-q4ks, llama-3.1-8b-iq3m,
+qwen3-8b-iq3m) all exceed the wasm32 4 GiB JSEP heap cap
+(`src/wasm/CMakeLists.txt:249`) and are deferred. Closure argues
+mathematical interpolation: r2=4 (the only un-exercised value) is
+structurally identical to the tested r2={2, 8} — the WGSL u32 divide
+is parameterized with no branch on the quotient. Re-enablement paths
+(wasm-mem64 JSEP build, streaming-loader spike, or accept
+interpolation) catalogued in the closure report's "Deferred subset"
+section. Path 3 (acceptance) is sufficient for Phase 3 closure;
+paths 1/2 stay deferred unless a separate signal motivates 7B+
+JSEP testing.
 
-START HERE in a fresh session.
+Stage 4.x stage-by-stage block (Stage 4.1 → 4.36) is now eligible to
+move from `TODO.md` to `TODO_ARCHIVE.md` in a separate `docs(TODO):`
+archival commit per the TODO archival cadence in `CLAUDE.md`.
 
-**Paste-and-go bootstrap (run this first, no thinking required):**
+### Earlier Stage 4.36 brief — collapsed (full text in closure report)
 
-```bash
-# 1. Confirm working tree at Stage 4.35 closure tip.
-cd /Users/probello/Repos/webllm
-git log --oneline -5
-#   → <Stage 4.35 TODO closure commit>     docs(TODO): Stage 4.35 closed — queue Stage 4.36 canonical-6 JSEP parity sweep
-#   → <Stage 4.35 reports commit>          docs(reports): Stage 4.35 closure — fix shipped, Paris decode parity
-#   → <Stage 4.35 fix commit>              fix(jsep/matmul): WGSL kqv MUL_MAT GQA broadcast (r2 divide)
-#   → 34e58db                              docs(TODO): Stage 4.34 closed — queue Stage 4.35 GQA-broadcast fix
-#   → 6cf1d1a                              docs(reports): Stage 4.34 closure — Outcome P-21-explicit-divide-needed
-
-# 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29).
-( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
-#   → ebc7c3d82   webllm-browser-patches   (patch stack 14)
-
-# 3. Smoke-server up on 8031, log_receiver on 8032, agentchrome session + spike + ref tabs.
-lsof -nP -iTCP:8031 -sTCP:LISTEN 2>/dev/null | head -2 || make smoke-serve &
-lsof -nP -iTCP:8032 -sTCP:LISTEN 2>/dev/null | head -2 || python3 log_receiver.py &
-PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
-[ -n "$PORT" ] || agentchrome connect --launch --headless
-```
-
-**One-line goal:** Confirm Stage 4.35's GQA-broadcast fix generalizes across the canonical-6 fleet (qwen3-0.6b, qwen3-1.7b, mistral-7b-instruct-v0.3-q4ks, llama-3.1-8b-instruct-iq3m, qwen3-8b-iq3m — TinyLlama already verified). For each model: run JSEP spike + non-JSEP ref-probe on the same prompt; verify `generatedIds[0]` matches. The kqv kernel is below the model boundary, so this is a regression-test sweep, not a new investigation.
-
-**One-line context:** The kqv kernel correctness was the load-bearing Phase 3 blocker. With it fixed and TinyLlama at parity, the remaining canonical-6 should fall through automatically — they exercise the same kernel via `dispatchMatmul`. If any model fails, the failure pattern (kqv vs non-kqv, GQA ratio specific) localizes the next investigation immediately.
-
-#### Stage 4.36 implementation sketch
-
-1. **Spike harness — model parametrization.** Currently `p2-v2-spike.src.ts` is hardcoded to TinyLlama. Either:
-   - **Option A (cheap):** add a `?model=<key>` URL param + lookup table mapping to GGUF path + reference token, run 6 iterations of the existing harness manually.
-   - **Option B (heavier):** extend the spike harness to loop the canonical-6 with a single navigation. Preferred if the loop is cheap to wire.
-
-2. **Reference token capture.** For each canonical-6 model, pre-capture the non-JSEP `webllm-wasm.js` reference's `generatedIds[0]` for a stable prompt ("The capital of France is" works for all). Store in a JSON manifest under `eval/reports/p2-v2-option-a-prime-2026-05-06/canonical6-refs.json`.
-
-3. **Per-model verification.** For each model: `genJSEP === genRef` ⇒ pass. Aggregate into a 6-row table in `STAGE-4.36-RESULT.md`.
-
-4. **Probe 21b is universal.** It runs synthetic shapes regardless of model. Re-run only once per session to catch any kernel-cache regression.
-
-5. **`make checkall` green.**
-
-#### Files to read first
-
-- [`STAGE-4.35-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.35-RESULT.md) — fix details + per-head delta table.
-- `src/inference/jsep/ops/matmul.ts:267-487` — the four `load_*` kernels (regression-guard surface).
-- `eval/models.ts` — canonical-6 GGUF registrations and contextLength.
-- `smoke-test/p2-v2-spike.src.ts` — current TinyLlama harness; the surface to parametrize.
-
-#### Risk register
-
-1. **Larger models stress the kernel cache differently.** llama-3.1-8b and qwen3-8b run more dispatches per token (650+ vs TinyLlama's ~250). The fix is mathematically identical regardless of dispatch count, but kernel-cache pressure or pipeline-key collisions could surface a different failure pattern. **Mitigation:** if 8B fails but 0.6B passes, suspect cache/pipeline-key issues, not the math.
-2. **GQA ratio differs across models.** Qwen3-0.6B has GQA 1:1 (n_kv_head==n_q_head, r2=1) so the divide is a no-op there. Qwen3-1.7B is 16:8 (r2=2). Mistral-7B is 32:8 (r2=4). Llama-3.1-8B is 32:8 (r2=4). Qwen3-8B is 32:4 (r2=8). **Mitigation:** TinyLlama already exercised r2=8 (16:4 GQA in the q4_0 build); the math is identical for r2=2 and r2=4.
-3. **Memory budget for 8B IQ3_M on 16 GB hardware floor.** The spike harness historically targets the canonical 16 GB floor; 8B IQ3_M (~3.6 GB) plus KV cache + Three.js coexistence assumption could OOM the spike on lower-end hardware. **Mitigation:** if the harness OOMs at 8B, fall back to the 5-model subset (qwen3-0.6b through llama-3.1-8b) and note the constraint in the closure.
-4. **Reference probe drift.** Non-JSEP `webllm-wasm.js` is the parity reference; if its token generation has drifted between the original TinyLlama capture and the canonical-6 capture, the test fails for the wrong reason. **Mitigation:** re-capture refs in the same session as the JSEP test.
-
-#### Exit criteria — Stage 4.36 closes when documented in `STAGE-4.36-RESULT.md`
-
-- All canonical-6 models report `generatedIds[0]` matching the non-JSEP reference, OR a documented and explained failure subset.
-- Probe 21b regression guard re-confirmed `P-21b-clean`.
-- `make checkall` green.
-- **If sweep is uneventful:** queue a "Phase 3 closed — JSEP causal-LM decode reaches parity" closure stub and archive the Stage 4.x stage-by-stage block from `TODO.md` to `TODO_ARCHIVE.md` per the TODO archival cadence.
-- **If sweep surfaces failures:** queue Stage 4.37 brief with the failing-model investigation plan.
+Full step-by-step Stage 4.36 brief (paste-and-go bootstrap, Option-A
+spike-harness `?model=<key>` parametrization, ref-token capture pattern,
+five-step implementation sketch with Probe 21b regression-guard re-run,
+four-item risk register, two-outcome uneventful/failures branch table)
+lives in [`STAGE-4.36-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.36-RESULT.md). Outcome **subset PASS** + **Phase-3-closed-for-testable-subset** CONFIRMED: 3/3 testable canonical-6 models match the non-JSEP `webllm-wasm.js` reference at `generatedIds[0]` and across all 5 greedy-decode tokens (TinyLlama r2=8 from Stage 4.35; qwen3-0.6b and qwen3-1.7b r2=2 added this stage — both predict `[12095,13,576,6722,315]` " Paris. The capital of"); Probe 21b re-confirmed `P-21b-clean`; `make checkall` green: 747 pass, 0 fail. Risk register entry #3 was superseded — the binding constraint is the wasm32 4 GiB JSEP heap cap, not the system 16 GB floor; mistral-7b-q4ks (4.14 GiB), llama-3.1-8b-iq3m (3.78 GiB), and qwen3-8b-iq3m (3.9 GiB) all exceed the cap and are deferred to a future wasm-mem64 JSEP build path. Closure argues mathematical interpolation: r2=4 (the only un-exercised value) is structurally identical to the tested r2={2, 8} — the WGSL u32 divide is parameterized with no branch on the quotient. Collapsed at Phase 3 closure time to keep the active surface focused.
 
 ### Earlier Stage 4.35 brief — collapsed (full text in closure report)
 
