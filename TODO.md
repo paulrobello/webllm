@@ -1073,11 +1073,15 @@ probe) or eliminates suspects 1+2 and forces Stage 4.29 to extend
 `node_dump_cb` for full-tensor stats (a structural change to the
 checkpoint framework, justifying a fresh trajectory assessment).
 
-### Next session pickup — Phase 3 Stage 4.31: widen `node_dump_cb` for full-tensor stats on `kqv_out-0` (Probe 18, Shape A) — and Probe 18b queued on the clean branch
+### Next session pickup — Phase 3 Stage 4.32: element-wise `kqv_out-0` divergence localization (Probe 19, Shape A) — and Probe 19b queued on the clean branch
 
-Stage 4.30 confirmed Outcome **P-17-clean**: all **7/7** layer-0 weights byte-exact at `tensor->data` post-`loadModel` (`attn_q.weight` Q4_0 `0xf2f7188c`, `attn_k.weight` Q4_0 `0x9399f36a`, `attn_output.weight` Q4_0 `0xaae061b5`, `ffn_norm.weight` F32 `0xcba312e0`, `ffn_gate.weight` Q4_0 `0xafdfc33a`, `ffn_up.weight` Q4_0 `0x76f44e42`, `ffn_down.weight` Q6_K `0xd1429247`). All `size_data == size_ref` ⇒ no in-flight quant conversion (risk register #2 closed). Suspect 2 (`ffn_norm.weight` gain-vector mis-load) is **DEAD by direct measurement** on the GGUF mmap-direct buft. Risk register #1 (host_mirror out of sync for JSEP-resident weights) also did not fire — all 5 JSEP-resident weights' `tensor->data` (= host_mirror per Stage 4.4 F1) match GGUF refs.
+Stage 4.31 confirmed Outcome **P-18-first8-blind**: every JSEP `kqv_out-0` forward pass diverges from the non-JSEP reference at full-tensor scope by 0.05-0.66 on `abs_max` (1000× the existing first8 ceiling). JSEP `abs_min = 0.0` on every pass vs ref `~4e-7`, signalling at least one contiguous block of zero outputs. The first8 window the existing `node_dump_cb` was reading (= `V[pos=0]` weighted by causal-mask-pinned position-0 softmax row) coincidentally agreed across runs; positions 1+ were unmonitored and that's where the cascade lives. **Stage 4.27's "first divergent op = `attn_out-0` Δ=4.77e-3" is a first8 projection of a much larger upstream divergence at `kqv_out-0` itself.**
 
-Surviving structural suspects: (3) first8-window blindness on `kqv_out-0`, and (4) cascade source upstream of `attn_out-0` (Qcur-0's INPUTS — `embd` post-`get_rows` and `attn_norm-0` output bytes the JSEP MUL_MAT actually reads). The cheaper of the two is suspect 3 — widening `node_dump_cb`'s window from first8 to full-tensor stats on `kqv_out-0` only requires editing the existing callback site; no new export. Run that first; on negative result (Outcome P-18-full-clean), pivot to Probe 18b (Shape B: hash `attn_norm-0` output bytes JSEP MUL_MAT reads at Qcur-0 execution time).
+Surviving structural suspects after Stage 4.31:
+1. ❌ Output-projection (`attn_output.weight`) byte-integrity — closed Stage 4.28 / 4.30.
+2. ❌ `ffn_norm.weight` gain-vector mis-load — closed Stage 4.30.
+3. ✅ **first8-window blindness on `kqv_out-0` — CONFIRMED at full-tensor scope.** Stage 4.32 narrows the window further: per-element capture for idx 11 (prefill), find the first index where JSEP and reference diverge, classify the structural pattern (row-bounded / block-bounded / scattered).
+4. **Upstream cascade source — `kq-0` / `kq_soft_max-0` may *also* carry first8-window blindness.** Stage 4.27 row 9 reported `kq-0` first8 Δ=0.0119 (already non-trivial). Probe 19b (Shape B) extends the full-tensor probe up the attention sub-graph to disambiguate "kqv MUL_MAT bug" vs "Q×K^T or softmax bug propagating downstream".
 
 START HERE in a fresh session.
 
@@ -1087,69 +1091,80 @@ START HERE in a fresh session.
 # 1. Confirm working tree.
 cd /Users/probello/Repos/webllm
 git log --oneline -5
-#   → <Stage 4.30 TODO closure commit>     docs(TODO): Stage 4.30 closed — queue Stage 4.31 widen node_dump_cb for kqv_out-0
-#   → <Stage 4.30 reports commit>          docs(reports): Stage 4.30 closure — Outcome P-17-clean
-#   → <Stage 4.30 spike commit>            feat(spike): Stage 4.30 Probe 17 — post-load tensor->data peek
-#   → 59b28a2                              docs(TODO): Stage 4.29 closed — queue Stage 4.30 post-load tensor->data peek
-#   → d7ae7e5                              docs(reports): Stage 4.29 closure — Outcome P-16-silent
+#   → <Stage 4.31 TODO closure commit>     docs(TODO): Stage 4.31 closed — queue Stage 4.32 idx-by-idx kqv_out-0 diff
+#   → <Stage 4.31 reports commit>          docs(reports): Stage 4.31 closure — Outcome P-18-first8-blind
+#   → <Stage 4.31 spike commit>            feat(spike): Stage 4.31 Probe 18 Shape A — kqv_out-0 full-tensor stats
+#   → cf134e8                              docs(TODO): Stage 4.30 closed — queue Stage 4.31 widen node_dump_cb for kqv_out-0
+#   → 52242a7                              docs(reports): Stage 4.30 closure — Outcome P-17-clean
 
-# 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29; Stage 4.30 was webllm-only).
+# 2. Confirm llama.cpp tip (patch stack 14 — unchanged from Stage 4.29; Stage 4.31 was webllm-only).
 ( cd ~/Repos/llama.cpp && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD )
 #   → ebc7c3d82   webllm-browser-patches   (patch stack 14)
 
-# 3. Smoke-server up on 8031 + reuse agentchrome session + spike tab.
+# 3. Smoke-server up on 8031 + reuse agentchrome session + both spike + ref-probe tabs.
 lsof -nP -iTCP:8031 -sTCP:LISTEN | head -2 || make smoke-serve &
 PORT=$(agentchrome connect --status | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')
 [ -n "$PORT" ] || agentchrome connect --launch --headless
 SPIKE_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-spike.html" in t.get("url","")), ""))' 2>/dev/null)
+REF_TAB=$(agentchrome --port "$PORT" tabs list | python3 -c 'import json,sys;print(next((t["id"] for t in json.load(sys.stdin) if "p2-v2-ref-probe.html" in t.get("url","")), ""))' 2>/dev/null)
 [ -n "$SPIKE_TAB" ] || SPIKE_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-spike.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ -n "$REF_TAB" ] || REF_TAB=$(agentchrome --port "$PORT" tabs create --background "http://localhost:8031/p2-v2-ref-probe.html" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 ```
 
-**One-line goal:** When `node_dump_cb` fires for a tensor whose name is `kqv_out-0`, expand the readback from the existing first-8-elements window to the full tensor and compute mean / abs-max / abs-min / NaN-count / Inf-count over all elements; push to `globalThis.__stage431Stats[name]` via EM_ASM. Spike compares JSEP and reference paths, synthesizes `P-18-{first8-blind, full-clean, full-dirty}`.
+**One-line goal:** Capture every element of the prefill `kqv_out-0` (idx 11, n=12288) on both JSEP and reference paths; compute per-index `|jsep[i] - ref[i]|`; find the first divergent index, the longest contiguous JSEP-zero run, and the per-row max-abs-delta. Synthesise `P-19-{row-bounded, block-bounded, upstream-cascade}` based on the structural pattern.
 
-**One-line context:** Stage 4.30 closed suspect 2 by direct measurement. The remaining suspects are (3) first8-window blindness on `kqv_out-0` (cheap to test, run first) and (4) upstream cascade source at Qcur-0 inputs (Probe 18b, Shape B — queued on the P-18-full-clean branch).
+**One-line context:** Stage 4.31 closed suspect 3 (the existence of first8-window blindness on `kqv_out-0`); Stage 4.32 closes it down to a *reproducible failure mode* — row-bounded tile-coverage gap, block-bounded subgroup-coverage gap, or upstream cascade from `kq-0` / `kq_soft_max-0`. Probe 19 is element-wise diff; Probe 19b (Shape B) is a one-line allowlist extension that tells us whether the upstream Q×K^T also has first8-window blindness.
 
-#### Stage 4.31 implementation sketch (Probe 18 — Shape A: full-tensor stats on `kqv_out-0`)
+#### Stage 4.32 implementation sketch (Probe 19 — Shape A: element-wise `kqv_out-0` capture)
 
-1. **C++ side** (`src/wasm/webgpu-bridge.cpp:node_dump_cb`):
-   - Locate the existing first-8-elements readback that powers `__stage417Checkpoints`.
-   - When `tensor->name == "kqv_out-0"`, also read back the FULL tensor (`ggml_nbytes(t)` bytes) and compute mean / abs-max / abs-min / NaN-count / Inf-count over all elements.
-   - Push to `globalThis.__stage431Stats[name]` via EM_ASM. Keep the existing first-8 readback intact so Stage 4.27's checkpoint diff still works.
-2. **JS spike side** (`smoke-test/p2-v2-spike.src.ts`):
-   - After the existing Stage 4.27 checkpoint diff block, walk `__stage431Stats["kqv_out-0"]` from both JSEP and reference runs.
-   - Emit `[STAGE-4.31] kqv_out-0 reference={mean: X, abs_max: Y, ...} jsep={mean: X', ...} delta_mean=... delta_abs_max=...`.
-   - Synthesize `[STAGE-4.31] OUTCOME: P-18-{first8-blind, full-clean, full-dirty}`.
-3. **Run the spike** at `?v=stage4.31-probe18&ingest=off`, dump verdict to `STAGE-4.31-spike-output.txt`.
+1. **C++ side** (`src/wasm/webgpu-bridge.cpp:node_dump_cb`): when `tensor->name == "kqv_out-0"` and `ggml_is_contiguous(t)`, walk every element and emit one `[CHECKPOINT-IDX-DUMP idx=N name=kqv_out-0 row=R first16=[…]]` stderr line per row R. For prefill (`[2048, 6, 1, 1]`) that's 6 rows of 16 elements per dump = 6 lines per pass; for decode (`[2048, 1, 1, 1]`) 1 row × however many indices we want to span. Cheap and parses cleanly offline. Alternative if rows-of-16 aren't enough: emit a denser per-row dump (e.g. 64 contiguous indices stride 32) or expose a `webllm_arm_kqv_capture(int)` export that copies the full tensor into a JS-owned `Float32Array` via `EM_ASM`.
+2. **JS spike + ref side**: each page already filters `[CHECKPOINT…]` lines into `__stderrLines`; no parser change needed. Capture both runs' lines, save under `eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.32-{jsep,ref}-kqv.txt`.
+3. **Diff script** (`STAGE-4.32-diff.py`): load both captures; per-index abs delta on idx 11; find first divergent index, longest contiguous JSEP-zero run, per-row max-abs-delta. Synthesise `P-19-{row-bounded, block-bounded, scattered, upstream-cascade}`.
+4. **Run** at `?v=stage4.32-probe19` on both pages.
+
+#### Stage 4.32b implementation sketch (Probe 19b — Shape B: full-tensor probe on `kq-0` + `kq_soft_max-0`)
+
+(Run *first* if Probe 19's element-wise capture is heavier than expected — Probe 19b is a one-line allowlist extension.)
+
+1. **C++ side**: change the `std::strcmp(t->name, "kqv_out-0") == 0` gate in `node_dump_cb` to a 3-name match (`kq-0`, `kq_soft_max-0`, `kqv_out-0`). Same `[CHECKPOINT-FULL …]` emission format.
+2. **TS side**: no change — `__stage431Stats` parser already accepts arbitrary names.
+3. **Diff**: aggregate-stat side-by-side. If `kq-0` carries a >1e-3 `abs_max` delta, the cascade originates at Q×K^T and `kqv_out-0` is faithfully amplifying upstream corruption. If only `kqv_out-0` diverges, the bug is in V × softmax (the later mat-mul on the chain) and Probe 19 narrows it further.
 
 #### Files to read first
 
-- [`STAGE-4.30-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.30-RESULT.md) — P-17-clean classification + suspect-2 closure + Stage 4.31 brief expansion + Probe 18b (Shape B) queued for the clean branch.
-- [`STAGE-4.27-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-RESULT.md) — Stage 4.17 cascade re-capture (`attn_out-0` Δ=4.77e-3 first-divergent op); reference for Stage 4.31's full-tensor scope expansion.
-- [`STAGE-4.17-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.17-RESULT.md) — original 96-checkpoint cascade build-up that named `kqv_out-0` as a candidate first8-blind site.
-- `src/wasm/webgpu-bridge.cpp:node_dump_cb` (current callback site for tensor stats).
-- `~/Repos/llama.cpp/ggml/src/ggml-webgpu/ggml-jsep.cpp:compute_op` (Shape B target if Shape A is clean).
+- [`STAGE-4.31-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.31-RESULT.md) — P-18-first8-blind classification + JSEP / ref aggregate-stat side-by-side + Stage 4.32 brief expansion + Probe 19b queued for the upstream-cascade branch.
+- [`STAGE-4.27-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.27-RESULT.md) — smoking-gun cascade table; Stage 4.31 has just demoted row 12 (`attn_out-0` Δ=4.77e-3) from "first divergence" to "first divergence projected through first8".
+- `src/wasm/webgpu-bridge.cpp:node_dump_cb` — current callback site. Stage 4.32 either extends the kqv-only probe to per-row dumps, or extends the name allowlist to add `kq-0` / `kq_soft_max-0`.
+- `~/Repos/llama.cpp/ggml/src/ggml-jsep/ggml-jsep.cpp:compute_op` — JSEP backend's MUL_MAT dispatch site. Reach for this if Stage 4.32 narrows divergence to the V × softmax mat-mul specifically.
+- `src/inference/jsep/ops/matmul.ts` — WGSL kqv MUL_MAT pipeline selection. Reach for this if Stage 4.32 narrows divergence to a tile-bounds / subgroup-coverage bug.
 
 #### Risk register
 
-1. **`kqv_out-0` may not have first8-blindness — full-tensor scope might also be clean.** That's the negative-result branch (Outcome P-18-full-clean). Stage 4.31b (Shape B) is the queued follow-on for that case; brief is in [`STAGE-4.30-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.30-RESULT.md) under "Probe 18b implementation sketch".
-2. **`__stage417Checkpoints` may not cache `kqv_out-0`.** Stage 4.27's checkpoint dictionary is keyed by node name; if `kqv_out-0` isn't in the cb_eval allowlist, Stage 4.31 must extend it (cheap; one string in `node_dump_cb`).
-3. **Reference path divergence drift.** Stages 4.17 / 4.27 used a non-JSEP reference build to compute the truth values. Patch stack growth from 13 → 14 (Stage 4.29 added the CPU-side hook, no kernel change) does NOT affect the reference path, so delta values from Stage 4.27 should still be load-bearing for Stage 4.31. Sanity-check by re-running Stage 4.27's first-divergent-op cascade and confirming `attn_out-0` still reads Δ=4.77e-3 before trusting the Stage 4.31 deltas.
-4. **The 5.24e-4 at Qcur-0 may be coming from rotary embedding inputs we haven't probed.** Q-projection's downstream path includes RoPE before reaching `kqv_out-0`. If `kqv_out-0` is full-clean and `attn_norm-0` (Q-proj's src1) is clean, the next candidate is RoPE position embeddings (`inp_pos`). Stage 4.31c (Shape C) would extend the input-bytes-as-read probe to RoPE inputs.
+1. **`kqv_out-0` element-wise capture is heavy.** 12288 × 4 B = 48 KiB prefill + 5 × 8 KiB = 40 KiB decode = 88 KiB / run. Fits in `globalThis` but `agentchrome js exec` JSON serialisation may slow above ~1 MiB. Mitigation: per-row stderr dump (6 + 5 = 11 lines / run) + offline Python parse. Already-cheap; preferred default.
+2. **Decode-step alignment between JSEP and ref runs.** The two runs generate different tokens at step 0 (JSEP → 297, ref → 3681). Decode steps 1+ feed different inputs to each model and aren't directly comparable. Stage 4.32 must focus on **idx 11 (prefill)** — the only forward pass where both runs receive the same input. Decode-step divergences are *consequence*, not cause; treat them as out-of-scope.
+3. **Reference path drift across patch-stack growth.** Patch-stack 13 → 14 (Stage 4.29 CPU-side hook) does not affect the reference build's correctness. The non-JSEP `webllm-wasm.{js,wasm}` is the authoritative truth source. Sanity-check by re-running Stage 4.27's first-divergent-op cascade on the current build before trusting Stage 4.32 deltas.
+4. **`abs_min = 0.0` could be a false positive in aggregate.** With f32 outputs and 12288 elements, the chance of one accidental exact 0.0 is non-zero. Stage 4.32's element-wise capture must include a per-pass *zero count + zero-index list* to distinguish "one accidental zero" from "a contiguous block of zeros". Only the latter implicates the kernel.
 
-#### Exit criteria — Stage 4.31 closes when documented in `STAGE-4.31-RESULT.md`
+#### Exit criteria — Stage 4.32 closes when documented in `STAGE-4.32-RESULT.md`
 
-- `kqv_out-0` full-tensor stats captured for both JSEP and reference paths; verdict on whether first8-blindness was hiding a real divergence.
+- Element-wise `kqv_out-0` (prefill, idx=11) deltas computed for both runs.
+- First-divergent-index identified.
+- Structural pattern classified (contiguous zero range, striped, scattered, upstream-cascade).
 - One of:
-  - **P-18-first8-blind**: full-tensor delta exceeds 1e-3 while first8 was clean. Suspect 3 CONFIRMED. Stage 4.32 traces the kernel-output divergence at the disagreement window.
-  - **P-18-full-clean**: full-tensor delta within noise (≤1e-5). Suspect 3 dies. Run Probe 18b (Shape B). Stage 4.32 picks based on Shape B's outcome.
-  - **P-18-full-dirty**: full-tensor delta also large but spread across the tensor (not localized). Re-frame as kernel-arithmetic disagreement at scale; rerun Stage 4.26's libllama-vs-WGSL precision probe at `kqv_out-0` inputs.
-- Stage 4.32 paste-and-go brief queued for the chosen branch.
+  - **P-19-row-bounded**: divergence aligns to row boundaries (every 2048-th index OR every 6-th index) → kqv MUL_MAT tile-bounds bug. Stage 4.33 instruments the JSEP MUL_MAT dispatch coverage.
+  - **P-19-block-bounded**: divergence aligns to a smaller block (16 / 32 / 64) → WGSL workgroup / subgroup coverage bug. Stage 4.33 inspects `src/inference/jsep/ops/matmul.ts` pipeline selection.
+  - **P-19-upstream-cascade**: the divergence pattern matches what V × softmax(Q×K^T) would produce if `kq-0` or `kq_soft_max-0` were corrupt, not from a kqv kernel bug. Stage 4.33 = Probe 19b (full-tensor probe up the attention sub-graph).
+- Stage 4.33 paste-and-go brief queued for the chosen branch.
 
-#### Branch on Probe 18 outcome
+#### Branch on Probe 19 outcome
 
-- **P-18-first8-blind** (suspect 3 hot): Stage 4.32 captures the full-tensor diff at idx-by-idx scale to localize where the kernel-output disagreement starts; re-uses Stage 4.27's first-divergent-op walk on a sliding window.
-- **P-18-full-clean** (suspect 3 dies): Stage 4.32 = Probe 18b (Shape B) — hash `attn_norm-0` output bytes the JSEP MUL_MAT reads at Qcur execution time.
-- **P-18-full-dirty** (kernel arithmetic at scale): Stage 4.32 re-runs Stage 4.26's WGSL-vs-libllama matmul precision probe but at `kqv_out-0` inputs (post-RoPE Q × K^T) instead of Q-projection (Q4_K × f32).
+- **P-19-row-bounded** (suspect: kqv MUL_MAT tile-bounds bug): Stage 4.33 captures the WGSL dispatch + grid + bind-group layout for the `kqv_out-0` MUL_MAT specifically.
+- **P-19-block-bounded** (suspect: WGSL workgroup coverage): Stage 4.33 inspects `src/inference/jsep/ops/matmul.ts` pipeline selection logic for the V × softmax shape.
+- **P-19-upstream-cascade** (suspect: Q × K^T or softmax): Stage 4.33 = Probe 19b, extending the full-tensor probe up the attention sub-graph.
+
+### Earlier Stage 4.31 brief — collapsed (full text in closure report)
+
+Full step-by-step Stage 4.31 brief (paste-and-go bootstrap, Probe 18 Shape A implementation sketch with `kqv_out-0` full-tensor stats inside `node_dump_cb` + spike & ref-probe parse blocks, four-item risk register, three-outcome P-18-{first8-blind, full-clean, full-dirty} branch table, Probe 18b Shape B sketch on the clean branch) lives in [`STAGE-4.31-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-4.31-RESULT.md). Outcome **P-18-first8-blind** CONFIRMED: JSEP prefill `kqv_out-0` `abs_max=0.04959` vs ref `0.11706` (Δ=0.067, far above 1e-3 threshold); decode steps Δ=0.05-0.66 on `abs_max`; JSEP `abs_min=0.0` on every pass vs ref `~4e-7` (signalling contiguous JSEP zero outputs). The first8 window the existing `node_dump_cb` was reading was `V[pos=0]` weighted by the position-0 softmax row that the causal mask pins to `[1, 0, 0, …]` — coincidentally bit-identical across runs while positions 1+ carry the cascade. Stage 4.27's row-12 `attn_out-0` Δ=4.77e-3 is now demoted from "first divergent op" to "first divergence projected through first8 — the actual first divergence is at row 11 outside first8". Stage 4.32 queues Probe 19 (element-wise `kqv_out-0` capture for idx 11; classify as row-bounded / block-bounded / upstream-cascade) and Probe 19b (Shape B: full-tensor probe extended to `kq-0` + `kq_soft_max-0`). Collapsed at Stage 4.32 queue time to keep the active surface focused.
 
 ### Earlier Stage 4.30 brief — collapsed (full text in closure report)
 
