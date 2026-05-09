@@ -5688,3 +5688,125 @@ Full step-by-step Stage 4.1 brief (Step 0 baseline verification, Step 1 aliasing
 ### Earlier Stage 3 brief — collapsed (full text in closure report)
 
 Full rationale, phasing, file list, and Q4_K kernel design notes for the original Stage 3 brief live in [`STAGE-3-RESULT.md`](eval/reports/p2-v2-option-a-prime-2026-05-06/STAGE-3-RESULT.md). The brief was inlined here through Stage 3 execution; collapsed at Stage 3.5 queue time to keep the active surface focused. The kernel landed in `4731dc1` and is verified correct in isolation.
+
+---
+
+## qwen3-0.6b-thinking-cold semantic-reasoning wedge investigation (closed 2026-05-08)
+
+The full pre-closure brief lived in `TODO.md` 2026-05-08 → 2026-05-08
+under "Fresh-session pickup — qwen3-0.6b-thinking-cold semantic-
+reasoning wedge". The closure inline-stub in `TODO.md` references
+[`eval/reports/qwen3-0.6b-thinking-cold-wedge-2026-05-08/SUMMARY.md`](eval/reports/qwen3-0.6b-thinking-cold-wedge-2026-05-08/SUMMARY.md)
+which carries the full diagnosis, evidence ledger, and re-evaluation
+triggers. This archive entry retains the original brief's hypothesis
+surface and procedure steps for historical context.
+
+**Original goal:** identify the root cause of the WASM `unreachable`
+trap that fires partway through `emb-001` (the first semantic-
+reasoning task) when running the full 4-dimension qwen3-0.6b-thinking-
+cold accuracy bench. Once root cause is in hand, decide between (a) a
+targeted code fix, (b) a per-dimension engine reset boundary, or (c)
+marking the wedge a known-stable-but-degraded behavior under the
+harness's new abort guard.
+
+**Original context (what shipped before the investigation):**
+Reproduced **twice** in 24 hours on the live DB (commits `09a744b` +
+`05094bd` deleted both contaminated rows). Pattern was bit-stable: the
+first 3 dimensions (tool-calling / reasoning / instruction-following =
+36 tasks) complete healthy, then emb-001 traps at ~531 ms, and every
+subsequent task throws `unreachable` synchronously in 2-3 ms.
+
+The harness side was defended (commit `f3cbca9`,
+`src/evaluation/runner.ts`): `runTasks` aborts after 3 consecutive
+errors with `EngineDeadError`, posts `eval_failed`, no `eval_complete`
+fires, no row written to `evals`. So future wedges no longer pollute
+the dashboard — but the underlying trap still aborts the run, and
+the actual cause was unknown at queue time.
+
+**Hypothesis surface (queued 2026-05-08):**
+
+1. **Cumulative state across tasks** — most likely. After 36
+   `engine.resetConversation()` + `character.chat()` cycles in the
+   same engine instance, something accumulates (asyncify stack
+   reservation, WASM heap fragmentation, scratch-buffer slot
+   allocation pattern) and the 37th call exceeds a threshold.
+   `resetConversation` flushes KV but is not a full re-init.
+2. **Temperature 0.1 + thinking deterministic loop** — thinking-warm
+   (temp 0.6) and thinking-hot (temp 0.9) on the same model + same
+   dimension sequence completed cleanly twice. Only thinking-cold
+   (temp 0.1) wedges. At low temperature with thinking ON, Qwen3
+   produces highly deterministic, often very long `<think>` blocks;
+   `rs-012` in the wedged run already shows the pattern (`8107 ms ·
+   empty output` → burned `max_tokens=1024` inside thinking without
+   producing `</think>`). Cumulative heap / scratch effect from such
+   long generations may amplify Hypothesis 1.
+3. **emb-001-specific input shape tickling a tokenizer / sampler
+   edge case** — least likely (the input is a 16-word sentence),
+   but cheap to verify.
+
+**Implementation steps (queued):**
+
+1. Capture browser console around the trap.
+2. Probe A — task-count bisection (run emb-001 alone).
+3. If H1: Probe B — boundary insertion (per-dimension reset).
+4. If H2: Probe C — temperature crossover.
+5. Compare against canonical baseline (Stage 4.36 testable subset).
+6. Document in
+   `eval/reports/qwen3-0.6b-thinking-cold-wedge-<DATE>/SUMMARY.md`.
+
+**Risk register (queued):**
+
+1. Wedge stops reproducing on a fresh session — possible if it
+   depends on Chrome's WebGPU / Dawn cache state.
+2. The trap is in upstream `ggml-webgpu` and not patchable here.
+3. Probes interact with Phase 3 JSEP work — `f3cbca9` shipped on the
+   legacy non-JSEP path; the wedge reproduces on `webllm-wasm.js`,
+   not `webllm-wasm-jsep.js`.
+4. Cumulative wedge masks an honest bug surface — if H3 is the right
+   answer, fixing the harness wedge guard would silence a real
+   signal.
+
+**Branch on outcome (queued):**
+
+- Wedge reproduces, root cause is cumulative state, per-dimension
+  reset fixes it → ship the boundary as a structural fix.
+- Wedge reproduces, root cause is upstream WASM trap not patchable
+  here → ship workaround.
+- Wedge does NOT reproduce on fresh sessions (3 attempts) → document
+  as transient.
+
+**Actual disposition (closed 2026-05-08):** middle branch, with a
+twist. Wedge **does** reproduce (~30% session, ~20% lifetime
+estimated; n=3 reproductions before the investigation, +1 during the
+investigation = 4 total). Probe A passed (emb-001 alone, post-
+warmup, no crash) → cumulative-state confirmed, input-specificity
+ruled out. Root cause attributed upstream to Dawn/Chrome WebGPU
+process pressure (the "external Instance reference no longer
+exists" message originates in Chrome's wire-client when the GPU-
+process peer recycles a long-running tab's device); our `wgpu::Instance`
+shared_ptr never re-assigns and our patch stack does not touch
+Instance lifetime. The cumulative state we control via
+`engine.resetConversation` (KV cache clear) is already exhausted
+per task. A real fix would require WebGPU device recreation between
+runs — major engine refactor with uncertain efficacy validation
+cost (`n=30+` trials per fix-validation pass at ~75 s each =
+~37 minutes wall per validation pass).
+
+**No structural code change shipped.** The abort guard `f3cbca9`
+fully prevents data pollution: verified during this investigation
+that Run #2 wedged at task 35-38, the guard fired
+`EngineDeadError` after 3 consecutive task errors, no
+`eval_complete` was published, no row was written to `evals`. Bench
+summary surfaces `[FAIL]` cleanly with the diagnosis message.
+
+**Re-evaluation triggers** (full list in SUMMARY.md):
+
+1. Wedge frequency on `qwen3-0.6b-thinking-cold` exceeds 50% over
+   any 10-trial window.
+2. Wedge starts firing on a second model.
+3. Upstream `ggml-webgpu` lands a change touching device-lifecycle
+   code.
+4. Chrome / Dawn ships a fix for the "external Instance reference"
+   message under sustained WebGPU load.
+5. Consumer reports wedges hitting agent + Three.js coexistence in
+   a real product workload.
