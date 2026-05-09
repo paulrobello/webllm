@@ -1,5 +1,12 @@
 # JSEP + MEMORY64 Build Target Implementation Plan
 
+> **SUPERSEDED 2026-05-08 — negative-result closure.** Phase A Task A2
+> hit two architectural blockers; the spec was reframed as a §31-style
+> cap probe with a negative result. See
+> [`../../../eval/reports/jsep-mem64-2026-05-08/SUMMARY.md`](../../../eval/reports/jsep-mem64-2026-05-08/SUMMARY.md)
+> for the closure. This plan is retained as the historical record; do not
+> execute its tasks without first solving the documented blockers.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a `wasm-build-jsep-mem64` target that combines the JSEP backend (`WEBLLM_BACKEND=jsep`) and MEMORY64 heap cap (`-sMEMORY64=1`, `-sMAXIMUM_MEMORY=16GB`) so the deferred 7B+ canonical-6 subset (mistral-7b-q4ks, llama-3.1-8b-iq3m, qwen3-8b-iq3m) can run through Stage 4.36's parity gate against `webllm-wasm-mem64.js` as the non-JSEP reference.

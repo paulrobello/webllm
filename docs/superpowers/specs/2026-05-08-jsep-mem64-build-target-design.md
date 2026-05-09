@@ -1,5 +1,15 @@
 # JSEP + MEMORY64 build target — design
 
+> **SUPERSEDED 2026-05-08 — negative-result closure.** Implementation attempt
+> hit two architectural blockers (static_assert at `ggml-jsep.cpp:830`
+> guarding JSEP against MEMORY64; `host_mirror` weight duplication
+> inside the wasm heap regardless of cap). See
+> [`../../../eval/reports/jsep-mem64-2026-05-08/SUMMARY.md`](../../../eval/reports/jsep-mem64-2026-05-08/SUMMARY.md)
+> for the full blocker catalogue and re-evaluation triggers. Stage 4.36's
+> deferred-subset closure under "path 3 — mathematical interpolation
+> acceptance" remains the operative stance. This document is retained as
+> the historical record of the attempt.
+
 Status: proposed, 2026-05-08
 Scope: TODO.md "Stage 4.36 closed — Phase 3 closed for testable subset
 (2026-05-08)" → re-enablement path 1 from
