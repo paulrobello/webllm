@@ -168,10 +168,21 @@ if(EMSCRIPTEN)
     # into a regex against the wasm-side export keys (e.g. "webgpu_init"),
     # not the Module-side aliases (e.g. "_webgpu_init"). Mismatch ⇒
     # silent no-op ⇒ "trying to suspend without WebAssembly.promising".
+    # NOTE 2026-05-09: backend_alloc_ctx_tensors removed from JSPI_EXPORTS.
+    # The TS binding `backendAllocCtxTensors` consumes the return value
+    # synchronously (Number(result) on wasm64 / result>>>0 on wasm32).
+    # Under JSPI promising-wrapping the call returned Promise<bigint>;
+    # `Number(Promise)` = NaN, then `BigInt(NaN)` in the matching
+    # backend_buffer_free path threw RangeError on wasm64 (silently
+    # coerced to 0 on wasm32, leaking the buffer pointer). Empirically
+    # this function does not suspend (wasm32 small-model bench ran
+    # 30+ tasks without firing "trying to suspend without
+    # WebAssembly.promising"), so removing it from the promising-wrap
+    # is safe and avoids an async/await ripple through ~30 call sites.
     string(CONCAT JSPI_EXPORTS
         "webgpu_init,"
         "ctx_create,ctx_free,"
-        "backend_alloc_ctx_tensors,backend_buffer_free,"
+        "backend_buffer_free,"
         "backend_tensor_set,backend_tensor_set3,backend_tensor_get,"
         "backend_tensor_get_async_begin,backend_tensor_get_async_poll,"
         "backend_tensor_get_async_finish,backend_tensor_get_async_cancel,"
@@ -201,6 +212,7 @@ if(EMSCRIPTEN)
         )
         target_link_options(webllm-wasm-mem64 PRIVATE
             "-sEXPORTED_FUNCTIONS=${EXPORTED_FUNCTIONS}"
+            "-sJSPI_EXPORTS=${JSPI_EXPORTS}"
             "-sEXPORTED_RUNTIME_METHODS=['stackAlloc','stackSave','stackRestore','stringToUTF8','lengthBytesUTF8','HEAPU8','HEAPF32','cwrap','Asyncify']"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
