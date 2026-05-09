@@ -86,7 +86,7 @@ export type {
 	RunTaskOptions,
 	RunTasksOptions,
 } from "./evaluation/runner.js";
-export { runTask, runTasks } from "./evaluation/runner.js";
+export { EngineDeadError, runTask, runTasks } from "./evaluation/runner.js";
 export { score } from "./evaluation/scorer.js";
 export type {
 	SystemProfile,

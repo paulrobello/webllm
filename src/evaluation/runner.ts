@@ -202,9 +202,27 @@ export interface RunTasksOptions extends RunTaskOptions {
 }
 
 /**
+ * Once the WASM module hits an `unreachable` trap or any other unrecoverable
+ * error, every subsequent `engine.resetConversation()` / `character.chat()`
+ * throws synchronously in 2-3 ms. Without an abort threshold, `runTasks`
+ * would faithfully record N zero-score rows and the dashboard would show
+ * `0/N · 0% · ~3ms` — false data that pollutes Δ comparisons. Three
+ * consecutive errors is well above any realistic transient (a single
+ * timeout in mid-task is plausible; three in a row means the engine is
+ * dead) and well below most dimensions' task counts.
+ */
+const RUNTASKS_ENGINE_DEAD_THRESHOLD = 3;
+
+/**
  * Run a batch of tasks sequentially. Sequential (not parallel) because a
  * single Character holds shared KV-cache state per model; running two at
  * once would corrupt it.
+ *
+ * If `RUNTASKS_ENGINE_DEAD_THRESHOLD` consecutive tasks return `error`,
+ * the loop aborts with `EngineDeadError` instead of marching through the
+ * remaining tasks and recording false zeros. The successful results
+ * captured before the wedge are attached to the error so callers can
+ * still surface the partial run.
  */
 export async function runTasks(
 	engine: ChatEngine,
@@ -213,11 +231,47 @@ export async function runTasks(
 	options: RunTasksOptions = {},
 ): Promise<EvalResult[]> {
 	const results: EvalResult[] = [];
+	let consecutiveErrors = 0;
+	let lastError: string | undefined;
 	for (const task of tasks) {
 		options.onTaskStart?.(task);
 		const result = await runTask(engine, modelId, task, options);
 		results.push(result);
 		await options.onTaskComplete?.(result);
+		if (result.error) {
+			consecutiveErrors++;
+			lastError = result.error;
+			if (consecutiveErrors >= RUNTASKS_ENGINE_DEAD_THRESHOLD) {
+				const err = new EngineDeadError(
+					`runTasks aborting after ${consecutiveErrors} consecutive task errors ` +
+						`(last: "${lastError}"). Engine is unrecoverable; ` +
+						`${tasks.length - results.length} remaining tasks would record false zeros. ` +
+						`Completed ${results.length - consecutiveErrors}/${tasks.length} tasks before the wedge.`,
+				);
+				err.partialResults = results;
+				err.lastTaskError = lastError;
+				throw err;
+			}
+		} else {
+			consecutiveErrors = 0;
+		}
 	}
 	return results;
+}
+
+/**
+ * Thrown by `runTasks` when consecutive per-task errors signal the engine
+ * has entered an unrecoverable state. The `partialResults` field carries
+ * the results captured before the wedge (including the N consecutive
+ * errors that triggered the abort), so callers can record the partial
+ * run, log diagnostics, or persist the trap context for follow-up
+ * investigation.
+ */
+export class EngineDeadError extends Error {
+	partialResults: EvalResult[] = [];
+	lastTaskError?: string;
+	constructor(message: string) {
+		super(message);
+		this.name = "EngineDeadError";
+	}
 }
