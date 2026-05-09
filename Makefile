@@ -335,7 +335,14 @@ bench-full: smoke-restart ## Speed + accuracy for every configured profile, stre
 	@curl -sf http://localhost:$(DASHBOARD_PORT)/health >/dev/null 2>&1 || \
 		(echo "ERROR: dashboard not reachable on port $(DASHBOARD_PORT). Run 'make dashboard-serve' in another terminal first."; exit 1)
 	@WEBLLM_LIVE_BENCH_URL=http://localhost:$(DASHBOARD_PORT) \
-		bun run eval/bench.ts --profiles full --fail-fast
+		bun run eval/bench.ts --profiles full
+# bench-full intentionally omits --fail-fast: a single transient sub-task
+# failure (e.g. socket close on POST /tasks, chat-smoke output timeout on a
+# high-temperature thinking profile) used to abort the entire matrix.
+# bench.ts tracks per-sub-task pass/fail in `results[]` and exits non-zero
+# at the end if any sub-task failed, so CI still flags the run.
+# `--fail-fast` is still available for hand-driven debugging — pass it
+# explicitly via `bun run eval/bench.ts --profiles full --fail-fast`.
 
 .PHONY: bench-prefill-tiling
 bench-prefill-tiling: ## Run the §22 prefill-tile measurement matrix into eval/reports/prefill-tiling-2026-04-27/

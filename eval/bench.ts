@@ -6,7 +6,7 @@
  * Speed (real WebGPU) → eval/chat-smoke.ts → run_* events
  * Accuracy (offline via Character) → eval/cli.ts → eval_* events
  */
-import { execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import {
 	LIVE_BENCH_URL_ENV,
@@ -162,7 +162,12 @@ async function main(): Promise<void> {
 		);
 	}
 
-	const results: Array<{ label: string; ok: boolean; phase: string }> = [];
+	const results: Array<{
+		label: string;
+		ok: boolean;
+		phase: string;
+		reason?: string;
+	}> = [];
 	const doSpeed = !values["skip-speed"];
 	const doAccuracy = !values["skip-accuracy"];
 	const failFast = values["fail-fast"] ?? false;
@@ -187,8 +192,8 @@ async function main(): Promise<void> {
 				entry.profile.name,
 			];
 			if (values.worker) speedArgs.push("--worker");
-			const ok = runChild(speedArgs, childEnv);
-			results.push({ label, ok, phase: "speed" });
+			const { ok, reason } = await runChild(speedArgs, childEnv);
+			results.push({ label, ok, phase: "speed", reason });
 			if (!ok && failFast) break;
 		} else if (doSpeed && isEmbedding) {
 			console.log(`\n--- speed: skipped (embedding profile) ---`);
@@ -218,8 +223,8 @@ async function main(): Promise<void> {
 						entry.benchId,
 					];
 			if (values.dimension) accArgs.push("--dimension", values.dimension);
-			const ok = runChild(accArgs, childEnv);
-			results.push({ label, ok, phase: "accuracy" });
+			const { ok, reason } = await runChild(accArgs, childEnv);
+			results.push({ label, ok, phase: "accuracy", reason });
 			if (!ok && failFast) break;
 		}
 	}
@@ -230,7 +235,8 @@ async function main(): Promise<void> {
 	console.log(`Passed:  ${results.length - failed}`);
 	console.log(`Failed:  ${failed}`);
 	for (const r of results) {
-		console.log(`  [${r.ok ? "PASS" : "FAIL"}] ${r.label} · ${r.phase}`);
+		const tag = `[${r.ok ? "PASS" : "FAIL"}] ${r.label} · ${r.phase}`;
+		console.log(r.ok || !r.reason ? `  ${tag}` : `  ${tag} — ${r.reason}`);
 	}
 
 	if (liveUrl) {
@@ -256,13 +262,76 @@ async function main(): Promise<void> {
 	if (failed > 0) process.exit(1);
 }
 
-function runChild(args: string[], env: NodeJS.ProcessEnv): boolean {
-	try {
-		execFileSync("bun", args, { stdio: "inherit", env });
-		return true;
-	} catch {
-		return false;
-	}
+// Run a bench sub-task as a child Bun process. stdout/stderr are mirrored
+// live to this process (so the user sees progress in real time), and we
+// also keep the last few lines of each stream so the bench summary can
+// surface a one-line failure reason without forcing the user to scroll
+// back through the matrix output.
+function runChild(
+	args: string[],
+	env: NodeJS.ProcessEnv,
+): Promise<{ ok: boolean; reason?: string }> {
+	const TAIL_LINES = 8;
+	const tail = { out: [] as string[], err: [] as string[] };
+
+	return new Promise((resolve) => {
+		const child = spawn("bun", args, {
+			env,
+			stdio: ["inherit", "pipe", "pipe"],
+		});
+		const wire = (
+			src: NodeJS.ReadableStream,
+			dst: NodeJS.WriteStream,
+			bucket: string[],
+		) => {
+			let leftover = "";
+			src.on("data", (chunk: Buffer | string) => {
+				const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+				dst.write(text);
+				const combined = leftover + text;
+				const parts = combined.split("\n");
+				leftover = parts.pop() ?? "";
+				for (const line of parts) {
+					if (!line.trim()) continue;
+					bucket.push(line);
+					if (bucket.length > TAIL_LINES) bucket.shift();
+				}
+			});
+			src.on("end", () => {
+				if (leftover.trim()) {
+					bucket.push(leftover);
+					if (bucket.length > TAIL_LINES) bucket.shift();
+				}
+			});
+		};
+		if (child.stdout) wire(child.stdout, process.stdout, tail.out);
+		if (child.stderr) wire(child.stderr, process.stderr, tail.err);
+		child.on("error", (err) => {
+			resolve({ ok: false, reason: err.message });
+		});
+		child.on("close", (code, signal) => {
+			if (code === 0 && !signal) {
+				resolve({ ok: true });
+				return;
+			}
+			// Build a one-line reason. Prefer a "Fatal:" / "Error:" line from
+			// stderr; fall back to the last non-empty stderr line; fall back
+			// to the last stdout line.
+			const lines = [...tail.err, ...tail.out];
+			const fatal = lines.find((l) =>
+				/^(fatal|error)[: ]/i.test(l.trim()),
+			);
+			let reason = (fatal ?? lines[lines.length - 1] ?? "").trim();
+			if (signal) {
+				reason = `killed by signal ${signal}${reason ? ` — ${reason}` : ""}`;
+			}
+			if (reason.length > 200) reason = `${reason.slice(0, 197)}…`;
+			resolve({
+				ok: false,
+				reason: reason || `exited with code ${code ?? "?"}`,
+			});
+		});
+	});
 }
 
 function printUsage(): void {
