@@ -1098,6 +1098,22 @@ section. Path 3 (acceptance) is sufficient for Phase 3 closure;
 paths 1/2 stay deferred unless a separate signal motivates 7B+
 JSEP testing.
 
+**Re-enablement attempt 2026-05-08 — §31-style cap probe, negative
+result.** Spec + plan in `docs/superpowers/{specs,plans}/2026-05-08-
+jsep-mem64-build-target*.md` (SUPERSEDED). Phase A Task A1 (CMakeLists.txt
+refactor) shipped cleanly and was reverted; Task A2 hit
+`static_assert(sizeof(void *) == 4, ...)` at `ggml-jsep.cpp:830` — a
+deliberate JSEP wasm32-only guard against pointer truncation in
+`EM_ASM_INT` calls. Deeper analysis surfaced a second blocker:
+`host_mirror` (`ggml-jsep.cpp:251`) duplicates every weight inside
+the wasm heap regardless of cap, so the streaming-loader path also
+covers 0 of 3 deferred models. Both lifts (mem64 build flag +
+streaming-loader) are blocked at architectural layers we deliberately
+built into JSEP during Phases 0-3. Closure report:
+[`eval/reports/jsep-mem64-2026-05-08/SUMMARY.md`](eval/reports/jsep-mem64-2026-05-08/SUMMARY.md).
+Path 3 (mathematical interpolation acceptance) remains the operative
+closure; paths 1/2 stay deferred behind the documented blockers.
+
 Per-stage stubs (Stage 3 + Stage 4.1 → 4.36) archived to
 [`TODO_ARCHIVE.md`](TODO_ARCHIVE.md) — see *Phase 3 JSEP causal-LM
 decode investigation* section. Per-stage closure reports stay under
