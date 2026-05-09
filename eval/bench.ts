@@ -6,7 +6,7 @@
  * Speed (real WebGPU) → eval/chat-smoke.ts → run_* events
  * Accuracy (offline via Character) → eval/cli.ts → eval_* events
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import {
 	LIVE_BENCH_URL_ENV,
@@ -67,6 +67,7 @@ async function main(): Promise<void> {
 			"fail-fast": { type: "boolean" },
 			worker: { type: "boolean" },
 			"eval-temperature": { type: "string" },
+			"no-retry-on-wedge": { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 		},
 		strict: true,
@@ -167,10 +168,12 @@ async function main(): Promise<void> {
 		ok: boolean;
 		phase: string;
 		reason?: string;
+		retried?: boolean;
 	}> = [];
 	const doSpeed = !values["skip-speed"];
 	const doAccuracy = !values["skip-accuracy"];
 	const failFast = values["fail-fast"] ?? false;
+	const retryOnWedge = !(values["no-retry-on-wedge"] ?? false);
 
 	for (const entry of cases) {
 		const label = entry.profile.name;
@@ -192,8 +195,13 @@ async function main(): Promise<void> {
 				entry.profile.name,
 			];
 			if (values.worker) speedArgs.push("--worker");
-			const { ok, reason } = await runChild(speedArgs, childEnv);
-			results.push({ label, ok, phase: "speed", reason });
+			const { ok, reason, retried } = await runChildWithWedgeRetry(
+				speedArgs,
+				childEnv,
+				`${label} · speed`,
+				retryOnWedge,
+			);
+			results.push({ label, ok, phase: "speed", reason, retried });
 			if (!ok && failFast) break;
 		} else if (doSpeed && isEmbedding) {
 			console.log(`\n--- speed: skipped (embedding profile) ---`);
@@ -223,8 +231,13 @@ async function main(): Promise<void> {
 						entry.benchId,
 					];
 			if (values.dimension) accArgs.push("--dimension", values.dimension);
-			const { ok, reason } = await runChild(accArgs, childEnv);
-			results.push({ label, ok, phase: "accuracy", reason });
+			const { ok, reason, retried } = await runChildWithWedgeRetry(
+				accArgs,
+				childEnv,
+				`${label} · accuracy`,
+				retryOnWedge,
+			);
+			results.push({ label, ok, phase: "accuracy", reason, retried });
 			if (!ok && failFast) break;
 		}
 	}
@@ -235,7 +248,9 @@ async function main(): Promise<void> {
 	console.log(`Passed:  ${results.length - failed}`);
 	console.log(`Failed:  ${failed}`);
 	for (const r of results) {
-		const tag = `[${r.ok ? "PASS" : "FAIL"}] ${r.label} · ${r.phase}`;
+		const tag = `[${r.ok ? "PASS" : "FAIL"}] ${r.label} · ${r.phase}${
+			r.retried ? " (retried after wedge)" : ""
+		}`;
 		console.log(r.ok || !r.reason ? `  ${tag}` : `  ${tag} — ${r.reason}`);
 	}
 
@@ -334,6 +349,63 @@ function runChild(
 	});
 }
 
+// Patterns that indicate the browser/WASM engine is wedged and a fresh
+// Chrome session should clear it. Pattern A (Chrome/Dawn WebGPU device
+// loss under cumulative GPU pressure) is the documented upstream cause —
+// see commit a09be3a closure. The abort guard f3cbca9 surfaces it as
+// EngineDeadError; speed-pass timeouts and accuracy "no signal" stalls
+// are the same root cause manifesting at different stages.
+const WEDGE_REASON_PATTERNS: readonly RegExp[] = [
+	/EngineDeadError/i,
+	/consecutive task errors/i,
+	/no signal from page/i,
+	/Timed out waiting for smoke-test result line/i,
+	/browser bench stalled/i,
+	/Smoke chat regression produced empty/i,
+];
+
+function isWedgeReason(reason: string | undefined): boolean {
+	if (!reason) return false;
+	return WEDGE_REASON_PATTERNS.some((p) => p.test(reason));
+}
+
+// Kill the agentchrome session so the next child's resolveAgentchromeSession
+// launches a fresh Chrome process — clears accumulated GPU-process pressure
+// and any wedged WebGPU device. Best-effort; the next child's launch path
+// auto-handles a missing session anyway.
+function restartChromeSession(): void {
+	try {
+		execFileSync("agentchrome", ["connect", "--disconnect"], {
+			stdio: ["ignore", "ignore", "ignore"],
+			timeout: 10_000,
+		});
+	} catch {
+		// Already-disconnected or agentchrome missing — next child handles it.
+	}
+}
+
+async function runChildWithWedgeRetry(
+	args: string[],
+	env: NodeJS.ProcessEnv,
+	label: string,
+	retryEnabled: boolean,
+): Promise<{ ok: boolean; reason?: string; retried?: boolean }> {
+	const first = await runChild(args, env);
+	if (first.ok) return first;
+	if (!retryEnabled || !isWedgeReason(first.reason)) return first;
+
+	console.log(
+		`\n[bench] ${label} wedged (reason: ${first.reason}) — restarting Chrome and retrying once`,
+	);
+	restartChromeSession();
+	// Brief pause for the OS to reap the Chrome process before the next
+	// child probes the CDP port.
+	await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+
+	const retry = await runChild(args, env);
+	return { ...retry, retried: true };
+}
+
 function printUsage(): void {
 	console.log(`Usage: bun run eval/bench.ts [options]
 
@@ -357,6 +429,12 @@ Options:
                               (often 0.6); current canonical baselines are
                               greedy. Override only when you specifically
                               want temp-stratified scores.
+      --no-retry-on-wedge  Skip the automatic Chrome restart + single retry
+                              when a sub-task fails with a wedge signature
+                              (EngineDeadError, "no signal from page",
+                              speed-pass timeout). Default is to retry once,
+                              which converts most upstream Chrome/Dawn
+                              WebGPU-device-loss wedges into PASSes.
   -h, --help             Show this help
 
 Examples:
