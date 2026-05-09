@@ -202,11 +202,19 @@ export async function runBenchMode({
 }
 
 async function postIngest(baseUrl, kind, body) {
+	// `keepalive: true` lets terminal-state signals (eval_failed, eval_complete)
+	// survive a page navigation that fires before the fetch resolves. Without
+	// it, the bench-full driver moving on to the next profile aborts the
+	// in-flight POST, leaving a stuck "in flight" entry on the dashboard
+	// because the cleanup event never arrived. The cap is small (~64 KB per
+	// browser policy) which fits eval_failed payloads easily; eval_complete
+	// reports are larger but typically still under the cap.
 	try {
 		const res = await fetch(`${baseUrl}/ingest?kind=${kind}`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify(body),
+			keepalive: true,
 		});
 		if (!res.ok) {
 			console.warn(`[bench] ingest ${kind} failed: HTTP ${res.status}`);

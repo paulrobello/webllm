@@ -199,6 +199,28 @@ function handleEvent(ev) {
 				break;
 			case "eval_started":
 				if (typeof evt.seq === "number") lastSeq = Math.max(lastSeq, evt.seq);
+				// Mid-session backstop: if any earlier in-flight eval for the
+				// same (modelId, sessionId) is still showing, treat it as
+				// orphaned and prune. bench.ts iterates profiles sequentially
+				// inside a session, so a fresh eval_started for the same model
+				// means the previous one will never fire eval_complete /
+				// eval_failed (typically because a wedged page failed to
+				// deliver the cleanup signal — keepalive: true mitigates that
+				// at the source, but this guards against any remaining gap).
+				{
+					const incoming = evt.payload;
+					if (incoming.sessionId) {
+						for (const [evalId, live] of state.runningEvalsByEvalId) {
+							if (
+								evalId !== incoming.evalId &&
+								live.sessionId === incoming.sessionId &&
+								live.modelId === incoming.modelId
+							) {
+								state.runningEvalsByEvalId.delete(evalId);
+							}
+						}
+					}
+				}
 				state.runningEvalsByEvalId.set(evt.payload.evalId, {
 					...evt.payload,
 					completedTasks: 0,
@@ -257,7 +279,21 @@ function handleEvent(ev) {
 				// Drop the session from the active map. The dashboard's overall
 				// progress bar represents *active* runs; once a session ends, the
 				// per-model rollup in the existing eval table is the right view.
-				state.benchSessionsBySessionId.delete(evt.payload.sessionId);
+				// Also prune any in-flight evals tagged with this sessionId — a
+				// wedged page may have failed to deliver its eval_failed signal
+				// (page navigation cancelling the in-flight fetch is the usual
+				// cause), so without this backstop the in-flight panel
+				// accumulates stuck entries across the session.
+				{
+					const sid = evt.payload.sessionId;
+					state.benchSessionsBySessionId.delete(sid);
+					for (const [evalId, live] of state.runningEvalsByEvalId) {
+						if (live.sessionId === sid) {
+							state.runningEvalsByEvalId.delete(evalId);
+						}
+					}
+				}
+				renderRunning();
 				renderEvals();
 				break;
 			case "reset":
