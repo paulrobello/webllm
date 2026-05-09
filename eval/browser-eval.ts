@@ -251,9 +251,15 @@ async function run(
 	await ensureSmokeServerReachable();
 	await ensureModelDownloaded(model);
 
-	// Stage the task list with live-server
+	// Stage the task list with live-server. Bun's HTTP keep-alive pool can
+	// re-use a stale connection from an earlier per-model sub-task once the
+	// idle gap (a speed pass that runs through chat-smoke.ts, not this
+	// driver) exceeds the local TCP/keep-alive timeout, surfacing as
+	// "Fatal: The socket connection was closed unexpectedly" on the next
+	// POST. One retry on transport-class errors removes the flake without
+	// masking real server failures (HTTP 4xx/5xx still throw immediately).
 	console.log(`Staging ${tasks.length} tasks at ${liveUrl}/tasks…`);
-	const postRes = await fetch(`${liveUrl}/tasks`, {
+	const postRes = await fetchWithRetry(`${liveUrl}/tasks`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ tasks }),
@@ -385,6 +391,25 @@ function pollBenchStatus(port: string, tab: string): BenchStatus | null {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Wraps fetch() with one retry for transport-class errors (socket closed,
+// connection reset/refused). HTTP-status errors are returned unchanged so
+// the caller's status check still fires. The retry is unconditional on a
+// thrown error because Bun's TypeError surface for network drops varies
+// across versions; matching the message text would be brittle.
+async function fetchWithRetry(
+	url: string,
+	init: RequestInit,
+): Promise<Response> {
+	try {
+		return await fetch(url, init);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.log(`  POST retry: first attempt failed (${msg})`);
+		await sleep(250);
+		return await fetch(url, init);
+	}
 }
 
 function printUsage(): void {
