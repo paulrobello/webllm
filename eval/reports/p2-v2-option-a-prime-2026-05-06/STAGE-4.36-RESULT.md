@@ -150,6 +150,25 @@ data points):
 
 ## Deferred subset (mistral-7b-q4ks, llama-3.1-8b-iq3m, qwen3-8b-iq3m)
 
+> **Update 2026-05-08 — paths 1 + 2 attempted and structurally
+> blocked.** A §31-style cap probe attempted to lift the deferred
+> subset via path 1 (`wasm-build-jsep-mem64`) and identified path 2
+> (streaming-loader on JSEP wasm32) as the parallel approach. Both
+> are blocked at JSEP-architectural layers we deliberately built
+> into the boundary during Phases 0-3: path 1 by the
+> `static_assert(sizeof(void *) == 4)` guard at `ggml-jsep.cpp:830`
+> (~100-300 LOC unwind across the JS↔WASM ABI to widen pointers
+> for MEMORY64), and path 2 by the per-buffer `host_mirror`
+> duplication that lands GGUF bytes inside the wasm heap regardless
+> of how the GGUF is loaded. **Path 3 (mathematical-interpolation
+> acceptance) remains the operative closure.** Full blocker
+> catalogue, numerical bounds, and re-evaluation triggers in
+> [`../jsep-mem64-2026-05-08/SUMMARY.md`](../jsep-mem64-2026-05-08/SUMMARY.md)
+> (commits `b98c67b` + `7a316c3` + `661c327`). The path enumeration
+> below is preserved as the original 2026-05-08 framing; treat
+> paths 1 + 2 as historical for any future re-attempt without
+> first solving the documented blockers.
+
 The `webllm-wasm-jsep.js` build is wasm32 with `-sMAXIMUM_MEMORY=4GB`
 (`src/wasm/CMakeLists.txt:249`). The spike harness fetches the GGUF
 into a JS `Uint8Array`, then `bridge.loadModel(buf)` `malloc`s a copy
@@ -203,10 +222,17 @@ stage-by-stage block in `TODO.md` is now eligible to move to
 ## Risk register (Stage 4.36 brief)
 
 1. **Larger models stress the kernel cache differently.** RESOLVED IN
-   PART. Tested through 1.7B / GQA 16:8 (~245 dispatches/token);
-   4B-8B not exercised due to the wasm32 cap deferral. The kernel
-   itself is the same set of WGSL pipelines regardless of dispatch
-   count, and Probe 21b's synthetic selftest is dispatch-agnostic.
+   PART; **residual is permanent under current JSEP architecture**
+   (annotated 2026-05-08). Tested through 1.7B / GQA 16:8 (~245
+   dispatches/token); 4B-8B not exercised due to the wasm32 cap
+   deferral. The kernel itself is the same set of WGSL pipelines
+   regardless of dispatch count, and Probe 21b's synthetic selftest
+   is dispatch-agnostic. The 2026-05-08 JSEP+MEM64 cap probe
+   ([`../jsep-mem64-2026-05-08/SUMMARY.md`](../jsep-mem64-2026-05-08/SUMMARY.md))
+   established that 4B-8B JSEP testing is structurally infeasible
+   without a JSEP-boundary refactor, so the un-exercised band is
+   not a pending follow-up; re-open only if the documented
+   re-evaluation triggers fire.
 2. **GQA ratio differs across models.** RESOLVED. r2={2,8} exercised
    in production paths; r2=4 deferred (interpolation argument above).
 3. **Memory budget for 8B IQ3_M on 16 GB hardware floor.** SUPERSEDED.
