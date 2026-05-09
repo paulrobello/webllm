@@ -2756,13 +2756,30 @@ function renderEvalsTable(evals) {
 		const dims = Object.keys(rep.dimensions ?? {});
 		return !(dims.length === 1 && dims[0] === "embedding");
 	});
-	// Build a per-eval prior map keyed by (modelId, profile, thinking) so
-	// each row can show Δ overall vs. the previous eval for the same
-	// configuration. Computed across all filtered evals (independent of
+	// Build a per-eval prior map keyed by (modelId, profile, thinking,
+	// totalTasks, params.temperature) so each row can show Δ overall vs.
+	// the previous eval that measured the SAME shape under the SAME
+	// sampling regime. Computed across all filtered evals (independent of
 	// the current sort order) so it's deterministic.
+	//
+	// Why totalTasks is in the key: dimension-restricted re-benches (e.g.
+	// the 2026-05-04 parser-leniency tool-calling rebench at 12 tasks)
+	// would otherwise cross-compare against full 36-task multi-dimension
+	// runs and surface spurious −60% Δ artefacts.
+	//
+	// Why params.temperature is in the key: the 2026-05-04 greedy cutover
+	// (CLAUDE.md "Greedy by default for accuracy bench") split the series
+	// — pre-cutover runs at temp=0.6 carry per-task variance large enough
+	// to flip the dimension mean by 25-33% on n=1 reruns, so they must
+	// not be cross-compared with greedy temp=0 runs. The pre-cutover DB
+	// is archived under eval/reports/archive/smoke-runs-pre-greedy-
+	// cutover-*.db; this guard adds belt-and-braces for any pre-cutover
+	// rows still present in the live DB.
 	const evalsByKey = new Map();
 	for (const ev of filtered) {
-		const key = `${ev.modelId}::${ev.profile ?? ""}::${ev.thinking ?? "off"}`;
+		const temp = ev.params?.temperature;
+		const tempKey = Number.isFinite(temp) ? String(temp) : "?";
+		const key = `${ev.modelId}::${ev.profile ?? ""}::${ev.thinking ?? "off"}::${ev.totalTasks ?? "?"}::${tempKey}`;
 		if (!evalsByKey.has(key)) evalsByKey.set(key, []);
 		evalsByKey.get(key).push(ev);
 	}

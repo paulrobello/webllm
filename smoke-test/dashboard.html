@@ -58,7 +58,7 @@
             <th data-sort="temperature" class="sortable">temp</th>
             <th data-sort="totalTasks" class="sortable num">tasks</th>
             <th data-sort="overall" class="sortable num">overall</th>
-            <th class="num" title="(this eval − previous eval for same model+profile+thinking) overall accuracy, in percentage points">Δ acc</th>
+            <th class="num" title="(this eval − previous eval for same model+profile+thinking+totalTasks+temperature), as a percentage of the prior. Match keys include task count and sampling temperature so dimension-restricted re-benches and pre/post greedy-cutover series don't cross-compare.">Δ acc</th>
             <th>dimensions (passed/total)</th>
             <th>system</th>
           </tr>
