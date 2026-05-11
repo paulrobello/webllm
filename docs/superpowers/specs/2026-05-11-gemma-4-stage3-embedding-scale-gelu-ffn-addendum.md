@@ -97,3 +97,117 @@ If a third Gemma-family arch (e.g. a future Gemma 5) lands with a different scal
 - **3.3f:** Insert `opScale(x, sqrt(hp.embeddingLength))` after `opGetRows(weights.tokEmb, ...)` at the four sites above, gated on `hp.architecture === "gemma4"`. Commit as `feat(inference): Gemma embedding scaling (Task 3.3f)`.
 - **3.3g:** Replace `opSwigluSplit(gate, up)` with `hp.architecture === "gemma4" ? wasm.opMul(wasm.opGelu(gate), up) : wasm.opSwigluSplit(gate, up)` at the four sites above. Commit as `feat(inference): Gemma GELU FFN activation (Task 3.3g)`.
 - **3.5:** Closure smoke probe + 36-prompt eval; closure report at `eval/reports/gemma-4-stage3-ple-dualrope-2026-05-11/SUMMARY.md`.
+
+## Post-3.3g diagnosis (surfaced 2026-05-11 after smoke probe)
+
+After 3.3f + 3.3g landed (commits `63c1a6d` + `79dd05d`), the Gemma 4 E2B
+smoke probe was re-run and still produced `<unused14><unused11>…<eos>…`
+garbage output. Decode 74.2 tok/s, embedder probe still 0.76 cosine
+(non-regression OK). Re-diagnosed against `gemma4.cpp` and found two
+additional Gemma-family architectural pieces that diverge from the
+project's generic causal-LM forward path. Tracking them as 3.3h / 3.3i.
+
+### Task 3.3h — V projection bare RMSNorm
+
+Reference: `~/Repos/llama.cpp/src/models/gemma4.cpp:220-221`:
+
+```cpp
+Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, nullptr, LLM_NORM_RMS, il);
+Vcur = ggml_rms_norm(ctx0, Vcur, hparams.f_norm_rms_eps);
+```
+
+Gemma 4 applies `ggml_rms_norm(Vcur, eps)` with **no gain** (no
+`attn_v_norm` weight tensor — bare RMSNorm) to the V projection before
+the attention call. Gemma 3 does **not** do this; it's unique to Gemma 4.
+Llama / Qwen / Mistral / Phi all pass V to attention without any norm.
+
+**Project site:** `src/inference/model-inference.ts:929` — inside
+`buildQKV`, just before `return { qReady, kReady, v3 }`. After the v3
+reshape3d to `[headDim, headCountKv, nTokens]`, apply
+`wasm.opRmsNorm(v3, hp.normEpsilon)` when
+`hp.architecture === "gemma4"`. The bare-RMS-normed tensor becomes
+the new `v3` returned to the caller and flows into the KV cache write.
+
+**Why it matters:** with `v3` un-normed but `qReady` / `kReady` normed,
+the attention output `softmax(QK^T) · V` is dimensionally inconsistent:
+V values have ~`sqrt(headDim)` magnitude while attention probabilities
+have already been computed against normalized Q/K. The V contribution
+to the residual stream is then mis-scaled, distorting downstream layers.
+
+### Task 3.3i — Final-logit softcap misuse in flash attention
+
+Reference: `~/Repos/llama.cpp/src/models/gemma4.cpp:11`:
+
+```cpp
+hparams.f_attention_scale = 1.0f; // Gemma4 uses self.scaling = 1.0 (no pre-attn scaling)
+```
+
+And `gemma4.cpp:379-383` (post-lm-head, NOT inside attention):
+
+```cpp
+if (hparams.f_final_logit_softcapping) {
+    cur = ggml_scale(ctx0, cur, 1.0f / hparams.f_final_logit_softcapping);
+    cur = ggml_tanh(ctx0, cur);
+    cur = ggml_scale(ctx0, cur, hparams.f_final_logit_softcapping);
+}
+```
+
+Gemma 4 has **no** attention softcap. The `f_final_logit_softcapping = 30.0`
+field is applied to **logits after lm_head matmul**, not inside the
+attention computation.
+
+**Current project bug** (`src/inference/model-inference.ts:1350`):
+
+```ts
+const attnOut = wasm.opFlashAttn(
+    qp, fullK, fullV, maskTensor,
+    1.0 / Math.sqrt(headDim),
+    0.0, // max_bias
+    hp.finalLogitSoftcap ?? 0.0, // ← MISUSE: should always be 0 for Gemma 4
+);
+```
+
+For Gemma 4 (`finalLogitSoftcap = 30.0` read from GGUF), this means
+flash attention is computing `tanh(QK^T / 30) * 30` on every layer.
+That tanh-squash crushes all attention scores to a narrow band, making
+attention nearly uniform across the context. The residual stream
+accumulates noise instead of meaningful information. Very plausible
+root cause for the unused-token output.
+
+**Project sites to patch:**
+
+| Method | Line | Fix |
+|---|---|---|
+| `forwardSingle` (FA branch) | 1350 | Replace `hp.finalLogitSoftcap ?? 0.0` with `0.0`. |
+| `forwardForEmbedding` (FA branch) | 2057 | Already `0.0` (no fix needed — confirm). |
+| `forwardAllPositions` (FA branch) | 2429 | Already `0.0` (no fix needed — confirm). |
+| `forwardDecode` (FA branch) | 3110 | Already `0` (no fix needed — confirm). |
+
+Only the `forwardSingle` site is wrong. The other three already pass
+0 — the misuse was localized.
+
+**Post-lm-head softcap (deferred):** the canonical Gemma 4 path applies
+`scale(1/s) → tanh → scale(s)` to logits **after** `opMulMat(output_weight, finalNorm)`.
+For the Stage 3 closure gate (greedy / temp=0), this is a no-op on the
+argmax — `s * tanh(x/s)` is monotonically increasing, so the top-1
+token is unchanged whether or not the softcap is applied. Defer to
+Stage 4 or a later cycle; not load-bearing for greedy smoke probe.
+
+If/when wired, requires a new `wasm.opTanh` binding (currently absent —
+see `src/inference/ggml-wasm.ts`; `_op_tanh` would need to be exported
+from `webgpu-bridge.cpp` and added to `EXPORTED_FUNCTIONS` in
+`src/wasm/CMakeLists.txt`. **Per CLAUDE.md, do NOT add to JSPI_EXPORTS** —
+`ggml_tanh` is non-suspending CPU-side graph build).
+
+### Updated tasks
+
+- **3.3h:** Inside `buildQKV`, apply `wasm.opRmsNorm(v3, hp.normEpsilon)`
+  before return when `hp.architecture === "gemma4"`. Commit as
+  `feat(inference): Gemma V bare-RMS-norm (Task 3.3h)`.
+- **3.3i:** Replace `hp.finalLogitSoftcap ?? 0.0` with literal `0.0` at
+  `forwardSingle:1350`. The other three FA sites already pass 0. Commit
+  as `fix(inference): drop Gemma final-logit-softcap misuse in FA (Task 3.3i)`.
+- **3.5:** Closure smoke probe + 36-prompt eval still pending — gated
+  on 3.3h + 3.3i landing. If output is now coherent (any ASCII-readable
+  English), 3.5 may also gate on a later post-lm-head softcap fix; for
+  now, greedy gate on first token = "Paris" / " Paris".
