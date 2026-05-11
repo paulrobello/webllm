@@ -882,9 +882,26 @@ and §3 for the table of GGUF keys → project impact.
    **Artifact:** `eval/reports/gemma-4-stage2-surface-wiring-<date>/SUMMARY.md`.
 
 3. **Stage 3 — Gemma 4 E2B forward-pass correctness (gated PLE +
-   QK norm + post-norms + scaling + dual RoPE).** **IN PROGRESS as of
-   2026-05-11; 4 of 10 sub-tasks landed; forward pass structurally
-   working but output garbage pending PLE injection.** Final scope per
+   QK norm + post-norms + scaling + dual RoPE).** **CLOSED 2026-05-11
+   EOS-12 — 68 % eval, well above the ≥40 % gate.** Closure report:
+   [`eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md).
+   Root cause: a single missing entry in
+   `getRopeModeForArchitecture` — Gemma family uses NEOX-style
+   RoPE (split-halves) per llama-model.cpp:2275-2310, but the
+   project mapped only `nomic-bert`, `phi3`, and `qwen*` to NEOX
+   and let Gemma fall through to `RopeMode.NORMAL` (interleaved).
+   The bug was invisible to Phase 4's 6-token short-completion
+   parity probe (rotation phases too small to compound) and
+   surfaced only on the chat-formatted Phase A probe + Phase B
+   length × content bisection. Fix: three lines plus a load-
+   bearing comment block. Per-dimension lift: reasoning
+   0 → 83 %, semantic-reasoning 0 → 80 %, instruction-following
+   19 → 92 %, overall **9 → 68 %**.
+
+   Sub-tasks (3.3a-l), Phase 4 shared-KV, Phase 5 chat-template:
+   all kept as-is; they were correct individually and required
+   the NEOX pairing to actually exercise correctly at scale.
+   Final scope per
    the 2026-05-10 correction (`docs/superpowers/specs/2026-05-10-gemma-4-stage3-correction-no-altup.md`):
    the unsloth Q4_K_M GGUF has **no AltUp/Laurel tensors** (the previous
    addendum overshot). Real component list:

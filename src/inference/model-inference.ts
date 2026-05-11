@@ -164,6 +164,21 @@ export function getRopeModeForArchitecture(
 	// rotates the wrong feature pairs and the model decodes to
 	// nonsense like "IMDbSidenoteSidenotepisode...").
 	if (architecture === "phi3") return RopeMode.NEOX;
+	// Gemma family (gemma, gemma2, gemma3, gemma3n, gemma4) uses
+	// NEOX-style RoPE — see llama-model.cpp:2275-2310 where every
+	// LLM_ARCH_GEMMA* case falls through to LLAMA_ROPE_TYPE_NEOX.
+	// Without this, the per-block forward path diverges
+	// catastrophically as a function of sequence length — short
+	// completion prompts squeak past the parity threshold but
+	// chat-formatted eval prompts (≥ ~20 tokens) collapse the
+	// residual stream to near-orthogonal vs the HF reference and
+	// the model emits `<eos>` (id 1) as its first response token.
+	// Closure data: Task 3.5 Phase B bisection (length is the
+	// dominant variable) at
+	// `eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/`.
+	if (architecture === "gemma" || architecture === "gemma4") {
+		return RopeMode.NEOX;
+	}
 	return String(architecture).startsWith("qwen")
 		? RopeMode.NEOX
 		: RopeMode.NORMAL;

@@ -1,0 +1,17 @@
+{
+  "$schema_version": "1.1",
+  "description": "Task 3.5 chat-formatted parity probe — Gemma 4 E2B Q4_K_M on emb-001. Raw token IDs come from a live `engine.chatCompletion` browser probe (the exact prompt that WebLLM sends to the model) so the parity is measured against the actual eval input, not a reconstructed best-guess of `apply_chat_template`. Last prompt token is 107 (newline), the position from which the model's first answer token is sampled.",
+  "messages_context": [
+    { "role": "system", "content": "You are a semantic similarity assistant. Answer with exactly one word from the given choices. Do not add explanation or punctuation." },
+    { "role": "user", "content": "Which word is most similar in meaning to 'happy': sad, joyful, tired, heavy?" }
+  ],
+  "expected_first_token_text": "joyful (or '__joyful' = id 86533 — the right answer per the task)",
+  "observed_webllm_first_token_id": 1,
+  "observed_webllm_first_token_text": "<eos>",
+  "input_token_ids": [
+    2, 105, 9731, 107, 3048, 270, 733, 270, 236746, 270, 236751, 14827, 32965, 270, 86533, 270, 111457, 236761, 270, 7925, 270, 4060, 270, 161617, 270, 811, 270, 3017, 270, 2543, 270, 1437, 270, 45163, 270, 59840, 236761, 270, 6294, 270, 2217, 270, 1282, 270, 146879, 270, 504, 270, 196235, 236761, 106, 107, 105, 2364, 107, 24249, 270, 3017, 270, 511, 270, 3374, 270, 32596, 270, 495, 270, 59603, 270, 1071, 270, 236789, 19849, 2632, 270, 37918, 236764, 270, 3672, 1275, 236764, 270, 225135, 236764, 270, 53767, 236881, 106, 107, 105, 4368, 107
+  ],
+  "prompts": [
+    "PLACEHOLDER — see input_token_ids; the chat-formatted text isn't reconstructed because special-token round-tripping isn't lossless across SPM variants."
+  ]
+}
