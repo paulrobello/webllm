@@ -1172,7 +1172,13 @@ export class ModelInference {
 			: 0;
 
 		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
-		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		// Gemma family scales the residual stream by sqrt(embedding_length)
+		// immediately after token-embedding lookup (gemma4.cpp:149). Llama/
+		// Qwen/Mistral/Phi do not — gated on the architecture predicate.
+		if (hp.architecture === "gemma4") {
+			x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
+		}
 
 		// Create the graph up front so each layer can expand its KV-cache writes
 		// into it *before* attention ops that read kv.k / kv.v are added. Without
@@ -1579,7 +1585,12 @@ export class ModelInference {
 			const maskPaddedRows = padTo(N, 32);
 			const maskTensor = wasm.tensorNew2d(GgmlType.F16, N, maskPaddedRows);
 
-			const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+			let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+			// Gemma family: scale residual stream by sqrt(embedding_length)
+			// after embedding lookup (gemma4.cpp:149).
+			if (hp.architecture === "gemma4") {
+				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
+			}
 			const graph = wasm.graphNew(hp.layerCount * 32 + 128);
 
 			let cur = x;
@@ -1891,7 +1902,12 @@ export class ModelInference {
 			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
 
-		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		// Gemma family: scale residual stream by sqrt(embedding_length)
+		// after embedding lookup (gemma4.cpp:149).
+		if (hp.architecture === "gemma4") {
+			x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
+		}
 
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
@@ -2258,7 +2274,12 @@ export class ModelInference {
 			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
 
-		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		// Gemma family: scale residual stream by sqrt(embedding_length)
+		// after embedding lookup (gemma4.cpp:149).
+		if (hp.architecture === "gemma4") {
+			x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
+		}
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
 		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
