@@ -180,11 +180,13 @@ export class ModelLoader {
 				`${metaPrefix}.rope.dimension_count_swa`,
 				keyLenSwa,
 			);
-			const freqBaseGlobal = getMetaNumber(
-				ctx,
-				`${metaPrefix}.rope.freq_base`,
-				1_000_000,
-			);
+			// Derive from the already-resolved scalar so the per-layer global
+			// array and the scalar never silently disagree on the fallback value.
+			// baseHp.ropeFreqBase already resolved: rope_freq_base → rope.freq_base → 10000.
+			const freqBaseGlobal = baseHp.ropeFreqBase;
+			// rope.freq_base_swa is Gemma-4-specific and intentionally NOT part of
+			// baseHp.ropeFreqBase's resolution chain, so a local read with its own
+			// fallback is correct here. 10_000 = Gemma 4 SWA RoPE θ per Gemma 4 technical report.
 			const freqBaseSwa = getMetaNumber(
 				ctx,
 				`${metaPrefix}.rope.freq_base_swa`,
@@ -220,7 +222,7 @@ export class ModelLoader {
 				slidingWindowSize: getMetaNumber(
 					ctx,
 					`${metaPrefix}.attention.sliding_window`,
-					512,
+					512, // E2B default; Gemma 4 documents 512 as the standard local window
 				),
 				sharedKvLayers: getMetaNumber(
 					ctx,
