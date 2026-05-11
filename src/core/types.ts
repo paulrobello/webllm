@@ -273,6 +273,13 @@ export interface ModelHyperparams {
 	 * Gemma family models (Gemma 4 E2B reports 30.0).
 	 */
 	finalLogitSoftcap?: number;
+	/**
+	 * Per-Layer Embedding (PLE) dimension — the short residual dimension (256
+	 * for Gemma 4 E2B) injected at each block input via the PLE lookup table.
+	 * Read from `<arch>.embedding_length_per_layer_input`. Absent for all
+	 * non-Gemma-4 architectures.
+	 */
+	pleDim?: number;
 }
 
 /** GPU buffer mappings and tensor metadata for a loaded model's weights. */

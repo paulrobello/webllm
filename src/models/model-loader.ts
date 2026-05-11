@@ -10,14 +10,51 @@ import {
 	TokenizerType,
 } from "../inference/tokenizer.js";
 import { GgufParser } from "./gguf-parser.js";
-import type { GgufContext } from "./gguf-types.js";
+import type { GgufContext, GgufTensorInfo } from "./gguf-types.js";
 import type { KVCacheConfig } from "./kv-cache.js";
+
+/**
+ * Loaded Per-Layer Embedding tensors for Gemma 4.
+ *
+ * All three tensors are present whenever `general.architecture === "gemma4"`.
+ * They are absent (the field is `undefined`) for every other architecture.
+ *
+ * Op sequence confirmed from llama.cpp `src/models/gemma3n.cpp`:
+ *   1. GET_ROWS(per_layer_token_embd.weight, token_ids)
+ *      → shape [pleDim × layerCount, n_tokens], scaled by sqrt(pleDim)
+ *   2. MUL_MAT(per_layer_model_proj.weight, inp_batch)
+ *      → shape [pleDim × layerCount, n_tokens], scaled by 1/sqrt(hiddenDim)
+ *   3. RMS_NORM(per_layer_proj_norm.weight)  ← applied to step-2 result
+ *   4. ADD(step-3, step-1), scaled by 1/sqrt(2)  → inp_per_layer
+ *   5. At each layer L: slice inp_per_layer[:, :, L] → [pleDim, n_tokens]
+ *      then gated via per_layer_inp_gate (per-block weight, not in this table)
+ *      and projected back to hidden via per_layer_proj (per-block weight).
+ *
+ * Injection point: PLE is prepared *before* the transformer layer loop and
+ * sliced once per block; it does NOT sit between attn_norm and attention.
+ * It is a residual correction added after the AltUp correct step, before
+ * the corrected predictions are passed to the next layer.
+ */
+export interface PleTensors {
+	/** `per_layer_token_embd.weight` — shape [pleDim × layerCount, vocabSize], Q5_K. */
+	perLayerEmbed: GgufTensorInfo;
+	/** `per_layer_model_proj.weight` — shape [hiddenDim, pleDim × layerCount], BF16. */
+	perLayerProj: GgufTensorInfo;
+	/** `per_layer_proj_norm.weight` — shape [pleDim], F32 (RMSNorm scale for projection). */
+	perLayerProjNorm: GgufTensorInfo;
+}
 
 /** Result of parsing a GGUF model file. */
 export interface ParsedModel {
 	hyperparams: ModelHyperparams;
 	tokenizerConfig: TokenizerConfig;
 	kvCacheConfig: KVCacheConfig;
+	/**
+	 * Gemma 4 Per-Layer Embedding tensors. Present only when
+	 * `hyperparams.architecture === "gemma4"` and all three PLE tensors exist
+	 * in the GGUF. Undefined for all other architectures.
+	 */
+	pleTensors?: PleTensors;
 }
 
 /**
@@ -37,7 +74,34 @@ export class ModelLoader {
 		hyperparams.vocabularySize = tokenizerConfig.vocabSize;
 		tokenizerConfig.contextLength = hyperparams.contextLength;
 		const kvCacheConfig = ModelLoader.buildKvCacheConfig(hyperparams);
-		return { hyperparams, tokenizerConfig, kvCacheConfig };
+		const pleTensors = ModelLoader.extractPleTensors(ctx, hyperparams);
+		return { hyperparams, tokenizerConfig, kvCacheConfig, pleTensors };
+	}
+
+	/**
+	 * Extract Per-Layer Embedding tensor descriptors for Gemma 4 models.
+	 *
+	 * Returns `undefined` for all non-Gemma-4 architectures or when any
+	 * required PLE tensor is absent from the GGUF (future-proofs against
+	 * stripped / partial exports).
+	 */
+	private static extractPleTensors(
+		ctx: GgufContext,
+		hyperparams: ModelHyperparams,
+	): PleTensors | undefined {
+		if (hyperparams.architecture !== "gemma4") return undefined;
+
+		const tensorMap = new Map<string, GgufTensorInfo>(
+			ctx.tensors.map((t) => [t.name, t]),
+		);
+
+		const perLayerEmbed = tensorMap.get("per_layer_token_embd.weight");
+		const perLayerProj = tensorMap.get("per_layer_model_proj.weight");
+		const perLayerProjNorm = tensorMap.get("per_layer_proj_norm.weight");
+
+		if (!perLayerEmbed || !perLayerProj || !perLayerProjNorm) return undefined;
+
+		return { perLayerEmbed, perLayerProj, perLayerProjNorm };
 	}
 
 	/** Extract model hyperparameters from GGUF metadata. */
@@ -233,6 +297,14 @@ export class ModelLoader {
 					ctx,
 					`${metaPrefix}.final_logit_softcapping`,
 				),
+				// Per-Layer Embedding dimension: 256 for E2B, 0 if key absent.
+				// Stored in GGUF as `<arch>.embedding_length_per_layer_input`.
+				pleDim:
+					getMetaNumber(
+						ctx,
+						`${metaPrefix}.embedding_length_per_layer_input`,
+						0,
+					) || undefined,
 			};
 		}
 
