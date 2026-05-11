@@ -148,6 +148,22 @@ export function attnSoftmaxScale(
 	return 1.0 / Math.sqrt(headDim);
 }
 
+/**
+ * Gemma family architectures (gemma, gemma2, gemma3, gemma4) share
+ * input-embed scaling by sqrt(embeddingLength) and GELU-parallel FFN
+ * activation per llama.cpp/src/models/gemma{,2,3,4}.cpp. Gemma 4 adds
+ * QK-norm + attention scale 1.0 + V bare-RMS-norm on top; those stay
+ * gated to gemma4 specifically (see attnSoftmaxScale + V branch).
+ */
+function isGemmaFamily(arch: ModelHyperparams["architecture"]): boolean {
+	return (
+		arch === "gemma" ||
+		arch === "gemma2" ||
+		arch === "gemma3" ||
+		arch === "gemma4"
+	);
+}
+
 export function getRopeModeForArchitecture(
 	architecture: ModelHyperparams["architecture"],
 ): number {
@@ -1418,9 +1434,9 @@ export class ModelInference {
 		// Embedding lookup: get_rows handles Q4_0→F32 dequant (opCpy does not)
 		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		// Gemma family scales the residual stream by sqrt(embedding_length)
-		// immediately after token-embedding lookup (gemma4.cpp:149). Llama/
-		// Qwen/Mistral/Phi do not — gated on the architecture predicate.
-		if (hp.architecture === "gemma4") {
+		// immediately after token-embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
+		// Llama/Qwen/Mistral/Phi do not — gated on the architecture predicate.
+		if (isGemmaFamily(hp.architecture)) {
 			x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
 		}
 
@@ -1612,14 +1628,28 @@ export class ModelInference {
 				// QK^T: K=[headDim, totalLen, nKvHeads], Q=[headDim, nTokens, nHeads]
 				//       -> [totalLen, nTokens, nHeads].
 				const qk = wasm.opMulMat(fullK, qp);
-				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
-				const qkCapped = hp.attnLogitSoftcap
-					? this.softCap(qk, hp.attnLogitSoftcap)
-					: qk;
+				// Gemma 2 attention logit soft-cap. Reference order
+				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305): scale qk
+				// first, then softcap, then softmax with scale=1.0.
+				// `opSoftMaxExt` applies its `scale` arg *inside* the
+				// kernel, so passing softcap(qk) + scale would softmax
+				// `softcap(qk) / sqrt(d_k)` — saturating tanh on the
+				// sqrt(d_k)-larger raw qk magnitudes and collapsing the
+				// attention distribution (gemma-2-2b smoke locked to id
+				// 139 whitespace without this swap).
+				let qkProcessed = qk;
+				let softmaxScale = attnSoftmaxScale(hp, headDim);
+				if (hp.attnLogitSoftcap) {
+					qkProcessed = this.softCap(
+						wasm.opScale(qk, softmaxScale),
+						hp.attnLogitSoftcap,
+					);
+					softmaxScale = 1.0;
+				}
 				const attnW = wasm.opSoftMaxExt(
-					qkCapped,
+					qkProcessed,
 					maskTensor,
-					attnSoftmaxScale(hp, headDim),
+					softmaxScale,
 					0.0,
 				);
 				// V * attn: V=[totalLen, headDim, nKvHeads], attn=[totalLen, nTokens, nHeads]
@@ -1651,11 +1681,10 @@ export class ModelInference {
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
 			// SwiGLU: fused silu(gate) * up. Gemma family uses gelu(gate) * up
-			// instead (gemma4.cpp:320, LLM_FFN_GELU + LLM_FFN_PAR).
-			const ffnHidden =
-				hp.architecture === "gemma4"
-					? wasm.opMul(wasm.opGelu(gate), up)
-					: wasm.opSwigluSplit(gate, up);
+			// instead (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
+			const ffnHidden = isGemmaFamily(hp.architecture)
+				? wasm.opMul(wasm.opGelu(gate), up)
+				: wasm.opSwigluSplit(gate, up);
 			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
 			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
 			const ffnOut = lw.postFfwNorm
@@ -1862,8 +1891,8 @@ export class ModelInference {
 
 			let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 			// Gemma family: scale residual stream by sqrt(embedding_length)
-			// after embedding lookup (gemma4.cpp:149).
-			if (hp.architecture === "gemma4") {
+			// after embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
+			if (isGemmaFamily(hp.architecture)) {
 				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
 			}
 			const graph = wasm.graphNew(hp.layerCount * 32 + 128);
@@ -1923,14 +1952,22 @@ export class ModelInference {
 				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
 				const qk = wasm.opMulMat(kp, qp);
-				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
-				const qkCapped = hp.attnLogitSoftcap
-					? this.softCap(qk, hp.attnLogitSoftcap)
-					: qk;
+				// Gemma 2 attention logit soft-cap: scale-first ordering
+				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
+				// forwardSingle for the longer rationale.
+				let qkProcessed = qk;
+				let softmaxScale = attnSoftmaxScale(hp, headDim);
+				if (hp.attnLogitSoftcap) {
+					qkProcessed = this.softCap(
+						wasm.opScale(qk, softmaxScale),
+						hp.attnLogitSoftcap,
+					);
+					softmaxScale = 1.0;
+				}
 				const attnW = wasm.opSoftMaxExt(
-					qkCapped,
+					qkProcessed,
 					maskTensor,
-					attnSoftmaxScale(hp, headDim),
+					softmaxScale,
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(vp, attnW);
@@ -1955,11 +1992,10 @@ export class ModelInference {
 
 				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N, ffnDim);
 				// Gemma family: gelu(gate) * up instead of silu(gate) * up
-				// (gemma4.cpp:320, LLM_FFN_GELU + LLM_FFN_PAR).
-				const ffnHidden =
-					hp.architecture === "gemma4"
-						? wasm.opMul(wasm.opGelu(gate), up)
-						: wasm.opSwigluSplit(gate, up);
+				// (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
+				const ffnHidden = isGemmaFamily(hp.architecture)
+					? wasm.opMul(wasm.opGelu(gate), up)
+					: wasm.opSwigluSplit(gate, up);
 				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
 				cur = wasm.opAdd(ffnOut, attnResidual);
@@ -2111,7 +2147,9 @@ export class ModelInference {
 				: 0;
 
 			let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
-			if (hp.architecture === "gemma4") {
+			// Gemma family: scale residual stream by sqrt(embedding_length)
+			// after embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
+			if (isGemmaFamily(hp.architecture)) {
 				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
 			}
 			// Embedding-output tap (HF `hidden_states[0]` equivalent).
@@ -2210,14 +2248,22 @@ export class ModelInference {
 				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
 				const qk = wasm.opMulMat(kp, qp);
-				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
-				const qkCapped = hp.attnLogitSoftcap
-					? this.softCap(qk, hp.attnLogitSoftcap)
-					: qk;
+				// Gemma 2 attention logit soft-cap: scale-first ordering
+				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
+				// forwardSingle for the longer rationale.
+				let qkProcessed = qk;
+				let softmaxScale = attnSoftmaxScale(hp, headDim);
+				if (hp.attnLogitSoftcap) {
+					qkProcessed = this.softCap(
+						wasm.opScale(qk, softmaxScale),
+						hp.attnLogitSoftcap,
+					);
+					softmaxScale = 1.0;
+				}
 				const attnW = wasm.opSoftMaxExt(
-					qkCapped,
+					qkProcessed,
 					maskTensor,
-					attnSoftmaxScale(hp, headDim),
+					softmaxScale,
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(vp, attnW);
@@ -2242,10 +2288,11 @@ export class ModelInference {
 				);
 				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N, ffnDim);
-				const ffnHidden =
-					hp.architecture === "gemma4"
-						? wasm.opMul(wasm.opGelu(gate), up)
-						: wasm.opSwigluSplit(gate, up);
+				// Gemma family: gelu(gate) * up instead of silu(gate) * up
+				// (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
+				const ffnHidden = isGemmaFamily(hp.architecture)
+					? wasm.opMul(wasm.opGelu(gate), up)
+					: wasm.opSwigluSplit(gate, up);
 				const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
 				const ffnOut = lw.postFfwNorm
 					? wasm.opMul(
@@ -2573,8 +2620,8 @@ export class ModelInference {
 
 		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		// Gemma family: scale residual stream by sqrt(embedding_length)
-		// after embedding lookup (gemma4.cpp:149).
-		if (hp.architecture === "gemma4") {
+		// after embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
+		if (isGemmaFamily(hp.architecture)) {
 			x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
 		}
 
@@ -2720,14 +2767,22 @@ export class ModelInference {
 				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
 			} else {
 				const qk = wasm.opMulMat(fullK, qp);
-				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
-				const qkCapped = hp.attnLogitSoftcap
-					? this.softCap(qk, hp.attnLogitSoftcap)
-					: qk;
+				// Gemma 2 attention logit soft-cap: scale-first ordering
+				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
+				// forwardSingle for the longer rationale.
+				let qkProcessed = qk;
+				let softmaxScale = attnSoftmaxScale(hp, headDim);
+				if (hp.attnLogitSoftcap) {
+					qkProcessed = this.softCap(
+						wasm.opScale(qk, softmaxScale),
+						hp.attnLogitSoftcap,
+					);
+					softmaxScale = 1.0;
+				}
 				const attnW = wasm.opSoftMaxExt(
-					qkCapped,
+					qkProcessed,
 					maskTensor,
-					attnSoftmaxScale(hp, headDim),
+					softmaxScale,
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(fullV, attnW);
@@ -2755,11 +2810,10 @@ export class ModelInference {
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
-			// Gemma family: gelu(gate) * up (gemma4.cpp:320).
-			const ffnHidden =
-				hp.architecture === "gemma4"
-					? wasm.opMul(wasm.opGelu(gate), up)
-					: wasm.opSwigluSplit(gate, up);
+			// Gemma family: gelu(gate) * up (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
+			const ffnHidden = isGemmaFamily(hp.architecture)
+				? wasm.opMul(wasm.opGelu(gate), up)
+				: wasm.opSwigluSplit(gate, up);
 			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
 			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
 			const ffnOut = lw.postFfwNorm
@@ -2955,8 +3009,8 @@ export class ModelInference {
 
 		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		// Gemma family: scale residual stream by sqrt(embedding_length)
-		// after embedding lookup (gemma4.cpp:149).
-		if (hp.architecture === "gemma4") {
+		// after embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
+		if (isGemmaFamily(hp.architecture)) {
 			x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
 		}
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
@@ -3099,14 +3153,22 @@ export class ModelInference {
 				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
 			} else {
 				const qk = wasm.opMulMat(fullK, qp);
-				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
-				const qkCapped = hp.attnLogitSoftcap
-					? this.softCap(qk, hp.attnLogitSoftcap)
-					: qk;
+				// Gemma 2 attention logit soft-cap: scale-first ordering
+				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
+				// forwardSingle for the longer rationale.
+				let qkProcessed = qk;
+				let softmaxScale = attnSoftmaxScale(hp, headDim);
+				if (hp.attnLogitSoftcap) {
+					qkProcessed = this.softCap(
+						wasm.opScale(qk, softmaxScale),
+						hp.attnLogitSoftcap,
+					);
+					softmaxScale = 1.0;
+				}
 				const attnW = wasm.opSoftMaxExt(
-					qkCapped,
+					qkProcessed,
 					maskTensor,
-					attnSoftmaxScale(hp, headDim),
+					softmaxScale,
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(fullV, attnW);
@@ -3133,11 +3195,10 @@ export class ModelInference {
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
-			// Gemma family: gelu(gate) * up (gemma4.cpp:320).
-			const ffnHidden =
-				hp.architecture === "gemma4"
-					? wasm.opMul(wasm.opGelu(gate), up)
-					: wasm.opSwigluSplit(gate, up);
+			// Gemma family: gelu(gate) * up (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
+			const ffnHidden = isGemmaFamily(hp.architecture)
+				? wasm.opMul(wasm.opGelu(gate), up)
+				: wasm.opSwigluSplit(gate, up);
 			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
 			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
 			const ffnOut = lw.postFfwNorm
@@ -3798,14 +3859,22 @@ export class ModelInference {
 					);
 				} else {
 					const qk = wasm.opMulMat(fullK, qp);
-					// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
-					const qkCapped = hp.attnLogitSoftcap
-						? this.softCap(qk, hp.attnLogitSoftcap)
-						: qk;
+					// Gemma 2 attention logit soft-cap: scale-first ordering
+					// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
+					// forwardSingle for the longer rationale.
+					let qkProcessed = qk;
+					let softmaxScale = 1 / Math.sqrt(hp.embeddingHeadLength);
+					if (hp.attnLogitSoftcap) {
+						qkProcessed = this.softCap(
+							wasm.opScale(qk, softmaxScale),
+							hp.attnLogitSoftcap,
+						);
+						softmaxScale = 1.0;
+					}
 					const attnW = wasm.opSoftMaxExt(
-						qkCapped,
+						qkProcessed,
 						maskTensor,
-						1 / Math.sqrt(hp.embeddingHeadLength),
+						softmaxScale,
 						0,
 					);
 					const attnOut = wasm.opMulMat(fullV, attnW);
