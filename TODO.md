@@ -1078,17 +1078,123 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-3)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-4)
 
-**Where to start:** **Task 3.3l** (deeper diagnostic). All
-architectural fixes 3.3a–k landed and verified by smoke probe. BF16
-cast (3.3j) was the major unblocker; rope_freqs (3.3k) was a real
-correctness gap but only minor arithmetic effect. Greedy output
-remains degenerate-repetitive (`_cownt_cownt_cownt_cることownt…`),
-indicating the residual stream gets stuck in a low-entropy state. The
-fastest disproving move is option (a) — intermediate hidden-state
-comparison vs HF transformers reference. Pinpoints first divergence
-layer in ~1 session.
+**Where to start:** **Task 3.3l Phase 2** — the WebLLM side of the
+parity-capture pipeline scaffolded this session (`eval/tools/parity-capture/`).
+The HF reference capture script is checked in, generic, and ready to
+run. Phase 2 adds: a WebLLM tap on `forwardSingle` that emits the
+same standard JSON shape, plus a comparison driver that reports the
+first divergent layer.
+
+**Why this is the right move:** the architectural blind-fix loop is
+exhausted — 3.3f→3.3k closed the obvious gemma4.cpp gaps but greedy
+Gemma 4 still emits degenerate output. The next move needs DATA, not
+more guesses. The parity-capture tool is the data source; once it
+runs end-to-end the diagnosis is mechanical.
+
+**Phase 2 plan (this is the entire next session's scope):**
+
+1. **TinyLlama parity sanity-check first.** Phase 2 work should land
+   on a baseline that we trust. Capture HF reference + webllm
+   tapped-forward for TinyLlama on the canonical prompt
+   (`The capital of France is`), expect cosine ≥ 0.99 at every layer
+   (TinyLlama is a known-good causal LM in the project). This is the
+   "the pipeline works" gate before pointing it at Gemma 4.
+
+2. **Run the HF capture** (still Phase 1 work that wasn't executed):
+   ```bash
+   hfdownloader download unsloth/gemma-4-E2B-it
+   hfdownloader download TinyLlama/TinyLlama-1.1B-Chat-v1.0
+   for model in unsloth/gemma-4-E2B-it TinyLlama/TinyLlama-1.1B-Chat-v1.0; do
+     SLUG=$(echo "$model" | sed 's|.*/||' | tr '[:upper:]' '[:lower:]')
+     RUN_DIR=eval/reports/parity-$SLUG-$(date +%Y-%m-%d)
+     mkdir -p "$RUN_DIR"
+     uv run --no-project --with-requirements \
+       eval/tools/parity-capture/requirements.txt \
+       python eval/tools/parity-capture/capture-hf-ref.py \
+       --model "$model" \
+       --inputs eval/tools/parity-capture/inputs.json \
+       --output "$RUN_DIR/hf-ref.json" \
+       --add-bos
+   done
+   ```
+   The TinyLlama capture is small (~2GB model, fp32 fast on CPU);
+   Gemma 4 is ~5GB, slower but still tractable on CPU. Use `--device
+   cuda` or `--device mps` if available.
+
+3. **WebLLM tap instrumentation** in `src/inference/model-inference.ts`:
+   - Add a new method `forwardWithLayerTaps(tokenIds, positions, options)`
+     that mirrors `forwardSingle` but `graphBuildForwardExpand`s the
+     residual stream after each block (per-layer `cur`) and reads each
+     back after `graphCompute`. Returns
+     `{ perLayerResidual: Float32Array[], finalNormHidden: Float32Array, logitsTop16: { ids: Int32Array, values: Float32Array } }`.
+   - Gate the tap behind a constructor flag (`capturePerLayerTaps`) so
+     production forwards stay zero-cost.
+   - Last-token only: read back row `[nTokens-1, :]` from each tap;
+     keeps memory under ~250 KB per capture.
+
+4. **Browser harness** at `smoke-test/parity-capture.html` (mirror
+   `real-model.html`'s loader, but instantiate ModelInference with
+   `capturePerLayerTaps: true` and call `forwardWithLayerTaps` instead
+   of going through chatCompletion). POSTs the resulting JSON to the
+   capture server.
+
+5. **Capture server** at `eval/tools/parity-capture/capture-server.ts`:
+   - Bun HTTP server, configurable port (default 8035 — register in
+     `~/.claude/used_ports.md`).
+   - POST `/capture` → writes body to `<run-dir>/webllm.json`.
+   - Single-file, no deps beyond Bun's built-in HTTP.
+
+6. **Comparison driver** at `eval/tools/parity-capture/compare.py`:
+   - Reads `<run-dir>/hf-ref.json` + `<run-dir>/webllm.json`.
+   - Verifies `n_layer` and `n_embd` match.
+   - Computes cosine + L2 per layer.
+   - Emits `<run-dir>/REPORT.md` with a per-layer table + the
+     "first layer below threshold" callout.
+   - Optional `--threshold 0.95` arg (default 0.95 for end-of-stack,
+     0.99 for first-block sanity).
+
+7. **Run the full pipeline on TinyLlama first**, then Gemma 4. The
+   TinyLlama REPORT.md should show cosine ≥ 0.99 at every layer
+   (proves the tap + comparison work). The Gemma 4 REPORT.md should
+   show a sudden drop at the buggy block — that's the diagnostic.
+
+8. **Fix the localized bug** based on the first divergent layer. The
+   op sequence at that block + its inputs (residual from the previous
+   block) are the search space. Strip the tap instrumentation if
+   it's behind a flag (no production code lives in the tap).
+
+**Required reading before touching code (Phase 2 entry):**
+1. `eval/tools/parity-capture/README.md` — workflow + format spec.
+2. `eval/tools/parity-capture/capture-hf-ref.py` — already generic;
+   no changes needed unless the JSON schema evolves.
+3. `src/inference/model-inference.ts:forwardSingle` (around line 1170
+   onward in current HEAD) — copy this method's structure into the
+   new `forwardWithLayerTaps`. The tap = adding each block's
+   `cur` to the graph's forward-expand list before `graphCompute`.
+4. `smoke-test/real-model.html` + `smoke-test/real-model-page.js` —
+   loader pattern to mirror for the capture harness.
+5. `eval/live-server.ts` — example of a Bun HTTP server in this
+   project; mirror its style for `capture-server.ts`.
+
+**Why scaffold without running Phase 1 capture yet:** running it in
+this session would only produce a half-comparison (no webllm side to
+compare against). The capture script is checked in and ready; Phase 2
+captures both sides + compares in one cohesive session, which is the
+right unit of work.
+
+**Estimated remaining work to ship Gemma 4 E2B:**
+- Phase 2 build-out (~1 session — tap + harness + server + compare
+  + first run).
+- TinyLlama parity proves the pipeline (~30 min within Phase 2).
+- Gemma 4 parity → identifies 1-2 architectural bugs (~30 min within
+  Phase 2). Bug-fix → re-probe → re-compare loop continues until
+  Stage 3 closes.
+- Task 3.5 closure report (~30 min after Stage 3 structurally closes).
+- Stage 4 (real SWA): 2 sub-tasks; may need 1 llama.cpp patch.
+- Stage 5 (shared-KV + bench + closure): 5 sub-tasks; may need
+  1 llama.cpp patch.
 
 **Required reading before touching code:**
 1. `docs/superpowers/specs/2026-05-11-gemma-4-stage3-embedding-scale-gelu-ffn-addendum.md`
@@ -1117,9 +1223,9 @@ layer in ~1 session.
 5. After Stage 3 closes structurally, run greedy smoke + the
    36-prompt eval ≥40% gate (Task 3.5).
 
-**Last verified state (2026-05-11 EOS-3, after this session):**
-- Branch `main` HEAD: `dec6f2d` (Task 3.3k: rope_freqs in RoPE).
-  Tree clean (the upcoming docs commit will land on top).
+**Last verified state (2026-05-11 EOS-4, after this session):**
+- Branch `main` HEAD: `c317671` (Phase 1 parity-capture scaffolding).
+  Tree clean after this TODO update commits.
 - `make checkall`: green (762 pass / 36 skip / 0 fail).
 - WASM build current: `webllm-wasm.js` + `webllm-wasm.wasm` in
   `smoke-test/` were rebuilt this session for the new
@@ -1145,6 +1251,8 @@ layer in ~1 session.
   still in place.
 
 **Per-task commits this session (most-recent first):**
+- `c317671` Phase 1 parity-capture scaffolding (HF side + README + format spec)
+- `db9ee8d` docs(TODO): 3.3k landed + 3.3l queued
 - `dec6f2d` Task 3.3k — rope_freqs (freq_factors) in RoPE
 - `bac18f1` docs(spec): Task 3.3k design
 - `f69f438` docs(TODO): Stage 3 progress through 3.3j handoff
@@ -1158,25 +1266,29 @@ layer in ~1 session.
 - `63c1a6d` Task 3.3f — Gemma embedding scaling
 - `e48d751` docs(spec): Stage 3 embedding-scale + GELU FFN addendum
 
-**Workflow to resume (Task 3.3l hidden-state diagnostic):**
-1. Re-verify tinyllama non-regression first (commit `dec6f2d` added
-   a new code path; quick browser probe to confirm bit-identical
-   behavior on a non-Gemma model).
-2. Build the HF reference capture script under
-   `eval/reports/gemma-4-stage3-tap-points-2026-05-11/`. Pattern:
-   pre-fetch via `hfdownloader download unsloth/gemma-4-E2B-it`,
-   then `uv run --no-project --with transformers ...` to forward
-   the same prompt with per-layer hooks.
-3. Add a temporary capture mode to `forwardForEmbedding` that
-   reads back per-layer residual after each block (gated on a
-   debug flag; not shipped). Run the smoke prompt through it.
-4. Compute cosine + L2 per layer. Whichever layer is the first
-   to diverge below cosine ~0.95 is the culprit; localize the
-   bug to that block's op sequence.
-5. Fix the localized bug. Strip the capture instrumentation.
-6. Re-probe greedy. Close Stage 3 if output is coherent.
-7. 36-prompt eval ≥40% gate (Task 3.5) only after greedy coherence
-   passes.
+**Workflow to resume (Task 3.3l Phase 2 — tap + harness + compare):**
+
+Detailed plan is in the "Phase 2 plan" block above; quick checklist:
+
+1. ✅ TinyLlama non-regression verified this session (151 tok/s,
+   "Here's a short joke:..." output) — skip step in fresh session
+   unless `git log` shows new changes since `c317671`.
+2. Run HF capture for both `TinyLlama/TinyLlama-1.1B-Chat-v1.0` and
+   `unsloth/gemma-4-E2B-it`. Pre-fetch via `hfdownloader`.
+3. Add `forwardWithLayerTaps` to `ModelInference` (mirror
+   `forwardSingle`; tap each block's `cur` into the graph; readback
+   last-token row per tap).
+4. Add `smoke-test/parity-capture.html` (loader harness; POSTs
+   capture JSON to capture-server).
+5. Add `eval/tools/parity-capture/capture-server.ts` (Bun HTTP on
+   port 8035 — register in `~/.claude/used_ports.md`).
+6. Add `eval/tools/parity-capture/compare.py` (cosine + L2 per layer,
+   emit `REPORT.md`).
+7. Run TinyLlama pipeline end-to-end — gate: cosine ≥ 0.99 at every
+   layer. If pass, the pipeline is trustworthy.
+8. Run Gemma 4 pipeline. Read the REPORT.md. The first layer with
+   cosine < 0.95 (or a sudden ≥ 0.05 drop between consecutive
+   layers) is the bug. Fix that op-block; re-run.
 
 **Estimated remaining work to ship Gemma 4 E2B:**
 - Task 3.3l hidden-state diagnostic (~1 session — likely surfaces
