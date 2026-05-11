@@ -1,0 +1,7 @@
+{
+  "$schema_version": "1.0",
+  "description": "Canonical prompts for webllm vs HF parity capture. Keep this list small and stable so reports are comparable across runs. Add prompts via separate inputs-<area>.json files if a probe needs a different fixture, but DO NOT replace these defaults.",
+  "prompts": [
+    "The capital of France is"
+  ]
+}
