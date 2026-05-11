@@ -837,6 +837,93 @@ Prior cycle 2026-05-01 was §27 (mul-mat vectorize #22578 +
 upscale shader; tip `e29753286`); sweep matrix at
 [`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md).
 
+### Gemma 4 E2B inference support (in progress 2026-05-10)
+
+**Status:** Phase 1 probe complete; spec written and committed.
+Spec: [`docs/superpowers/specs/2026-05-10-gemma-4-e2b-correctness-first-support-design.md`](docs/superpowers/specs/2026-05-10-gemma-4-e2b-correctness-first-support-design.md).
+Implementation plan written via `superpowers:writing-plans` after spec
+approval; execution via `superpowers:subagent-driven-development`.
+
+**Target:** `unsloth/gemma-4-E2B-it-GGUF` Q4_K_M (3.11 GB), already
+symlinked at `smoke-test/models/gemma-4-e2b-it-q4km.gguf`. E4B as
+follow-on probe after Stage 5 closure (same arch path; expected
+registration-only delta).
+
+**Probe findings (2026-05-10):** GGUF parses + weights load + tokenizer
+works; generation fails at `GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2)`
+in `ModelInference.buildQKV`. Seven architectural deltas confirmed vs
+current causal-LM dispatch — see spec §2 for full GGUF metadata dump
+and §3 for the table of GGUF keys → project impact.
+
+**Scope decisions (committed 2026-05-10):**
+- Correctness-first staging (Stages 1–3 collapse Gemma 4's variations
+  onto familiar paths; Stages 4–5 lift to production shape)
+- Linear 5-stage shape (one gate per stage, mid-implementation
+  "Gemma 4 produces correct output" milestone at Stage 3)
+- E2B-only scope (E4B deferred to follow-on probe)
+- Patch-budget cap +2 max on `webllm-browser-patches` (Stages 4 + 5)
+
+**Stages:**
+
+1. **Stage 1 — Per-layer hyperparams refactor (foundation).** Convert
+   scalar `embeddingHeadLength`, `feedForwardLength`, `ropeDimensionCount`,
+   `ropeFreqBase` into per-layer arrays. Existing models replicate the
+   scalar `layerCount` times (zero behavioral delta). Gemma 4 populates
+   per-layer from GGUF. **Gate:** `make checkall` green + 3-model
+   `generatedIds[0]` match on TinyLlama / qwen3-0.6b / qwen3-1.7b.
+   **Artifact:** `eval/reports/gemma-4-stage1-per-layer-hp-<date>/SUMMARY.md`.
+
+2. **Stage 2 — Gemma 4 surface wiring.** Chat template (`formatGemma4`),
+   stop-token registration (`<end_of_turn>`), `GEMMA4_DEFAULTS` sampler,
+   `final_logit_softcapping=30.0` wiring, `eval/models.ts` registration,
+   bundle regeneration. **Gate:** smoke loads + greedy-decodes 5
+   coherent ASCII tokens on `"The capital of France is"`; multi-turn
+   stops cleanly on `<end_of_turn>`.
+   **Artifact:** `eval/reports/gemma-4-stage2-surface-wiring-<date>/SUMMARY.md`.
+
+3. **Stage 3 — PLE injection + dual RoPE dispatch.** Load
+   `per_layer_token_embd` table, inject per-layer into residual at
+   each layer's start, dispatch RoPE per-layer-type (512-dim @ 1M
+   base for global / 256-dim @ 10k base for SWA — even with Stage 4
+   still pending, the per-layer-type RoPE must match training).
+   **Gate:** first generated token on `"The capital of France is"` is
+   `Paris` (or ` Paris`); 36-prompt eval ≥40% (loose for Stage 4 to
+   lift further).
+   **Artifact:** `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`.
+
+4. **Stage 4 — Real sliding-window attention.** Replace Stage-3
+   "all-global" fallback with real SWA on the 4-of-5 layers marked
+   local in the GGUF pattern. Window 512; mask + KV-window logic
+   per upstream llama.cpp. May require 1 llama.cpp patch if
+   ggml-webgpu's softmax-with-mask path can't express the windowed
+   mask. **Gate:** eval lifts ≥60% (Phi-3 closure standard);
+   long-context probe (1000-token generation) shows no quality cliff
+   at the 512-token window boundary.
+   **Artifact:** `eval/reports/gemma-4-stage4-swa-<date>/SUMMARY.md`.
+
+5. **Stage 5 — Shared-KV ref-sharing + bench + closure.** Wire the
+   last-20-of-35 layers' shared K/V references through the KV-cache
+   allocator (currently materializes duplicate K/V; ~3 GB wasted),
+   per-conversation snapshot/load respects the sharing graph,
+   `indexeddb-store` serializes the ref-shared layout. **Gates:**
+   VRAM drops ≥2 GB vs Stage 4; smoke-bench profile-mode 3-run
+   median ≥10 tok/s; eval ≥ Stage 4 (target ≥60% holds). May
+   require 1 llama.cpp patch for the cache allocator.
+   **Artifact:** `eval/reports/gemma-4-e2b-validation-<date>/SUMMARY.md`
+   (Phi-3 closure template; absorbs phases 5–6 of Phi-3).
+
+**Out of scope (this campaign):** E4B SKU; PLE CPU offload; 26B A4B
+MoE and 31B Dense SKUs; multimodal (vision/audio); MTP drafter (deferred
+behind upstream llama.cpp Discussion #22735).
+
+**Risks:** Stage 1 silent regression (mitigated by 3-model `generatedIds[0]`
+gate); Stage 4 SWA mask shape unsupported by ggml-webgpu (mitigated by
+synthetic windowed-mask probe before implementation); Stage 5 ref-shared
+KV breaks persistence (mitigated by `engine-conversation-persistence`
+test surface). Wall-clock risk: 5 sessions plan; partial credit lands
+if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
+Gemma 4).
+
 ### Tier 3 migration to upstream `llama_decode` (REDIRECTED 2026-05-05)
 
 **Status: P0 + P1 closed. P2 v1 reverted 2026-05-05 (18× decode regression — architectural mismatch).** P2-v2 (JSEP-style architecture) **Phase 1 research probe closed 2026-05-05; Phase 2 spec + plan written 2026-05-05, ready to execute.** P3-P5 deferred behind P2-v2 gate.
