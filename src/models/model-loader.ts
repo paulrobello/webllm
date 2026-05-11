@@ -44,6 +44,72 @@ export interface PleTensors {
 	perLayerProjNorm: GgufTensorInfo;
 }
 
+/**
+ * Global AltUp tensors for Gemma 3N (Gemma 4 E2B/E4B).
+ *
+ * AltUp (Alternating Updates) is the 4-stream hidden-state architecture used
+ * in Gemma 3N. These two tensors project the embedding into the multi-stream
+ * layout (pre-loop) and back to single hidden state (post-loop).
+ *
+ * Canonical GGUF names (from llama.cpp `src/llama-arch.cpp`):
+ *   - `altup_proj.weight`
+ *   - `altup_unembd_proj.weight`
+ *
+ * Detection gate: presence of `altupProj` on {@link ParsedModel} identifies
+ * a Gemma 3N architecture. Non-AltUp Gemma 4 variants leave these undefined.
+ */
+export interface AltUpGlobalTensors {
+	/** `altup_proj.weight` — projects token embeddings into AltUp n_altup-stream layout pre-loop. */
+	altupProj: GgufTensorInfo;
+	/** `altup_unembd_proj.weight` — projects AltUp streams back to single hidden state pre-output. */
+	altupUnembdProj: GgufTensorInfo;
+}
+
+/**
+ * Per-block Gemma 3N tensors (AltUp + Laurel + gated-PLE).
+ *
+ * Each array has length === `hyperparams.layerCount`. All arrays are populated
+ * together when the GGUF contains Gemma 3N per-block tensors; individual
+ * tensor types absent from the GGUF (e.g., AltUp tensors in a stripped GGUF)
+ * will have that sub-array as `undefined`.
+ *
+ * Canonical GGUF names (from llama.cpp `src/llama-arch.cpp`, pattern blk.L.X):
+ *   AltUp:      blk.L.altup_correct_coef.weight, blk.L.altup_correct_scale.weight,
+ *               blk.L.altup_predict_coef.weight, blk.L.altup_router.weight,
+ *               blk.L.altup_router_norm.weight
+ *   Laurel:     blk.L.laurel_l.weight, blk.L.laurel_r.weight, blk.L.laurel_post_norm.weight
+ *   Gated-PLE:  blk.L.inp_gate.weight, blk.L.proj.weight, blk.L.post_norm.weight
+ */
+export interface Gemma3NPerBlockTensors {
+	// AltUp per-block tensors
+	/** `blk.L.altup_correct_coef.weight` — corrective coefficients [n_altup, n_altup] per layer. */
+	altupCorrectCoef?: GgufTensorInfo[];
+	/** `blk.L.altup_correct_scale.weight` — per-element scale applied after correction [n_embd] per layer. */
+	altupCorrectScale?: GgufTensorInfo[];
+	/** `blk.L.altup_predict_coef.weight` — predictive coefficients [n_altup, n_altup*n_altup] per layer. */
+	altupPredictCoef?: GgufTensorInfo[];
+	/** `blk.L.altup_router.weight` — routes active stream selection [n_embd, n_altup] per layer. */
+	altupRouter?: GgufTensorInfo[];
+	/** `blk.L.altup_router_norm.weight` — RMSNorm for the router [n_embd] per layer. */
+	altupRouterNorm?: GgufTensorInfo[];
+
+	// Laurel per-block tensors
+	/** `blk.L.laurel_l.weight` — left projection (down to low rank) per layer. */
+	laurelL?: GgufTensorInfo[];
+	/** `blk.L.laurel_r.weight` — right projection (up from low rank to hidden) per layer. */
+	laurelR?: GgufTensorInfo[];
+	/** `blk.L.laurel_post_norm.weight` — RMSNorm after Laurel projection per layer. */
+	laurelPostNorm?: GgufTensorInfo[];
+
+	// Gated-PLE per-block tensors
+	/** `blk.L.inp_gate.weight` — gating projection [n_embd, pleDim] per layer. */
+	pleInpGate: GgufTensorInfo[];
+	/** `blk.L.proj.weight` — final projection [pleDim, n_embd] per layer. */
+	plePerBlockProj: GgufTensorInfo[];
+	/** `blk.L.post_norm.weight` — RMSNorm after per-block projection [n_embd] per layer. */
+	plePostNorm: GgufTensorInfo[];
+}
+
 /** Result of parsing a GGUF model file. */
 export interface ParsedModel {
 	hyperparams: ModelHyperparams;
@@ -55,6 +121,20 @@ export interface ParsedModel {
 	 * in the GGUF. Undefined for all other architectures.
 	 */
 	pleTensors?: PleTensors;
+	/**
+	 * Gemma 3N global AltUp tensors. Present only when `altup_proj.weight`
+	 * and `altup_unembd_proj.weight` both exist in the GGUF. This is the
+	 * canonical detection gate for Gemma 3N architecture (Gemma 4 E2B/E4B).
+	 */
+	altUpGlobal?: AltUpGlobalTensors;
+	/**
+	 * Gemma 3N per-block tensors (AltUp + Laurel + gated-PLE). Present only
+	 * when `hyperparams.architecture === "gemma4"` and the gated-PLE per-block
+	 * tensors (`blk.0.inp_gate.weight`, `blk.0.proj.weight`,
+	 * `blk.0.post_norm.weight`) are all present. AltUp and Laurel sub-arrays
+	 * are `undefined` if those tensors are absent from the GGUF.
+	 */
+	gemma3nPerBlock?: Gemma3NPerBlockTensors;
 }
 
 /**
@@ -75,7 +155,19 @@ export class ModelLoader {
 		tokenizerConfig.contextLength = hyperparams.contextLength;
 		const kvCacheConfig = ModelLoader.buildKvCacheConfig(hyperparams);
 		const pleTensors = ModelLoader.extractPleTensors(ctx, hyperparams);
-		return { hyperparams, tokenizerConfig, kvCacheConfig, pleTensors };
+		const altUpGlobal = ModelLoader.extractAltUpGlobal(ctx, hyperparams);
+		const gemma3nPerBlock = ModelLoader.extractGemma3NPerBlock(
+			ctx,
+			hyperparams,
+		);
+		return {
+			hyperparams,
+			tokenizerConfig,
+			kvCacheConfig,
+			pleTensors,
+			altUpGlobal,
+			gemma3nPerBlock,
+		};
 	}
 
 	/**
@@ -102,6 +194,162 @@ export class ModelLoader {
 		if (!perLayerEmbed || !perLayerProj || !perLayerProjNorm) return undefined;
 
 		return { perLayerEmbed, perLayerProj, perLayerProjNorm };
+	}
+
+	/**
+	 * Extract global AltUp tensor descriptors for Gemma 3N (Gemma 4 E2B/E4B).
+	 *
+	 * Returns `undefined` for all non-Gemma-4 architectures or when either
+	 * global AltUp tensor is absent from the GGUF (e.g., stripped quantized
+	 * exports). Presence of the returned value is the canonical detection gate
+	 * for the Gemma 3N architecture: `if (parsed.altUpGlobal)`.
+	 *
+	 * Tensor names confirmed from llama.cpp `src/llama-arch.cpp`:
+	 *   - `altup_proj.weight`
+	 *   - `altup_unembd_proj.weight`
+	 */
+	private static extractAltUpGlobal(
+		ctx: GgufContext,
+		hyperparams: ModelHyperparams,
+	): AltUpGlobalTensors | undefined {
+		if (hyperparams.architecture !== "gemma4") return undefined;
+
+		const tensorMap = new Map<string, GgufTensorInfo>(
+			ctx.tensors.map((t) => [t.name, t]),
+		);
+
+		const altupProj = tensorMap.get("altup_proj.weight");
+		const altupUnembdProj = tensorMap.get("altup_unembd_proj.weight");
+
+		if (!altupProj || !altupUnembdProj) return undefined;
+
+		return { altupProj, altupUnembdProj };
+	}
+
+	/**
+	 * Extract per-block Gemma 3N tensor descriptors (AltUp + Laurel + gated-PLE).
+	 *
+	 * Returns `undefined` for non-Gemma-4 architectures or when the required
+	 * gated-PLE per-block tensors (`blk.0.inp_gate.weight`, `blk.0.proj.weight`,
+	 * `blk.0.post_norm.weight`) are absent from the GGUF.
+	 *
+	 * AltUp and Laurel sub-arrays are populated only when those tensors exist
+	 * in the GGUF; they are `undefined` otherwise (e.g., stripped exports that
+	 * omit AltUp routing weights).
+	 *
+	 * Tensor name patterns confirmed from llama.cpp `src/llama-arch.cpp`:
+	 *   AltUp:     blk.L.altup_correct_coef.weight, blk.L.altup_correct_scale.weight,
+	 *              blk.L.altup_predict_coef.weight, blk.L.altup_router.weight,
+	 *              blk.L.altup_router_norm.weight
+	 *   Laurel:    blk.L.laurel_l.weight, blk.L.laurel_r.weight, blk.L.laurel_post_norm.weight
+	 *   Gated-PLE: blk.L.inp_gate.weight, blk.L.proj.weight, blk.L.post_norm.weight
+	 */
+	private static extractGemma3NPerBlock(
+		ctx: GgufContext,
+		hyperparams: ModelHyperparams,
+	): Gemma3NPerBlockTensors | undefined {
+		if (hyperparams.architecture !== "gemma4") return undefined;
+
+		const layerCount = hyperparams.layerCount;
+		const tensorMap = new Map<string, GgufTensorInfo>(
+			ctx.tensors.map((t) => [t.name, t]),
+		);
+
+		// Gated-PLE per-block tensors are required — if layer 0 is absent the
+		// whole group is absent (guards against partially-stripped GGUFs).
+		if (
+			!tensorMap.has("blk.0.inp_gate.weight") ||
+			!tensorMap.has("blk.0.proj.weight") ||
+			!tensorMap.has("blk.0.post_norm.weight")
+		) {
+			return undefined;
+		}
+
+		// Collect required gated-PLE arrays (present in all Gemma 3N GGUFs).
+		const pleInpGate: GgufTensorInfo[] = [];
+		const plePerBlockProj: GgufTensorInfo[] = [];
+		const plePostNorm: GgufTensorInfo[] = [];
+		for (let i = 0; i < layerCount; i++) {
+			pleInpGate.push(
+				tensorMap.get(`blk.${i}.inp_gate.weight`) as GgufTensorInfo,
+			);
+			plePerBlockProj.push(
+				tensorMap.get(`blk.${i}.proj.weight`) as GgufTensorInfo,
+			);
+			plePostNorm.push(
+				tensorMap.get(`blk.${i}.post_norm.weight`) as GgufTensorInfo,
+			);
+		}
+
+		// AltUp per-block tensors — optional (absent in stripped GGUFs).
+		const hasAltupPerBlock = tensorMap.has("blk.0.altup_correct_coef.weight");
+		let altupCorrectCoef: GgufTensorInfo[] | undefined;
+		let altupCorrectScale: GgufTensorInfo[] | undefined;
+		let altupPredictCoef: GgufTensorInfo[] | undefined;
+		let altupRouter: GgufTensorInfo[] | undefined;
+		let altupRouterNorm: GgufTensorInfo[] | undefined;
+		if (hasAltupPerBlock) {
+			altupCorrectCoef = [];
+			altupCorrectScale = [];
+			altupPredictCoef = [];
+			altupRouter = [];
+			altupRouterNorm = [];
+			for (let i = 0; i < layerCount; i++) {
+				altupCorrectCoef.push(
+					tensorMap.get(`blk.${i}.altup_correct_coef.weight`) as GgufTensorInfo,
+				);
+				altupCorrectScale.push(
+					tensorMap.get(
+						`blk.${i}.altup_correct_scale.weight`,
+					) as GgufTensorInfo,
+				);
+				altupPredictCoef.push(
+					tensorMap.get(`blk.${i}.altup_predict_coef.weight`) as GgufTensorInfo,
+				);
+				altupRouter.push(
+					tensorMap.get(`blk.${i}.altup_router.weight`) as GgufTensorInfo,
+				);
+				altupRouterNorm.push(
+					tensorMap.get(`blk.${i}.altup_router_norm.weight`) as GgufTensorInfo,
+				);
+			}
+		}
+
+		// Laurel per-block tensors — optional (absent in stripped GGUFs).
+		const hasLaurel = tensorMap.has("blk.0.laurel_l.weight");
+		let laurelL: GgufTensorInfo[] | undefined;
+		let laurelR: GgufTensorInfo[] | undefined;
+		let laurelPostNorm: GgufTensorInfo[] | undefined;
+		if (hasLaurel) {
+			laurelL = [];
+			laurelR = [];
+			laurelPostNorm = [];
+			for (let i = 0; i < layerCount; i++) {
+				laurelL.push(
+					tensorMap.get(`blk.${i}.laurel_l.weight`) as GgufTensorInfo,
+				);
+				laurelR.push(
+					tensorMap.get(`blk.${i}.laurel_r.weight`) as GgufTensorInfo,
+				);
+				laurelPostNorm.push(
+					tensorMap.get(`blk.${i}.laurel_post_norm.weight`) as GgufTensorInfo,
+				);
+			}
+		}
+
+		return {
+			altupCorrectCoef,
+			altupCorrectScale,
+			altupPredictCoef,
+			altupRouter,
+			altupRouterNorm,
+			laurelL,
+			laurelR,
+			laurelPostNorm,
+			pleInpGate,
+			plePerBlockProj,
+			plePostNorm,
+		};
 	}
 
 	/** Extract model hyperparameters from GGUF metadata. */

@@ -80,5 +80,74 @@ describe.skipIf(!existsSync(GEMMA4))(
 			expect(ple?.perLayerProjNorm.dimensions).toHaveLength(1);
 			expect(ple?.perLayerProjNorm.dimensions[0]).toBe(256); // pleDim
 		});
+
+		it("loads per-block gated-PLE tensors when arch is gemma4", () => {
+			// Tasks 3.2a + 3.2b + 3.2c: AltUp / Laurel / gated-PLE per-block tensor exposure.
+			//
+			// The Q4KM GGUF contains gated-PLE per-block tensors (blk.L.inp_gate.weight,
+			// blk.L.proj.weight, blk.L.post_norm.weight) but does NOT contain AltUp or
+			// Laurel tensors. This is expected — the AltUp/Laurel tensors are absent from
+			// this quantized export. The detection gate (altUpGlobal presence) correctly
+			// identifies non-AltUp GGUFs without false-positives.
+			//
+			// Tensor names confirmed via:
+			//   - GGUF probe (probe output: blk.{0..34}.inp_gate.weight etc., count=35)
+			//   - llama.cpp src/llama-arch.cpp (LLM_TENSOR_PER_LAYER_INP_GATE → "blk.%d.inp_gate",
+			//     LLM_TENSOR_PER_LAYER_PROJ → "blk.%d.proj",
+			//     LLM_TENSOR_PER_LAYER_POST_NORM → "blk.%d.post_norm")
+			const buf = readFileSync(GEMMA4);
+			const parsed = ModelLoader.parseModel(buf);
+			const pb = parsed.gemma3nPerBlock;
+
+			// gemma3nPerBlock is populated (gated-PLE tensors are present)
+			expect(pb).toBeDefined();
+
+			// Gated-PLE per-block arrays — present in all Gemma 3N GGUFs, length === layerCount
+			expect(pb?.pleInpGate).toHaveLength(35);
+			expect(pb?.plePerBlockProj).toHaveLength(35);
+			expect(pb?.plePostNorm).toHaveLength(35);
+
+			// Verify layer 0 tensor descriptors are non-null with correct names
+			expect(pb?.pleInpGate[0]).toBeDefined();
+			expect(pb?.pleInpGate[0].name).toBe("blk.0.inp_gate.weight");
+			expect(pb?.pleInpGate[0].dimensions).toEqual([1536, 256]); // [n_embd, pleDim]
+
+			expect(pb?.plePerBlockProj[0]).toBeDefined();
+			expect(pb?.plePerBlockProj[0].name).toBe("blk.0.proj.weight");
+			expect(pb?.plePerBlockProj[0].dimensions).toEqual([256, 1536]); // [pleDim, n_embd]
+
+			expect(pb?.plePostNorm[0]).toBeDefined();
+			expect(pb?.plePostNorm[0].name).toBe("blk.0.post_norm.weight");
+			expect(pb?.plePostNorm[0].dimensions).toEqual([1536]); // [n_embd]
+
+			// Verify last layer (34) is also loaded
+			expect(pb?.pleInpGate[34]).toBeDefined();
+			expect(pb?.pleInpGate[34].name).toBe("blk.34.inp_gate.weight");
+
+			// AltUp global — absent from this Q4KM GGUF (stripped export)
+			// The detection gate for Gemma 3N code paths is altUpGlobal presence
+			expect(parsed.altUpGlobal).toBeUndefined();
+
+			// AltUp and Laurel per-block sub-arrays — absent from this Q4KM GGUF
+			expect(pb?.altupCorrectCoef).toBeUndefined();
+			expect(pb?.altupCorrectScale).toBeUndefined();
+			expect(pb?.altupPredictCoef).toBeUndefined();
+			expect(pb?.altupRouter).toBeUndefined();
+			expect(pb?.altupRouterNorm).toBeUndefined();
+			expect(pb?.laurelL).toBeUndefined();
+			expect(pb?.laurelR).toBeUndefined();
+			expect(pb?.laurelPostNorm).toBeUndefined();
+		});
+
+		it("returns undefined gemma3nPerBlock for non-Gemma-4 architectures", () => {
+			// Non-Gemma-4 GGUFs must not populate the Gemma 3N tensor groups.
+			// Use a Llama GGUF as the non-Gemma-4 control.
+			const LLAMA = "smoke-test/models/llama-3.2-1b-q4f16.gguf";
+			if (!existsSync(LLAMA)) return; // skip if not available
+			const buf = readFileSync(LLAMA);
+			const parsed = ModelLoader.parseModel(buf);
+			expect(parsed.altUpGlobal).toBeUndefined();
+			expect(parsed.gemma3nPerBlock).toBeUndefined();
+		});
 	},
 );
