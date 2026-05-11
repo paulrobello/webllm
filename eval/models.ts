@@ -585,6 +585,36 @@ export const BENCHMARK_MODELS: BenchmarkModel[] = [
 		ggufUrl: "https://huggingface.co/bartowski/gemma-2-2b-it-GGUF",
 	},
 
+	{
+		id: "gemma-4-e2b-it-q4km",
+		name: "Gemma 4 E2B Instruct (Q4_K_M)",
+		family: "Gemma 4",
+		architecture: "gemma4",
+		// 2.3B effective (PLE), 5.1B total parameter count. paramsB
+		// reports the active-compute size that the rest of the fleet
+		// uses for tier comparisons.
+		paramsB: 2.3,
+		// Q4_K_M weights file is 3.11 GB; round to 3110 MB. The PLE
+		// table sits inside the same file; chunked binding dispatch
+		// handles it (Stage 3 probe confirms exact tensor sizes).
+		vramMB: 3110,
+		defaultQuant: "q4km",
+		availableQuants: ["q4km"],
+		capabilities: {
+			toolCalling: false, // deferred — Gemma 4 PEG tool format
+			structuredOutput: false,
+			vision: false, // mmproj weights ship separately
+			embedding: false,
+		},
+		license: "Apache-2.0",
+		contextLength: 4096,
+		tier: "balanced",
+		requiresShaderF16: false,
+		downloadUrl: "https://huggingface.co/google/gemma-4-E2B-it",
+		ggufUrl: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF",
+		ggufFilePattern: "Q4_K_M",
+	},
+
 	// --- Wave 2 (7B+) ---
 	// Q4_0 7B = ~4.46 GB exceeds the WASM 4 GiB streaming cap. Q3_K_M
 	// (3.36 GB) was tried first and produced gibberish output — the Q3_K
