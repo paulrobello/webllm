@@ -462,6 +462,9 @@ export class WebLLM {
 			Array.isArray(input) &&
 			detectChatTemplate(chatTemplate ?? "") === "llama2" &&
 			!(chatTemplate ?? "").includes("<<SYS>>");
+		const isGemma4 =
+			Array.isArray(input) &&
+			String(entry.hyperparams.architecture) === "gemma4";
 		const {
 			temperature: effectiveTemperature,
 			topK: effectiveTopK,
@@ -472,6 +475,7 @@ export class WebLLM {
 			isQwenChatml,
 			isPhi3,
 			isMistral,
+			isGemma4,
 			enableThinking: config?.enableThinking,
 			consumer: {
 				temperature: config?.temperature,
@@ -941,6 +945,7 @@ export class WebLLM {
 			const isMistral =
 				detectChatTemplate(tokenizer.options.chatTemplate ?? "") === "llama2" &&
 				!(tokenizer.options.chatTemplate ?? "").includes("<<SYS>>");
+			const isGemma4 = String(entry.hyperparams.architecture) === "gemma4";
 			const {
 				temperature: effectiveTemperature,
 				topK: effectiveTopK,
@@ -951,6 +956,7 @@ export class WebLLM {
 				isQwenChatml,
 				isPhi3,
 				isMistral,
+				isGemma4,
 				enableThinking: config?.enableThinking,
 				consumer: {
 					temperature: config?.temperature,

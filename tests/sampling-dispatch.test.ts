@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	GEMMA4_DEFAULTS,
 	MISTRAL_DEFAULTS,
 	PHI3_DEFAULTS,
 	QWEN_NON_THINKING_DEFAULTS,
@@ -188,6 +189,44 @@ describe("resolveSamplingParams — raw mode", () => {
 			topP: 0.85,
 			repetitionPenalty: 1.2,
 		});
+	});
+});
+
+describe("Gemma 4 auto dispatch", () => {
+	test("returns GEMMA4_DEFAULTS when isGemma4 is true and mode is auto", () => {
+		const out = resolveSamplingParams({
+			samplingMode: "auto",
+			isQwenChatml: false,
+			isPhi3: false,
+			isGemma4: true,
+			consumer: {},
+		});
+		expect(out.temperature).toBe(1.0);
+		expect(out.topP).toBe(0.95);
+		expect(out.topK).toBe(64);
+		expect(out.repetitionPenalty).toBe(1.0);
+	});
+
+	test("explicit mode 'gemma4' selects the profile regardless of arch flags", () => {
+		const out = resolveSamplingParams({
+			samplingMode: "gemma4",
+			isQwenChatml: true,
+			isPhi3: false,
+			isGemma4: false,
+			consumer: {},
+		});
+		expect(out.temperature).toBe(1.0);
+	});
+
+	test("consumer override beats profile defaults", () => {
+		const out = resolveSamplingParams({
+			samplingMode: "auto",
+			isQwenChatml: false,
+			isGemma4: true,
+			consumer: { temperature: 0 },
+		});
+		expect(out.temperature).toBe(0);
+		expect(out.topP).toBe(GEMMA4_DEFAULTS.topP); // unchanged
 	});
 });
 

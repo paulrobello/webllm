@@ -60,6 +60,20 @@ export const MISTRAL_DEFAULTS = Object.freeze({
 	repetitionPenalty: 1.0,
 } as const);
 
+/**
+ * Gemma 4 default sampling. Google's reference inference pipeline uses
+ * `temperature=1.0`, `top_p=0.95`, `top_k=64` for instruction-tuned
+ * Gemma 4 checkpoints. For benchmarking the project pins temperature 0
+ * via the `--eval-temperature` override; runtime chat callers get the
+ * higher-temperature spec defaults unless they explicitly override.
+ */
+export const GEMMA4_DEFAULTS = Object.freeze({
+	temperature: 1.0,
+	topK: 64,
+	topP: 0.95,
+	repetitionPenalty: 1.0,
+} as const);
+
 /** Sampling mode dispatch on `CompletionConfig.sampling`. */
 export type SamplingMode =
 	| "auto"
@@ -67,6 +81,7 @@ export type SamplingMode =
 	| "qwen-default"
 	| "phi3"
 	| "mistral"
+	| "gemma4"
 	| "raw";
 
 /** Inputs to {@link resolveSamplingParams}. */
@@ -90,6 +105,11 @@ export interface SamplingResolutionInput {
 	 * Selects Mistral's official recommended sampling under `"auto"`.
 	 */
 	isMistral?: boolean;
+	/**
+	 * True when the loaded model is a Gemma 4 architecture (any size).
+	 * Selects the Gemma 4 `"auto"` profile (T=1.0 / top_p=0.95 / top_k=64).
+	 */
+	isGemma4?: boolean;
 	/**
 	 * Reasoning toggle from the chat config. `false` selects the
 	 * non-thinking profile under `"auto"` + Qwen+ChatML; `true` /
@@ -137,6 +157,7 @@ export function resolveSamplingParams(
 		isQwenChatml,
 		isPhi3,
 		isMistral,
+		isGemma4,
 		enableThinking,
 		consumer,
 	} = input;
@@ -144,6 +165,12 @@ export function resolveSamplingParams(
 	const applyAutoPhi3 = samplingMode === "auto" && !!isPhi3 && !isQwenChatml;
 	const applyAutoMistral =
 		samplingMode === "auto" && !!isMistral && !isQwenChatml && !isPhi3;
+	const applyAutoGemma4 =
+		samplingMode === "auto" &&
+		!!isGemma4 &&
+		!isQwenChatml &&
+		!isPhi3 &&
+		!isMistral;
 	const forcedProfile =
 		samplingMode === "qwen-thinking"
 			? QWEN_THINKING_DEFAULTS
@@ -153,7 +180,9 @@ export function resolveSamplingParams(
 					? PHI3_DEFAULTS
 					: samplingMode === "mistral"
 						? MISTRAL_DEFAULTS
-						: null;
+						: samplingMode === "gemma4"
+							? GEMMA4_DEFAULTS
+							: null;
 	const autoProfile = applyAutoQwen
 		? enableThinking === false
 			? QWEN_NON_THINKING_DEFAULTS
@@ -162,7 +191,9 @@ export function resolveSamplingParams(
 			? PHI3_DEFAULTS
 			: applyAutoMistral
 				? MISTRAL_DEFAULTS
-				: null;
+				: applyAutoGemma4
+					? GEMMA4_DEFAULTS
+					: null;
 	const activeProfile = forcedProfile ?? autoProfile;
 	return {
 		temperature: consumer.temperature ?? activeProfile?.temperature ?? 1.0,
