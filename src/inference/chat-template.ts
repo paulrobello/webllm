@@ -8,6 +8,7 @@ export type ChatTemplateType =
 	| "llama2"
 	| "chatml"
 	| "gemma"
+	| "gemma4"
 	| "phi3"
 	| "llama3"
 	| "mistral-v7"
@@ -22,6 +23,11 @@ export function detectChatTemplate(template: string): ChatTemplateType {
 	if (!template) return "unknown";
 	if (template.includes("<|im_start|>")) return "chatml";
 	if (template.includes("[SYSTEM_PROMPT]")) return "mistral-v7";
+	if (
+		template.includes("{% macro format_parameters") ||
+		template.includes("{%- macro format_parameters")
+	)
+		return "gemma4";
 	if (template.includes("<start_of_turn>")) return "gemma";
 	if (template.includes("<|assistant|") && !template.includes("<|end|>"))
 		return "zephyr";
@@ -294,6 +300,21 @@ function formatGemma(
 	return prompt;
 }
 
+export function formatGemma4(
+	messages: ChatMessage[],
+	addGenerationPrompt: boolean,
+): string {
+	let prompt = "";
+	for (const msg of messages) {
+		const role = msg.role === "assistant" ? "model" : msg.role;
+		prompt += `<start_of_turn>${role}\n${msg.content}<end_of_turn>\n`;
+	}
+	if (addGenerationPrompt) {
+		prompt += "<start_of_turn>model\n";
+	}
+	return prompt;
+}
+
 function formatPhi3(
 	messages: ChatMessage[],
 	addGenerationPrompt: boolean,
@@ -387,6 +408,7 @@ const FORMATTERS: Record<
 	llama2: formatLlama2,
 	chatml: formatChatml,
 	gemma: formatGemma,
+	gemma4: formatGemma4,
 	phi3: formatPhi3,
 	llama3: formatLlama3,
 	"mistral-v7": formatMistralV7,
