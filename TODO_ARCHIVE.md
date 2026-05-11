@@ -5810,3 +5810,200 @@ summary surfaces `[FAIL]` cleanly with the diagnosis message.
    message under sustained WebGPU load.
 5. Consumer reports wedges hitting agent + Three.js coexistence in
    a real product workload.
+
+
+## Campaign Q1 — Gemma 2 un-demote (queued 2026-05-11 EOS-12; closed 2026-05-11 EOS-13; archived from TODO.md)
+
+> Closed 2026-05-11 EOS-13 at 60 % overall eval (gate ≥ 60 % cleared).
+> Six fixes, three of which were not on the original 2026-05-01 demote
+> SUMMARY candidate list. Doctrine lesson: *expect plural root causes
+> for demotes*. Closure report:
+> [`eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md`](eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md).
+> Closure commit: `dc3304a`. The "closure stub" linking to this archive
+> entry lives inline in `TODO.md` for next-session reference.
+
+---
+
+**Original goal:** un-demote `gemma-2-2b-it-q4f16` from the
+wave-2 demote list back into the canonical fleet. Current state
+at queue time: smoke produces 64 tokens of id 139 (whitespace)
+at temp 0 with the NEOX-RoPE fix in. Different failure signature
+from the pre-NEOX `RSSSF suprême` gibberish — the residual
+stream is now locked into a single token instead of producing
+chaotic noise. Three concrete architectural pieces are missing
+(verified against
+`~/Repos/llama.cpp/src/models/gemma2.cpp` lines 9-176 and the GGUF
+metadata dump).
+
+**Pre-work — verified 2026-05-11 EOS-12:**
+- Architecture string: `gemma2` (already in the
+  `ModelArchitecture` union).
+- NEOX-RoPE: landed at `c8c8447` (covers gemma/gemma2/gemma3/gemma4).
+- post-attention-norm / post-ffw-norm: already loaded via `opt()`
+  in `model-inference.ts:528-529` and applied in `forwardSingle`
+  / `forwardWithLayerTaps` via `lw.postAttentionNorm` /
+  `lw.postFfwNorm` ternaries (Task 3.3d wired this generically;
+  Gemma 2 GGUFs ship the same `post_attention_norm.weight` /
+  `post_ffw_norm.weight` tensor names per llama.cpp's loader).
+- `attnSoftmaxScale("gemma2", headDim)` returns `1/sqrt(headDim)`
+  (default branch — matches Gemma 2's `f_attention_scale =
+  1/sqrt(n_embd_head_k)` for 2B per `gemma2.cpp:27-29`; for 27B
+  it differs but 27B is out of scope under the 8B ceiling).
+
+**Gemma 2 2B GGUF parameters** (from
+`smoke-test/models/gemma-2-2b-q4f16.gguf` metadata dump):
+
+```
+gemma2.attention.sliding_window      = 4096
+gemma2.attention.sliding_window_pattern = (not in GGUF; period=2 default)
+gemma2.attn_logit_softcapping        = 50.0
+gemma2.final_logit_softcapping       = 30.0
+gemma2.attention.head_count          = 8
+gemma2.attention.head_count_kv       = 4    (GQA, 2× group)
+gemma2.attention.key_length          = 256
+gemma2.embedding_length              = 2304
+gemma2.block_count                   = 26
+```
+
+Tensors present: `token_embd.weight`, per-block `attn_*`, `ffn_*`,
+`attn_post_norm`, `ffn_post_norm`. **NO `output.weight`** — Gemma
+2 ties `lm_head` to `token_embd` (per `gemma2.cpp:35,39` —
+`TENSOR_DUPLICATED` flag).
+
+**Stage Q1.1 — Tied output embedding.** Make the model loader
+fall back to `token_embd.weight` when `output.weight` is absent
+and the architecture is in the tied-embedding set (`gemma`,
+`gemma2`, `gemma3`, plus other small models known to tie: smollm,
+some qwen variants — audit separately). Today: the loader likely
+throws or silently fills with zeros, which would explain the
+whitespace lock. **Gate:** smoke loads without an "output.weight
+not found" error; greedy decode on `"The capital of France is"`
+emits a non-whitespace continuation (need not be coherent yet —
+the soft-caps below are still missing).
+
+> **CLOSED — verified already implemented.** All four lm_head
+> sites in `src/inference/model-inference.ts` already used
+> `weights.output ?? weights.tokEmb` fallback. Q1.1 was a no-op.
+> The whitespace lock was driven by missing soft-capping (Q1.2 +
+> Q1.3) and the architecture-branch + softcap-order issues
+> (Q1.6), not by tied-embedding wiring.
+
+**Stage Q1.2 — Attention logit soft-capping** (`attn_soft_cap`
+flag). Add a per-architecture `attnLogitSoftcap?: number` to
+`ModelHyperparams`, populated from `gemma2.attn_logit_softcapping`
+(50.0). In the attention math, wrap the pre-softmax logits with
+`tanh(qk / cap) * cap` per `llama-graph.cpp:2019-2026`. Two paths
+to touch: the manual softmax path (`opMulMat`/`opSoftMaxExt`) and
+the FlashAttention path (probably needs an FA disable for any
+arch with soft-cap, since FA fuses softmax without supporting a
+tanh wrap — check `ggml_flash_attn_ext` signature in the rebased
+llama.cpp). **Gate:** parity probe on a 95-token plain completion
+prompt — block-by-block cosine ≥ 0.95 vs HF reference at float32.
+
+> **CLOSED — commits `f2735d5` (op_tanh binding) + `5d1aba4`
+> (attn-side wiring) + `bb73d4f` (JSDoc placement).** FA shader
+> already implemented soft-cap natively (`ggml-wgsl-shaders.hpp:
+> 2002, :2712`) and the WebGPU host divides `scale /= logit_softcap`
+> pre-dispatch (`ggml-webgpu.cpp:1942-1944`), so FA didn't need
+> disabling. Manual softmax path was wired with the soft-cap
+> helper. The actual ordering bug (soft-cap on unscaled qk)
+> wasn't surfaced until Q1.6.
+
+**Stage Q1.3 — Final-logit soft-capping** (`f_final_logit_softcapping`,
+30.0 for Gemma 2 2B). Wrap the lm_head output with
+`tanh(logits / cap) * cap` per `gemma2.cpp:169-171`. Single-site
+change in `forwardSingle` after the output projection. Already
+present as a field on `ModelHyperparams.finalLogitSoftcap` but
+currently only respected for Gemma 4 (and incorrectly so — see
+Task 3.3i closure notes). **Gate:** top-1 argmax matches HF on
+the parity prompt; sampler doesn't degenerate (sample 10 greedy
+decodes on the smoke prompt and confirm non-trivial variety in
+the continuation distribution).
+
+> **CLOSED — same commit as Q1.2 (`5d1aba4`).** Bundled with
+> Q1.2 because both needed the new `op_tanh` binding. `softCap`
+> helper applied at all 4 lm_head sites via a guarded ternary
+> on `hp.finalLogitSoftcap`.
+
+**Stage Q1.4 — Eval verification.** Re-enable `gemma-2-2b-warm`
+in the `full` smoke profile set. Run
+`bun run eval/bench.ts --profiles gemma-2-2b-warm` at greedy
+temp 0. **Gate:** 36-prompt eval ≥ 60 % (Phi-3 closure baseline).
+If accuracy clears, un-demote (remove the demote comment block in
+`smoke-profiles.ts`, restore the entry in the `full` set). If
+still below 60 %, run a chat-formatted parity probe (Phase A
+template) to localize the residual issue.
+
+> **CLOSED — commit `dc3304a`.** Eval landed 60 % overall
+> (29/48): 92 % reasoning, 72 % instruction-following, 61 %
+> semantic-reasoning, 17 % tool-calling@capability=false.
+> Excluding tool-calling: 27/36 = 75 %.
+
+**Stage Q1.5 — Documentation.** Closure report at
+`eval/reports/gemma-2-2b-un-demote-<date>/SUMMARY.md` with
+before/after eval matrix and per-stage parity deltas. Update the
+demote SUMMARY at
+`eval/reports/gemma2-demote-2026-05-01/SUMMARY.md` with a
+"SUPERSEDED" notice pointing at the un-demote.
+
+> **CLOSED — commit `dc3304a`.** Closure report shipped.
+> SUPERSEDED notice added to demote SUMMARY. TODO.md Campaign Q1
+> marked CLOSED with full retrospective.
+
+**Stage Q1.6 — Extend gemma4 branches to Gemma family + fix
+softcap order** (surfaced 2026-05-11 EOS-13 during Q1.4 smoke
+probe). Q1.2 + Q1.3 landed correctly per spec compliance + code
+quality reviews, but the smoke probe still locked to whitespace.
+Investigation of `gemma2.cpp:60-176` surfaced two gaps:
+
+1. **Gemma-family architecture branches** in `model-inference.ts`
+   that were gated `gemma4`-only should apply to whole family:
+   - Input embedding scale by `sqrt(n_embd)` (gemma2.cpp:70).
+   - GELU-parallel FFN activation instead of SwiGLU (gemma2.cpp:140).
+
+   Kept gated to gemma4 only: V bare-RMS-norm (gemma2 does NOT do
+   this per gemma2.cpp:93) + `attnSoftmaxScale === 1.0` (gemma2
+   needs the standard 1/sqrt(d_k); QK-norm is gemma4-only).
+
+2. **Soft-cap ordering bug.** The original Q1.2 wiring applied
+   `softCap(qk, cap)` BEFORE the softmax kernel's internal
+   `scale = 1/sqrt(d_k)` multiplication. Reference order per
+   `gemma2.cpp:110` + `ggml-cpu/ops.cpp:8232-8233`: scale FIRST,
+   then softcap, then softmax with scale=1.0. With the wrong
+   order, soft-cap acts on sqrt(d_k)-larger qk magnitudes,
+   saturating tanh and producing near-bang-bang attention.
+
+> **CLOSED — commit `31d53a5`.** Added `isGemmaFamily(arch)`
+> helper. Extended embed-scale + GELU FFN to whole family (10
+> sites). Refactored 6 manual-softmax sites to scale-first
+> ordering. FA path untouched (already correct). Smoke probe
+> after fix: `Paris.` (4 tokens, finish=stop-token) instead of
+> 20 whitespace tokens.
+
+**Out of scope (this campaign):** Gemma 2 9B and 27B SKUs (the 27B
+needs a different `f_attention_scale` formula and is above the
+8B ceiling regardless); Gemma 2 actually using SWA at lengths >
+4096 (window is wider than `bench-full`'s longest output, so
+all-global fallback is fine for the eval gate). SWA at scale is
+the Stage 4 work below; if Q1.4 misses on long-prompt tasks
+specifically, defer to Stage 4 rather than stretching this
+campaign.
+
+**Risks (original; retained for retrospective):**
+- FA + soft-cap incompatibility (Q1.2). Mitigation: gate FA off
+  whenever `hp.attnLogitSoftcap` is non-zero; verify in smoke
+  with `FA: OFF` toggle. If FA is the dominant Gemma 2 throughput
+  lever, a follow-up campaign can teach FA the soft-cap path.
+
+  → *Didn't materialize.* FA shader already implemented soft-cap
+  natively and the host code pre-divided scale, so FA stayed on.
+
+- Tied-embedding regression risk on other archs (Q1.1). Mitigation:
+  flip the fallback only when `output.weight` is genuinely absent
+  AND the architecture is in an explicit tied-embedding set;
+  models like Mistral that ship `output.weight` keep their
+  existing behavior.
+
+  → *Didn't materialize.* The fallback was already in place
+  pre-Q1, gated implicitly by the GGUF having or not having
+  `output.weight`. No regression possible.
