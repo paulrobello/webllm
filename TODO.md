@@ -1014,10 +1014,15 @@ and §3 for the table of GGUF keys → project impact.
        harness + capture-server + compare driver. TinyLlama gate
        PASSES; Gemma 4 surfaces layer-0 drift + layer-2 catastrophic
        drop. Reports under `eval/reports/parity-*-2026-05-11/`.
-     - ⏳ Phase 3 (queued 2026-05-11 EOS-5): checkpoint-level taps
-       inside block 0 to localize WHERE in the block the residual
-       drifts. See "Resume in fresh session" block below for the
-       full plan + recapture quickstart.
+     - ✅ Phase 3 (2026-05-11 EOS-6, commit `78f12e1`): embedding-
+       output tap + attention softmax scale bug fix. Gemma 4 layers
+       0-14 now cosines 0.88-0.98 (recovered from 0.34-0.97 jitter);
+       catastrophic boundary moves to L15 (shared-KV transition).
+       See "Phase 3 findings" below.
+     - ⏳ Phase 4 (queued 2026-05-11 EOS-6): wire shared-KV at
+       layers 15-34. Originally Stage 5 work; pulled forward into
+       Stage 3 because correctness requires it. See "Phase 4 plan"
+       below.
      Candidates in priority order:
      (a) **Intermediate hidden-state comparison** vs HuggingFace
          `transformers` Gemma 4 reference run on the same prompt
@@ -1088,13 +1093,153 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-5)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-6)
 
-**Phase 2 CLOSED 2026-05-11 (commit `b7c2e0f`):** end-to-end parity-
-capture pipeline shipped and validated. TinyLlama parity PASSES (gate-
-trustworthy); Gemma 4 parity surfaces the bug. **Where to start next:**
-**Task 3.3l Phase 3** — finer-grained checkpoint taps inside block 0
-to localize where in the block the residual stream first drifts.
+**Phase 3 CLOSED 2026-05-11 (commit `78f12e1`):** attention-scale bug
+fixed; embedding-output tap added; Gemma 4 layers 0-14 recovered. New
+catastrophic boundary at layer 15 (shared-KV transition). **Where to
+start next:** **Task 3.3l Phase 4** — implement shared-KV handling for
+layers 15-34. See "Phase 4 plan" below.
+
+**Phase 3 findings — Gemma 4 attention softmax scale was wrong:**
+
+The bug: `gemma4.cpp:11` sets `hparams.f_attention_scale = 1.0f`
+("Gemma4 uses self.scaling = 1.0, no pre-attn scaling") passed
+verbatim as `kq_scale` to `ggml_soft_max_ext` at `llama-graph.cpp:
+2033`. Gemma 4's `attn_q_norm` / `attn_k_norm` gains are trained to
+compensate for the missing 1/√d_k factor. WebLLM was applying the
+default 1/√head_dim across every architecture; for Gemma 4 with
+head_dim=256 that's a 16× scaling difference, producing essentially
+uniform attention weights and non-uniform drift compounding across
+the residual stream.
+
+Fix: new `attnSoftmaxScale(hp, headDim)` helper returns 1.0 for
+`gemma4` and 1/√head_dim for everything else; 8 call sites updated
+(FA + manual paths in forwardSingle, forwardForEmbedding,
+forwardWithLayerTaps, forwardAllPositions, and the 6th debug path).
+
+Parity-capture before vs after (eval/reports/parity-gemma-4-e2b-
+attnscale-fix-2026-05-11/REPORT.md):
+
+| Block | Before | After | Δ |
+|---|---|---|---|
+| embed | 0.9953 | 0.9953 | — (unchanged) |
+| L0 | 0.9756 | 0.9600 | -0.016 (slight, accepted) |
+| L1 | 0.9685 | 0.9807 | +0.012 |
+| L2 | 0.6591 ⚠ | 0.8648 | +0.206 ★ |
+| L4 | 0.9375 | 0.9822 | +0.045 |
+| L9 | 0.6730 | 0.9603 | +0.287 ★ |
+| L11 | 0.3436 | 0.8790 | +0.535 ★ |
+| L14 | 0.8445 | 0.9742 | +0.130 |
+| **L15** | 0.5572 | **0.6605** | (still bad — Δ -0.31 NEW boundary) |
+| L34 | 0.0335 | 0.0420 | (still terrible) |
+
+TinyLlama regression-check after fix: PASS (end-stack cos 0.9855,
+top-1 argmax matches HF id 3681). Conditional is architecture-gated.
+
+Gemma 4 chat smoke (greedy temp=0): output transitioned from low-
+entropy repetition `_cownt_cownt_cownt…` to high-entropy mixed-vocab
+noise `เชพอ'ircleこれから話precise…`. This signature change matches
+"layers 0-14 mostly correct, layer 15+ destroys the residual stream".
+
+**Phase 4 plan — shared-KV at layers 15-34:**
+
+The bug: Gemma 4 E2B has `num_kv_shared_layers=20`. Per gemma4.cpp:
+208-238, `has_kv(il)` returns false for layers ≥ `n_layer_kv_from_
+start` (= `n_layer - shared_kv_layers` = 15). Shared-KV layers DON'T
+compute their own K/V from `wk`/`wv` — instead they REUSE the K/V
+cache slot from an earlier (full-attention-or-SWA-matching) layer.
+
+WebLLM currently computes fresh K/V from `lw.kProj` / `lw.vProj` at
+every layer including 15-34. The GGUF does ship `attn_k.weight` /
+`attn_v.weight` at every layer, but at shared-KV layers those weights
+should be IGNORED — the attention reads from the cache slot of an
+earlier layer.
+
+Reference: llama-kv-cache-iswa.cpp + llama-kv-cache.cpp (look for
+`reuse layer %d, is_swa = %d` log line at llama-kv-cache.cpp:249).
+The remapping is layer-type-aware: each shared SWA layer reuses the
+LAST same-SWA-type pre-share slot; each shared full layer reuses the
+LAST full pre-share slot.
+
+For unsloth/gemma-4-E2B-it: SWA pattern is
+`[T,T,T,T,F,T,T,T,T,F,T,T,T,T,F]` for layers 0-14. Layers 15-34
+follow the pattern `[T,T,T,T,F]×4` and reuse — per llama.cpp's iSWA
+remap — the LAST same-type SWA / full slot before the boundary.
+Concretely (the pattern is `il_kv_reuse = first_pre_share_match`):
+- Layer 14 (full, has own KV at slot 14) — the last full layer before share
+- Layer 13 (SWA, has own KV at slot 13) — the last SWA layer before share
+- Layer 15 (SWA, share) → reuses slot 13
+- Layer 16 (SWA, share) → reuses slot 13
+- Layer 17 (SWA, share) → reuses slot 13
+- Layer 18 (SWA, share) → reuses slot 13
+- Layer 19 (full, share) → reuses slot 14
+- Layer 20 (SWA, share) → reuses slot 13
+- ...
+
+Confirm this mapping by adding instrumented logs in llama.cpp side
+and dumping at load time, or by reading `llama_kv_cache_init` debug
+output.
+
+Phase 4 implementation:
+1. **Loader change** (`src/models/model-loader.ts`): expose
+   `sharedKvLayers` already loaded, plus a derived per-layer
+   `kvReuseFromLayer[il]: number | null` mapping. For `il < n_layer
+   - sharedKvLayers`: `null` (own K/V). For `il >= ...`: index of
+   the last preceding same-type layer with own K/V.
+2. **Inference change** (`forwardSingle` + `forwardWithLayerTaps`):
+   in the per-layer loop, if `kvReuseFromLayer[il] !== null`, SKIP
+   the K/V projection + KV-cache write for this layer. Instead,
+   point `fullK` / `fullV` views at the cached slot of layer
+   `kvReuseFromLayer[il]`.
+3. **Q projection still happens** at every layer (each layer has
+   its own `attn_q.weight`).
+4. **Attention itself** uses the borrowed K/V plus this-layer's Q.
+5. **Memory savings**: shared-KV layers don't allocate cache slots
+   (Stage 5's headline 2 GB savings). Phase 4 can either share
+   the existing-slot view (cheap) or skip allocation (savings).
+   For correctness-first, sharing the view is enough; allocation
+   savings can land later.
+6. **Validation**: re-run parity capture. Expected: layers 15-34
+   cosines recover to the same ~0.93-0.98 regime as 0-14.
+7. **Gates**: end-stack cos ≥ 0.95; greedy smoke produces real
+   English; ≥40% eval on the 36-prompt suite (Stage 3 closure
+   target).
+
+**Risks / open questions:**
+- The exact iSWA remap (which layer's KV does layer 15 reuse?)
+  must be empirically validated. If the mapping is wrong, the
+  parity report will surface it again at L15.
+- The `attn_k.weight` / `attn_v.weight` tensors at shared-KV
+  layers — should they be deleted from the loader (free memory)
+  or just ignored? Ignoring is simpler; deleting saves a few MB.
+- Stage 4 (real SWA windowed mask) is still pending. For 6-token
+  prompts SWA is invisible; longer prompts will need it.
+
+**Phase 4 recapture quickstart** (same as Phase 3 — only the
+WebLLM side needs rebuild):
+
+```bash
+# 1. Restart capture-server
+RUN_DIR=eval/reports/parity-gemma-4-e2b-shared-kv-$(date +%Y-%m-%d)
+mkdir -p "$RUN_DIR"
+cp eval/reports/parity-gemma-4-e2b-stage3-block0-2026-05-11/hf-ref.json \
+   "$RUN_DIR/hf-ref.json"
+lsof -ti:8035 | xargs kill -9 2>/dev/null
+bun run eval/tools/parity-capture/capture-server.ts \
+  --run-dir "$RUN_DIR" --port 8035 &
+
+# 2. Rebuild bundle after code changes
+bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+
+# 3. Re-run WebLLM capture (HF reference reused)
+agentchrome --port 63846 navigate \
+  "http://localhost:8031/parity-capture.html?model=gemma-4-e2b-it-q4km&inputIds=2,818,5279,529,7001,563&v=$(date +%s)"
+
+# 4. Compare
+uv run --no-project --with numpy python3 \
+  eval/tools/parity-capture/compare.py --run-dir "$RUN_DIR"
+```
 
 **Phase 2 results (eval/reports/parity-*-2026-05-11/REPORT.md):**
 
