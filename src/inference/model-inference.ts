@@ -1649,6 +1649,10 @@ export class ModelInference {
 					N,
 				);
 
+				// This embedding tap path skips Gemma's post-attention / post-FFW
+				// norms because no embedder GGUF in the registry carries them; if
+				// a Gemma-family model is ever registered with embeddingCapable=true,
+				// wire postAttentionNorm / postFfwNorm here to match forwardSingle.
 				const oProj = wasm.opMulMat(lw.oProj, merged);
 				const attnResidual = wasm.opAdd(oProj, cur);
 
