@@ -1352,7 +1352,12 @@ export class ModelInference {
 					maskTensor,
 					1.0 / Math.sqrt(headDim),
 					0.0, // max_bias (ALiBi disabled)
-					hp.finalLogitSoftcap ?? 0.0, // logit_softcap (Gemma family; 0 = disabled)
+					// FA logit_softcap is the *attention* softcap (Gemma 2 only). Gemma 4
+					// sets f_attention_scale = 1.0f with no attention softcap; its
+					// f_final_logit_softcapping = 30.0 belongs AFTER lm_head, not here
+					// (gemma4.cpp:11 vs :379). The project does not currently support
+					// Gemma 2 attention softcap — pass 0.0 unconditionally.
+					0.0, // logit_softcap (no attention softcap supported)
 				);
 				// FA returns contiguous [headDim, nHeads, nTokens] — reshape
 				// directly to [embDim, nTokens] for oProj. No permute or
