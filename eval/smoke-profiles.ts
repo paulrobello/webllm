@@ -262,20 +262,21 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
-	// ── Gemma 2 2B IT — DEMOTED 2026-05-01 ────────────────────
-	// Profile retained for future re-probe but NOT in the `full`
-	// set. Gemma 2 introduces post-attention LayerNorm, post-FFW
-	// LayerNorm, alternating sliding-window attention, attention/
-	// output logit soft-capping, and tied output↔embedding weights.
-	// The patched ggml-webgpu fork doesn't fully implement those
-	// arch-specific features; the model loads + generates 64 tokens
-	// at 54 tok/s but emits coherent-but-incoherent output ("RSSSF
-	// suprême suprême estúdio estúdio…") consistent with broken
-	// internal math. See closure report at
-	// eval/reports/gemma2-demote-2026-05-01/SUMMARY.md.
-	// Do not re-add to `full` without re-running smoke + verifying
-	// the failure no longer reproduces (likely needs upstream
-	// ggml-webgpu coverage of the four gemma2 quirks above).
+	// ── Gemma 2 2B IT — UN-DEMOTED 2026-05-11 ─────────────────
+	// Originally demoted 2026-05-01 due to broken internal math
+	// ("RSSSF suprême suprême estúdio…" gibberish). Root causes
+	// landed in Q1 campaign (commits f2735d5..31d53a5):
+	//   1. NEOX-RoPE for Gemma family (c8c8447, pre-Q1 work).
+	//   2. Attention + final logit soft-capping with op_tanh
+	//      binding (f2735d5 + 5d1aba4 + bb73d4f).
+	//   3. Embed-scale sqrt(n_embd) + GELU FFN extended from
+	//      gemma4-only to whole gemma family; scale-first
+	//      softcap order in manual softmax path (31d53a5).
+	// Eval at greedy temp 0: 60 % overall (29/48), 92 % reasoning,
+	// 72 % instruction-following, 61 % semantic-reasoning, 17 %
+	// tool-calling (capability=false, expected low). 58.8 tok/s
+	// decode. Closure report:
+	// eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md.
 	{
 		name: "gemma-2-2b-warm",
 		model: "gemma-2-2b-q4f16",
@@ -430,6 +431,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"llama-3.2-3b-warm",
 		"hermes-3-llama-3.2-3b-warm",
 		"phi-3.5-mini-warm",
+		"gemma-2-2b-warm",
 		"qwen3-4b-warm",
 		"qwen3-4b-thinking-warm",
 		"mistral-7b-v0.3-warm",

@@ -1,5 +1,13 @@
 # Gemma 2 2B — DEMOTED from `full` set (2026-05-01)
 
+> **SUPERSEDED 2026-05-11** — `gemma-2-2b-warm` un-demoted after Q1
+> campaign fixes (NEOX-RoPE, soft-capping, embed-scale, GELU FFN,
+> softcap order). Eval lifted from gibberish to **60 % overall**
+> (92 % reasoning, 72 % instruction-following). Closure report:
+> [`eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md`](../gemma-2-2b-un-demote-2026-05-11/SUMMARY.md).
+> Retained here as the diagnosis-of-record for the failure mode
+> and the doctrine "demote candidates are usually plural" lesson.
+
 ## Outcome
 
 `gemma-2-2b-q4f16` removed from the `SMOKE_PROFILE_SETS.full` array

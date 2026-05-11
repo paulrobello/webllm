@@ -1270,15 +1270,45 @@ SWA), so doing Gemma 2 first gets the soft-cap + tied-embedding
 patterns landed and reused.
 
 ────────────────────────────────────────────────────────────────
-### Campaign Q1 — Gemma 2 un-demote (queued 2026-05-11 EOS-12)
+### Campaign Q1 — Gemma 2 un-demote — **CLOSED 2026-05-11 EOS-13** ✅
 
-**Goal:** un-demote `gemma-2-2b-it-q4f16` from the wave-2 demote
-list back into the canonical fleet. Current state: smoke produces
-64 tokens of id 139 (whitespace) at temp 0 with the NEOX-RoPE
-fix in. Different failure signature from the pre-NEOX `RSSSF
-suprême` gibberish — the residual stream is now locked into a
-single token instead of producing chaotic noise. Three concrete
-architectural pieces are missing (verified against
+`gemma-2-2b-warm` un-demoted back into `SMOKE_PROFILE_SETS.full`
+at 60 % overall eval (92 % reasoning / 72 % instruction-following
+/ 61 % semantic-reasoning / 17 % tool-calling@capability=false).
+Speed: 58.8 tok/s decode. Closure SUMMARY:
+[`eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md`](eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md).
+
+**Root cause (six items, plural):** NEOX RoPE (pre-Q1 `c8c8447`),
+attention soft-cap (`f2735d5` + `5d1aba4`), final-logit soft-cap
+(`5d1aba4`), embed-scale extended to whole gemma family
+(`31d53a5`), GELU FFN extended to whole gemma family (`31d53a5`),
+scale-first softcap order in manual softmax path (`31d53a5`). The
+original demote SUMMARY enumerated five candidates with similar
+weight; the actual un-demote needed six fixes, three of which
+weren't on the original list — doctrine: *expect plural root
+causes for demotes*.
+
+Original Q1 plan (Q1.1-Q1.5) and the surfaced Q1.6 (gemma-family
+branch extension + softcap order) below are preserved for
+historical context; everything CLOSED.
+
+**Out-of-original-scope Q1.6** surfaced 2026-05-11 EOS-13 when
+Q1.4 smoke probe still showed whitespace lock after Q1.1-Q1.3
+landed. Adding it to the campaign was the right call (rather
+than punting to a separate campaign) since Q1.2-Q1.3 alone
+didn't move the smoke probe and the architectural reading was
+on-hand.
+
+---
+
+**Original goal:** un-demote `gemma-2-2b-it-q4f16` from the
+wave-2 demote list back into the canonical fleet. Current state
+at queue time: smoke produces 64 tokens of id 139 (whitespace)
+at temp 0 with the NEOX-RoPE fix in. Different failure signature
+from the pre-NEOX `RSSSF suprême` gibberish — the residual
+stream is now locked into a single token instead of producing
+chaotic noise. Three concrete architectural pieces are missing
+(verified against
 `~/Repos/llama.cpp/src/models/gemma2.cpp` lines 9-176 and the GGUF
 metadata dump).
 
