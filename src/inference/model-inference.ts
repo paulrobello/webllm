@@ -957,7 +957,8 @@ export class ModelInference {
 	/**
 	 * Pre-loop Per-Layer Embedding (PLE) projection chain for Gemma 4 (Gemma 3N).
 	 * Produces inp_per_layer with shape [pleDim, n_tokens, layerCount] which
-	 * Task 3.3b will slice per-block and inject into the residual.
+	 * is consumed per-block via slice + gated injection inside the layer loop
+	 * (separate concern from this helper).
 	 *
 	 * Returns null for non-Gemma-4 architectures (PLE tensors absent).
 	 *
@@ -1088,10 +1089,11 @@ export class ModelInference {
 		// into it *before* attention ops that read kv.k / kv.v are added. Without
 		// this ordering, the cpy (write) and the view (read) have no dependency
 		// edge, so attention reads stale data (zeros).
+		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
-		// Task 3.3b will slice inpPerLayer per-block and inject into the residual.
+		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
 		const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, nTokens);
 		if (inpPerLayer !== null) {
 			wasm.graphBuildForwardExpand(graph, inpPerLayer);
@@ -1772,10 +1774,11 @@ export class ModelInference {
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 
+		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
-		// Task 3.3b will slice inpPerLayer per-block and inject into the residual.
+		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
 		const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, nTokens);
 		if (inpPerLayer !== null) {
 			wasm.graphBuildForwardExpand(graph, inpPerLayer);
@@ -2111,10 +2114,11 @@ export class ModelInference {
 			: 0;
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
-		// Task 3.3b will slice inpPerLayer per-block and inject into the residual.
+		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
 		const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, nTokens);
 		if (inpPerLayer !== null) {
 			wasm.graphBuildForwardExpand(graph, inpPerLayer);
