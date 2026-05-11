@@ -926,7 +926,12 @@ export class ModelInference {
 		const kReady = lw.kNorm
 			? wasm.opMul(wasm.opRmsNorm(k3, hp.normEpsilon), lw.kNorm)
 			: k3;
-		return { qReady, kReady, v3 };
+		// Gemma 4 applies bare RMSNorm (no gain) to V before attention
+		// (gemma4.cpp:221: ggml_rms_norm(Vcur, f_norm_rms_eps)). No other
+		// architecture in the fleet does this — Q/K-only normed elsewhere.
+		const vReady =
+			hp.architecture === "gemma4" ? wasm.opRmsNorm(v3, hp.normEpsilon) : v3;
+		return { qReady, kReady, v3: vReady };
 	}
 
 	/**
