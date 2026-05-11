@@ -954,44 +954,71 @@ and §3 for the table of GGUF keys → project impact.
      `opMul(cur, lw.layerOutputScale)` applied at the end of each
      per-layer iteration, right after PLE injection. Op sequence per
      `gemma4.cpp:355-358`.
-   - ⏳ **Task 3.3f (NEW — surfaced 2026-05-11):** Gemma embedding
-     scaling. The standard embedding lookup
-     `wasm.opGetRows(weights.tokEmb, tokenIdsTensor)` in all four
-     forward methods (`forwardSingle:1175`, `forwardForEmbedding:1582`,
-     `forwardAllPositions:1894`, `forwardDecode:2261`) does NOT
-     pre-scale `x` by `sqrt(hp.embeddingLength)`. Gemma family does
-     this universally (`gemma4.cpp:104`:
-     `inpL = ggml_scale(inpL, sqrtf(n_embd))`). Llama / Qwen / Mistral
-     / Phi don't, so a generic per-architecture gate is required.
-     Suggested: add `scaleEmbedding?: boolean` hyperparam OR predicate
-     `hp.architecture === "gemma4"` in the relevant forward methods.
-     **Expected impact:** load-bearing for semantic correctness —
-     residual stream is currently off by `1/sqrt(1536) ≈ 0.0255` on
-     Gemma 4. Best-guess: this single fix unlocks coherent output.
-   - ⏳ **Task 3.3g (NEW — surfaced 2026-05-11):** Gemma FFN
-     activation is GELU not SiLU. Sites: `forwardSingle:1390`,
-     `forwardForEmbedding:1677`, `forwardAllPositions:2070`,
-     `forwardDecode:2433` all use `wasm.opSwigluSplit(gate, up)`
-     which is `silu(gate) * up`. Per `gemma4.cpp:320`
-     (`LLM_FFN_GELU, LLM_FFN_PAR`), Gemma uses `gelu(gate) * up`.
-     Replace with `wasm.opMul(wasm.opGelu(gate), up)` when
-     `hp.architecture === "gemma4"` (or add a `ffnActivation`
-     hyperparam: `"silu"` default vs `"gelu"` Gemma). **Expected
-     impact:** also load-bearing for semantic correctness.
-   - ⏳ Task 3.5: smoke probe gate (Paris first-token) — adjudicable
-     once 3.3f + 3.3g land. 36-prompt eval ≥40% gate, Stage 3 closure
-     report at `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`.
+   - ✅ Task 3.3f (commit `63c1a6d`): Gemma embedding scale. Inserted
+     `wasm.opScale(x, Math.sqrt(hp.embeddingLength))` after each
+     `opGetRows(weights.tokEmb, ...)` at all four forward methods,
+     gated on `hp.architecture === "gemma4"`. Op sequence per
+     `gemma4.cpp:149`.
+   - ✅ Task 3.3g (commit `79dd05d`): Gemma GELU FFN activation.
+     Replaced `opSwigluSplit(gate, up)` with
+     `wasm.opMul(wasm.opGelu(gate), up)` at all four forward methods
+     when Gemma 4; SwiGLU retained elsewhere. Op sequence per
+     `gemma4.cpp:320` (LLM_FFN_GELU + LLM_FFN_PAR).
+   - ✅ Task 3.3h (commit `a321df6`): Gemma V bare-RMS-norm inside
+     `buildQKV`. Applied `wasm.opRmsNorm(v3, hp.normEpsilon)` (no
+     gain) for Gemma 4 before return. Op sequence per `gemma4.cpp:221`.
+   - ✅ Task 3.3i (commit `ac8bbe1`): Drop final-logit-softcap misuse
+     in flash attention. `forwardSingle:1350` was passing
+     `hp.finalLogitSoftcap` (= 30.0 on Gemma 4) as FA's logit_softcap;
+     Gemma 4 has `f_attention_scale = 1.0` with no attention softcap
+     (`gemma4.cpp:11`). Pass 0.0 unconditionally. The other three FA
+     sites already passed 0.
+   - ✅ Task 3.3j (commits `d6132ed` + `2591525`): BF16 → F32 cast at
+     weight load. The `mul_mat_f32_bf16` WGSL shader fails to compile
+     (BF16 unsupported by WebGPU), and the failure cascades through
+     CommandBuffer invalidation — affected MUL_MAT silently writes
+     garbage to its output tensor. For Gemma 4 E2B, `per_layer_model_proj`
+     is BF16 in the unsloth Q4_K_M GGUF and participates in PLE
+     pre-loop projection, so every prefill/decode step was emitting
+     garbage into `inp_per_layer` and polluting the residual stream
+     at every block via PLE injection. Fix: detect BF16 in
+     `ModelInference.makeTensor`, override to F32 alloc, convert
+     bytes at upload via new `bf16BytesToF32Bytes` helper. Streaming
+     path supported (JS-side conversion). Prior session's 3.3a
+     closure note mis-classified this as a benign CPU fallback —
+     it was a correctness-blocking bug.
+   - ⏳ **Task 3.3k (NEW — surfaced 2026-05-11 EOS):** `rope_freqs`
+     (freq_factors) support in RoPE for Gemma 4 global-attention
+     layers. Per `gemma4.cpp:86-88` + `:184-188` + `:202`, non-SWA
+     layers carry a per-layer `rope_freqs` weight tensor of shape
+     `[n_embd_head/2] = [256]` (TENSOR_DUPLICATED across global
+     layers — one tensor shared). Applied as a per-dim divisor to
+     `theta` inside `ggml_rope_ext` (`ops.cpp:5633`:
+     `ff = freq_factors ? freq_factors[i0/2] : 1.0f`). The unsloth
+     GGUF ships `rope_freqs.weight`. The project's `op_rope` binding
+     in `webgpu-bridge.cpp:179-185` hard-codes `nullptr` for
+     freq_factors, so Gemma 4 global-attention layers (7-of-35) get
+     wrong RoPE encoding. **Expected impact:** load-bearing — current
+     greedy output is degenerate repetitive (`_cownt_cownt_cownt…`),
+     consistent with corrupted attention from wrong position
+     encoding on 1-of-5 layers. **Cost:** WASM rebuild required
+     (new `op_rope_with_freqs` binding + TS wrapper + loader
+     update + 4 forward-site updates + new LayerWeights field).
+   - ⏳ Task 3.5: closure smoke probe + 36-prompt eval — pending 3.3k.
 
-   **Smoke-gate observation 2026-05-11 (post-3.3e):** All five planned
-   Stage 3 sub-tasks landed (3.3a–e + pre-wired 3.3c). Gemma 4 reaches
-   `[8/8]` and decodes 64 tokens at 71 tok/s, but output is still
-   `<unused14><unused11>…<eos>…` garbage. Diagnosis traced the two
-   above gaps; neither was in the original spec or the no-AltUp
-   correction. The bf16 WGSL "device error" in the tab title is a
-   one-shot `mul_mat_f32_bf16` shader parse error on Task 3.3a's
-   BF16 `per_layer_model_proj` MUL_MAT; ggml's `supports_op` scheduler
-   falls back to CPU and execution continues — orthogonal performance
-   concern, not a correctness blocker.
+   **Smoke-gate progression 2026-05-11 (post-3.3j):** All Stage 3 fixes
+   landed (3.3a–j). The BF16 cast (3.3j) was THE correctness unblocker:
+   `mul_mat_f32_bf16` shader failures were NOT benign one-shot CPU
+   fallbacks (as 3.3a's closure note had claimed); they were
+   cascading CommandBuffer invalidations writing garbage to
+   `per_layer_model_proj` output every layer/token. After 3.3j the
+   output transitions from `<unused14><unused11>…` unused-token
+   noise to **real-vocab tokens** — `LA_T_cowntहांत_cَour…` at
+   temp=1.0, `_cownt_cownt_cownt…_cることownt…` at temp=0. The
+   greedy degenerate repetition signature points at a remaining
+   load-bearing arch piece: `rope_freqs` (Task 3.3k). The bf16
+   device-error log in tab titles is now gone — console verifies
+   no shader compile failures during decode.
 
 4. **Stage 4 — Real sliding-window attention.** Replace Stage-3
    "all-global" fallback with real SWA on the 4-of-5 layers marked
@@ -1026,48 +1053,59 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-2)
 
-**Where to start:** **Task 3.3f** (Gemma embedding scaling). All 3.3a–e
-landed and reviewed but the model still emits garbage — diagnosis on
-this same session traced the gap to two Gemma-family architectural
-pieces that were never in the original spec or no-AltUp correction:
-embedding scale (3.3f) and FFN activation (3.3g). Both are 1–2 line
-per-site changes plus one hyperparam (or arch-string predicate) gate.
-
-**Recommended ordering:** ship 3.3f first as a stand-alone change with
-smoke probe (`"The capital of France is"` → first token). If 3.3f
-alone produces ASCII output (even if not yet "Paris"), ship 3.3g
-second and re-probe for the "Paris" semantic gate. If 3.3f produces
-no qualitative change, ship 3.3g without iterating — both are required
-and won't fight each other.
+**Where to start:** **Task 3.3k** (`rope_freqs` / freq_factors in RoPE
+for Gemma 4 global-attention layers). All architectural fixes 3.3a–j
+landed this session; the BF16 → F32 cast (3.3j) was THE correctness
+unblocker that lifted output from unused-token noise into real-vocab
+territory. Greedy output is now degenerate-repetitive
+(`_cownt_cownt_cownt…`), pointing at wrong RoPE on the 7-of-35 global
+layers. This is the canonical Stage 3 closure blocker.
 
 **Required reading before touching code:**
-1. `docs/superpowers/specs/2026-05-10-gemma-4-stage3-correction-no-altup.md`
-   — Stage 3 scope correction (authoritative for the no-AltUp/Laurel
-   decision; does NOT mention 3.3f/3.3g — those are this-session
-   findings that need a spec amendment).
-2. `~/Repos/llama.cpp/src/models/gemma4.cpp` — **canonical op-sequence
-   source of truth**. For 3.3f read line 104; for 3.3g read line 320.
-3. `src/inference/model-inference.ts` for the existing wired pieces.
-   Grep `opGetRows(weights.tokEmb` (4 sites for 3.3f) and
-   `opSwigluSplit` (4 sites for 3.3g) to find injection points.
-4. `src/core/types.ts:282` for the `pleDim?: number` precedent — pick
-   the same field-shape for any new `scaleEmbedding` / `ffnActivation`
-   field, OR predicate directly on `hp.architecture === "gemma4"`.
+1. `docs/superpowers/specs/2026-05-11-gemma-4-stage3-embedding-scale-gelu-ffn-addendum.md`
+   — the canonical follow-on spec covering 3.3f→3.3j; documents the
+   BF16 cascade-corruption diagnosis (with correction to the prior
+   session's mis-classification of the bf16 error as benign).
+2. `~/Repos/llama.cpp/src/models/gemma4.cpp` lines 86-88, 184-188,
+   202 for the canonical RoPE op sequence on non-SWA layers.
+3. `~/Repos/llama.cpp/ggml/src/ggml-cpu/ops.cpp:5628-5658` for the
+   freq_factors semantics: `ff = freq_factors ? freq_factors[i0/2] : 1.0f`
+   applied as a per-dim divisor to theta.
+4. `src/wasm/webgpu-bridge.cpp:179-185` for the current `op_rope`
+   binding (hard-codes `nullptr` for freq_factors).
+5. `src/inference/ggml-wasm.ts:793+` for the current `opRope` TS
+   wrapper.
 
-**Last verified state (2026-05-11 EOS, after this session):**
-- Branch `main` HEAD: `c4e5659` (Task 3.3e). Tree clean.
+**Task 3.3k — implementation plan:**
+
+1. **WASM binding:** Add `op_rope_with_freqs(x, pos, freqs, n_dims, mode, ...)` in `webgpu-bridge.cpp` — same args as `op_rope` plus a `void* freq_factors` parameter passed through to `ggml_rope_ext`. Export from `EXPORTED_FUNCTIONS` in `src/wasm/CMakeLists.txt`. **Per CLAUDE.md, do NOT add to JSPI_EXPORTS** — `ggml_rope_ext` is non-suspending CPU-side graph build. Rebuild WASM: `make wasm-build` (~minutes).
+2. **TS wrapper:** Add `opRopeWithFreqs(x, pos, freqs, n_dims, mode, ...)` in `ggml-wasm.ts` mirroring `opRope`'s is64 dispatch pattern.
+3. **LayerWeights field:** Add `ropeFreqs: TensorPtr | null` to the `LayerWeights` interface in `src/core/types.ts`.
+4. **Loader:** In `ModelInference.loadWeights`, after the existing per-layer fields, add `ropeFreqs: opt("rope_freqs.weight")`. (The GGUF stores one rope_freqs tensor TENSOR_DUPLICATED across global layers per `gemma4.cpp:87`. For local SWA layers it's absent — `opt()` returns null. For global layers it points at the shared tensor.)
+5. **Forward sites:** In each of the four forward methods, change the existing `wasm.opRope(qReady, posTensor, ropeDimCount, ropeMode, ...)` and `wasm.opRope(kReady, ...)` calls to use `opRopeWithFreqs` when `lw.ropeFreqs !== null`, passing `lw.ropeFreqs` as the new parameter. Keep `opRope` for layers without rope_freqs (all other archs + SWA layers).
+6. **checkall + smoke probe.** Greedy `?temp=0&model=gemma-4-e2b-it-q4km` smoke probe should produce coherent ASCII text. If first token of `"The capital of France is"` continuation is "Paris" / " Paris", file Stage 3 closure report at `eval/reports/gemma-4-stage3-ple-dualrope-2026-05-11/SUMMARY.md` and advance to the 36-prompt eval gate (Task 3.5).
+
+**Last verified state (2026-05-11 EOS-2, after this session):**
+- Branch `main` HEAD: `2591525` (3.3j follow-up: BF16 cast streaming
+  fix). Tree clean.
 - `make checkall`: green (762 pass / 36 skip / 0 fail).
 - Patch stack on `~/Repos/llama.cpp` branch `webllm-browser-patches`:
-  9 patches (unchanged this session; no llama.cpp patches needed for
-  3.3f/3.3g).
-- Smoke probe `?model=gemma-4-e2b-it-q4km` reaches `[8/8]`, generates
-  64 tokens at 71 tok/s, output `<unused14><unused11>…` (still garbage;
-  3.3f/3.3g pending).
-- Smoke probe `?model=tinyllama-1.1b-chat-q4_0` unchanged across all
-  Stage-3 commits (145+ tok/s, embed cosine 0.76). Non-regression
-  proven five times this session.
+  9 patches (unchanged this session). 3.3k will need NO llama.cpp
+  patch — the upstream `ggml_rope_ext` already accepts `freq_factors`;
+  the project's binding just hard-codes nullptr.
+- Smoke probe `?model=gemma-4-e2b-it-q4km&ingest=off`:
+  - default (temp=1.0): output is real-vocab garbage mixing scripts
+    (`LA_T_cowntहांत_cَour …`).
+  - greedy (`&temp=0`): degenerate repetitive
+    (`_cownt_cownt_cownt…_cることownt…`).
+  - In both cases: 64 tokens generated in ~1.3s (~70 tok/s); no
+    runtime errors; bf16 device-error message GONE from tab titles
+    and console; `[8/8]` embed cosine = 0.76 (Arctic-Embed-s OK).
+- Smoke probe `?model=tinyllama-1.1b-chat-q4_0` non-regression
+  unverified this session (no time spent re-running). Should re-run
+  before claiming 3.3k closure to confirm non-Gemma paths still work.
 - agentchrome session on port 63846 active, tab id
   `094440A57C7855615A7AE1070C4FF61D` (reuse it — don't launch new
   Chrome). `make smoke-serve` running on 8031.
@@ -1075,55 +1113,38 @@ and won't fight each other.
   still in place.
 
 **Per-task commits this session (most-recent first):**
-- `c4e5659` Task 3.3e — `layer_output_scale`
-- `ff8965d` Task 3.3d closure doc (forwardForEmbedding guard comment)
-- `73f77df` Task 3.3d — post-attention + post-FFW norms
-- `6f9db1b` Task 3.3b closure doc (helper contract + op count)
-- `cf56960` Task 3.3b — per-block gated PLE injection
-- `7fd0167` Task 3.3a closure doc (de-task + size-bump annotation)
-- `ba0f90e` Task 3.3a — pre-loop PLE projection chain
+- `2591525` Task 3.3j follow-up — BF16 cast streaming-path support
+- `d6132ed` Task 3.3j — BF16 → F32 cast at weight load
+- `f4929c1` docs(spec): post-3.3h/3.3i diagnosis — BF16 mul_mat root cause
+- `ac8bbe1` Task 3.3i — drop final-logit-softcap misuse in FA
+- `a321df6` Task 3.3h — Gemma V bare-RMS-norm in buildQKV
+- `4626150` docs(spec): post-3.3g diagnosis — 3.3h + 3.3i
+- `79dd05d` Task 3.3g — Gemma GELU FFN activation
+- `63c1a6d` Task 3.3f — Gemma embedding scaling
+- `e48d751` docs(spec): Stage 3 embedding-scale + GELU FFN addendum
 
-**Workflow to resume (each new task):**
-1. Add a brief spec note to
-   `docs/superpowers/specs/2026-05-10-gemma-4-stage3-correction-no-altup.md`
-   (or a fresh "no-altup-followup" addendum) capturing the 3.3f /
-   3.3g rationale — they're not in any current spec.
-2. Invoke `superpowers:subagent-driven-development` with: "Implement
-   Task 3.3f (Gemma embedding scaling). Reference gemma4.cpp:104 for
-   the op (`ggml_scale(x, sqrt(n_embd))` applied to the embedding
-   lookup result, gated on Gemma architecture). Sites:
-   `src/inference/model-inference.ts` lines 1175 (forwardSingle),
-   1582 (forwardForEmbedding — include this one), 1894
-   (forwardAllPositions), 2261 (forwardDecode)."
-3. Each task: dispatch implementer → spec reviewer → code quality
-   reviewer per the skill flow. The pattern from this session worked
-   well: terse implementer prompts with explicit `gemma4.cpp` line
-   refs + line numbers in webllm + the existing-pattern style guide
-   (mirror `opt()` loading, ternary-gate at sites).
-4. After 3.3f and 3.3g land, run the Stage 3 closure smoke probe.
-   Capture first 10 generated tokens. If first token is `Paris` (or
-   ` Paris`), file Stage 3 closure report at
-   `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`,
-   then advance to the 36-prompt eval ≥40% gate (Task 3.5).
-
-**Bf16 WGSL device-error note for next session:** The
-`mul_mat_f32_bf16` kernel parse error from Task 3.3a's
-`per_layer_model_proj` (BF16) MUL_MAT is a one-shot device-error log
-followed by ggml-webgpu's `supports_op`-driven CPU fallback. Execution
-continues correctly; the tab title flips to the error message but
-`[8/8]` still completes. **Not a correctness blocker** for 3.3f/3.3g.
-If a future cycle wants to keep the op on GPU, two options: (a) cast
-`per_layer_model_proj` to F16 at load time in `model-inference.ts`
-(weight transform during `uploadToTensorChunked`), or (b) patch
-`ggml-webgpu` to support BF16 MUL_MAT (likely 1 llama.cpp patch +
-WGSL kernel). Both are deferred.
+**Workflow to resume (Task 3.3k):**
+1. Add a spec note to
+   `docs/superpowers/specs/2026-05-11-gemma-4-stage3-embedding-scale-gelu-ffn-addendum.md`
+   capturing the 3.3k rationale (rope_freqs gap + diagnosis from
+   degenerate greedy output).
+2. Implement WASM binding + rebuild WASM (`make wasm-build`).
+3. Implement TS wrapper + loader + 4 forward-site updates.
+4. `make checkall` green.
+5. Greedy smoke probe. If "Paris" → Stage 3 closure report. If not
+   → diagnose next gap (could be real SWA needed earlier than
+   planned, or another arch piece).
+6. Re-run non-regression smoke on `tinyllama-1.1b-chat-q4_0` to
+   confirm the new RoPE path doesn't break models without
+   rope_freqs.
 
 **Estimated remaining work to ship Gemma 4 E2B:**
-- Stage 3 remaining: Task 3.3f (~30 min) + Task 3.3g (~30 min) +
-  Task 3.5 closure (~30 min — smoke gate + eval + report). One
-  session should close Stage 3 cleanly.
-- Stage 4 (real SWA): 2 sub-tasks (mask-shape probe + per-layer
-  dispatch); may need 1 llama.cpp patch.
+- Task 3.3k (~1 session — includes WASM rebuild + 5-site code +
+  smoke gate) — close Stage 3 if rope_freqs is THE remaining
+  blocker, OR surface the next missing piece.
+- Task 3.5 closure report (~30 min — capture eval + tag canonical
+  baseline).
+- Stage 4 (real SWA): 2 sub-tasks; may need 1 llama.cpp patch.
 - Stage 5 (shared-KV + bench + closure): 5 sub-tasks; may need
   1 llama.cpp patch on the KV-cache allocator.
 - Total wall-clock budget: probably 2–3 more focused sessions to ship.
