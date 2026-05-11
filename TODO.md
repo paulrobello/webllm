@@ -1111,28 +1111,147 @@ HF reference. Closure report:
 tokenization audit**. Greedy chat smoke produces only `<eos>`
 tokens (regressed from pre-Phase-4 mixed-script noise, which
 itself was already wrong). Parity capture's correctness (HF top-1
-match) implies the model arithmetic is fine; the issue is at the
-TOKENIZE step. Likely `<start_of_turn>` / `<end_of_turn>` aren't
-treated as special tokens — chat smoke reports `tokensIn=75` for a
-6-word prompt, suggesting the template literals are decomposing into
-many BPE tokens.
+match for the raw bare prompt) implies the model arithmetic is
+fine; the issue is at the TOKENIZE step.
 
-Phase 5 plan:
-1. Log `tokenizer.encode("<start_of_turn>user\n...")` in the browser
-   harness. If `<start_of_turn>` splits into multiple tokens, fix
-   the tokenizer's special-token handling for Gemma 4.
-2. Compare against HF transformers' `tokenizer.apply_chat_template`
-   output for the same messages. They should agree byte-for-byte.
-3. If chat template fidelity is fine, suspect `GEMMA4_DEFAULTS`
-   sampler config or the stop-token registration (`<end_of_turn>`
-   id 106 + `<eos>` id 1).
-4. Re-run chat smoke; expect "Paris" as the first generated token.
-5. Then close Task 3.5 via the 36-prompt eval (`make bench-…` for
-   the Gemma 4 profile; gate ≥ 40%).
+**Smoking gun:** smoke harness reports `tokensIn=75` for the
+prompt `"The capital of France is"` wrapped via the chat
+template. With `formatGemma4` outputting
+`<start_of_turn>user\nThe capital of France is<end_of_turn>\n<start_of_turn>model\n`,
+the expected count is ~12-15 tokens. 75 tokens implies the
+special-token literals are decomposing into many BPE pieces.
 
-After Phase 5 and Task 3.5, Stage 3 closes structurally and
+**Diagnostic plan — concrete steps:**
+
+1. **Log the actual token stream.** In the live agentchrome tab,
+   open the dev console and run:
+   ```js
+   // Verify tokenization of each special literal in isolation.
+   const tok = window.tokenizer ?? window.smokeEngine?._tokenizer;
+   console.log(JSON.stringify(tok.encode("<start_of_turn>"), null, 0));
+   console.log(JSON.stringify(tok.encode("<end_of_turn>"), null, 0));
+   console.log(JSON.stringify(tok.encode("<bos>")));
+   // And the full chat-template prompt.
+   const full = "<start_of_turn>user\nThe capital of France is<end_of_turn>\n<start_of_turn>model\n";
+   const ids = tok.encode(full);
+   console.log("tokensIn:", ids.length, "ids:", JSON.stringify(ids));
+   ```
+   Expected (per Gemma 4 GGUF vocab): `<start_of_turn>` → id 105,
+   `<end_of_turn>` → id 106, `<bos>` → id 2. If either splits into
+   multiple ids, the tokenizer isn't applying its special-token
+   pre-tokenization rule.
+
+2. **Cross-check against HF.** Re-run with
+   `transformers.AutoTokenizer.from_pretrained("unsloth/gemma-4-E2B-it")`:
+   ```python
+   from transformers import AutoTokenizer
+   t = AutoTokenizer.from_pretrained("unsloth/gemma-4-E2B-it")
+   ids = t.apply_chat_template(
+       [{"role": "user", "content": "The capital of France is"}],
+       add_generation_prompt=True,
+   )
+   print(len(ids), ids)
+   ```
+   The WebLLM tokenizer's encode of the same string should match
+   byte-for-byte (modulo BOS placement convention; see step 5).
+
+3. **Locate the tokenizer's special-token handling.** Files to
+   inspect:
+   - `src/inference/tokenizer.ts` — `Tokenizer` class. Look for
+     `addedTokens` / `specialTokens` / `pre_tokenize` logic. Gemma
+     4 uses SentencePiece with extra added tokens registered in
+     GGUF metadata `tokenizer.ggml.added_tokens` (or similar key).
+   - `src/models/model-loader.ts:562-680` — `buildTokenizerConfig`.
+     Verify the added-tokens array is being plumbed through for
+     Gemma 4's `gpt2`/`llama` model class.
+   - Compare with how Qwen3 / Phi-3 register their `<|im_start|>`
+     / `<|im_end|>` / `<|endoftext|>` literals (those work).
+
+4. **If `<end_of_turn>` is the actual generated token but mis-decoded
+   as `<eos>`,** the stop-token table is wrong. Check
+   `src/inference/sampling.ts` / wherever stop-token IDs are
+   resolved for Gemma 4. Should include both 1 (`<eos>`) and 106
+   (`<end_of_turn>`).
+
+5. **BOS handling.** Verify the tokenizer prepends `<bos>` (id 2)
+   when `tokenizer.encode` is called on the chat-template string.
+   Gemma 4 was trained with `<bos>` at sequence start. Parity
+   capture got the right answer because the raw inputIds explicitly
+   included `[2, ...]`. The smoke path goes through
+   `encodeChatPrompt` which may or may not prepend BOS — confirm.
+
+6. **Re-run greedy chat smoke** after each diagnostic. The "fixed"
+   signal is the first generated token = "Paris" (id 9079) for
+   `prompt=The capital of France is`. Other coherent answers
+   ("the city of Paris", etc.) also pass.
+
+**Gates for Phase 5 closure:**
+- Greedy chat smoke produces coherent English (not `<eos>` only).
+- `tokenizer.encode(chat_template_string).length` matches HF
+  transformers' `apply_chat_template` count for the same messages.
+
+**Then Task 3.5 (Stage 3 closure):** run the 36-prompt eval
+(`make bench-…` for the Gemma 4 profile). Gate ≥ 40% (Stage 4
+will lift further).
+
+After Phase 5 + Task 3.5, Stage 3 closes structurally and
 attention turns to **Stage 4 — real SWA windowed mask** (still
-pending).
+pending; affects long-context generation > 512 tokens).
+
+**Required reading before touching code (Phase 5 entry):**
+
+1. `src/inference/tokenizer.ts` — the main Tokenizer class.
+   Look at how it handles added/special tokens during encode.
+2. `src/models/model-loader.ts:buildTokenizerConfig` — how
+   added-tokens / special-token metadata is read from GGUF.
+3. `src/inference/chat-template.ts:formatGemma4` (line 303) — the
+   template string. Verify it matches Google's documented format
+   exactly (compare against
+   https://ai.google.dev/gemma/docs/core/prompt-structure).
+4. `smoke-test/real-model-smoke.js:buildSmokePrompt` (line 153) and
+   `encodeChatPrompt` — how the smoke harness encodes the
+   prompt; verify the BOS path.
+5. `smoke-test/scorer-registrations.js` — confirm Gemma 4 stop
+   tokens are wired alongside chat-template registration.
+
+**Quickstart (Phase 5 dev loop):**
+
+```bash
+# 1. Smoke server (probably already running on 8031).
+make smoke-serve &
+
+# 2. Browse to the chat smoke for Gemma 4 with a fresh cache-bust.
+V=$(date +%s)
+agentchrome --port 63846 navigate \
+  "http://localhost:8031/real-model.html?model=gemma-4-e2b-it-q4km&prompt=The+capital+of+France+is&temp=0&max_tokens=24&v=$V" \
+  --tab 094440A57C7855615A7AE1070C4FF61D
+
+# 3. After [6/8] tokenizer ready, drop into the page console and run
+#    the encode/decode probes from step 1 of the diagnostic plan.
+
+# 4. After a TS edit, rebuild bundle:
+bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+
+# 5. Reload the tab with a new ?v=$(date +%s) suffix.
+
+# 6. When the chat smoke produces coherent output, lock in by
+#    running checkall + the Gemma 4 36-prompt eval profile.
+make checkall
+```
+
+**Estimated remaining work to ship Gemma 4 E2B:**
+
+- Phase 5 (chat-template tokenization fix): ~1 session, possibly
+  small (just wiring the right special-token metadata through).
+- Task 3.5 closure (36-prompt eval ≥ 40%): ~30 min once Phase 5
+  is green.
+- Stage 4 (real SWA windowed mask): 2 sub-tasks; may need 1
+  llama.cpp patch if ggml-webgpu's softmax mask can't express the
+  windowed shape.
+- Stage 5 (bench + closure report — Stage 5's original KV
+  ref-sharing was pulled forward into Phase 4; this is now just
+  bench + write-up): 1-2 sub-tasks.
+- Total wall-clock budget: **1-3 more focused sessions to ship**.
 
 **Phase 3 closure (prior EOS) preserved below** for reference:
 
