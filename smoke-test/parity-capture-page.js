@@ -193,6 +193,7 @@ export async function runParityCapture() {
 			input_token_ids: Array.from(tokenIdsArr),
 			n_layer: tapped.perLayerResidual.length,
 			n_embd: tapped.finalNormHidden.length,
+			embedding_output_last_token: Array.from(tapped.embeddingOutput),
 			per_layer_residual_last_token: tapped.perLayerResidual.map((arr) =>
 				Array.from(arr),
 			),

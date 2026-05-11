@@ -127,6 +127,27 @@ export interface ForwardTrace {
 	backendBreakdownAvailable?: boolean;
 }
 
+/**
+ * Per-architecture softmax pre-scale for attention. Most models use the
+ * standard `1 / sqrt(head_dim)` so QK^T sits in unit variance before the
+ * softmax. Gemma 3 / 3n / 4 are the exception — `gemma4.cpp:11` sets
+ * `hparams.f_attention_scale = 1.0` ("Gemma4 uses self.scaling = 1.0,
+ * no pre-attn scaling"), passed verbatim as `kq_scale` to
+ * `ggml_soft_max_ext` at `llama-graph.cpp:2033`. The q/k norm gains in
+ * Gemma 4 are trained to compensate for the missing 1/√d_k factor;
+ * applying the default scale produces VASTLY softer (more uniform)
+ * attention weights and the residual stream drifts non-uniformly across
+ * layers (parity-capture diagnostic 2026-05-11: cosine 0.97 at L0/L1,
+ * 0.66 catastrophic drop at L2, end-of-stack 0.14).
+ */
+export function attnSoftmaxScale(
+	hp: { architecture: ModelHyperparams["architecture"] },
+	headDim: number,
+): number {
+	if (hp.architecture === "gemma4") return 1.0;
+	return 1.0 / Math.sqrt(headDim);
+}
+
 export function getRopeModeForArchitecture(
 	architecture: ModelHyperparams["architecture"],
 ): number {
@@ -1466,7 +1487,7 @@ export class ModelInference {
 					fullK,
 					fullV,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0, // max_bias (ALiBi disabled)
 					// FA logit_softcap is the *attention* softcap (Gemma 2 only). Gemma 4
 					// sets f_attention_scale = 1.0f with no attention softcap; its
@@ -1487,7 +1508,7 @@ export class ModelInference {
 				const attnW = wasm.opSoftMaxExt(
 					qk,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0,
 				);
 				// V * attn: V=[totalLen, headDim, nKvHeads], attn=[totalLen, nTokens, nHeads]
@@ -1781,7 +1802,7 @@ export class ModelInference {
 				const attnW = wasm.opSoftMaxExt(
 					qk,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(vp, attnW);
@@ -1930,6 +1951,7 @@ export class ModelInference {
 		tokenIds: Int32Array,
 		opts?: { topK?: number },
 	): Promise<{
+		embeddingOutput: Float32Array;
 		perLayerResidual: Float32Array[];
 		finalNormHidden: Float32Array;
 		logitsTop16: { ids: Int32Array; values: Float32Array };
@@ -1964,10 +1986,17 @@ export class ModelInference {
 			if (hp.architecture === "gemma4") {
 				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
 			}
+			// Embedding-output tap (HF `hidden_states[0]` equivalent).
+			// Read back here to compare against the reference's pre-block-0
+			// state; pins down whether drift starts at embedding lookup +
+			// scale or only inside the per-block forward path.
+			const embeddingTap = x;
 
 			// graphNew capacity: forwardSingle uses layerCount * 72 + 160.
-			// We add one explicit per-layer tap expand → +1/layer.
-			const graph = wasm.graphNew(hp.layerCount * 80 + 192);
+			// We add one explicit per-layer tap expand → +1/layer + the
+			// embedding-output tap → +1.
+			const graph = wasm.graphNew(hp.layerCount * 80 + 200);
+			wasm.graphBuildForwardExpand(graph, embeddingTap);
 
 			const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, N);
 			if (inpPerLayer !== null) {
@@ -2033,7 +2062,7 @@ export class ModelInference {
 				const attnW = wasm.opSoftMaxExt(
 					qk,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(vp, attnW);
@@ -2160,11 +2189,23 @@ export class ModelInference {
 
 				await wasm.graphCompute(graph);
 
-				// Read back: every layer's last-token row, then final-norm last
-				// row, then last-token full-vocab logits → top-K in JS.
-				const perLayerResidual: Float32Array[] = [];
+				// Read back: embedding output (pre-block-0), every layer's
+				// last-token row, then final-norm last row, then last-token
+				// full-vocab logits → top-K in JS.
 				const rowBytes = E * 4;
 				const lastTokenOffset = (N - 1) * rowBytes;
+				const embedBuf = await wasm.downloadFromTensor(
+					embeddingTap,
+					rowBytes,
+					lastTokenOffset,
+				);
+				const embeddingOutput = new Float32Array(
+					embedBuf.buffer,
+					embedBuf.byteOffset,
+					E,
+				).slice();
+
+				const perLayerResidual: Float32Array[] = [];
 				for (let il = 0; il < hp.layerCount; il++) {
 					const buf = await wasm.downloadFromTensor(
 						layerTaps[il],
@@ -2233,6 +2274,7 @@ export class ModelInference {
 				}
 
 				return {
+					embeddingOutput,
 					perLayerResidual,
 					finalNormHidden,
 					logitsTop16: { ids: sortedIds, values: sortedVals },
@@ -2504,7 +2546,7 @@ export class ModelInference {
 					fullK,
 					fullV,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0,
 					0.0,
 				);
@@ -2514,7 +2556,7 @@ export class ModelInference {
 				const attnW = wasm.opSoftMaxExt(
 					qk,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(fullV, attnW);
@@ -2867,7 +2909,7 @@ export class ModelInference {
 					fullK,
 					fullV,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0,
 					0.0,
 				);
@@ -2877,7 +2919,7 @@ export class ModelInference {
 				const attnW = wasm.opSoftMaxExt(
 					qk,
 					maskTensor,
-					1.0 / Math.sqrt(headDim),
+					attnSoftmaxScale(hp, headDim),
 					0.0,
 				);
 				const attnOut = wasm.opMulMat(fullV, attnW);

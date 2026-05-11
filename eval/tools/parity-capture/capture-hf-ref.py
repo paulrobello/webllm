@@ -113,6 +113,7 @@ def _capture_single_prompt(
     # i.e. hidden_states[1:].
     hidden = out.hidden_states
     n_layer = len(hidden) - 1
+    embedding_output = hidden[0][0, -1, :].to(torch.float32).cpu().tolist()
     per_layer = [
         hidden[i + 1][0, -1, :].to(torch.float32).cpu().tolist() for i in range(n_layer)
     ]
@@ -135,6 +136,7 @@ def _capture_single_prompt(
         "input_token_ids": ids,
         "n_layer": n_layer,
         "n_embd": len(final_norm),
+        "embedding_output_last_token": embedding_output,
         "per_layer_residual_last_token": per_layer,
         "final_norm_hidden_last_token": final_norm,
         "logits_top16": logits_top,

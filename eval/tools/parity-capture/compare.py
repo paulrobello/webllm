@@ -94,10 +94,26 @@ def compare(run_dir: Path, threshold: float, first_layer_threshold: float) -> in
     n_layer = ref["n_layer"]
     n_embd = ref["n_embd"]
 
+    # Embedding-output tap (HF hidden_states[0] / webllm pre-block-0 state).
+    # Present in v2 captures; falls back gracefully if either side is older.
+    emb_cos: float | None = None
+    emb_l2: float | None = None
+    ref_emb = ref.get("embedding_output_last_token")
+    web_emb = web.get("embedding_output_last_token")
+    if ref_emb is not None and web_emb is not None:
+        a = np.asarray(ref_emb, dtype=np.float32)
+        b = np.asarray(web_emb, dtype=np.float32)
+        emb_cos = _cosine(a, b)
+        emb_l2 = _l2_distance(a, b)
+
     rows = [
-        "| Layer | Cosine | L2 | Note |",
+        "| Block | Cosine | L2 | Note |",
         "|-------|--------|------|------|",
     ]
+    if emb_cos is not None:
+        # Use "embed" row label for the pre-block-0 tap.
+        emb_flag = " ⚠ pre-block-0 drift" if emb_cos < first_layer_threshold else ""
+        rows.append(f"| embed | {emb_cos:.4f} | {emb_l2:.4f} |{emb_flag} |")
     prev_cos: float | None = None
     first_below_threshold = -1
     first_sudden_drop = -1
@@ -161,6 +177,15 @@ def compare(run_dir: Path, threshold: float, first_layer_threshold: float) -> in
             + ("OK" if fn_cos >= threshold else "below end-of-stack gate"),
         ]
     else:
+        if emb_cos is not None:
+            if emb_cos >= first_layer_threshold:
+                summary_lines.append(
+                    f"- **Embedding output matches** (cos {emb_cos:.4f} ≥ {first_layer_threshold}) → bug is INSIDE the per-block forward path, not in `opGetRows + opScale`."
+                )
+            else:
+                summary_lines.append(
+                    f"- **Embedding output already drifts** (cos {emb_cos:.4f} < {first_layer_threshold}, L2 {emb_l2:.4f}) → bug starts at embedding lookup / scaling, not inside the per-block forward."
+                )
         if first_below_threshold != -1:
             summary_lines.append(
                 f"- First layer with cosine below threshold: **block {first_below_threshold}**"
