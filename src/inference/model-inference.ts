@@ -419,8 +419,12 @@ export class ModelInference {
 		//   was made BEFORE FA could engage and no longer applies.
 		// - Manual mode: F32 (4 bytes/elem). Legacy mul_mat-friendly default.
 		const kvElemBytes = this.flashAttn ? 2 : 4;
-		const perLayerBytes =
-			hp.embeddingHeadLength * maxContextLength * kvElemBytes;
+		// For mixed-head-dim architectures (Gemma 4), KV cache slots are sized
+		// for the worst-case (largest) head_dim so any layer can use the buffer.
+		const maxHeadDim = hp.embeddingHeadLengthPerLayer
+			? Math.max(...hp.embeddingHeadLengthPerLayer)
+			: hp.embeddingHeadLength;
+		const perLayerBytes = maxHeadDim * maxContextLength * kvElemBytes;
 		const totalBytes = hp.layerCount * 2 * perLayerBytes;
 		const memSize = hp.layerCount * 2 * 16384 + totalBytes + (1 << 20);
 
@@ -432,12 +436,18 @@ export class ModelInference {
 		const kvType = this.flashAttn ? GgmlType.F16 : GgmlType.F32;
 		this.kvLayers = [];
 		for (let i = 0; i < hp.layerCount; i++) {
+			// Per-layer head_dim for mixed-head-dim architectures (Gemma 4).
+			// Non-uniform models (SWA vs global) allocate each layer's KV
+			// tensors at the actual head_dim for that layer.
+			const layerHeadDim = hp.embeddingHeadLengthPerLayer
+				? hp.embeddingHeadLengthPerLayer[i]
+				: hp.embeddingHeadLength;
 			this.kvLayers.push({
 				// K: [headDim, maxCtx, nKvHeads] — same layout in both modes;
 				// dtype tracks FA mode.
 				k: wasm.tensorNew3d(
 					kvType,
-					hp.embeddingHeadLength,
+					layerHeadDim,
 					maxContextLength,
 					hp.headCountKv,
 				),
@@ -447,14 +457,14 @@ export class ModelInference {
 				v: this.flashAttn
 					? wasm.tensorNew3d(
 							kvType,
-							hp.embeddingHeadLength,
+							layerHeadDim,
 							maxContextLength,
 							hp.headCountKv,
 						)
 					: wasm.tensorNew3d(
 							kvType,
 							maxContextLength,
-							hp.embeddingHeadLength,
+							layerHeadDim,
 							hp.headCountKv,
 						),
 			});
@@ -509,6 +519,15 @@ export class ModelInference {
 		const { hp } = this;
 		const elem = 2; // FA mode = F16
 		// 2 = K + V per layer; FA layout is symmetric.
+		// For mixed-head-dim architectures, sum the actual per-layer headDims.
+		if (hp.embeddingHeadLengthPerLayer) {
+			return (
+				2 *
+				hp.embeddingHeadLengthPerLayer.reduce((s, d) => s + d, 0) *
+				hp.headCountKv *
+				elem
+			);
+		}
 		return hp.layerCount * 2 * hp.embeddingHeadLength * hp.headCountKv * elem;
 	}
 
@@ -557,6 +576,11 @@ export class ModelInference {
 		const { hp, wasm } = this;
 		const elem = 2; // FA mode = F16
 		const maxCtx = this.kvMaxContextLength;
+		// NOTE (Stage 3): for mixed-head-dim architectures (Gemma 4), this
+		// assumes uniform head_dim across all layers — incorrect for SWA vs
+		// global layers. Per-layer byte accounting is a Stage 6+ follow-up;
+		// serializeKVCache/loadKVCache are not exercised by the Stage 3 smoke
+		// probe (conversation pool is not activated for Gemma 4 yet).
 		const perHeadFullBytes = hp.embeddingHeadLength * maxCtx * elem;
 		const perHeadPopBytes = hp.embeddingHeadLength * nTokens * elem;
 		const perLayerOutBytes = hp.headCountKv * perHeadPopBytes;
@@ -645,6 +669,9 @@ export class ModelInference {
 		const { hp, wasm } = this;
 		const elem = 2; // FA mode = F16
 		const maxCtx = this.kvMaxContextLength;
+		// NOTE (Stage 3): for mixed-head-dim architectures (Gemma 4), this
+		// assumes uniform head_dim — incorrect for SWA vs global layers.
+		// Per-layer byte accounting deferred to Stage 6+.
 		const perHeadFullBytes = hp.embeddingHeadLength * maxCtx * elem;
 		const perHeadSnapBytes = hp.embeddingHeadLength * sl * elem;
 		const perHeadLoadBytes = hp.embeddingHeadLength * nTokens * elem;
@@ -865,6 +892,7 @@ export class ModelInference {
 		lw: LayerWeights,
 		ffnNormed: TensorPtr,
 		nTokens: number,
+		ffnDim?: number,
 	): { gate: TensorPtr; up: TensorPtr } {
 		const { wasm, hp } = this;
 		if (lw.gateUpFused) {
@@ -874,7 +902,7 @@ export class ModelInference {
 			// so HF puts gate first / up second along the output dim, and
 			// llama.cpp's convert_hf_to_gguf.py Phi3MiniModel preserves
 			// that order — gate is the FIRST half, up is the SECOND.
-			const ffSize = hp.feedForwardLength;
+			const ffSize = ffnDim ?? hp.feedForwardLength;
 			const fused = wasm.opMulMat(lw.gateUpFused, ffnNormed); // [2*ffSize, nTokens]
 			const tokenBytes = F32_BYTES * 2 * ffSize;
 			const gate = wasm.opCont(
@@ -931,7 +959,6 @@ export class ModelInference {
 
 		const t1 = trace ? performance.now() : 0;
 
-		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
@@ -974,6 +1001,22 @@ export class ModelInference {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
 
+			// Per-layer head_dim, RoPE dim, RoPE freq_base for mixed architectures
+			// (Gemma 4: SWA layers use 256 head_dim / 1e4 freq; global use 512 / 1e6).
+			// Fallback to scalar fields for uniform architectures (no behavioral delta).
+			const headDim = hp.embeddingHeadLengthPerLayer
+				? hp.embeddingHeadLengthPerLayer[il]
+				: hp.embeddingHeadLength;
+			const ropeFreqBase = hp.ropeFreqBasePerLayer
+				? hp.ropeFreqBasePerLayer[il]
+				: hp.ropeFreqBase;
+			const ropeDimCount = hp.ropeDimensionCountPerLayer
+				? hp.ropeDimensionCountPerLayer[il]
+				: headDim;
+			const ffnDim = hp.feedForwardLengthPerLayer
+				? hp.feedForwardLengthPerLayer[il]
+				: undefined;
+
 			// LLaMA RMSNorm: (x / rms(x)) * gamma. ggml_rms_norm only does the
 			// normalize step — the per-dim gain `attn_norm.weight` must be applied
 			// separately. Same for `ffn_norm.weight` and the final `output_norm.weight`.
@@ -991,10 +1034,10 @@ export class ModelInference {
 			const qRope = wasm.opRope(
 				qReady,
 				posTensor,
-				headDim,
+				ropeDimCount,
 				ropeMode,
 				hp.contextLength,
-				hp.ropeFreqBase,
+				ropeFreqBase,
 				hp.ropeScale,
 				0.0,
 				1.0,
@@ -1004,10 +1047,10 @@ export class ModelInference {
 			const kRope = wasm.opRope(
 				kReady,
 				posTensor,
-				headDim,
+				ropeDimCount,
 				ropeMode,
 				hp.contextLength,
-				hp.ropeFreqBase,
+				ropeFreqBase,
 				hp.ropeScale,
 				0.0,
 				1.0,
@@ -1141,7 +1184,7 @@ export class ModelInference {
 				lw.ffnNorm,
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
-			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens);
+			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
 			// Fused silu(gate) * up — single GPU op instead of silu+mul.
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
@@ -1304,7 +1347,6 @@ export class ModelInference {
 		const { hp, wasm, weights } = this;
 		const N = tokenIds.length;
 		const E = hp.embeddingLength;
-		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
@@ -1326,6 +1368,20 @@ export class ModelInference {
 			for (let il = 0; il < hp.layerCount; il++) {
 				const lw = weights.layers[il];
 
+				// Per-layer scalars for mixed-head-dim architectures (Gemma 4).
+				const headDim = hp.embeddingHeadLengthPerLayer
+					? hp.embeddingHeadLengthPerLayer[il]
+					: hp.embeddingHeadLength;
+				const ropeFreqBase = hp.ropeFreqBasePerLayer
+					? hp.ropeFreqBasePerLayer[il]
+					: hp.ropeFreqBase;
+				const ropeDimCount = hp.ropeDimensionCountPerLayer
+					? hp.ropeDimensionCountPerLayer[il]
+					: headDim;
+				const ffnDim = hp.feedForwardLengthPerLayer
+					? hp.feedForwardLengthPerLayer[il]
+					: undefined;
+
 				let normed = wasm.opMul(
 					wasm.opRmsNorm(cur, hp.normEpsilon),
 					lw.attnNorm,
@@ -1343,10 +1399,10 @@ export class ModelInference {
 				const qRope = wasm.opRope(
 					qReady,
 					posTensor,
-					headDim,
+					ropeDimCount,
 					ropeMode,
 					hp.contextLength,
-					hp.ropeFreqBase,
+					ropeFreqBase,
 					hp.ropeScale,
 					0.0,
 					1.0,
@@ -1356,10 +1412,10 @@ export class ModelInference {
 				const kRope = wasm.opRope(
 					kReady,
 					posTensor,
-					headDim,
+					ropeDimCount,
 					ropeMode,
 					hp.contextLength,
-					hp.ropeFreqBase,
+					ropeFreqBase,
 					hp.ropeScale,
 					0.0,
 					1.0,
@@ -1395,7 +1451,7 @@ export class ModelInference {
 				);
 				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 
-				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N);
+				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N, ffnDim);
 				const ffnHidden = wasm.opSwigluSplit(gate, up);
 				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
@@ -1600,7 +1656,6 @@ export class ModelInference {
 
 		const t1 = trace ? performance.now() : 0;
 
-		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
@@ -1623,6 +1678,20 @@ export class ModelInference {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
 
+			// Per-layer scalars for mixed-head-dim architectures (Gemma 4).
+			const headDim = hp.embeddingHeadLengthPerLayer
+				? hp.embeddingHeadLengthPerLayer[il]
+				: hp.embeddingHeadLength;
+			const ropeFreqBase = hp.ropeFreqBasePerLayer
+				? hp.ropeFreqBasePerLayer[il]
+				: hp.ropeFreqBase;
+			const ropeDimCount = hp.ropeDimensionCountPerLayer
+				? hp.ropeDimensionCountPerLayer[il]
+				: headDim;
+			const ffnDim = hp.feedForwardLengthPerLayer
+				? hp.feedForwardLengthPerLayer[il]
+				: undefined;
+
 			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
 			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
 
@@ -1637,10 +1706,10 @@ export class ModelInference {
 			const qRope = wasm.opRope(
 				qReady,
 				posTensor,
-				headDim,
+				ropeDimCount,
 				ropeMode,
 				hp.contextLength,
-				hp.ropeFreqBase,
+				ropeFreqBase,
 				hp.ropeScale,
 				0.0,
 				1.0,
@@ -1650,10 +1719,10 @@ export class ModelInference {
 			const kRope = wasm.opRope(
 				kReady,
 				posTensor,
-				headDim,
+				ropeDimCount,
 				ropeMode,
 				hp.contextLength,
-				hp.ropeFreqBase,
+				ropeFreqBase,
 				hp.ropeScale,
 				0.0,
 				1.0,
@@ -1758,7 +1827,7 @@ export class ModelInference {
 				lw.ffnNorm,
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
-			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens);
+			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
@@ -1920,7 +1989,6 @@ export class ModelInference {
 
 		const t1 = trace ? performance.now() : 0;
 
-		const headDim = hp.embeddingHeadLength;
 		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
@@ -1942,6 +2010,20 @@ export class ModelInference {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
 
+			// Per-layer scalars for mixed-head-dim architectures (Gemma 4).
+			const headDim = hp.embeddingHeadLengthPerLayer
+				? hp.embeddingHeadLengthPerLayer[il]
+				: hp.embeddingHeadLength;
+			const ropeFreqBase = hp.ropeFreqBasePerLayer
+				? hp.ropeFreqBasePerLayer[il]
+				: hp.ropeFreqBase;
+			const ropeDimCount = hp.ropeDimensionCountPerLayer
+				? hp.ropeDimensionCountPerLayer[il]
+				: headDim;
+			const ffnDim = hp.feedForwardLengthPerLayer
+				? hp.feedForwardLengthPerLayer[il]
+				: undefined;
+
 			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
 			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
 
@@ -1956,10 +2038,10 @@ export class ModelInference {
 			const qRope = wasm.opRope(
 				qReady,
 				posTensor,
-				headDim,
+				ropeDimCount,
 				ropeMode,
 				hp.contextLength,
-				hp.ropeFreqBase,
+				ropeFreqBase,
 				hp.ropeScale,
 				0.0,
 				1.0,
@@ -1969,10 +2051,10 @@ export class ModelInference {
 			const kRope = wasm.opRope(
 				kReady,
 				posTensor,
-				headDim,
+				ropeDimCount,
 				ropeMode,
 				hp.contextLength,
-				hp.ropeFreqBase,
+				ropeFreqBase,
 				hp.ropeScale,
 				0.0,
 				1.0,
@@ -2074,7 +2156,7 @@ export class ModelInference {
 				lw.ffnNorm,
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
-			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens);
+			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 			cur = wasm.opAdd(ffnOut, attnResidual);
