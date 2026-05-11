@@ -58,6 +58,11 @@ interface WeightTensors {
 	// Phi-3 lm_head bias. Null for all other architectures and for
 	// Phi-3.5-mini (its lm_head is biasless).
 	outputBias: TensorPtr | null;
+	// Gemma 4 / Gemma 3N Per-Layer Embedding (PLE) global tensors.
+	// Null for all non-Gemma-4 architectures (tensors absent from GGUF).
+	perLayerEmbed: TensorPtr | null;
+	perLayerProj: TensorPtr | null;
+	perLayerProjNorm: TensorPtr | null;
 	layers: LayerWeights[];
 }
 
@@ -327,6 +332,17 @@ export class ModelInference {
 			? this.makeTensor(tensorMap, "output_norm.bias")
 			: null;
 
+		// Gemma 4 / Gemma 3N PLE global tensors — absent on all other architectures.
+		const perLayerEmbed = tensorMap.has("per_layer_token_embd.weight")
+			? this.makeTensor(tensorMap, "per_layer_token_embd.weight")
+			: null;
+		const perLayerProj = tensorMap.has("per_layer_model_proj.weight")
+			? this.makeTensor(tensorMap, "per_layer_model_proj.weight")
+			: null;
+		const perLayerProjNorm = tensorMap.has("per_layer_proj_norm.weight")
+			? this.makeTensor(tensorMap, "per_layer_proj_norm.weight")
+			: null;
+
 		const isPhi3 = hp.architecture === "phi3";
 		const layers: LayerWeights[] = [];
 		for (let i = 0; i < hp.layerCount; i++) {
@@ -386,7 +402,17 @@ export class ModelInference {
 			}
 		}
 
-		this.weights = { tokEmb, norm, normBias, output, outputBias, layers };
+		this.weights = {
+			tokEmb,
+			norm,
+			normBias,
+			output,
+			outputBias,
+			perLayerEmbed,
+			perLayerProj,
+			perLayerProjNorm,
+			layers,
+		};
 		this.weightBuf = wasm.backendAllocCtxTensors();
 
 		for (const t of ggufCtx.tensors) {
@@ -929,6 +955,74 @@ export class ModelInference {
 	}
 
 	/**
+	 * Pre-loop Per-Layer Embedding (PLE) projection chain for Gemma 4 (Gemma 3N).
+	 * Produces inp_per_layer with shape [pleDim, n_tokens, layerCount] which
+	 * Task 3.3b will slice per-block and inject into the residual.
+	 *
+	 * Returns null for non-Gemma-4 architectures (PLE tensors absent).
+	 *
+	 * Canonical reference: ~/Repos/llama.cpp/src/models/gemma3n.cpp
+	 *   build_inp_per_layer() + project_per_layer_inputs()
+	 */
+	private buildPreLoopPle(
+		tokenIdsTensor: TensorPtr,
+		inpBatch: TensorPtr,
+		nTokens: number,
+	): TensorPtr | null {
+		const { hp, wasm, weights } = this;
+		if (!weights) return null;
+		if (
+			!weights.perLayerEmbed ||
+			!weights.perLayerProj ||
+			!weights.perLayerProjNorm ||
+			!hp.pleDim
+		) {
+			return null;
+		}
+		const pleDim = hp.pleDim;
+		const layerCount = hp.layerCount;
+		const hiddenDim = hp.embeddingLength;
+		const tokEmbdScale = Math.sqrt(pleDim);
+		const perLayerProjectionScale = 1.0 / Math.sqrt(hiddenDim);
+		const perLayerInputScale = 1.0 / Math.sqrt(2);
+
+		// Steps 1-3: build_inp_per_layer()
+		// GET_ROWS(per_layer_tok_embd, tokens) -> [pleDim*layerCount, n_tokens]
+		let inpPerLayer = wasm.opGetRows(weights.perLayerEmbed, tokenIdsTensor);
+		// reshape to [pleDim, layerCount, n_tokens]
+		inpPerLayer = wasm.opReshape3d(inpPerLayer, pleDim, layerCount, nTokens);
+		// scale by sqrt(pleDim)
+		inpPerLayer = wasm.opScale(inpPerLayer, tokEmbdScale);
+
+		// Steps 4-7: project_per_layer_inputs()
+		// MUL_MAT(per_layer_model_proj, inp_batch) -> [pleDim*layerCount, n_tokens]
+		let perLayerProjTensor = wasm.opMulMat(weights.perLayerProj, inpBatch);
+		perLayerProjTensor = wasm.opScale(
+			perLayerProjTensor,
+			perLayerProjectionScale,
+		);
+		perLayerProjTensor = wasm.opReshape3d(
+			perLayerProjTensor,
+			pleDim,
+			layerCount,
+			nTokens,
+		);
+		// RMSNorm + per_layer_proj_norm gain
+		perLayerProjTensor = wasm.opMul(
+			wasm.opRmsNorm(perLayerProjTensor, hp.normEpsilon),
+			weights.perLayerProjNorm,
+		);
+
+		// Steps 8-9: ADD + scale by 1/sqrt(2)
+		inpPerLayer = wasm.opAdd(perLayerProjTensor, inpPerLayer);
+		inpPerLayer = wasm.opScale(inpPerLayer, perLayerInputScale);
+
+		// Step 10: permute to [pleDim, n_tokens, layerCount], materialize via cont
+		inpPerLayer = wasm.opCont(wasm.opPermute(inpPerLayer, 0, 2, 1, 3));
+		return inpPerLayer;
+	}
+
+	/**
 	 * Single-call forward pass: one ctxCreate → graph build → graph compute →
 	 * ctxFree cycle for the given tokens. **Do not call directly** — public
 	 * callers go through `forward()`, which dispatches to either this or the
@@ -994,7 +1088,14 @@ export class ModelInference {
 		// into it *before* attention ops that read kv.k / kv.v are added. Without
 		// this ordering, the cpy (write) and the view (read) have no dependency
 		// edge, so attention reads stale data (zeros).
-		const graph = wasm.graphNew(hp.layerCount * 64 + 128);
+		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
+
+		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
+		// Task 3.3b will slice inpPerLayer per-block and inject into the residual.
+		const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, nTokens);
+		if (inpPerLayer !== null) {
+			wasm.graphBuildForwardExpand(graph, inpPerLayer);
+		}
 
 		let cur = x;
 		for (let il = 0; il < hp.layerCount; il++) {
@@ -1671,7 +1772,14 @@ export class ModelInference {
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 
-		const graph = wasm.graphNew(hp.layerCount * 64 + 128);
+		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
+
+		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
+		// Task 3.3b will slice inpPerLayer per-block and inject into the residual.
+		const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, nTokens);
+		if (inpPerLayer !== null) {
+			wasm.graphBuildForwardExpand(graph, inpPerLayer);
+		}
 
 		let cur = x;
 		for (let il = 0; il < hp.layerCount; il++) {
@@ -2003,7 +2111,14 @@ export class ModelInference {
 			: 0;
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
-		const graph = wasm.graphNew(hp.layerCount * 64 + 128);
+		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
+
+		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
+		// Task 3.3b will slice inpPerLayer per-block and inject into the residual.
+		const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, nTokens);
+		if (inpPerLayer !== null) {
+			wasm.graphBuildForwardExpand(graph, inpPerLayer);
+		}
 
 		let cur = x;
 		for (let il = 0; il < hp.layerCount; il++) {
