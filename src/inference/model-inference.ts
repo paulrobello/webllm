@@ -1105,7 +1105,7 @@ export class ModelInference {
 					maskTensor,
 					1.0 / Math.sqrt(headDim),
 					0.0, // max_bias (ALiBi disabled)
-					0.0, // logit_softcap (Gemma; not used by Llama/Qwen/Mistral)
+					hp.finalLogitSoftcap ?? 0.0, // logit_softcap (Gemma family; 0 = disabled)
 				);
 				// FA returns contiguous [headDim, nHeads, nTokens] — reshape
 				// directly to [embDim, nTokens] for oProj. No permute or
