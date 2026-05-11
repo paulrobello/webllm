@@ -1125,65 +1125,75 @@ Gemma 4).
 landed. Closure report:
 [`eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md).
 
-**Task 3.5 ran 2026-05-11 EOS-9 — Stage 3 gate MISSED. Two §28
-negative-result probes closed; deeper architectural probes queued.**
+**Task 3.5 ran 2026-05-11 EOS-9/10/11 — Stage 3 gate MISSED. THREE
+§28-negative probes closed AND a length-dependent forward-path bug
+isolated via the chat-formatted parity probe.**
 
-| Run | Temp | Score |
-|-----|------|-------|
-| Baseline (greedy) | 0 | **4.33 / 48 = 9 %** (3.3 / 36 ex tool-calling ≈ 9 %) |
-| Default-system suppression A/B | 0 | 4.33 / 48 = 9 % (bit-identical; unreachable on eval path) |
-| Temp 0.6 sweep | 0.6 | 2.33 / 36 = 6 % (per-task outputs identical to baseline) |
+| Probe                          | Temp | Score / Cosine | Outcome |
+|--------------------------------|------|----------------|---------|
+| 36-prompt eval baseline (greedy) | 0    | 4.33 / 48 = **9 %** | gate missed |
+| Default-system suppression A/B | 0    | 9 % bit-identical | §28: eval path bypasses it |
+| Temp 0.6 sweep                 | 0.6  | 6 % identical per-task outputs | §28: failure deterministic |
+| Stop-token audit (vocab + console probe + 1-line fix probe) | 0 | 9 % | §28: model emits `<eos>` as 1st token |
+| **Parity probe A — 95-token chat (emb-001)** | n/a | final-norm cos **0.5824**, top-1 MISMATCH, top-16 overlap **0/16** | **POSITIVE — forward path is broken on this input** |
+| **Parity probe B1 — 92-token plain completion** | n/a | final-norm cos **0.3894**, top-16 overlap **7/16** | **POSITIVE — length-dependent, no special tokens needed** |
+| **Parity probe B2 — 10-token short chat** | n/a | final-norm cos 0.9055, top-16 overlap 10/16 | mild divergence; chat scaffolding adds tail noise but isn't the gating issue |
 
 Closure reports:
 - [`eval/reports/gemma-4-stage3-eval-baseline-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-eval-baseline-2026-05-11/SUMMARY.md)
 - [`eval/reports/gemma-4-stage3-default-system-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-default-system-probe-2026-05-11/SUMMARY.md)
 - [`eval/reports/gemma-4-stage3-temp-sweep-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-temp-sweep-probe-2026-05-11/SUMMARY.md)
+- [`eval/reports/gemma-4-stage3-stop-token-audit-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-stop-token-audit-2026-05-11/SUMMARY.md)
+- [`eval/reports/parity-gemma-4-e2b-chat-emb001-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-chat-emb001-2026-05-11/SUMMARY.md)
+- [`eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md)
 
-Failure-mode signature (deterministic across temps):
-- reasoning + semantic-reasoning: 0 / 24 in every run; outputs
-  collapse to `"Please provide the question..."` / immediate `<eos>`.
-- instruction-following: 2.33 / 12 = 19.4 % in every run; only
-  short-stem prompts pass.
-- Speed-pass smoke produces coherent jokes — the chat decode loop
-  itself is healthy.
+**Root cause narrowed:** The per-block forward path diverges
+catastrophically from HF reference as a function of sequence
+length. Block-2 cosine drops from ≥0.95 (6-token Phase 4
+baseline) to ~0.65 (92–95-token probes); block 11 drops to
+0.15–0.24. The bug is **inside the SWA layers** (layers 0-13 are
+SWA in Gemma 4 E2B; the divergence is well established before any
+full-attention or shared-KV layer fires). Length is the dominant
+variable; special-token content (`<|turn>`, system block) adds a
+secondary tail effect on logits but doesn't change the per-block
+divergence profile.
 
-**Three open hypotheses queued for the next session (priority
-order):**
+**Next probe (Phase C — intra-block taps):** Add taps inside
+block 1 to localize the first divergent op. Highest-yield
+candidates per the Phase B SUMMARY:
 
-1. **`forwardSingle` vs `forwardPrefill` divergence post-shared-KV
-   (cheap-ish; new instrument).** Parity Phase 4 verified
-   `forwardPrefill` cosine 0.9722 on `"The capital of France is"`,
-   but the decode loop generates one token at a time via
-   `forwardSingle`. If `n_layer_kv_from_start=15` ref-share isn't
-   wired for decode steps, the model would produce the right
-   first token (consistent with sparse `"I'm"` outputs) then
-   garbage thereafter — exactly the observed pattern.
-   **Probe:** tap `forwardSingle` activations at L0/L15/L34 over
-   a 20-token decode run, compare to HF reference.
-2. **Stop-token leak / sampler boundary audit (cheapest).** Bare
-   `<eos>` outputs on emb-001..emb-002 and empty outputs in the
-   temp-0.6 probe imply something emits a stop token on the first
-   decode step. Audit which of `<|turn>` (105), `<turn|>` (106),
-   `<eos>`, `<bos>`, `<unused...>` end up in the active stop set,
-   and whether any of those token IDs appear in the prompt
-   tokenization (which would short-circuit decode).
-3. **Real SWA (Stage 4; biggest investment).** All-global fallback
-   is approximately right for <512-token generations but may leak
-   long-context dependencies on the 5-of-30 SWA layers, distorting
-   the residual stream enough to produce refusal-style outputs.
-   This is also pre-planned Stage 4 work.
+1. **SWA causal mask math** (block 6 in the candidate list).
+   Gemma SWA layers should mask all positions outside the
+   512-window. At seq < 512 the mask should degenerate to plain
+   causal, but if the WebGPU mask logic applies the window
+   anyway (e.g. always masks positions ≤ pos − 512 even when
+   pos < 512), the result is fully-zeroed attention reads on
+   shorter sequences. Cheap to verify by inspecting the mask
+   tensor for one block-1 forward pass.
+2. **RoPE / RoPE-with-freq_factors** at higher positions.
+   Per-layer freq factors landed in Task 3.3k. At positions
+   0-91 the rotation accumulates much more than at 0-5; a
+   precision or formula error would surface only at length.
 
-The §C-v2-A doctrine cap on speculative bets: each remaining
-probe is heavier than the two §28 closures above. Recommend the
-next session opens with hypothesis (2) — pure-inspection probe,
-zero code, single smoke-tab cycle. If it fires, hypothesis (1)
-becomes mandatory; otherwise hypothesis (1)'s `forwardSingle`
-tap is the next instrument to build.
+**Stage 4 SWA implementation** (replacing the all-global fallback
+with the real windowed mask) is now elevated from "long-context
+fix" to "likely Stage 3 gating fix" — the two work items may
+collapse into one lever.
 
-**Outcome summary (above) supersedes the prior pickup plan**:
-both cheap probes closed §28 negative and the next probes are
-architectural. The pre-flight checks below remain valid for the
-next session's `forwardSingle`/stop-token instrumenting work.
+**Pickup plan for the next session:**
+
+1. Read `eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md`
+   for the full context and candidate-op ordering.
+2. Add intra-block taps to `ModelInference.forwardWithLayerTaps`:
+   for a specified `--probeBlock=1` argument, capture the
+   post-RMSNorm input, post-Q/K/V, post-QKnorm, post-RoPE,
+   post-attention output, post-PLE, and post-block residual.
+3. Run Phase C on the **B1 fixture** (92-token plain completion
+   — no chat-template noise to triage).
+4. The first op-level divergence (cosine drop > 0.02 vs HF
+   reference) is the bug.
+5. If that op is the SWA mask: Stage 4 lands the fix.
+   Otherwise: file a tighter probe on the named op.
 
 **Required reading before touching code (Task 3.5 entry):**
 

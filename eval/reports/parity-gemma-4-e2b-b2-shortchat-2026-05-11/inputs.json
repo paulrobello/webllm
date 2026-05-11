@@ -1,0 +1,19 @@
+{
+  "$schema_version": "1.1",
+  "description": "Phase B2 \u2014 short chat-formatted prompt (no system message). Tests whether chat scaffolding alone triggers the divergence.",
+  "input_token_ids": [
+    2,
+    105,
+    2364,
+    107,
+    10979,
+    106,
+    107,
+    105,
+    4368,
+    107
+  ],
+  "prompts": [
+    "<|turn>user\nHi<turn|>\n<|turn>model\n"
+  ]
+}
