@@ -2,3 +2,5 @@ torch
 transformers
 safetensors
 accelerate
+numpy
+

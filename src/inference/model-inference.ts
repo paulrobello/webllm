@@ -1902,6 +1902,350 @@ export class ModelInference {
 	}
 
 	/**
+	 * Diagnostic tap-forward: run the full forwardSingle graph (PLE, post-
+	 * norms, layerOutputScale, embedding scaling, Gemma GELU, rope_freqs —
+	 * everything `forwardSingle` does) over `tokenIds` AS IF processing
+	 * them as a fresh prefill (positions 0..N-1, no KV history). Read back
+	 * the last-token row of every block's residual stream, the post-
+	 * `output_norm` final hidden state, and the top-K logits.
+	 *
+	 * Used by `smoke-test/parity-capture.html` to compare layer-by-layer
+	 * against a HuggingFace `transformers` reference capture (see
+	 * `eval/tools/parity-capture/README.md`). Pinpoints the first block
+	 * where webllm diverges from canonical fp32 output — the FIRST
+	 * divergent block carries the bug.
+	 *
+	 * **Side-effect free**: does not touch `this.kvLayers` or
+	 * `this.nCached`. Uses manual attention (no FA) to match the HF ref
+	 * forward's numerical path.
+	 *
+	 * Output schema matches `eval/tools/parity-capture/README.md`:
+	 *   - `perLayerResidual[i]` — `cur` AFTER block i, last-token row,
+	 *     post-PLE-injection + post-`layerOutputScale` (i.e., the value
+	 *     passed to block i+1).
+	 *   - `finalNormHidden` — last-token row after `output_norm`.
+	 *   - `logitsTop16` — top-K logits for the last token (K=16).
+	 */
+	async forwardWithLayerTaps(
+		tokenIds: Int32Array,
+		opts?: { topK?: number },
+	): Promise<{
+		perLayerResidual: Float32Array[];
+		finalNormHidden: Float32Array;
+		logitsTop16: { ids: Int32Array; values: Float32Array };
+	}> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		const { hp, wasm, weights } = this;
+		const N = tokenIds.length;
+		const E = hp.embeddingLength;
+		const V = hp.vocabularySize;
+		const nHeads = hp.headCount;
+		const K = Math.max(1, opts?.topK ?? 16);
+		const ropeMode = getRopeModeForArchitecture(hp.architecture);
+
+		// Same seasoning as forwardSingle (64 bytes/elem covers PLE +
+		// post-norm overhead for Gemma 4 at long prefill). Per-layer tap
+		// adds no nodes beyond the existing `cur` chain.
+		const graphMem = hp.layerCount * 32768 + N * E * 64;
+		wasm.ctxCreate(graphMem);
+
+		try {
+			const posTensor = wasm.tensorNew1d(GgmlType.I32, N);
+			const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, N);
+
+			const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
+			const needsMask = N > 1;
+			const maskPaddedCols = padTo(N, 32);
+			const maskTensor = needsMask
+				? wasm.tensorNew2d(GgmlType.F16, N, maskPaddedCols)
+				: 0;
+
+			let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
+			if (hp.architecture === "gemma4") {
+				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
+			}
+
+			// graphNew capacity: forwardSingle uses layerCount * 72 + 160.
+			// We add one explicit per-layer tap expand → +1/layer.
+			const graph = wasm.graphNew(hp.layerCount * 80 + 192);
+
+			const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, N);
+			if (inpPerLayer !== null) {
+				wasm.graphBuildForwardExpand(graph, inpPerLayer);
+			}
+
+			const layerTaps: TensorPtr[] = [];
+			let cur = x;
+			for (let il = 0; il < hp.layerCount; il++) {
+				const lw = weights.layers[il];
+
+				const headDim = hp.embeddingHeadLengthPerLayer
+					? hp.embeddingHeadLengthPerLayer[il]
+					: hp.embeddingHeadLength;
+				const ropeFreqBase = hp.ropeFreqBasePerLayer
+					? hp.ropeFreqBasePerLayer[il]
+					: hp.ropeFreqBase;
+				const ropeDimCount = hp.ropeDimensionCountPerLayer
+					? hp.ropeDimensionCountPerLayer[il]
+					: headDim;
+				const ffnDim = hp.feedForwardLengthPerLayer
+					? hp.feedForwardLengthPerLayer[il]
+					: undefined;
+
+				let normed = wasm.opMul(
+					wasm.opRmsNorm(cur, hp.normEpsilon),
+					lw.attnNorm,
+				);
+				if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
+
+				const { qReady, kReady, v3 } = this.buildQKV(
+					lw,
+					normed,
+					N,
+					headDim,
+					nHeads,
+				);
+
+				const qRope = this.applyRope(
+					qReady,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+				const kRope = this.applyRope(
+					kReady,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+
+				// Manual attention chain (no KV cache, no FA) — matches HF
+				// transformers reference's numerical path for clean diff.
+				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+				const kp = wasm.opPermute(kRope, 0, 2, 1, 3);
+				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
+
+				const qk = wasm.opMulMat(kp, qp);
+				const attnW = wasm.opSoftMaxExt(
+					qk,
+					maskTensor,
+					1.0 / Math.sqrt(headDim),
+					0.0,
+				);
+				const attnOut = wasm.opMulMat(vp, attnW);
+				const merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					nHeads * headDim,
+					N,
+				);
+
+				const oProjRaw = wasm.opMulMat(lw.oProj, merged);
+				const oProj = lw.postAttentionNorm
+					? wasm.opMul(
+							wasm.opRmsNorm(oProjRaw, hp.normEpsilon),
+							lw.postAttentionNorm,
+						)
+					: oProjRaw;
+				const attnResidual = wasm.opAdd(oProj, cur);
+
+				let ffnNormed = wasm.opMul(
+					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+					lw.ffnNorm,
+				);
+				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
+				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N, ffnDim);
+				const ffnHidden =
+					hp.architecture === "gemma4"
+						? wasm.opMul(wasm.opGelu(gate), up)
+						: wasm.opSwigluSplit(gate, up);
+				const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
+				const ffnOut = lw.postFfwNorm
+					? wasm.opMul(
+							wasm.opRmsNorm(ffnOutRaw, hp.normEpsilon),
+							lw.postFfwNorm,
+						)
+					: ffnOutRaw;
+
+				cur = wasm.opAdd(ffnOut, attnResidual);
+				if (
+					inpPerLayer !== null &&
+					lw.pleInpGate &&
+					lw.plePerBlockProj &&
+					lw.plePostNorm
+				) {
+					cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, N);
+				}
+				if (lw.layerOutputScale) {
+					cur = wasm.opMul(cur, lw.layerOutputScale);
+				}
+
+				// Tap point: ensure this tensor survives buffer alloc + compute
+				// so we can read back its contents below.
+				wasm.graphBuildForwardExpand(graph, cur);
+				layerTaps.push(cur);
+			}
+
+			let finalHidden = wasm.opMul(
+				wasm.opRmsNorm(cur, hp.normEpsilon),
+				weights.norm,
+			);
+			if (weights.normBias)
+				finalHidden = wasm.opAdd(finalHidden, weights.normBias);
+
+			let logits = weights.output
+				? wasm.opMulMat(weights.output, finalHidden)
+				: wasm.opMulMat(weights.tokEmb, finalHidden);
+			if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
+
+			wasm.graphBuildForwardExpand(graph, finalHidden);
+			wasm.graphBuildForwardExpand(graph, logits);
+
+			const graphBuf = wasm.backendAllocCtxTensors();
+			try {
+				// Upload inputs: positions = 0..N-1, causal mask.
+				const idsBytes = N * 4;
+				const posBytes = N * 4;
+				const maskBytes = needsMask ? N * maskPaddedCols * 2 : 0;
+				const totalBytes = idsBytes + posBytes + maskBytes;
+				const heap = wasm.malloc(totalBytes);
+				try {
+					const idsPtr = heap;
+					const posPtr = heap + idsBytes;
+					const maskPtr = heap + idsBytes + posBytes;
+
+					const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
+					const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
+					for (let i = 0; i < N; i++) {
+						idsView[i] = tokenIds[i];
+						posView[i] = i;
+					}
+
+					if (needsMask) {
+						const F16_NEG_INF = 0xfc00;
+						const mask = new Uint16Array(
+							wasm.heapU8.buffer,
+							maskPtr,
+							N * maskPaddedCols,
+						);
+						for (let q = 0; q < N; q++) {
+							const rowBase = q * N;
+							for (let k = 0; k < N; k++) {
+								mask[rowBase + k] = k <= q ? 0 : F16_NEG_INF;
+							}
+						}
+						for (let q = N; q < maskPaddedCols; q++) {
+							const rowBase = q * N;
+							for (let k = 0; k < N; k++) mask[rowBase + k] = 0;
+						}
+					}
+
+					wasm.backendTensorSet3(
+						tokenIdsTensor,
+						idsPtr,
+						idsBytes,
+						posTensor,
+						posPtr,
+						posBytes,
+						needsMask ? maskTensor : 0,
+						maskPtr,
+						maskBytes,
+					);
+				} finally {
+					wasm.free(heap);
+				}
+
+				await wasm.graphCompute(graph);
+
+				// Read back: every layer's last-token row, then final-norm last
+				// row, then last-token full-vocab logits → top-K in JS.
+				const perLayerResidual: Float32Array[] = [];
+				const rowBytes = E * 4;
+				const lastTokenOffset = (N - 1) * rowBytes;
+				for (let il = 0; il < hp.layerCount; il++) {
+					const buf = await wasm.downloadFromTensor(
+						layerTaps[il],
+						rowBytes,
+						lastTokenOffset,
+					);
+					perLayerResidual.push(
+						new Float32Array(buf.buffer, buf.byteOffset, E).slice(),
+					);
+				}
+
+				const fnBuf = await wasm.downloadFromTensor(
+					finalHidden,
+					rowBytes,
+					lastTokenOffset,
+				);
+				const finalNormHidden = new Float32Array(
+					fnBuf.buffer,
+					fnBuf.byteOffset,
+					E,
+				).slice();
+
+				const logitsBytes = V * 4;
+				const logitsOffset = (N - 1) * logitsBytes;
+				const logitsBuf = await wasm.downloadFromTensor(
+					logits,
+					logitsBytes,
+					logitsOffset,
+				);
+				const logitsFlat = new Float32Array(
+					logitsBuf.buffer,
+					logitsBuf.byteOffset,
+					V,
+				);
+
+				// Top-K via maintained min-of-K. K is small (16); ~V*K compares.
+				const topIds = new Int32Array(K).fill(-1);
+				const topVals = new Float32Array(K).fill(-Infinity);
+				let minIdx = 0;
+				let minVal = -Infinity;
+				for (let i = 0; i < V; i++) {
+					const v = logitsFlat[i];
+					if (v > minVal) {
+						topIds[minIdx] = i;
+						topVals[minIdx] = v;
+						// Recompute min-of-K.
+						minVal = topVals[0];
+						minIdx = 0;
+						for (let j = 1; j < K; j++) {
+							if (topVals[j] < minVal) {
+								minVal = topVals[j];
+								minIdx = j;
+							}
+						}
+					}
+				}
+				// Sort top-K descending by value.
+				const order: number[] = [];
+				for (let i = 0; i < K; i++) order.push(i);
+				order.sort((a, b) => topVals[b] - topVals[a]);
+				const sortedIds = new Int32Array(K);
+				const sortedVals = new Float32Array(K);
+				for (let i = 0; i < K; i++) {
+					sortedIds[i] = topIds[order[i]];
+					sortedVals[i] = topVals[order[i]];
+				}
+
+				return {
+					perLayerResidual,
+					finalNormHidden,
+					logitsTop16: { ids: sortedIds, values: sortedVals },
+				};
+			} finally {
+				wasm.backendBufferFree(graphBuf);
+			}
+		} finally {
+			wasm.ctxFree();
+		}
+	}
+
+	/**
 	 * Compute an L2-normalized sentence embedding by running a single-
 	 * pass causal forward over `tokenIds`, tapping the post-
 	 * `output_norm` hidden state, pooling, and L2-normalizing.
