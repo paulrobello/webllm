@@ -220,6 +220,38 @@ export function assertContiguousF32(
 }
 
 /**
+ * Convert raw BF16 bytes to F32 bytes.
+ *
+ * BF16 is the high 16 bits of an equivalent F32 value (identical sign +
+ * exponent layout; mantissa truncated to 7 bits). Conversion to F32 is
+ * therefore lossless: shift each u16 into the high half of a u32 with the
+ * low 16 bits zeroed.
+ *
+ * Used when WebGPU lacks BF16 support: the GGUF source is BF16 but the
+ * GPU-side tensor is allocated as F32 so the well-supported
+ * `mul_mat_f32_f32` shader fires instead of the unsupported
+ * `mul_mat_f32_bf16` (which fails compile and cascades through
+ * CommandBuffer invalidation).
+ */
+export function bf16BytesToF32Bytes(bf16: Uint8Array): Uint8Array {
+	if (bf16.byteLength % 2 !== 0) {
+		throw new Error(
+			`bf16BytesToF32Bytes: expected even byte count, got ${bf16.byteLength}`,
+		);
+	}
+	const u16 = new Uint16Array(
+		bf16.buffer,
+		bf16.byteOffset,
+		bf16.byteLength / 2,
+	);
+	const u32 = new Uint32Array(u16.length);
+	for (let i = 0; i < u16.length; i++) {
+		u32[i] = u16[i] << 16;
+	}
+	return new Uint8Array(u32.buffer);
+}
+
+/**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
@@ -235,6 +267,13 @@ export class ModelInference {
 	private weights: WeightTensors | null = null;
 	private weightBuf: BufferPtr = 0;
 	private nameToTensor = new Map<string, TensorPtr>();
+	// Tensor names whose GGUF source type was BF16 and have been allocated
+	// as F32 on the GPU. Bytes need BF16 → F32 conversion at upload.
+	// WebGPU has no native bf16 support; mul_mat_f32_bf16 fails to compile
+	// and silently corrupts every dependent kernel. Casting to F32 lifts the
+	// load-bearing matmul onto the supported mul_mat_f32_f32 path. Lossless
+	// in the BF16 → F32 direction.
+	private bf16OverriddenNames = new Set<string>();
 
 	private kvLayers: LayerKVCache[] | null = null;
 	private kvBuf: BufferPtr = 0;
@@ -445,6 +484,23 @@ export class ModelInference {
 			if (!tensor) continue;
 			const srcOffset = ggufCtx.dataOffset + t.offset;
 			const nbytes = wasm.tensorNbytes(tensor);
+			const needsBf16Cast = this.bf16OverriddenNames.has(t.name);
+			if (needsBf16Cast) {
+				// Streamed-callback BF16 cast not supported (would need to
+				// re-align chunk boundaries to even byte counts and stitch
+				// across chunks). The smoke test path is non-callback; if a
+				// future caller hits this, the in-memory path below handles it.
+				if (isCallback) {
+					throw new Error(
+						`BF16 → F32 cast for "${t.name}" requires in-memory GGUF data; streamed-callback path is not supported.`,
+					);
+				}
+				const srcNbytes = nbytes / 2;
+				const bf16Bytes = dataAt(srcOffset, srcNbytes);
+				const f32Bytes = bf16BytesToF32Bytes(bf16Bytes);
+				wasm.uploadToTensorChunked(tensor, f32Bytes);
+				continue;
+			}
 			if (isCallback) {
 				wasm.uploadRangeChunked(
 					tensor,
@@ -3295,7 +3351,14 @@ export class ModelInference {
 		if (!info) throw new Error(`Weight "${name}" not found in GGUF`);
 
 		const d = info.dimensions;
-		const t = info.type;
+		// WebGPU has no BF16 support; the mul_mat_f32_bf16 shader fails to
+		// compile and silently corrupts dependent kernels. Override BF16 to
+		// F32 here and convert the GGUF bytes at upload (see loadWeights).
+		const isBf16 = info.type === GgmlType.BF16;
+		if (isBf16) {
+			this.bf16OverriddenNames.add(name);
+		}
+		const t: number = isBf16 ? GgmlType.F32 : info.type;
 		let tensor: TensorPtr;
 
 		if (d.length === 1) tensor = this.wasm.tensorNew1d(t, d[0]);
