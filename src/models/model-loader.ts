@@ -468,6 +468,18 @@ export class ModelLoader {
 			poolingType,
 			causalAttention,
 			alibiMaxBias,
+			// Gemma soft-capping hyperparams. Both keys return undefined on
+			// non-Gemma architectures, so the spread is a no-op there. Read
+			// at base level (not gated on gemma4) so Gemma 2 picks them up
+			// via the post-lm_head wrap and the attention pre-softmax wrap.
+			finalLogitSoftcap: getMetaNumberOptional(
+				ctx,
+				`${metaPrefix}.final_logit_softcapping`,
+			),
+			attnLogitSoftcap: getMetaNumberOptional(
+				ctx,
+				`${metaPrefix}.attn_logit_softcapping`,
+			),
 		};
 
 		if (arch === "gemma4") {
@@ -556,10 +568,8 @@ export class ModelLoader {
 				),
 				sharedKvLayers,
 				kvReuseFromLayer: sharedKvLayers > 0 ? kvReuseFromLayer : undefined,
-				finalLogitSoftcap: getMetaNumberOptional(
-					ctx,
-					`${metaPrefix}.final_logit_softcapping`,
-				),
+				// finalLogitSoftcap already loaded into baseHp at the base level and
+				// carried through via `...baseHp` above.
 				// Per-Layer Embedding dimension: 256 for E2B, 0 if key absent.
 				// Stored in GGUF as `<arch>.embedding_length_per_layer_input`.
 				pleDim:

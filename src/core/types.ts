@@ -289,6 +289,13 @@ export interface ModelHyperparams {
 	 */
 	finalLogitSoftcap?: number;
 	/**
+	 * Attention logit softcap value (`tanh(qk / s) * s` pre-softmax).
+	 * 0 → no softcap. Read from GGUF `<arch>.attn_logit_softcapping`.
+	 * Present on Gemma 2 (50.0). Gemma 4 has no attention soft-cap
+	 * (f_attention_scale = 1.0 with QK-norm instead).
+	 */
+	attnLogitSoftcap?: number;
+	/**
 	 * Per-Layer Embedding (PLE) dimension — the short residual dimension (256
 	 * for Gemma 4 E2B) injected at each block input via the PLE lookup table.
 	 * Read from `<arch>.embedding_length_per_layer_input`. Absent for all

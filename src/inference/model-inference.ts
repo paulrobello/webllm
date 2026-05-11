@@ -999,6 +999,19 @@ export class ModelInference {
 	 * K, and V so it cannot share this helper — it has its own inline
 	 * split-QKV code that throws if the model is fused.
 	 */
+
+	/**
+	 * Gemma soft-cap: `tanh(x / cap) * cap`. Used for attention logit
+	 * soft-cap (Gemma 2 pre-softmax) and final-logit soft-cap (Gemma 2
+	 * post-lm_head). The fused FA shader applies attention soft-cap
+	 * natively via its `logit_softcap` arg — this helper is for the
+	 * manual softmax path and the post-lm_head wrap.
+	 */
+	private softCap(x: TensorPtr, cap: number): TensorPtr {
+		const wasm = this.wasm;
+		return wasm.opScale(wasm.opTanh(wasm.opScale(x, 1 / cap)), cap);
+	}
+
 	private buildQKV(
 		lw: LayerWeights,
 		normed: TensorPtr,
@@ -1583,12 +1596,13 @@ export class ModelInference {
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0, // max_bias (ALiBi disabled)
-					// FA logit_softcap is the *attention* softcap (Gemma 2 only). Gemma 4
-					// sets f_attention_scale = 1.0f with no attention softcap; its
+					// FA logit_softcap is the *attention* softcap (Gemma 2 only).
+					// The fused FA shader implements `v = logit_softcap * tanh(v / logit_softcap)`
+					// natively when logit_softcap != 0 (ggml-wgsl-shaders.hpp:2002, :2712).
+					// Gemma 4 sets f_attention_scale = 1.0f with no attention softcap; its
 					// f_final_logit_softcapping = 30.0 belongs AFTER lm_head, not here
-					// (gemma4.cpp:11 vs :379). The project does not currently support
-					// Gemma 2 attention softcap — pass 0.0 unconditionally.
-					0.0, // logit_softcap (no attention softcap supported)
+					// (gemma4.cpp:11 vs :379). Gemma 2 sets attn_logit_softcapping = 50.0.
+					hp.attnLogitSoftcap ?? 0.0,
 				);
 				// FA returns contiguous [headDim, nHeads, nTokens] — reshape
 				// directly to [embDim, nTokens] for oProj. No permute or
@@ -1599,8 +1613,12 @@ export class ModelInference {
 				// QK^T: K=[headDim, totalLen, nKvHeads], Q=[headDim, nTokens, nHeads]
 				//       -> [totalLen, nTokens, nHeads].
 				const qk = wasm.opMulMat(fullK, qp);
+				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
+				const qkCapped = hp.attnLogitSoftcap
+					? this.softCap(qk, hp.attnLogitSoftcap)
+					: qk;
 				const attnW = wasm.opSoftMaxExt(
-					qk,
+					qkCapped,
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
@@ -1670,6 +1688,9 @@ export class ModelInference {
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
 		if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
+		// Gemma 2 / Gemma 4 post-lm_head soft-cap: tanh(logits / s) * s.
+		if (hp.finalLogitSoftcap)
+			logits = this.softCap(logits, hp.finalLogitSoftcap);
 
 		wasm.graphBuildForwardExpand(graph, logits);
 
@@ -1903,8 +1924,12 @@ export class ModelInference {
 				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
 				const qk = wasm.opMulMat(kp, qp);
+				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
+				const qkCapped = hp.attnLogitSoftcap
+					? this.softCap(qk, hp.attnLogitSoftcap)
+					: qk;
 				const attnW = wasm.opSoftMaxExt(
-					qk,
+					qkCapped,
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
@@ -2186,8 +2211,12 @@ export class ModelInference {
 				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
 
 				const qk = wasm.opMulMat(kp, qp);
+				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
+				const qkCapped = hp.attnLogitSoftcap
+					? this.softCap(qk, hp.attnLogitSoftcap)
+					: qk;
 				const attnW = wasm.opSoftMaxExt(
-					qk,
+					qkCapped,
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
@@ -2256,6 +2285,9 @@ export class ModelInference {
 				? wasm.opMulMat(weights.output, finalHidden)
 				: wasm.opMulMat(weights.tokEmb, finalHidden);
 			if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
+			// Gemma 2 / Gemma 4 post-lm_head soft-cap: tanh(logits / s) * s.
+			if (hp.finalLogitSoftcap)
+				logits = this.softCap(logits, hp.finalLogitSoftcap);
 
 			wasm.graphBuildForwardExpand(graph, finalHidden);
 			wasm.graphBuildForwardExpand(graph, logits);
@@ -2683,13 +2715,18 @@ export class ModelInference {
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
-					0.0,
+					// Gemma 2 attention logit soft-cap (FA shader applies natively).
+					hp.attnLogitSoftcap ?? 0.0,
 				);
 				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
 			} else {
 				const qk = wasm.opMulMat(fullK, qp);
+				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
+				const qkCapped = hp.attnLogitSoftcap
+					? this.softCap(qk, hp.attnLogitSoftcap)
+					: qk;
 				const attnW = wasm.opSoftMaxExt(
-					qk,
+					qkCapped,
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
@@ -2755,6 +2792,9 @@ export class ModelInference {
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
 		if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
+		// Gemma 2 / Gemma 4 post-lm_head soft-cap: tanh(logits / s) * s.
+		if (hp.finalLogitSoftcap)
+			logits = this.softCap(logits, hp.finalLogitSoftcap);
 
 		wasm.graphBuildForwardExpand(graph, logits);
 
@@ -3054,13 +3094,18 @@ export class ModelInference {
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
-					0.0,
+					// Gemma 2 attention logit soft-cap (FA shader applies natively).
+					hp.attnLogitSoftcap ?? 0.0,
 				);
 				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
 			} else {
 				const qk = wasm.opMulMat(fullK, qp);
+				// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
+				const qkCapped = hp.attnLogitSoftcap
+					? this.softCap(qk, hp.attnLogitSoftcap)
+					: qk;
 				const attnW = wasm.opSoftMaxExt(
-					qk,
+					qkCapped,
 					maskTensor,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
@@ -3124,6 +3169,9 @@ export class ModelInference {
 			? wasm.opMulMat(weights.output, finalNorm)
 			: wasm.opMulMat(weights.tokEmb, finalNorm);
 		if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
+		// Gemma 2 / Gemma 4 post-lm_head soft-cap: tanh(logits / s) * s.
+		if (hp.finalLogitSoftcap)
+			logits = this.softCap(logits, hp.finalLogitSoftcap);
 
 		const t2 = trace ? performance.now() : 0;
 
@@ -3741,7 +3789,8 @@ export class ModelInference {
 						maskTensor,
 						1 / Math.sqrt(hp.embeddingHeadLength),
 						0,
-						0,
+						// Gemma 2 attention logit soft-cap (FA shader applies natively).
+						hp.attnLogitSoftcap ?? 0,
 					);
 					merged = wasm.opReshape2d(
 						attnOut,
@@ -3750,8 +3799,12 @@ export class ModelInference {
 					);
 				} else {
 					const qk = wasm.opMulMat(fullK, qp);
+					// Gemma 2 attention logit soft-cap: tanh(qk / 50) * 50 pre-softmax.
+					const qkCapped = hp.attnLogitSoftcap
+						? this.softCap(qk, hp.attnLogitSoftcap)
+						: qk;
 					const attnW = wasm.opSoftMaxExt(
-						qk,
+						qkCapped,
 						maskTensor,
 						1 / Math.sqrt(hp.embeddingHeadLength),
 						0,
