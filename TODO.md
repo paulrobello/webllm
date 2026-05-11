@@ -1029,6 +1029,26 @@ and §3 for the table of GGUF keys → project impact.
        (see `SUMMARY.md` for the closure write-up). Chat smoke
        still degenerate (`<eos>` × N) — downstream chat-template
        tokenization issue, surfaced separately as Phase 5.
+     - ✅ Phase 5 (2026-05-11 EOS-8, commits `d8a0835` feat +
+       `4fc5993` docs): chat-template tokenization audit.
+       **Root cause:** the unsloth Gemma-4 / Gemma-3N GGUF vocab
+       stores the turn-boundary tokens under non-standard literals
+       `<|turn>` (id 105) and `<turn|>` (id 106), not the classical
+       `<start_of_turn>` / `<end_of_turn>`. `formatGemma4` was
+       hard-coding the classical literals, so the SPM tokenizer
+       BPE-fragmented each into ~7 unrelated pieces and the model
+       received untrained input on every turn boundary. **Fix:**
+       template-sniff `<|turn>` substring in `formatGemma4` and
+       in the two `addChatStopToken` call sites (engine.ts chat
+       and chatCompletion paths); emit the matching literal pair.
+       Classical Gemma 2 / 3 templates unaffected. **Outcome:**
+       `tokensIn` 75 → 41-46; greedy smoke went from `<eos>` × N
+       to coherent English ("Please provide the text you would
+       like me to help you with.") with finish=stop-token after
+       13 tokens. Browser-console probe confirms
+       `tok.encode("<|turn>")=[105]` and `tok.encode("<turn|>")=[106]`.
+       Ship gate green (763 pass / 0 fail). Closure report:
+       [`eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md).
      Candidates in priority order:
      (a) **Intermediate hidden-state comparison** vs HuggingFace
          `transformers` Gemma 4 reference run on the same prompt
@@ -1099,104 +1119,96 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-7)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-8)
 
-**Phase 4 CLOSED 2026-05-11 EOS-7:** shared-KV at layers 15-34 wired
-per `llama-model.cpp:2007-2014` iSWA remap. Gemma 4 parity-capture
-now passes end-of-stack with cosine 0.9722 and top-1 argmax matches
-HF reference. Closure report:
-[`eval/reports/parity-gemma-4-e2b-shared-kv-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-shared-kv-2026-05-11/SUMMARY.md).
+**Phase 5 CLOSED 2026-05-11 EOS-8:** chat-template tokenization fix
+landed. `formatGemma4` + `engine.addChatStopToken` now dispatch on
+the active template's `<|turn>` literal so the unsloth GGUF gets the
+matching `<|turn>` / `<turn|>` (ids 105 / 106) and classical Gemma
+2/3 GGUFs keep `<start_of_turn>` / `<end_of_turn>`. Greedy smoke went
+from `<eos>` × N to coherent English with clean `finish=stop-token`;
+`tokensIn` 75 → 41-46. Closure report:
+[`eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md).
 
-**Where to start next:** **Task 3.3l Phase 5 — chat-template
-tokenization audit**. Greedy chat smoke produces only `<eos>`
-tokens (regressed from pre-Phase-4 mixed-script noise, which
-itself was already wrong). Parity capture's correctness (HF top-1
-match for the raw bare prompt) implies the model arithmetic is
-fine; the issue is at the TOKENIZE step.
+**Where to start next:** **Task 3.5 — Stage 3 closure 36-prompt eval**.
+With Phase 5 done, the chat path now produces coherent output and
+the eval gate (`≥40%` per the Stage 3 spec) can be measured.
 
-**Smoking gun:** smoke harness reports `tokensIn=75` for the
-prompt `"The capital of France is"` wrapped via the chat
-template. With `formatGemma4` outputting
-`<start_of_turn>user\nThe capital of France is<end_of_turn>\n<start_of_turn>model\n`,
-the expected count is ~12-15 tokens. 75 tokens implies the
-special-token literals are decomposing into many BPE pieces.
+**Smoke-quality observation (input to Task 3.5):** greedy decode is
+conversational and prone to mid-stream repetition (e.g.
+`"Please tell me what you want to ask?"` emitted twice on
+`"What is the capital of France?"`). None of this is a tokenization
+bug — Phase 5 closed correctly. Likely contributors, to be sorted by
+the 36-prompt eval results:
 
-**Diagnostic plan — concrete steps:**
+- The default-system injection (`shouldInjectDefaultSystem`) is
+  active for Gemma 4 because the template lacks the
+  `enable_thinking` + `<think>` markers. The GGUF's native template
+  only emits `<|turn>system\n` when a real system role is present;
+  injecting a default may push the IT model into a "wait for further
+  user instruction" mode. **Mitigation candidate:** add a
+  template-aware exception so Gemma 4 skips default-system injection
+  (one-liner in `chat-template.ts:shouldInjectDefaultSystem` or its
+  caller; estimate the eval-delta before committing).
+- Documented greedy-degeneracy on small Gemma IT variants. The
+  bench harness uses greedy-by-default (set 2026-05-04 policy), so
+  the 36-prompt eval is the right measurement instrument.
+- Stage 4 SWA hasn't landed. Probably irrelevant for the 36-prompt
+  eval (each generation < 512 tokens), but quantify against the
+  Phi-3 closure baseline (60%) to know if SWA is the gating lever
+  between 40% and 60%.
 
-1. **Log the actual token stream.** In the live agentchrome tab,
-   open the dev console and run:
-   ```js
-   // Verify tokenization of each special literal in isolation.
-   const tok = window.tokenizer ?? window.smokeEngine?._tokenizer;
-   console.log(JSON.stringify(tok.encode("<start_of_turn>"), null, 0));
-   console.log(JSON.stringify(tok.encode("<end_of_turn>"), null, 0));
-   console.log(JSON.stringify(tok.encode("<bos>")));
-   // And the full chat-template prompt.
-   const full = "<start_of_turn>user\nThe capital of France is<end_of_turn>\n<start_of_turn>model\n";
-   const ids = tok.encode(full);
-   console.log("tokensIn:", ids.length, "ids:", JSON.stringify(ids));
-   ```
-   Expected (per Gemma 4 GGUF vocab): `<start_of_turn>` → id 105,
-   `<end_of_turn>` → id 106, `<bos>` → id 2. If either splits into
-   multiple ids, the tokenizer isn't applying its special-token
-   pre-tokenization rule.
+**Diagnostic plan — concrete steps for Task 3.5:**
 
-2. **Cross-check against HF.** Re-run with
-   `transformers.AutoTokenizer.from_pretrained("unsloth/gemma-4-E2B-it")`:
-   ```python
-   from transformers import AutoTokenizer
-   t = AutoTokenizer.from_pretrained("unsloth/gemma-4-E2B-it")
-   ids = t.apply_chat_template(
-       [{"role": "user", "content": "The capital of France is"}],
-       add_generation_prompt=True,
-   )
-   print(len(ids), ids)
-   ```
-   The WebLLM tokenizer's encode of the same string should match
-   byte-for-byte (modulo BOS placement convention; see step 5).
+1. Locate the Gemma 4 entry in `eval/models.ts` and find the
+   matching `make bench-*` target (or assemble one via
+   `bun run eval/bench.ts --model gemma-4-e2b-it-q4km --temp 0`).
+2. Ensure the dashboard is up (`make dashboard-serve`, port 8033)
+   so the run lands in the live SQLite — or run with `?ingest=off`
+   if Phase 5 is still being re-validated and we don't want to
+   pollute the canonical timeline.
+3. Run a single 3-task probe first (3 most-discriminating tasks
+   from the 36-prompt suite) before committing to the full run;
+   confirm scoring is finite and the output isn't all-degenerate.
+4. Full 36-prompt run. Gate threshold ≥40%.
+5. If ≥40%: declare Stage 3 closed, pivot to **Stage 4 — real
+   SWA windowed mask**. If <40%: open a Stage 3-quality probe
+   (default-system suppression A/B is the cheapest first lever).
 
-3. **Locate the tokenizer's special-token handling.** Files to
-   inspect:
-   - `src/inference/tokenizer.ts` — `Tokenizer` class. Look for
-     `addedTokens` / `specialTokens` / `pre_tokenize` logic. Gemma
-     4 uses SentencePiece with extra added tokens registered in
-     GGUF metadata `tokenizer.ggml.added_tokens` (or similar key).
-   - `src/models/model-loader.ts:562-680` — `buildTokenizerConfig`.
-     Verify the added-tokens array is being plumbed through for
-     Gemma 4's `gpt2`/`llama` model class.
-   - Compare with how Qwen3 / Phi-3 register their `<|im_start|>`
-     / `<|im_end|>` / `<|endoftext|>` literals (those work).
+**Required reading before touching code (Task 3.5 entry):**
 
-4. **If `<end_of_turn>` is the actual generated token but mis-decoded
-   as `<eos>`,** the stop-token table is wrong. Check
-   `src/inference/sampling.ts` / wherever stop-token IDs are
-   resolved for Gemma 4. Should include both 1 (`<eos>`) and 106
-   (`<end_of_turn>`).
+1. `eval/models.ts` — confirm the Gemma 4 profile (chat template
+   wiring, stop tokens, sampling defaults).
+2. `eval/bench.ts` + `eval/perf.ts` — the harness driving the
+   36-prompt sweep.
+3. `eval/tasks/*` — what the 36 prompts actually are (so a low
+   score can be diagnosed by category rather than treated as a
+   uniform "the model is weak" verdict).
+4. `eval/reports/parity-gemma-4-e2b-shared-kv-2026-05-11/SUMMARY.md`
+   — recap of where the model parity sits before this eval.
 
-5. **BOS handling.** Verify the tokenizer prepends `<bos>` (id 2)
-   when `tokenizer.encode` is called on the chat-template string.
-   Gemma 4 was trained with `<bos>` at sequence start. Parity
-   capture got the right answer because the raw inputIds explicitly
-   included `[2, ...]`. The smoke path goes through
-   `encodeChatPrompt` which may or may not prepend BOS — confirm.
+**Quickstart (Task 3.5 dev loop):**
 
-6. **Re-run greedy chat smoke** after each diagnostic. The "fixed"
-   signal is the first generated token = "Paris" (id 9079) for
-   `prompt=The capital of France is`. Other coherent answers
-   ("the city of Paris", etc.) also pass.
+```bash
+# 1. Smoke server + dashboard.
+make smoke-serve &
+make dashboard-serve &        # optional but useful for tracking
 
-**Gates for Phase 5 closure:**
-- Greedy chat smoke produces coherent English (not `<eos>` only).
-- `tokenizer.encode(chat_template_string).length` matches HF
-  transformers' `apply_chat_template` count for the same messages.
+# 2. Sanity probe: 3 tasks against the new chat-template path.
+bun run eval/bench.ts --model gemma-4-e2b-it-q4km --temp 0 \
+  --tasks "easy-001,easy-002,easy-003" --runs 1
 
-**Then Task 3.5 (Stage 3 closure):** run the 36-prompt eval
-(`make bench-…` for the Gemma 4 profile). Gate ≥ 40% (Stage 4
-will lift further).
+# 3. Full 36-prompt eval (matches the Stage 3 gate threshold).
+make bench-gemma-4-e2b-it-q4km   # or the equivalent target in Makefile
 
-After Phase 5 + Task 3.5, Stage 3 closes structurally and
-attention turns to **Stage 4 — real SWA windowed mask** (still
-pending; affects long-context generation > 512 tokens).
+# 4. If accuracy < 40%, probe the default-system suppression
+#    lever before any other change. The TODO entry above lists
+#    other candidates in priority order.
+```
+
+After Task 3.5, Stage 3 closes structurally and attention turns to
+**Stage 4 — real SWA windowed mask** (still pending; affects
+long-context generation > 512 tokens).
 
 **Required reading before touching code (Phase 5 entry):**
 
