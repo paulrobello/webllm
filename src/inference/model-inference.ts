@@ -999,19 +999,6 @@ export class ModelInference {
 	 * K, and V so it cannot share this helper — it has its own inline
 	 * split-QKV code that throws if the model is fused.
 	 */
-
-	/**
-	 * Gemma soft-cap: `tanh(x / cap) * cap`. Used for attention logit
-	 * soft-cap (Gemma 2 pre-softmax) and final-logit soft-cap (Gemma 2
-	 * post-lm_head). The fused FA shader applies attention soft-cap
-	 * natively via its `logit_softcap` arg — this helper is for the
-	 * manual softmax path and the post-lm_head wrap.
-	 */
-	private softCap(x: TensorPtr, cap: number): TensorPtr {
-		const wasm = this.wasm;
-		return wasm.opScale(wasm.opTanh(wasm.opScale(x, 1 / cap)), cap);
-	}
-
 	private buildQKV(
 		lw: LayerWeights,
 		normed: TensorPtr,
@@ -1091,6 +1078,18 @@ export class ModelInference {
 		const vReady =
 			hp.architecture === "gemma4" ? wasm.opRmsNorm(v3, hp.normEpsilon) : v3;
 		return { qReady, kReady, v3: vReady };
+	}
+
+	/**
+	 * Gemma soft-cap: `tanh(x / cap) * cap`. Used for attention logit
+	 * soft-cap (Gemma 2 pre-softmax) and final-logit soft-cap (Gemma 2
+	 * post-lm_head). The fused FA shader applies attention soft-cap
+	 * natively via its `logit_softcap` arg — this helper is for the
+	 * manual softmax path and the post-lm_head wrap.
+	 */
+	private softCap(x: TensorPtr, cap: number): TensorPtr {
+		const wasm = this.wasm;
+		return wasm.opScale(wasm.opTanh(wasm.opScale(x, 1 / cap)), cap);
 	}
 
 	/**
