@@ -881,15 +881,25 @@ and §3 for the table of GGUF keys → project impact.
    stops cleanly on `<end_of_turn>`.
    **Artifact:** `eval/reports/gemma-4-stage2-surface-wiring-<date>/SUMMARY.md`.
 
-3. **Stage 3 — PLE injection + dual RoPE dispatch.** Load
-   `per_layer_token_embd` table, inject per-layer into residual at
-   each layer's start, dispatch RoPE per-layer-type (512-dim @ 1M
-   base for global / 256-dim @ 10k base for SWA — even with Stage 4
-   still pending, the per-layer-type RoPE must match training).
+3. **Stage 3 — Gemma 3N architecture (AltUp + Laurel + gated-PLE) +
+   dual RoPE dispatch.** Phase 1 probe (Task 3.1, commit `c98dc1a`)
+   and Task 3.2 loader exposure (commits `0c91ce8` + `6c5da48`) confirmed
+   Gemma 4 E2B is architecturally **Gemma 3N** — not a vanilla transformer
+   with PLE bolted on. Canonical reference:
+   `~/Repos/llama.cpp/src/models/gemma3n.cpp`. Stage 3 absorbs three new
+   component groups: AltUp (4-stream architecture with per-block
+   predict/correct + pre/post-loop projection), Laurel (low-rank parallel
+   residual), and gated PLE per block (replaces simple PLE add). Plus the
+   original per-layer head_dim + dual RoPE dispatch (Task 3.4) that
+   unblocks the `buildQKV` reshape3d assertion. Spec addendum:
+   [`docs/superpowers/specs/2026-05-10-gemma-4-stage3-gemma3n-architecture-addendum.md`](docs/superpowers/specs/2026-05-10-gemma-4-stage3-gemma3n-architecture-addendum.md).
+   Stage 3 task list expands from 5 to 10 tasks. Detection predicate at
+   runtime: `weights.altupProj` presence (not arch string).
    **Gate:** first generated token on `"The capital of France is"` is
    `Paris` (or ` Paris`); 36-prompt eval ≥40% (loose for Stage 4 to
    lift further).
-   **Artifact:** `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`.
+   **Artifact:** `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`
+   (PROBE.md + PROBE addendum already landed in commits c98dc1a + 0c91ce8).
 
 4. **Stage 4 — Real sliding-window attention.** Replace Stage-3
    "all-global" fallback with real SWA on the 4-of-5 layers marked
