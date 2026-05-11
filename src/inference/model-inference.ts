@@ -1392,8 +1392,12 @@ export class ModelInference {
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
-			// Fused silu(gate) * up — single GPU op instead of silu+mul.
-			const ffnHidden = wasm.opSwigluSplit(gate, up);
+			// SwiGLU: fused silu(gate) * up. Gemma family uses gelu(gate) * up
+			// instead (gemma4.cpp:320, LLM_FFN_GELU + LLM_FFN_PAR).
+			const ffnHidden =
+				hp.architecture === "gemma4"
+					? wasm.opMul(wasm.opGelu(gate), up)
+					: wasm.opSwigluSplit(gate, up);
 			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
 			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
 			const ffnOut = lw.postFfwNorm
@@ -1685,7 +1689,12 @@ export class ModelInference {
 				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 
 				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N, ffnDim);
-				const ffnHidden = wasm.opSwigluSplit(gate, up);
+				// Gemma family: gelu(gate) * up instead of silu(gate) * up
+				// (gemma4.cpp:320, LLM_FFN_GELU + LLM_FFN_PAR).
+				const ffnHidden =
+					hp.architecture === "gemma4"
+						? wasm.opMul(wasm.opGelu(gate), up)
+						: wasm.opSwigluSplit(gate, up);
 				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
 				cur = wasm.opAdd(ffnOut, attnResidual);
@@ -2083,7 +2092,11 @@ export class ModelInference {
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
-			const ffnHidden = wasm.opSwigluSplit(gate, up);
+			// Gemma family: gelu(gate) * up (gemma4.cpp:320).
+			const ffnHidden =
+				hp.architecture === "gemma4"
+					? wasm.opMul(wasm.opGelu(gate), up)
+					: wasm.opSwigluSplit(gate, up);
 			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
 			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
 			const ffnOut = lw.postFfwNorm
@@ -2451,7 +2464,11 @@ export class ModelInference {
 			);
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
-			const ffnHidden = wasm.opSwigluSplit(gate, up);
+			// Gemma family: gelu(gate) * up (gemma4.cpp:320).
+			const ffnHidden =
+				hp.architecture === "gemma4"
+					? wasm.opMul(wasm.opGelu(gate), up)
+					: wasm.opSwigluSplit(gate, up);
 			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
 			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
 			const ffnOut = lw.postFfwNorm
