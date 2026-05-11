@@ -10,7 +10,7 @@ describe.skipIf(!existsSync(GEMMA4))(
 		it("reads gemma4.feed_forward_length as a 35-element array", () => {
 			const buf = readFileSync(GEMMA4);
 			const ctx = GgufParser.parse(buf);
-			const ffn = GgufParser.getMetaNumberArray(
+			const ffn = GgufParser.getMetadataNumberArray(
 				ctx,
 				"gemma4.feed_forward_length",
 			);
@@ -24,7 +24,7 @@ describe.skipIf(!existsSync(GEMMA4))(
 		it("reads gemma4.attention.sliding_window_pattern as 35-element bool array", () => {
 			const buf = readFileSync(GEMMA4);
 			const ctx = GgufParser.parse(buf);
-			const pat = GgufParser.getMetaBooleanArray(
+			const pat = GgufParser.getMetadataBooleanArray(
 				ctx,
 				"gemma4.attention.sliding_window_pattern",
 			);
@@ -39,13 +39,15 @@ describe.skipIf(!existsSync(GEMMA4))(
 		it("returns fallback for missing key", () => {
 			const buf = readFileSync(GEMMA4);
 			const ctx = GgufParser.parse(buf);
-			expect(GgufParser.getMetaNumberArray(ctx, "nonexistent.key")).toEqual([]);
-			expect(
-				GgufParser.getMetaNumberArray(ctx, "nonexistent.key", [42]),
-			).toEqual([42]);
-			expect(GgufParser.getMetaBooleanArray(ctx, "nonexistent.key")).toEqual(
+			expect(GgufParser.getMetadataNumberArray(ctx, "nonexistent.key")).toEqual(
 				[],
 			);
+			expect(
+				GgufParser.getMetadataNumberArray(ctx, "nonexistent.key", [42]),
+			).toEqual([42]);
+			expect(
+				GgufParser.getMetadataBooleanArray(ctx, "nonexistent.key"),
+			).toEqual([]);
 		});
 	},
 );

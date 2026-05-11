@@ -99,10 +99,10 @@ export class GgufParser {
 	 * @param ctx - Parsed GGUF context.
 	 * @param key - Metadata key.
 	 * @param fallback - Value returned when the key is absent. Defaults to [].
-	 * @returns Array of numbers, or `fallback` if key is missing.
+	 * @returns Array of numbers, or `fallback` if missing.
 	 * @throws Error if the key exists but its value is not an array.
 	 */
-	static getMetaNumberArray(
+	static getMetadataNumberArray(
 		ctx: GgufContext,
 		key: string,
 		fallback: number[] = [],
@@ -118,8 +118,8 @@ export class GgufParser {
 	/**
 	 * Retrieve a boolean-array metadata entry (GGUF ARRAY of BOOL).
 	 *
-	 * GGUF BOOL is encoded as UINT8 (0 or 1). The parser stores them as JS
-	 * booleans, but this method also accepts numeric 0/1 for robustness.
+	 * GGUF BOOL elements are always decoded to JS booleans by the parser
+	 * (line 199: `view.getUint8(offset) !== 0`). No numeric coercion needed.
 	 *
 	 * @param ctx - Parsed GGUF context.
 	 * @param key - Metadata key.
@@ -127,7 +127,7 @@ export class GgufParser {
 	 * @returns Array of booleans, or `fallback` if key is missing.
 	 * @throws Error if the key exists but its value is not an array.
 	 */
-	static getMetaBooleanArray(
+	static getMetadataBooleanArray(
 		ctx: GgufContext,
 		key: string,
 		fallback: boolean[] = [],
@@ -137,9 +137,7 @@ export class GgufParser {
 		if (!Array.isArray(kv.value)) {
 			throw new Error(`GGUF key "${key}" is not an array`);
 		}
-		return (kv.value as Array<number | boolean>).map((v) =>
-			typeof v === "boolean" ? v : v !== 0,
-		);
+		return (kv.value as boolean[]).slice();
 	}
 }
 
