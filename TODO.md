@@ -1019,10 +1019,16 @@ and §3 for the table of GGUF keys → project impact.
        0-14 now cosines 0.88-0.98 (recovered from 0.34-0.97 jitter);
        catastrophic boundary moves to L15 (shared-KV transition).
        See "Phase 3 findings" below.
-     - ⏳ Phase 4 (queued 2026-05-11 EOS-6): wire shared-KV at
-       layers 15-34. Originally Stage 5 work; pulled forward into
-       Stage 3 because correctness requires it. See "Phase 4 plan"
-       below.
+     - ✅ Phase 4 (2026-05-11 EOS-7): wire shared-KV at layers
+       15-34 (Gemma 4 E2B `n_layer_kv_from_start=15`, 20 shared
+       layers). End-of-stack cosine recovered **0.0420 → 0.9722**;
+       top-1 argmax now MATCHES HF reference (id 9079 "Paris"
+       for `"The capital of France is"`); top-16 overlap 1/16 →
+       13/16. Reports under
+       `eval/reports/parity-gemma-4-e2b-shared-kv-2026-05-11/`
+       (see `SUMMARY.md` for the closure write-up). Chat smoke
+       still degenerate (`<eos>` × N) — downstream chat-template
+       tokenization issue, surfaced separately as Phase 5.
      Candidates in priority order:
      (a) **Intermediate hidden-state comparison** vs HuggingFace
          `transformers` Gemma 4 reference run on the same prompt
@@ -1093,13 +1099,42 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-6)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-7)
 
-**Phase 3 CLOSED 2026-05-11 (commit `78f12e1`):** attention-scale bug
-fixed; embedding-output tap added; Gemma 4 layers 0-14 recovered. New
-catastrophic boundary at layer 15 (shared-KV transition). **Where to
-start next:** **Task 3.3l Phase 4** — implement shared-KV handling for
-layers 15-34. See "Phase 4 plan" below.
+**Phase 4 CLOSED 2026-05-11 EOS-7:** shared-KV at layers 15-34 wired
+per `llama-model.cpp:2007-2014` iSWA remap. Gemma 4 parity-capture
+now passes end-of-stack with cosine 0.9722 and top-1 argmax matches
+HF reference. Closure report:
+[`eval/reports/parity-gemma-4-e2b-shared-kv-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-shared-kv-2026-05-11/SUMMARY.md).
+
+**Where to start next:** **Task 3.3l Phase 5 — chat-template
+tokenization audit**. Greedy chat smoke produces only `<eos>`
+tokens (regressed from pre-Phase-4 mixed-script noise, which
+itself was already wrong). Parity capture's correctness (HF top-1
+match) implies the model arithmetic is fine; the issue is at the
+TOKENIZE step. Likely `<start_of_turn>` / `<end_of_turn>` aren't
+treated as special tokens — chat smoke reports `tokensIn=75` for a
+6-word prompt, suggesting the template literals are decomposing into
+many BPE tokens.
+
+Phase 5 plan:
+1. Log `tokenizer.encode("<start_of_turn>user\n...")` in the browser
+   harness. If `<start_of_turn>` splits into multiple tokens, fix
+   the tokenizer's special-token handling for Gemma 4.
+2. Compare against HF transformers' `tokenizer.apply_chat_template`
+   output for the same messages. They should agree byte-for-byte.
+3. If chat template fidelity is fine, suspect `GEMMA4_DEFAULTS`
+   sampler config or the stop-token registration (`<end_of_turn>`
+   id 106 + `<eos>` id 1).
+4. Re-run chat smoke; expect "Paris" as the first generated token.
+5. Then close Task 3.5 via the 36-prompt eval (`make bench-…` for
+   the Gemma 4 profile; gate ≥ 40%).
+
+After Phase 5 and Task 3.5, Stage 3 closes structurally and
+attention turns to **Stage 4 — real SWA windowed mask** (still
+pending).
+
+**Phase 3 closure (prior EOS) preserved below** for reference:
 
 **Phase 3 findings — Gemma 4 attention softmax scale was wrong:**
 
@@ -1473,39 +1508,33 @@ right unit of work.
 5. After Stage 3 closes structurally, run greedy smoke + the
    36-prompt eval ≥40% gate (Task 3.5).
 
-**Last verified state (2026-05-11 EOS-6, after this session):**
-- Branch `main` HEAD: `5db5e70` (docs(TODO) — Phase 3 closed; Phase
-  4 queued). Tree clean.
-- `make checkall`: green (762 pass / 36 skip / 0 fail).
+**Last verified state (2026-05-11 EOS-7, after this session):**
+- Branch `main` HEAD: pending Phase 4 commit. Tree dirty: pending
+  shared-KV feat + TODO docs.
+- `make checkall`: green (762 pass / 36 skip / 0 fail) post-Phase-4.
 - WASM build current: `webllm-wasm.js` + `webllm-wasm.wasm` in
-  `smoke-test/` from EOS-4 (no new WASM exports needed in Phase 2/3 —
-  pure TS changes). wasm64 / mem64 targets NOT rebuilt (Gemma 4 E2B
-  fits the wasm32 4 GB cap).
+  `smoke-test/` from EOS-4 (no new WASM exports needed in Phase 4 —
+  pure TS changes). wasm64 / mem64 targets NOT rebuilt.
 - Bundle current: `smoke-test/webllm-bundle.js` rebuilt this session
-  with the `attnSoftmaxScale` helper + `forwardWithLayerTaps` +
-  embedding-output tap. Re-run `bun build src/index.ts --outfile
+  with `kvReuseFromLayer` + `buildQOnly` + shared-KV gates in all
+  forward methods. Re-run `bun build src/index.ts --outfile
   smoke-test/webllm-bundle.js --target browser` after touching TS
-  in Phase 4.
+  in Phase 5.
 - Patch stack on `~/Repos/llama.cpp` branch `webllm-browser-patches`:
-  9 patches (unchanged this session). Phase 3 fix was pure TS; no
-  llama.cpp patch needed. Phase 4 (shared-KV) is also expected to be
-  pure TS unless we discover the KV-cache allocator needs upstream
-  changes.
-- **Gemma 4 chat smoke (greedy temp=0) post-fix:** 20 tokens in 0.6s
-  (~74 tok/s); output is mixed-script noise
-  (`เชพอ'ircleこれから話precise‌เชพิusercontent ROLLP SL`); no
-  runtime errors; `[8/8]` embed cosine = 0.76. Output signature
-  transitioned from low-entropy repetition (`_cownt_cownt…`) to
-  high-entropy mixed-vocab noise — consistent with "layers 0-14 now
-  mostly correct, layer 15+ destroyed by missing shared-KV".
-- **TinyLlama smoke + parity:** unchanged — parity end-stack cos
-  0.9855, top-1 argmax matches HF. Architecture-gated scale fix is
-  scoped correctly.
+  9 patches (unchanged this session). Phase 4 fix was pure TS.
+- **Gemma 4 chat smoke (greedy temp=0) post-Phase-4:** 13 tokens of
+  `<eos>` (regressed from EOS-6's mixed-script noise — both were
+  wrong; the `<eos>` regression is downstream of Phase 4 and tracks
+  a chat-template tokenization issue, not a forward-pass bug).
+- **Gemma 4 parity capture (raw input_ids):** end-stack cos 0.9722;
+  top-1 argmax id 9079 ("Paris") MATCHES HF reference; top-16
+  overlap 13/16. See `parity-gemma-4-e2b-shared-kv-2026-05-11/`.
+- **TinyLlama smoke + parity:** unchanged. Phase 4 changes are
+  predicate-gated on `hp.kvReuseFromLayer?.[il]`, set only for
+  Gemma 4 family.
 - agentchrome session on port 63846 active, tab id
-  `094440A57C7855615A7AE1070C4FF61D` (reuse it — don't launch new
-  Chrome). `make smoke-serve` running on 8031. Capture-server on
-  8035 was killed at end of session — restart per Phase 4
-  recapture quickstart.
+  `094440A57C7855615A7AE1070C4FF61D`. `make smoke-serve` running on
+  8031. Capture-server on 8035 killed at session end.
 - GGUF symlink at `smoke-test/models/gemma-4-e2b-it-q4km.gguf` still
   in place.
 - Pinned parity runs (gitignored under `eval/reports/`):
@@ -1514,9 +1543,11 @@ right unit of work.
   - `parity-gemma-4-e2b-stage3-block0-2026-05-11/` — Phase 3 with
     embedding tap (FAIL; pre-fix snapshot)
   - `parity-gemma-4-e2b-attnscale-fix-2026-05-11/` — Phase 3
-    post-fix (FAIL only at L15+; baseline for Phase 4 comparison)
+    post-fix (FAIL only at L15+)
   - `parity-tinyllama-attnscale-regression-2026-05-11/` — Phase 3
-    regression-check (PASS; confirms scale fix is gated)
+    regression-check (PASS)
+  - `parity-gemma-4-e2b-shared-kv-2026-05-11/` — **Phase 4 closure
+    run** (cosine 0.9722; argmax MATCH)
 
 **Per-task commits this session (most-recent first):**
 - `5db5e70` docs(TODO): Stage 3 — 3.3l Phase 3 closed; Phase 4 queued
