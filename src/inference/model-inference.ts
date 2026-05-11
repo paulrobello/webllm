@@ -56,6 +56,10 @@ interface LayerWeights {
 	pleInpGate: TensorPtr | null; // blk.L.inp_gate.weight   [n_embd, pleDim]
 	plePerBlockProj: TensorPtr | null; // blk.L.proj.weight    [pleDim, n_embd]
 	plePostNorm: TensorPtr | null; // blk.L.post_norm.weight  [n_embd]
+	// Gemma 4 per-layer output scale: a learned [1]-shape scalar multiplied
+	// into the layer's residual after PLE injection and before the next layer.
+	// Null on all other architectures (absent from GGUF).
+	layerOutputScale: TensorPtr | null;
 }
 
 interface WeightTensors {
@@ -388,6 +392,7 @@ export class ModelInference {
 					pleInpGate: null,
 					plePerBlockProj: null,
 					plePostNorm: null,
+					layerOutputScale: null,
 				});
 			} else {
 				// Default split-QKV / split-gate-up path used by llama / qwen* /
@@ -417,6 +422,7 @@ export class ModelInference {
 					pleInpGate: opt("inp_gate.weight"),
 					plePerBlockProj: opt("proj.weight"),
 					plePostNorm: opt("post_norm.weight"),
+					layerOutputScale: opt("layer_output_scale.weight"),
 				});
 			}
 		}
@@ -1397,6 +1403,11 @@ export class ModelInference {
 			) {
 				cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
 			}
+			// Gemma 4: multiply residual by per-layer learned scalar before feeding
+			// the next layer (broadcasts [1]-shape weight across all hidden dims).
+			if (lw.layerOutputScale) {
+				cur = wasm.opMul(cur, lw.layerOutputScale);
+			}
 		}
 
 		let finalNorm = wasm.opMul(
@@ -2072,6 +2083,11 @@ export class ModelInference {
 			) {
 				cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
 			}
+			// Gemma 4: multiply residual by per-layer learned scalar before feeding
+			// the next layer (broadcasts [1]-shape weight across all hidden dims).
+			if (lw.layerOutputScale) {
+				cur = wasm.opMul(cur, lw.layerOutputScale);
+			}
 		}
 
 		let finalNorm = wasm.opMul(
@@ -2428,6 +2444,11 @@ export class ModelInference {
 				lw.plePostNorm
 			) {
 				cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
+			}
+			// Gemma 4: multiply residual by per-layer learned scalar before feeding
+			// the next layer (broadcasts [1]-shape weight across all hidden dims).
+			if (lw.layerOutputScale) {
+				cur = wasm.opMul(cur, lw.layerOutputScale);
 			}
 		}
 
