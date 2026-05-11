@@ -103,6 +103,8 @@ export type ModelArchitecture =
 	| "phi"
 	| "phi3"
 	| "gemma"
+	| "gemma2"
+	| "gemma3"
 	| "gemma4"
 	| "qwen"
 	| "qwen2"
