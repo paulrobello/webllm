@@ -221,6 +221,55 @@ export interface ModelHyperparams {
 	 * Defaults to 8.0 when GGUF metadata omits the key (gaianet mirror).
 	 */
 	alibiMaxBias?: number;
+	/**
+	 * Per-layer head dimension. When present, dispatch code MUST index
+	 * by layer (`embeddingHeadLengthPerLayer[i]`) instead of reading the
+	 * scalar `embeddingHeadLength`. Length === `layerCount`. Absent for
+	 * uniform architectures (Llama, Mistral, Qwen, Phi-3, etc.). Present
+	 * for Gemma 4 where SWA layers use a smaller head_dim than global
+	 * layers.
+	 */
+	embeddingHeadLengthPerLayer?: number[];
+	/**
+	 * Per-layer FFN intermediate size. When present, dispatch code MUST
+	 * index by layer. Length === `layerCount`. Absent for uniform
+	 * architectures. Present for Gemma 4 (6144 first 15 layers, 12288
+	 * remaining 20).
+	 */
+	feedForwardLengthPerLayer?: number[];
+	/**
+	 * Per-layer RoPE dimension count. When present, dispatch code MUST
+	 * read this for RoPE; absent → use the legacy global value (or
+	 * `embeddingHeadLength` if no legacy value applies).
+	 */
+	ropeDimensionCountPerLayer?: number[];
+	/**
+	 * Per-layer RoPE base frequency. Length === `layerCount`. Absent →
+	 * use scalar `ropeFreqBase`. Present for Gemma 4 (1e6 for global,
+	 * 1e4 for SWA).
+	 */
+	ropeFreqBasePerLayer?: number[];
+	/**
+	 * Length === `layerCount`. `true` means the layer uses sliding-window
+	 * attention; `false` means global causal attention. Absent → all
+	 * layers global (the existing behavior). Present for Gemma 4.
+	 */
+	slidingWindowPattern?: boolean[];
+	/** Sliding-window size (token count). Absent unless `slidingWindowPattern` is. */
+	slidingWindowSize?: number;
+	/**
+	 * Number of trailing layers whose attn_k and attn_v reference the
+	 * KV cache of an earlier layer instead of allocating their own.
+	 * 0 (or absent) means no sharing. Gemma 4 E2B reports 20 (last 20
+	 * of 35 layers share earlier KV).
+	 */
+	sharedKvLayers?: number;
+	/**
+	 * Final logit softcap value (`tanh(logits / s) * s`). 0 → no softcap.
+	 * Read from GGUF `<arch>.final_logit_softcapping`. Present for
+	 * Gemma family models (Gemma 4 E2B reports 30.0).
+	 */
+	finalLogitSoftcap?: number;
 }
 
 /** GPU buffer mappings and tensor metadata for a loaded model's weights. */
