@@ -602,7 +602,7 @@ export class WebLLM {
 					// registering id 0 as a stop would terminate generation
 					// on any unknown-token emission.
 					addChatStopToken(genConfig, tokenizer, config, "<|im_end|>");
-				} else if (tmpl === "gemma") {
+				} else if (tmpl === "gemma" || tmpl === "gemma4") {
 					// Gemma chat models terminate every turn with
 					// `<end_of_turn>`. The GGUF's declared EOS is `<eos>`
 					// (id 1), which the model rarely emits in chat — without
@@ -1057,7 +1057,7 @@ export class WebLLM {
 					// Non-Qwen ChatML (Hermes-3, SmolLM2, etc.): stop on
 					// `<|im_end|>` (see same-named block in chatCompletion).
 					addChatStopToken(genConfig, tokenizer, config, "<|im_end|>");
-				} else if (tmpl === "gemma") {
+				} else if (tmpl === "gemma" || tmpl === "gemma4") {
 					// Gemma: stop on `<end_of_turn>` (see same-named block in
 					// chatCompletion).
 					addChatStopToken(genConfig, tokenizer, config, "<end_of_turn>");
