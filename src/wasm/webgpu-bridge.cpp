@@ -184,6 +184,22 @@ void* op_rope(void* x, void* pos, int32_t n_dims, int32_t mode, int32_t n_ctx_or
                          ext_factor, attn_factor, beta_fast, beta_slow);
 }
 
+// RoPE with per-dim freq_factors weight (Gemma 4 global layers,
+// Llama 3.1, etc.). `freqs` is a 1-D tensor of shape [n_dims/2]
+// applied as a per-dim divisor to theta inside ggml_rope_ext
+// (ggml-cpu/ops.cpp:5633: ff = freq_factors ? freq_factors[i0/2] : 1.0f).
+// Pass nullptr-equivalent (0) for `freqs` is NOT supported — callers
+// who don't have a freq_factors weight should use op_rope above.
+void* op_rope_with_freqs(void* x, void* pos, void* freqs,
+                         int32_t n_dims, int32_t mode, int32_t n_ctx_orig,
+                         float freq_base, float freq_scale, float ext_factor,
+                         float attn_factor, float beta_fast, float beta_slow) {
+    return ggml_rope_ext(current_ctx(), (struct ggml_tensor*)x, (struct ggml_tensor*)pos,
+                         (struct ggml_tensor*)freqs,
+                         n_dims, mode, n_ctx_orig, freq_base, freq_scale,
+                         ext_factor, attn_factor, beta_fast, beta_slow);
+}
+
 void* op_reshape_2d(void* x, int32_t ne0, int32_t ne1) {
     return ggml_reshape_2d(current_ctx(), (struct ggml_tensor*)x, ne0, ne1);
 }

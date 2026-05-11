@@ -60,6 +60,11 @@ interface LayerWeights {
 	// into the layer's residual after PLE injection and before the next layer.
 	// Null on all other architectures (absent from GGUF).
 	layerOutputScale: TensorPtr | null;
+	// Per-layer RoPE freq_factors weight (Gemma 4 global-attention layers,
+	// Llama 3.1, etc.) — shape [n_embd_head/2]. Applied as per-dim divisor
+	// to theta inside ggml_rope_ext. Null on Gemma 4 SWA layers, all
+	// pre-Llama-3.1 GGUFs, Qwen, Mistral, Phi (absent from GGUF).
+	ropeFreqs: TensorPtr | null;
 }
 
 interface WeightTensors {
@@ -395,12 +400,28 @@ export class ModelInference {
 			? this.makeTensor(tensorMap, "per_layer_proj_norm.weight")
 			: null;
 
+		// Shared RoPE freq_factors weight: present in Gemma 4 (one tensor
+		// TENSOR_DUPLICATED across global-attention layers per gemma4.cpp:86-88)
+		// and in Llama 3.1 (YaRN scaling table). Per-layer assignment below
+		// gates this tensor through `slidingWindowPattern` so Gemma 4 SWA
+		// layers stay null (no freq_factors during their RoPE).
+		const ropeFreqsGlobal = tensorMap.has("rope_freqs.weight")
+			? this.makeTensor(tensorMap, "rope_freqs.weight")
+			: null;
+
 		const isPhi3 = hp.architecture === "phi3";
 		const layers: LayerWeights[] = [];
 		for (let i = 0; i < hp.layerCount; i++) {
 			const p = (s: string) => `blk.${i}.${s}`;
 			const opt = (s: string) =>
 				tensorMap.has(p(s)) ? this.makeTensor(tensorMap, p(s)) : null;
+			// Per-layer ropeFreqs assignment. Gemma 4 SWA layers must not
+			// apply freq_factors (they weren't trained with it). For other
+			// architectures with rope_freqs (Llama 3.1), slidingWindowPattern
+			// is absent and every layer gets the shared tensor.
+			const isSwaLayer = hp.slidingWindowPattern?.[i] === true;
+			const layerRopeFreqs =
+				ropeFreqsGlobal && !isSwaLayer ? ropeFreqsGlobal : null;
 			if (isPhi3) {
 				// Phi-3: fused QKV + fused gate-up. The forward graph slices
 				// the fused outputs via opView3d / opView2d. Per-layer norms
@@ -432,6 +453,7 @@ export class ModelInference {
 					plePerBlockProj: null,
 					plePostNorm: null,
 					layerOutputScale: null,
+					ropeFreqs: layerRopeFreqs,
 				});
 			} else {
 				// Default split-QKV / split-gate-up path used by llama / qwen* /
@@ -462,6 +484,7 @@ export class ModelInference {
 					plePerBlockProj: opt("proj.weight"),
 					plePostNorm: opt("post_norm.weight"),
 					layerOutputScale: opt("layer_output_scale.weight"),
+					ropeFreqs: layerRopeFreqs,
 				});
 			}
 		}
@@ -989,6 +1012,55 @@ export class ModelInference {
 	}
 
 	/**
+	 * Apply RoPE with optional per-dim freq_factors weight. Gemma 4 globals
+	 * and Llama 3.1 ship a `rope_freqs.weight` tensor that ggml_rope_ext
+	 * applies as a per-dim divisor to theta (ops.cpp:5633: `ff =
+	 * freq_factors ? freq_factors[i0/2] : 1.0f`). For Gemma 4, the loader
+	 * assigns `lw.ropeFreqs` only on non-SWA layers (per
+	 * `hp.slidingWindowPattern`); all other paths pass through to the
+	 * plain `opRope`.
+	 */
+	private applyRope(
+		x: TensorPtr,
+		posTensor: TensorPtr,
+		lw: LayerWeights,
+		ropeDimCount: number,
+		ropeMode: number,
+		ropeFreqBase: number,
+	): TensorPtr {
+		const { wasm, hp } = this;
+		if (lw.ropeFreqs !== null) {
+			return wasm.opRopeWithFreqs(
+				x,
+				posTensor,
+				lw.ropeFreqs,
+				ropeDimCount,
+				ropeMode,
+				hp.contextLength,
+				ropeFreqBase,
+				hp.ropeScale,
+				0.0,
+				1.0,
+				0.0,
+				0.0,
+			);
+		}
+		return wasm.opRope(
+			x,
+			posTensor,
+			ropeDimCount,
+			ropeMode,
+			hp.contextLength,
+			ropeFreqBase,
+			hp.ropeScale,
+			0.0,
+			1.0,
+			0.0,
+			0.0,
+		);
+	}
+
+	/**
 	 * Build the per-layer FFN gate / up projections.
 	 *
 	 * - **Split** (llama / qwen* / mistral / phi): two matmuls.
@@ -1289,31 +1361,21 @@ export class ModelInference {
 				nHeads,
 			);
 
-			const qRope = wasm.opRope(
+			const qRope = this.applyRope(
 				qReady,
 				posTensor,
+				lw,
 				ropeDimCount,
 				ropeMode,
-				hp.contextLength,
 				ropeFreqBase,
-				hp.ropeScale,
-				0.0,
-				1.0,
-				0.0,
-				0.0,
 			);
-			const kRope = wasm.opRope(
+			const kRope = this.applyRope(
 				kReady,
 				posTensor,
+				lw,
 				ropeDimCount,
 				ropeMode,
-				hp.contextLength,
 				ropeFreqBase,
-				hp.ropeScale,
-				0.0,
-				1.0,
-				0.0,
-				0.0,
 			);
 
 			// Write K to cache: permute kRope(0,2,1,3) -> [headDim, nTokens, nKvHeads]
@@ -1693,31 +1755,21 @@ export class ModelInference {
 					nHeads,
 				);
 
-				const qRope = wasm.opRope(
+				const qRope = this.applyRope(
 					qReady,
 					posTensor,
+					lw,
 					ropeDimCount,
 					ropeMode,
-					hp.contextLength,
 					ropeFreqBase,
-					hp.ropeScale,
-					0.0,
-					1.0,
-					0.0,
-					0.0,
 				);
-				const kRope = wasm.opRope(
+				const kRope = this.applyRope(
 					kReady,
 					posTensor,
+					lw,
 					ropeDimCount,
 					ropeMode,
-					hp.contextLength,
 					ropeFreqBase,
-					hp.ropeScale,
-					0.0,
-					1.0,
-					0.0,
-					0.0,
 				);
 
 				// Manual attention chain — mirrors CausalLMEmbedder.
@@ -2023,31 +2075,21 @@ export class ModelInference {
 				nHeads,
 			);
 
-			const qRope = wasm.opRope(
+			const qRope = this.applyRope(
 				qReady,
 				posTensor,
+				lw,
 				ropeDimCount,
 				ropeMode,
-				hp.contextLength,
 				ropeFreqBase,
-				hp.ropeScale,
-				0.0,
-				1.0,
-				0.0,
-				0.0,
 			);
-			const kRope = wasm.opRope(
+			const kRope = this.applyRope(
 				kReady,
 				posTensor,
+				lw,
 				ropeDimCount,
 				ropeMode,
-				hp.contextLength,
 				ropeFreqBase,
-				hp.ropeScale,
-				0.0,
-				1.0,
-				0.0,
-				0.0,
 			);
 
 			const kNb1 = wasm.tensorNb(kv.k, 1);
@@ -2398,31 +2440,21 @@ export class ModelInference {
 				nHeads,
 			);
 
-			const qRope = wasm.opRope(
+			const qRope = this.applyRope(
 				qReady,
 				posTensor,
+				lw,
 				ropeDimCount,
 				ropeMode,
-				hp.contextLength,
 				ropeFreqBase,
-				hp.ropeScale,
-				0.0,
-				1.0,
-				0.0,
-				0.0,
 			);
-			const kRope = wasm.opRope(
+			const kRope = this.applyRope(
 				kReady,
 				posTensor,
+				lw,
 				ropeDimCount,
 				ropeMode,
-				hp.contextLength,
 				ropeFreqBase,
-				hp.ropeScale,
-				0.0,
-				1.0,
-				0.0,
-				0.0,
 			);
 
 			const kNb1 = wasm.tensorNb(kv.k, 1);

@@ -837,6 +837,63 @@ export class GgmlWasm {
 		);
 	}
 
+	/**
+	 * RoPE with a per-dim freq_factors weight. Gemma 4's global-attention
+	 * layers and Llama 3.1 ship a `rope_freqs.weight` tensor of shape
+	 * `[nDims/2]` applied as a per-dim divisor to theta inside
+	 * ggml_rope_ext. Callers without a freq_factors weight should use
+	 * `opRope` (which passes nullptr).
+	 */
+	opRopeWithFreqs(
+		x: TensorPtr,
+		pos: TensorPtr,
+		freqs: TensorPtr,
+		nDims: number,
+		mode: number,
+		nCtxOrig: number,
+		freqBase: number,
+		freqScale: number,
+		extFactor: number,
+		attnFactor: number,
+		betaFast: number,
+		betaSlow: number,
+	): TensorPtr {
+		if (this.is64) {
+			return Number(
+				this.m._op_rope_with_freqs(
+					BigInt(x),
+					BigInt(pos),
+					BigInt(freqs),
+					nDims,
+					mode,
+					nCtxOrig,
+					freqBase,
+					freqScale,
+					extFactor,
+					attnFactor,
+					betaFast,
+					betaSlow,
+				),
+			);
+		}
+		return (
+			this.m._op_rope_with_freqs(
+				x,
+				pos,
+				freqs,
+				nDims,
+				mode,
+				nCtxOrig,
+				freqBase,
+				freqScale,
+				extFactor,
+				attnFactor,
+				betaFast,
+				betaSlow,
+			) >>> 0
+		);
+	}
+
 	opReshape2d(x: TensorPtr, ne0: number, ne1: number): TensorPtr {
 		if (this.is64) {
 			return Number(this.m._op_reshape_2d(BigInt(x), ne0, ne1));
