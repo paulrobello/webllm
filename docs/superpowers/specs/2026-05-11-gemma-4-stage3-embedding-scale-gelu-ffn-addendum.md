@@ -296,3 +296,142 @@ entirely.
 
 **Project file impact:** single file change in `model-inference.ts`
 (makeTensor + upload loop + new helper). No wasm rebuild needed.
+
+## Post-3.3j diagnosis (surfaced 2026-05-11 EOS-2)
+
+After 3.3j landed, the BF16 cascade-corruption was eliminated and
+output transitioned from `<unused14>…` unused-token noise to real
+vocabulary tokens. But the quality remained degenerate:
+
+- Default sampling (temp=1.0, topK=64, topP=0.95): mixed-script
+  garbage (`LA_T_cowntहांत_cَour down $|cَour **over by…`).
+- Greedy (temp=0): degenerate repetitive
+  (`_cownt_cownt_cownt…_cることownt_cることownt…`).
+
+The greedy signature — locking onto a small cycle of subword tokens
+— is consistent with corrupted attention on a subset of layers
+distorting the residual stream in a specific direction.
+
+### Task 3.3k — `rope_freqs` (freq_factors) in RoPE
+
+Reference: `~/Repos/llama.cpp/src/models/gemma4.cpp:84-88`:
+
+```cpp
+if (!hparams.is_swa(i)) {
+    // full_attention layers use rope_freqs for proportional rope
+    layer.rope_freqs = create_tensor(tn(LLM_TENSOR_ROPE_FREQS, "weight", i),
+                                     {n_embd_head/2}, rope_freqs_flag);
+    rope_freqs_flag = TENSOR_DUPLICATED;
+}
+```
+
+And `gemma4.cpp:184-188`:
+
+```cpp
+ggml_tensor * freq_factors = nullptr;
+if (!hparams.is_swa(il)) {
+    // full_attention layers use rope_freqs for proportional rope
+    freq_factors = model.layers[il].rope_freqs;
+}
+```
+
+And `gemma4.cpp:202` (Q) + `gemma4.cpp:226` (K):
+
+```cpp
+Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, freq_factors, n_rot_l, rope_type,
+                     n_ctx_orig, freq_base_l, freq_scale_l,
+                     ext_factor, attn_factor, beta_fast, beta_slow);
+```
+
+Semantics from `~/Repos/llama.cpp/ggml/src/ggml-cpu/ops.cpp:5633`:
+
+```c
+const float ff = freq_factors ? freq_factors[i0/2] : 1.0f;
+```
+
+freq_factors is a per-dim divisor applied to `theta` inside
+`ggml_rope_ext`. When nullptr, ff defaults to 1.0 (no scaling).
+For YaRN-style scaling (Gemma 4 global layers, Llama 3.1), the
+weight values stretch or squeeze the per-dimension rotation
+frequencies — Gemma 4 globals are trained with `rope_base=1e6`
+(very long-context-aware), and the `rope_freqs` weight prevents
+high-frequency dimensions from wrapping prematurely at low
+positions.
+
+**The unsloth `gemma-4-e2b-it-q4km.gguf` ships `rope_freqs.weight`.**
+Confirmed via:
+
+```sh
+strings smoke-test/models/gemma-4-e2b-it-q4km.gguf | grep rope_freqs
+# rope_freqs.weight
+```
+
+**Current project bug:** `src/wasm/webgpu-bridge.cpp:179-185`
+hard-codes `nullptr` for the `ggml_rope_ext` freq_factors argument.
+So Gemma 4's 7-of-35 global-attention layers get RoPE encoding
+WITHOUT the per-dim freq correction — wrong position phases for
+the highest-frequency dimensions. This distorts attention scores
+on those layers and corrupts the residual stream.
+
+The 28-of-35 SWA layers have NO `rope_freqs` (it's absent from
+the GGUF for them, per gemma4.cpp's `if (!hparams.is_swa(i))`
+guard) and use plain RoPE — so they're already correct.
+
+This also impacts Llama 3.1 (which ships `rope_freqs` as a YaRN
+scaling table) but those project paths weren't shown to fail —
+likely because Llama 3.1's freq_factors is closer to identity for
+short contexts. Gemma 4's appears more aggressive.
+
+**Implementation:**
+
+1. **WASM binding** (`src/wasm/webgpu-bridge.cpp`): Add a new
+   `op_rope_with_freqs(x, pos, freqs, n_dims, mode, ...)` function
+   alongside the existing `op_rope`, passing `freqs` (cast to
+   `ggml_tensor*`) instead of `nullptr` to `ggml_rope_ext`. Same
+   `current_ctx()` lifecycle as `op_rope`.
+
+2. **Export list** (`src/wasm/CMakeLists.txt`): Add
+   `_op_rope_with_freqs` to `EXPORTED_FUNCTIONS`. **DO NOT add to
+   `JSPI_EXPORTS`** per CLAUDE.md — `ggml_rope_ext` is a
+   non-suspending CPU-side graph build, like the existing `_op_rope`.
+
+3. **WASM rebuild:** `make wasm-build` (canonical wasm32 build —
+   the build the smoke test uses). The mem64 target rebuild is
+   irrelevant for the Gemma 4 E2B smoke probe (3.1 GB model fits
+   in the wasm32 4 GB cap with room to spare).
+
+4. **TS wrapper** (`src/inference/ggml-wasm.ts`): Add
+   `opRopeWithFreqs(x, pos, freqs, n_dims, mode, ...)` mirroring
+   `opRope`'s `is64` dispatch pattern with one extra tensor
+   parameter.
+
+5. **LayerWeights field** (`src/core/types.ts`): Add
+   `ropeFreqs: TensorPtr | null` to the `LayerWeights` interface.
+
+6. **Loader** (`src/inference/model-inference.ts`): In each layer's
+   `layers.push({...})` block, add `ropeFreqs: opt("rope_freqs.weight")`.
+   Loads the per-layer rope_freqs weight when present (Gemma 4
+   global layers), null otherwise (Gemma 4 SWA layers + all other
+   architectures).
+
+7. **Forward sites** (`src/inference/model-inference.ts`): In each
+   of the four forward methods (`forwardSingle`, `forwardForEmbedding`,
+   `forwardAllPositions`, `forwardDecode`), replace the existing
+   Q and K `wasm.opRope(qReady/kReady, ...)` calls with a ternary:
+   `lw.ropeFreqs ? wasm.opRopeWithFreqs(..., lw.ropeFreqs, ...) :
+   wasm.opRope(...)`. Two replacements per forward method × 4
+   methods = 8 sites.
+
+**Gate:** Greedy smoke probe (`?model=gemma-4-e2b-it-q4km&temp=0`)
+should produce coherent ASCII text. If first token of `"The capital
+of France is"` continuation is "Paris" / " Paris", Stage 3 closes.
+Tinyllama non-regression must also be verified (the new op is
+gated on `lw.ropeFreqs` being non-null, so non-Gemma paths stay
+bit-identical, but verify).
+
+**Non-regression risk:** Llama 3.1 paths in the project register
+`rope_freqs.weight` per-layer too. After 3.3k, Llama 3.1 will
+START applying freq_factors during RoPE. This may change output
+slightly — though the project's prior testing without freq_factors
+was apparently "good enough." Verify with one Llama 3.1 smoke
+probe after Gemma 4 closes.
