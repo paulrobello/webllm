@@ -987,24 +987,49 @@ and §3 for the table of GGUF keys → project impact.
      path supported (JS-side conversion). Prior session's 3.3a
      closure note mis-classified this as a benign CPU fallback —
      it was a correctness-blocking bug.
-   - ⏳ **Task 3.3k (NEW — surfaced 2026-05-11 EOS):** `rope_freqs`
-     (freq_factors) support in RoPE for Gemma 4 global-attention
-     layers. Per `gemma4.cpp:86-88` + `:184-188` + `:202`, non-SWA
-     layers carry a per-layer `rope_freqs` weight tensor of shape
-     `[n_embd_head/2] = [256]` (TENSOR_DUPLICATED across global
-     layers — one tensor shared). Applied as a per-dim divisor to
-     `theta` inside `ggml_rope_ext` (`ops.cpp:5633`:
-     `ff = freq_factors ? freq_factors[i0/2] : 1.0f`). The unsloth
-     GGUF ships `rope_freqs.weight`. The project's `op_rope` binding
-     in `webgpu-bridge.cpp:179-185` hard-codes `nullptr` for
-     freq_factors, so Gemma 4 global-attention layers (7-of-35) get
-     wrong RoPE encoding. **Expected impact:** load-bearing — current
-     greedy output is degenerate repetitive (`_cownt_cownt_cownt…`),
-     consistent with corrupted attention from wrong position
-     encoding on 1-of-5 layers. **Cost:** WASM rebuild required
-     (new `op_rope_with_freqs` binding + TS wrapper + loader
-     update + 4 forward-site updates + new LayerWeights field).
-   - ⏳ Task 3.5: closure smoke probe + 36-prompt eval — pending 3.3k.
+   - ✅ Task 3.3k (commit `dec6f2d`): `rope_freqs` (freq_factors)
+     support. New `op_rope_with_freqs` WASM binding, exported (not
+     JSPI-promised — non-suspending). New `opRopeWithFreqs` TS
+     wrapper. New `LayerWeights.ropeFreqs` field + loader logic that
+     loads the shared `rope_freqs.weight` once and assigns it to
+     each non-SWA layer via `hp.slidingWindowPattern`. New private
+     `applyRope` helper that dispatches between `opRope` and
+     `opRopeWithFreqs` based on `lw.ropeFreqs`; 8 production forward
+     sites (Q + K × 4 methods) collapsed onto the helper. **Outcome:
+     correctness fix landed but not the dominant remaining blocker.**
+     Greedy output before vs after this change:
+     - Before: `--T $\precGetenv_cownt_cownt_cownt_cownt_cownt_cownt_cownt_cることownt_cることownt_cることownt_cることownt_cることownt_cることony-downed **EDECHPYEDECHPYEDECHPYED`
+     - After:  `--T $\precGetenv_cownt_cownt_cownt_cownt_cownt_cownt_cownt_cownt_cることownt_cることownt_cることownt_cることownt_cることony-COUGHTECHPYEDECHPYEDECHPYEDECHPYED`
+
+     Subtle arithmetic divergence (different ending pattern at token
+     ~50+) confirms the fix is firing, but the dominant `_cownt…`
+     degenerate repetition persists. rope_freqs was a real correctness
+     gap (matches gemma4.cpp), but a deeper architectural piece
+     remains responsible for the residual stream getting locked into
+     a low-entropy state on this short prompt.
+   - ⏳ Task 3.3l (NEW — queued 2026-05-11 EOS-3): deeper diagnostic.
+     Candidates in priority order:
+     (a) **Intermediate hidden-state comparison** vs HuggingFace
+         `transformers` Gemma 4 reference run on the same prompt
+         tokens. Tap `forwardForEmbedding` to capture per-layer
+         residual stream, save to JSON, compare. The bucket-D ref
+         capture pattern (`eval/reports/bucket-d-probe-2026-04-29/
+         capture-refs.py`) is the closest precedent. Pinpoints the
+         FIRST layer where residual diverges from canonical.
+     (b) **Chat template + tokenizer audit.** Verify the BOS token
+         is added with the right ID and the `<start_of_turn>` /
+         `<end_of_turn>` tokens encode to their correct GGUF IDs.
+         Look-bearing if BPE tokenization is off — the model would
+         see different tokens than training data.
+     (c) **Real SWA implementation** (originally Stage 4). Currently
+         falls back to all-global; for prompt+output < 512 tokens
+         this shouldn't matter much, but verify by capping output to
+         within-window range or implementing SWA.
+     (d) **Per-layer KV-cache slot size**. Gemma 4 mixed-head-dim
+         means SWA layers store smaller K/V than global. The
+         project currently sizes for worst-case (largest) per the
+         loader spec. If allocation is wrong, attention reads
+         garbage from KV cache.
 
    **Smoke-gate progression 2026-05-11 (post-3.3j):** All Stage 3 fixes
    landed (3.3a–j). The BF16 cast (3.3j) was THE correctness unblocker:
@@ -1053,59 +1078,66 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-2)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-3)
 
-**Where to start:** **Task 3.3k** (`rope_freqs` / freq_factors in RoPE
-for Gemma 4 global-attention layers). All architectural fixes 3.3a–j
-landed this session; the BF16 → F32 cast (3.3j) was THE correctness
-unblocker that lifted output from unused-token noise into real-vocab
-territory. Greedy output is now degenerate-repetitive
-(`_cownt_cownt_cownt…`), pointing at wrong RoPE on the 7-of-35 global
-layers. This is the canonical Stage 3 closure blocker.
+**Where to start:** **Task 3.3l** (deeper diagnostic). All
+architectural fixes 3.3a–k landed and verified by smoke probe. BF16
+cast (3.3j) was the major unblocker; rope_freqs (3.3k) was a real
+correctness gap but only minor arithmetic effect. Greedy output
+remains degenerate-repetitive (`_cownt_cownt_cownt_cることownt…`),
+indicating the residual stream gets stuck in a low-entropy state. The
+fastest disproving move is option (a) — intermediate hidden-state
+comparison vs HF transformers reference. Pinpoints first divergence
+layer in ~1 session.
 
 **Required reading before touching code:**
 1. `docs/superpowers/specs/2026-05-11-gemma-4-stage3-embedding-scale-gelu-ffn-addendum.md`
-   — the canonical follow-on spec covering 3.3f→3.3j; documents the
-   BF16 cascade-corruption diagnosis (with correction to the prior
-   session's mis-classification of the bf16 error as benign).
-2. `~/Repos/llama.cpp/src/models/gemma4.cpp` lines 86-88, 184-188,
-   202 for the canonical RoPE op sequence on non-SWA layers.
-3. `~/Repos/llama.cpp/ggml/src/ggml-cpu/ops.cpp:5628-5658` for the
-   freq_factors semantics: `ff = freq_factors ? freq_factors[i0/2] : 1.0f`
-   applied as a per-dim divisor to theta.
-4. `src/wasm/webgpu-bridge.cpp:179-185` for the current `op_rope`
-   binding (hard-codes `nullptr` for freq_factors).
-5. `src/inference/ggml-wasm.ts:793+` for the current `opRope` TS
-   wrapper.
+   — the canonical follow-on spec covering 3.3f→3.3k; documents the
+   BF16 cascade-corruption diagnosis and the rope_freqs investigation.
+2. `eval/reports/bucket-d-probe-2026-04-29/capture-refs.py` — the
+   established pattern for capturing HF transformers reference
+   hidden states for parity comparison. Adapt for gemma-4-e2b: load
+   `unsloth/gemma-4-E2B-it` via `transformers.AutoModelForCausalLM`,
+   tokenize the same prompt webllm uses, capture per-layer residual
+   stream via forward hooks, save JSON.
+3. `src/inference/model-inference.ts:forwardForEmbedding` — tap
+   point. Already returns the final hidden state; add a temporary
+   intermediate-tap mode that captures EVERY layer's residual.
+4. `src/inference/chat-template.ts:303` formatGemma4 — verify the
+   exact prompt string passed to tokenizer.encode matches what HF's
+   transformers tokenizer produces for the same chat messages.
+   Compare token IDs lock-step.
 
-**Task 3.3k — implementation plan:**
+**Task 3.3l — diagnostic plan (option (a) hidden-state comparison):**
 
-1. **WASM binding:** Add `op_rope_with_freqs(x, pos, freqs, n_dims, mode, ...)` in `webgpu-bridge.cpp` — same args as `op_rope` plus a `void* freq_factors` parameter passed through to `ggml_rope_ext`. Export from `EXPORTED_FUNCTIONS` in `src/wasm/CMakeLists.txt`. **Per CLAUDE.md, do NOT add to JSPI_EXPORTS** — `ggml_rope_ext` is non-suspending CPU-side graph build. Rebuild WASM: `make wasm-build` (~minutes).
-2. **TS wrapper:** Add `opRopeWithFreqs(x, pos, freqs, n_dims, mode, ...)` in `ggml-wasm.ts` mirroring `opRope`'s is64 dispatch pattern.
-3. **LayerWeights field:** Add `ropeFreqs: TensorPtr | null` to the `LayerWeights` interface in `src/core/types.ts`.
-4. **Loader:** In `ModelInference.loadWeights`, after the existing per-layer fields, add `ropeFreqs: opt("rope_freqs.weight")`. (The GGUF stores one rope_freqs tensor TENSOR_DUPLICATED across global layers per `gemma4.cpp:87`. For local SWA layers it's absent — `opt()` returns null. For global layers it points at the shared tensor.)
-5. **Forward sites:** In each of the four forward methods, change the existing `wasm.opRope(qReady, posTensor, ropeDimCount, ropeMode, ...)` and `wasm.opRope(kReady, ...)` calls to use `opRopeWithFreqs` when `lw.ropeFreqs !== null`, passing `lw.ropeFreqs` as the new parameter. Keep `opRope` for layers without rope_freqs (all other archs + SWA layers).
-6. **checkall + smoke probe.** Greedy `?temp=0&model=gemma-4-e2b-it-q4km` smoke probe should produce coherent ASCII text. If first token of `"The capital of France is"` continuation is "Paris" / " Paris", file Stage 3 closure report at `eval/reports/gemma-4-stage3-ple-dualrope-2026-05-11/SUMMARY.md` and advance to the 36-prompt eval gate (Task 3.5).
+1. Write `eval/reports/gemma-4-stage3-tap-points-2026-05-11/capture-refs.py` modeled on the bucket-D pattern. Use `hfdownloader download unsloth/gemma-4-E2B-it` first (per CLAUDE.md HF doctrine), then `uv run --no-project --with transformers ...` to load + tokenize + forward-with-hooks. Save per-layer residual stream as JSON.
+2. Add a temporary instrumentation to `model-inference.ts:forwardForEmbedding` that captures per-layer residual after each block (graph tap; readback once at end). Run smoke probe with the same prompt as the python ref.
+3. Compute cosine + L2 norm difference per layer. The FIRST layer where webllm diverges meaningfully from HF reference is the load-bearing missing piece.
+4. Fix that piece. Re-run hidden-state comparison. Stage 3 closes when end-of-stack residual matches HF reference at cosine ≥ 0.95 (looser than the embedder parity gate since 35 layers compound error).
+5. After Stage 3 closes structurally, run greedy smoke + the
+   36-prompt eval ≥40% gate (Task 3.5).
 
-**Last verified state (2026-05-11 EOS-2, after this session):**
-- Branch `main` HEAD: `2591525` (3.3j follow-up: BF16 cast streaming
-  fix). Tree clean.
+**Last verified state (2026-05-11 EOS-3, after this session):**
+- Branch `main` HEAD: `dec6f2d` (Task 3.3k: rope_freqs in RoPE).
+  Tree clean (the upcoming docs commit will land on top).
 - `make checkall`: green (762 pass / 36 skip / 0 fail).
+- WASM build current: `webllm-wasm.js` + `webllm-wasm.wasm` in
+  `smoke-test/` were rebuilt this session for the new
+  `_op_rope_with_freqs` export. wasm64 / mem64 targets NOT rebuilt
+  (the Gemma 4 E2B model fits in the wasm32 4 GB cap).
 - Patch stack on `~/Repos/llama.cpp` branch `webllm-browser-patches`:
-  9 patches (unchanged this session). 3.3k will need NO llama.cpp
-  patch — the upstream `ggml_rope_ext` already accepts `freq_factors`;
-  the project's binding just hard-codes nullptr.
-- Smoke probe `?model=gemma-4-e2b-it-q4km&ingest=off`:
-  - default (temp=1.0): output is real-vocab garbage mixing scripts
-    (`LA_T_cowntहांत_cَour …`).
-  - greedy (`&temp=0`): degenerate repetitive
-    (`_cownt_cownt_cownt…_cることownt…`).
-  - In both cases: 64 tokens generated in ~1.3s (~70 tok/s); no
-    runtime errors; bf16 device-error message GONE from tab titles
-    and console; `[8/8]` embed cosine = 0.76 (Arctic-Embed-s OK).
-- Smoke probe `?model=tinyllama-1.1b-chat-q4_0` non-regression
-  unverified this session (no time spent re-running). Should re-run
-  before claiming 3.3k closure to confirm non-Gemma paths still work.
+  9 patches (unchanged this session). 3.3k did NOT need a llama.cpp
+  patch — upstream `ggml_rope_ext` already accepts `freq_factors`.
+- Smoke probe `?model=gemma-4-e2b-it-q4km&ingest=off&temp=0` (greedy):
+  64 tokens in ~1.3s (~70 tok/s); output is degenerate-repetitive
+  (`--T $\precGetenv_cownt_cownt…_cることownt…COUGHTECHPYEDECHPY…`).
+  No runtime errors. `[8/8]` embed cosine = 0.76 (Arctic-Embed-s OK).
+- Smoke probe `?model=tinyllama-1.1b-chat-q4_0` NON-REGRESSION
+  unverified this session. **Must re-run** before any further
+  changes — the new `op_rope_with_freqs` path is gated on
+  `lw.ropeFreqs !== null`, and TinyLlama doesn't ship rope_freqs,
+  so the predicate should never fire and behavior should be
+  bit-identical. Verify.
 - agentchrome session on port 63846 active, tab id
   `094440A57C7855615A7AE1070C4FF61D` (reuse it — don't launch new
   Chrome). `make smoke-serve` running on 8031.
@@ -1113,6 +1145,9 @@ layers. This is the canonical Stage 3 closure blocker.
   still in place.
 
 **Per-task commits this session (most-recent first):**
+- `dec6f2d` Task 3.3k — rope_freqs (freq_factors) in RoPE
+- `bac18f1` docs(spec): Task 3.3k design
+- `f69f438` docs(TODO): Stage 3 progress through 3.3j handoff
 - `2591525` Task 3.3j follow-up — BF16 cast streaming-path support
 - `d6132ed` Task 3.3j — BF16 → F32 cast at weight load
 - `f4929c1` docs(spec): post-3.3h/3.3i diagnosis — BF16 mul_mat root cause
@@ -1123,31 +1158,35 @@ layers. This is the canonical Stage 3 closure blocker.
 - `63c1a6d` Task 3.3f — Gemma embedding scaling
 - `e48d751` docs(spec): Stage 3 embedding-scale + GELU FFN addendum
 
-**Workflow to resume (Task 3.3k):**
-1. Add a spec note to
-   `docs/superpowers/specs/2026-05-11-gemma-4-stage3-embedding-scale-gelu-ffn-addendum.md`
-   capturing the 3.3k rationale (rope_freqs gap + diagnosis from
-   degenerate greedy output).
-2. Implement WASM binding + rebuild WASM (`make wasm-build`).
-3. Implement TS wrapper + loader + 4 forward-site updates.
-4. `make checkall` green.
-5. Greedy smoke probe. If "Paris" → Stage 3 closure report. If not
-   → diagnose next gap (could be real SWA needed earlier than
-   planned, or another arch piece).
-6. Re-run non-regression smoke on `tinyllama-1.1b-chat-q4_0` to
-   confirm the new RoPE path doesn't break models without
-   rope_freqs.
+**Workflow to resume (Task 3.3l hidden-state diagnostic):**
+1. Re-verify tinyllama non-regression first (commit `dec6f2d` added
+   a new code path; quick browser probe to confirm bit-identical
+   behavior on a non-Gemma model).
+2. Build the HF reference capture script under
+   `eval/reports/gemma-4-stage3-tap-points-2026-05-11/`. Pattern:
+   pre-fetch via `hfdownloader download unsloth/gemma-4-E2B-it`,
+   then `uv run --no-project --with transformers ...` to forward
+   the same prompt with per-layer hooks.
+3. Add a temporary capture mode to `forwardForEmbedding` that
+   reads back per-layer residual after each block (gated on a
+   debug flag; not shipped). Run the smoke prompt through it.
+4. Compute cosine + L2 per layer. Whichever layer is the first
+   to diverge below cosine ~0.95 is the culprit; localize the
+   bug to that block's op sequence.
+5. Fix the localized bug. Strip the capture instrumentation.
+6. Re-probe greedy. Close Stage 3 if output is coherent.
+7. 36-prompt eval ≥40% gate (Task 3.5) only after greedy coherence
+   passes.
 
 **Estimated remaining work to ship Gemma 4 E2B:**
-- Task 3.3k (~1 session — includes WASM rebuild + 5-site code +
-  smoke gate) — close Stage 3 if rope_freqs is THE remaining
-  blocker, OR surface the next missing piece.
-- Task 3.5 closure report (~30 min — capture eval + tag canonical
-  baseline).
+- Task 3.3l hidden-state diagnostic (~1 session — likely surfaces
+  1 architectural gap; possibly 2 sessions if multiple compounding
+  issues).
+- Task 3.5 closure report (~30 min).
 - Stage 4 (real SWA): 2 sub-tasks; may need 1 llama.cpp patch.
 - Stage 5 (shared-KV + bench + closure): 5 sub-tasks; may need
   1 llama.cpp patch on the KV-cache allocator.
-- Total wall-clock budget: probably 2–3 more focused sessions to ship.
+- Total wall-clock budget: probably 2–4 more focused sessions to ship.
 
 ### Tier 3 migration to upstream `llama_decode` (REDIRECTED 2026-05-05)
 
