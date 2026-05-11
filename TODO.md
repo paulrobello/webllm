@@ -1217,16 +1217,25 @@ NEOX-RoPE plausibly being the dominant one.
    The NEOX fix only touches Gemma family — TinyLlama / Qwen3 /
    Mistral / Llama 3.x / Phi-3 are unaffected on paper, but a
    sweep verifies. Cheap, mostly idle wall time.
-2. **Re-probe gemma2.** The 2026-05-01 `gemma-2-2b-warm` demote
-   blamed multiple Gemma 2 quirks (post-norms, SWA, soft-capping,
-   tied embeddings). With NEOX-RoPE now correct, gemma2 may work
-   significantly better. Probe path: re-enable the
-   `gemma-2-2b-warm` profile in the `full` set, run
-   `bench-profile PROFILES=gemma-2-2b-warm`, check whether it
-   stops producing the "RSSSF suprême suprême estúdio…" pattern.
-   If accuracy clears the Phi-3 60 % baseline, un-demote and
-   commit. If still broken, the demote SUMMARY's other quirks
-   are the residual gating issues.
+2. **Re-probe gemma2.** **PROBED 2026-05-11 EOS-12 — NEOX-RoPE
+   alone is necessary but not sufficient.** Smoke probe via
+   `engine.chatCompletion` direct call with the NEOX fix in the
+   bundle: model loads cleanly (26 layers, vocab 256000),
+   decodes 64 tokens at 83.5 tok/s, **all 64 tokens are id 139
+   (whitespace), finishReason=max-tokens**. Different failure
+   mode from the pre-NEOX "RSSSF suprême suprême estúdio…"
+   gibberish — the residual stream is locked into a single
+   high-frequency token instead of producing chaotic noise.
+   Consistent with at least one of the demote SUMMARY's
+   non-RoPE items being load-bearing: **(a) logit soft-capping**
+   (Gemma 2 applies `tanh(x/cap)*cap` to attention + final
+   logits; not implemented for gemma2), **(b) tied output
+   embedding** (Gemma 2 ties lm_head to embed_tokens; our
+   loader carries them separately), **(c) alternating SWA
+   without `slidingWindowPattern` key** (Gemma 2's pattern is
+   in a different metadata schema than Gemma 4's). Un-demote
+   needs all three fixes, not just one. Filed as multi-task
+   follow-up if/when Gemma 2 becomes a registered target.
 3. **Stage 4 — real SWA windowed mask.** No longer gating Stage
    3 (eval at 68 %, gate ≥40 %). Still pre-planned for long-
    context (> 512-token generations) where SWA layers should
