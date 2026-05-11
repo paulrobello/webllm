@@ -1042,8 +1042,9 @@ export class ModelInference {
 	 * Returns the new residual. Reference: gemma4.cpp:328-353
 	 * (build_lora_mm(W,x) -> opMulMat; build_norm(x, gain, _, RMS, _) -> opMul(opRmsNorm(...), gain)).
 	 *
-	 * Caller must verify lw.pleInpGate / lw.plePerBlockProj / lw.plePostNorm
-	 * are all non-null AND inpPerLayer is non-null before calling.
+	 * Callers should verify lw.pleInpGate / lw.plePerBlockProj / lw.plePostNorm
+	 * are non-null AND inpPerLayer is non-null for performance; the helper
+	 * returns `cur` unchanged if any precondition fails (defense in depth).
 	 */
 	private injectPerBlockPle(
 		lw: LayerWeights,
@@ -1163,7 +1164,7 @@ export class ModelInference {
 		// this ordering, the cpy (write) and the view (read) have no dependency
 		// edge, so attention reads stale data (zeros).
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
-		// +8/layer over the prior 64 covers the ~6 per-block PLE injection nodes (injectPerBlockPle).
+		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
 		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
@@ -1857,7 +1858,7 @@ export class ModelInference {
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
-		// +8/layer over the prior 64 covers the ~6 per-block PLE injection nodes (injectPerBlockPle).
+		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
 		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
@@ -2206,7 +2207,7 @@ export class ModelInference {
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
-		// +8/layer over the prior 64 covers the ~6 per-block PLE injection nodes (injectPerBlockPle).
+		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
 		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
