@@ -611,8 +611,15 @@ export class WebLLM {
 					// `<end_of_turn>`. The GGUF's declared EOS is `<eos>`
 					// (id 1), which the model rarely emits in chat — without
 					// explicit `<end_of_turn>` registration the model runs
-					// to maxTokens.
-					addChatStopToken(genConfig, tokenizer, config, "<end_of_turn>");
+					// to maxTokens. Unsloth's Gemma-4 / Gemma-3N variant
+					// renames the literal to `<turn|>` (id 106); pick the
+					// literal that the active template actually uses so
+					// `addChatStopToken` resolves to a real vocab id.
+					const tpl = tokenizer.options.chatTemplate ?? "";
+					const stopText = tpl.includes("<turn|>")
+						? "<turn|>"
+						: "<end_of_turn>";
+					addChatStopToken(genConfig, tokenizer, config, stopText);
 				}
 			}
 		}
@@ -1064,9 +1071,14 @@ export class WebLLM {
 					// `<|im_end|>` (see same-named block in chatCompletion).
 					addChatStopToken(genConfig, tokenizer, config, "<|im_end|>");
 				} else if (tmpl === "gemma" || tmpl === "gemma4") {
-					// Gemma: stop on `<end_of_turn>` (see same-named block in
-					// chatCompletion).
-					addChatStopToken(genConfig, tokenizer, config, "<end_of_turn>");
+					// Gemma: stop on `<end_of_turn>` / `<turn|>` (see
+					// same-named block in chatCompletion for the unsloth
+					// Gemma-4 / Gemma-3N variant rationale).
+					const tpl = tokenizer.options.chatTemplate ?? "";
+					const stopText = tpl.includes("<turn|>")
+						? "<turn|>"
+						: "<end_of_turn>";
+					addChatStopToken(genConfig, tokenizer, config, stopText);
 				}
 			}
 

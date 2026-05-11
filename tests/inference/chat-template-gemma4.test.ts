@@ -31,6 +31,23 @@ describe("formatGemma4", () => {
 		expect(out).not.toContain("<start_of_turn>model\n");
 		expect(out.endsWith("<end_of_turn>\n")).toBe(true);
 	});
+
+	// Unsloth's Gemma-4-E2B-it-GGUF (and the broader Gemma-3N family) ships
+	// a vocab that stores the turn-boundary special tokens under
+	// `<|turn>` / `<turn|>` instead of the classical literals. The template
+	// detection still resolves to "gemma4" but the formatter must emit the
+	// matching literals or the tokenizer BPE-splits each into ~7 garbage
+	// tokens and the model produces degenerate output.
+	it("emits <|turn>...<turn|> when template uses the unsloth variant", () => {
+		const unslothTemplate =
+			"{%- macro format_parameters(...) -%}{{ '<|turn>user\\n' }}...{{ '<turn|>\\n' }}";
+		const out = formatGemma4(
+			[{ role: "user", content: "Hello." }],
+			/* addGenerationPrompt */ true,
+			unslothTemplate,
+		);
+		expect(out).toBe("<|turn>user\nHello.<turn|>\n" + "<|turn>model\n");
+	});
 });
 
 describe("detectChatTemplate — gemma4", () => {

@@ -303,14 +303,25 @@ function formatGemma(
 export function formatGemma4(
 	messages: ChatMessage[],
 	addGenerationPrompt: boolean,
+	template?: string,
 ): string {
+	// Unsloth's Gemma-4 / Gemma-3N IT GGUFs ship a vocab that stores the
+	// turn-boundary special tokens as `<|turn>` (id 105) and `<turn|>`
+	// (id 106) instead of the classical `<start_of_turn>` / `<end_of_turn>`
+	// literals. Encoding the classical literals against that vocab BPE-splits
+	// each into ~7 garbage tokens, so the model receives untrained input and
+	// emits degenerate output. Detect the variant by sniffing the actual
+	// chat-template string and emit the matching token literals.
+	const useTurnPipeVariant = template?.includes("<|turn>") ?? false;
+	const open = useTurnPipeVariant ? "<|turn>" : "<start_of_turn>";
+	const close = useTurnPipeVariant ? "<turn|>" : "<end_of_turn>";
 	let prompt = "";
 	for (const msg of messages) {
 		const role = msg.role === "assistant" ? "model" : msg.role;
-		prompt += `<start_of_turn>${role}\n${msg.content}<end_of_turn>\n`;
+		prompt += `${open}${role}\n${msg.content}${close}\n`;
 	}
 	if (addGenerationPrompt) {
-		prompt += "<start_of_turn>model\n";
+		prompt += `${open}model\n`;
 	}
 	return prompt;
 }
