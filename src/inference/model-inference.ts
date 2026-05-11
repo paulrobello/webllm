@@ -574,7 +574,13 @@ export class ModelInference {
 			? Math.max(...hp.embeddingHeadLengthPerLayer)
 			: hp.embeddingHeadLength;
 		const perLayerBytes = maxHeadDim * maxContextLength * kvElemBytes;
-		const totalBytes = hp.layerCount * 2 * perLayerBytes;
+		// Shared-KV layers (Gemma 4) don't allocate their own K/V — they share
+		// tensor handles with the source layer. Count only owning layers when
+		// sizing the ctx pool.
+		const owningLayers = hp.kvReuseFromLayer
+			? hp.kvReuseFromLayer.filter((r) => r === null).length
+			: hp.layerCount;
+		const totalBytes = owningLayers * 2 * perLayerBytes;
 		const memSize = hp.layerCount * 2 * 16384 + totalBytes + (1 << 20);
 
 		wasm.ctxCreate(memSize);
@@ -585,6 +591,22 @@ export class ModelInference {
 		const kvType = this.flashAttn ? GgmlType.F16 : GgmlType.F32;
 		this.kvLayers = [];
 		for (let i = 0; i < hp.layerCount; i++) {
+			// Shared-KV layer (Gemma 4): point at the source layer's tensors.
+			// The iSWA remap (model-loader.ts) guarantees the source layer has
+			// matching head_dim/RoPE so the views constructed at the read site
+			// are shape-compatible. No new tensors allocated — saves ~20 layers'
+			// worth of K+V on Gemma 4 E2B (~480 MiB at maxCtx=4096, F16).
+			const reuse = hp.kvReuseFromLayer?.[i] ?? null;
+			if (reuse !== null) {
+				const src = this.kvLayers[reuse];
+				if (!src) {
+					throw new Error(
+						`initKVCache: layer ${i} reuses layer ${reuse} but source not yet pushed`,
+					);
+				}
+				this.kvLayers.push({ k: src.k, v: src.v });
+				continue;
+			}
 			// Per-layer head_dim for mixed-head-dim architectures (Gemma 4).
 			// Non-uniform models (SWA vs global) allocate each layer's KV
 			// tensors at the actual head_dim for that layer.
@@ -1033,6 +1055,38 @@ export class ModelInference {
 	}
 
 	/**
+	 * Build only the Q projection (no K/V) for shared-KV layers (Gemma 4
+	 * E2B layers 15-34). Mirrors the Q-only path of `buildQKV` for split-
+	 * projection architectures. Fused-QKV (Phi-3) does not share KV so we
+	 * throw rather than slicing out the unused K/V from a single matmul.
+	 */
+	private buildQOnly(
+		lw: LayerWeights,
+		normed: TensorPtr,
+		nTokens: number,
+		headDim: number,
+		nHeads: number,
+	): TensorPtr {
+		const { wasm, hp } = this;
+		if (lw.qkvFused) {
+			throw new Error(
+				"buildQOnly: fused QKV with shared-KV layer is not supported (no current model needs this)",
+			);
+		}
+		if (!lw.qProj) {
+			throw new Error(
+				`buildQOnly: split-QKV path requires qProj for ${hp.architecture}`,
+			);
+		}
+		const qRaw = wasm.opMulMat(lw.qProj, normed);
+		const q = lw.qBias ? wasm.opAdd(qRaw, lw.qBias) : qRaw;
+		const q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
+		return lw.qNorm
+			? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
+			: q3;
+	}
+
+	/**
 	 * Apply RoPE with optional per-dim freq_factors weight. Gemma 4 globals
 	 * and Llama 3.1 ship a `rope_freqs.weight` tensor that ggml_rope_ext
 	 * applies as a per-dim divisor to theta (ops.cpp:5633: `ff =
@@ -1367,6 +1421,11 @@ export class ModelInference {
 			const ffnDim = hp.feedForwardLengthPerLayer
 				? hp.feedForwardLengthPerLayer[il]
 				: undefined;
+			// Shared-KV layer (Gemma 4 E2B layers 15-34): K/V come from an earlier
+			// layer's cache slot. Skip own K/V projection + cache write; reads use
+			// the same `kv.k`/`kv.v` handles which were aliased to the source
+			// layer's tensors at `initKVCache` time.
+			const isShared = (hp.kvReuseFromLayer?.[il] ?? null) !== null;
 
 			// LLaMA RMSNorm: (x / rms(x)) * gamma. ggml_rms_norm only does the
 			// normalize step — the per-dim gain `attn_norm.weight` must be applied
@@ -1374,13 +1433,17 @@ export class ModelInference {
 			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
 			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
 
-			const { qReady, kReady, v3 } = this.buildQKV(
-				lw,
-				normed,
-				nTokens,
-				headDim,
-				nHeads,
-			);
+			let qReady: TensorPtr;
+			let kReadyOwn: TensorPtr | null = null;
+			let v3Own: TensorPtr | null = null;
+			if (isShared) {
+				qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
+			} else {
+				const qkv = this.buildQKV(lw, normed, nTokens, headDim, nHeads);
+				qReady = qkv.qReady;
+				kReadyOwn = qkv.kReady;
+				v3Own = qkv.v3;
+			}
 
 			const qRope = this.applyRope(
 				qReady,
@@ -1390,73 +1453,78 @@ export class ModelInference {
 				ropeMode,
 				ropeFreqBase,
 			);
-			const kRope = this.applyRope(
-				kReady,
-				posTensor,
-				lw,
-				ropeDimCount,
-				ropeMode,
-				ropeFreqBase,
-			);
 
-			// Write K to cache: permute kRope(0,2,1,3) -> [headDim, nTokens, nKvHeads]
 			const kNb1 = wasm.tensorNb(kv.k, 1);
 			const kNb2 = wasm.tensorNb(kv.k, 2);
-			const kWriteView = wasm.opView3d(
-				kv.k,
-				headDim,
-				nTokens,
-				hp.headCountKv,
-				kNb1,
-				kNb2,
-				pastLen * kNb1,
-			);
-			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
-			// ggml_cpy handles non-contiguous src via strides, so the previously
-			// mandatory opCont is redundant — dropping it saves a GPU dispatch per
-			// layer per forward.
-			const kWrite = wasm.opCpy(kRopeP, kWriteView);
-			// Expand into the graph NOW so the cpy node precedes attention reads.
-			wasm.graphBuildForwardExpand(graph, kWrite);
-
-			// V cache layout depends on this.flashAttn:
-			// - FA mode:     [headDim, maxCtx, nKvHeads]  (FA-ready)
-			// - Manual mode: [maxCtx, headDim, nKvHeads]  (mul_mat compat)
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			let v3P: TensorPtr;
-			let vWriteView: TensorPtr;
-			if (this.flashAttn) {
-				// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(headDim=0, nTokens=1, nKvHeads=2): permute (0, 2, 1, 3).
-				v3P = wasm.opPermute(v3, 0, 2, 1, 3);
-				vWriteView = wasm.opView3d(
-					kv.v,
+			if (!isShared) {
+				const kRope = this.applyRope(
+					kReadyOwn as TensorPtr,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+				const v3 = v3Own as TensorPtr;
+				// Write K to cache: permute kRope(0,2,1,3) -> [headDim, nTokens, nKvHeads]
+				const kWriteView = wasm.opView3d(
+					kv.k,
 					headDim,
 					nTokens,
 					hp.headCountKv,
-					vNb1,
-					vNb2,
-					pastLen * vNb1,
+					kNb1,
+					kNb2,
+					pastLen * kNb1,
 				);
-			} else {
-				// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(nTokens=0, headDim=1, nKvHeads=2): permute (1, 2, 0, 3).
-				const vNb0 = wasm.tensorNb(kv.v, 0);
-				v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-				vWriteView = wasm.opView3d(
-					kv.v,
-					nTokens,
-					headDim,
-					hp.headCountKv,
-					vNb1,
-					vNb2,
-					pastLen * vNb0,
-				);
-			}
-			// opCpy handles strided src — opCont skipped (see K write above).
-			const vWrite = wasm.opCpy(v3P, vWriteView);
-			wasm.graphBuildForwardExpand(graph, vWrite);
+				const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
+				// ggml_cpy handles non-contiguous src via strides, so the previously
+				// mandatory opCont is redundant — dropping it saves a GPU dispatch per
+				// layer per forward.
+				const kWrite = wasm.opCpy(kRopeP, kWriteView);
+				// Expand into the graph NOW so the cpy node precedes attention reads.
+				wasm.graphBuildForwardExpand(graph, kWrite);
 
-			// Read K from cache: [headDim, totalLen, nKvHeads]
+				// V cache layout depends on this.flashAttn:
+				// - FA mode:     [headDim, maxCtx, nKvHeads]  (FA-ready)
+				// - Manual mode: [maxCtx, headDim, nKvHeads]  (mul_mat compat)
+				let v3P: TensorPtr;
+				let vWriteView: TensorPtr;
+				if (this.flashAttn) {
+					// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(headDim=0, nTokens=1, nKvHeads=2): permute (0, 2, 1, 3).
+					v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						headDim,
+						nTokens,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						pastLen * vNb1,
+					);
+				} else {
+					// src(headDim=0, nKvHeads=1, nTokens=2) -> dst(nTokens=0, headDim=1, nKvHeads=2): permute (1, 2, 0, 3).
+					const vNb0 = wasm.tensorNb(kv.v, 0);
+					v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						nTokens,
+						headDim,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						pastLen * vNb0,
+					);
+				}
+				// opCpy handles strided src — opCont skipped (see K write above).
+				const vWrite = wasm.opCpy(v3P, vWriteView);
+				wasm.graphBuildForwardExpand(graph, vWrite);
+			}
+
+			// Read K from cache: [headDim, totalLen, nKvHeads]. For shared
+			// layers, kv.k aliases the source layer's K tensor; the source's
+			// kWrite was expanded earlier in this same forward pass.
 			const fullK = wasm.opView3d(
 				kv.k,
 				headDim,
@@ -1720,6 +1788,16 @@ export class ModelInference {
 	): Promise<Float32Array> {
 		if (!this.weights) throw new Error("Weights not loaded");
 		const { hp, wasm, weights } = this;
+		// Shared-KV (Gemma 4 family) requires reusing earlier-layer K/V at
+		// shared layers. The stateless embedding path doesn't write K/V to
+		// a cache so it can't simply alias tensors — adding shared-KV here
+		// follows the `forwardWithLayerTaps` per-layer KV passing pattern,
+		// which isn't currently needed (Gemma 4 has `embedding: false`).
+		if (hp.kvReuseFromLayer?.some((r) => r !== null)) {
+			throw new Error(
+				`forwardForEmbedding: shared-KV architecture (${hp.architecture}) is not registered as an embedder. Wire forwardWithLayerTaps-style K/V passing if this changes.`,
+			);
+		}
 		const N = tokenIds.length;
 		const E = hp.embeddingLength;
 		const nHeads = hp.headCount;
@@ -2004,6 +2082,12 @@ export class ModelInference {
 			}
 
 			const layerTaps: TensorPtr[] = [];
+			// Shared-KV layers (Gemma 4 E2B layers 15-34) reuse the K/V
+			// computed by an earlier layer in the SAME forward pass (this
+			// path has no persistent cache). Save each owning layer's
+			// post-RoPE kRope and v3 so shared layers can reference them.
+			const kRopePerLayer: TensorPtr[] = new Array(hp.layerCount).fill(0);
+			const v3PerLayer: TensorPtr[] = new Array(hp.layerCount).fill(0);
 			let cur = x;
 			for (let il = 0; il < hp.layerCount; il++) {
 				const lw = weights.layers[il];
@@ -2020,6 +2104,8 @@ export class ModelInference {
 				const ffnDim = hp.feedForwardLengthPerLayer
 					? hp.feedForwardLengthPerLayer[il]
 					: undefined;
+				const kvReuse = hp.kvReuseFromLayer?.[il] ?? null;
+				const isShared = kvReuse !== null;
 
 				let normed = wasm.opMul(
 					wasm.opRmsNorm(cur, hp.normEpsilon),
@@ -2027,24 +2113,39 @@ export class ModelInference {
 				);
 				if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
 
-				const { qReady, kReady, v3 } = this.buildQKV(
-					lw,
-					normed,
-					N,
-					headDim,
-					nHeads,
-				);
+				let qReady: TensorPtr;
+				let kRope: TensorPtr;
+				let v3: TensorPtr;
+				if (isShared) {
+					qReady = this.buildQOnly(lw, normed, N, headDim, nHeads);
+					// Reuse the source layer's post-RoPE K and pre-permute V.
+					// Source layer ran earlier in this loop; tensors are still
+					// graph nodes that will be evaluated together at compute.
+					kRope = kRopePerLayer[kvReuse];
+					v3 = v3PerLayer[kvReuse];
+					if (!kRope || !v3) {
+						throw new Error(
+							`forwardWithLayerTaps: layer ${il} reuses layer ${kvReuse} but source K/V not yet materialized`,
+						);
+					}
+				} else {
+					const qkv = this.buildQKV(lw, normed, N, headDim, nHeads);
+					qReady = qkv.qReady;
+					v3 = qkv.v3;
+					kRope = this.applyRope(
+						qkv.kReady,
+						posTensor,
+						lw,
+						ropeDimCount,
+						ropeMode,
+						ropeFreqBase,
+					);
+					kRopePerLayer[il] = kRope;
+					v3PerLayer[il] = v3;
+				}
 
 				const qRope = this.applyRope(
 					qReady,
-					posTensor,
-					lw,
-					ropeDimCount,
-					ropeMode,
-					ropeFreqBase,
-				);
-				const kRope = this.applyRope(
-					kReady,
 					posTensor,
 					lw,
 					ropeDimCount,
@@ -2449,17 +2550,22 @@ export class ModelInference {
 			const ffnDim = hp.feedForwardLengthPerLayer
 				? hp.feedForwardLengthPerLayer[il]
 				: undefined;
+			const isShared = (hp.kvReuseFromLayer?.[il] ?? null) !== null;
 
 			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
 			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
 
-			const { qReady, kReady, v3 } = this.buildQKV(
-				lw,
-				normed,
-				nTokens,
-				headDim,
-				nHeads,
-			);
+			let qReady: TensorPtr;
+			let kReadyOwn: TensorPtr | null = null;
+			let v3Own: TensorPtr | null = null;
+			if (isShared) {
+				qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
+			} else {
+				const qkv = this.buildQKV(lw, normed, nTokens, headDim, nHeads);
+				qReady = qkv.qReady;
+				kReadyOwn = qkv.kReady;
+				v3Own = qkv.v3;
+			}
 
 			const qRope = this.applyRope(
 				qReady,
@@ -2469,61 +2575,64 @@ export class ModelInference {
 				ropeMode,
 				ropeFreqBase,
 			);
-			const kRope = this.applyRope(
-				kReady,
-				posTensor,
-				lw,
-				ropeDimCount,
-				ropeMode,
-				ropeFreqBase,
-			);
 
 			const kNb1 = wasm.tensorNb(kv.k, 1);
 			const kNb2 = wasm.tensorNb(kv.k, 2);
-			const kWriteView = wasm.opView3d(
-				kv.k,
-				headDim,
-				nTokens,
-				hp.headCountKv,
-				kNb1,
-				kNb2,
-				pastLen * kNb1,
-			);
-			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
-			const kWrite = wasm.opCpy(kRopeP, kWriteView);
-			wasm.graphBuildForwardExpand(graph, kWrite);
-
-			// V cache write — same dual-layout pattern as forward(); see Task 3.
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			let v3P: TensorPtr;
-			let vWriteView: TensorPtr;
-			if (this.flashAttn) {
-				v3P = wasm.opPermute(v3, 0, 2, 1, 3);
-				vWriteView = wasm.opView3d(
-					kv.v,
+			if (!isShared) {
+				const kRope = this.applyRope(
+					kReadyOwn as TensorPtr,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+				const v3 = v3Own as TensorPtr;
+				const kWriteView = wasm.opView3d(
+					kv.k,
 					headDim,
 					nTokens,
 					hp.headCountKv,
-					vNb1,
-					vNb2,
-					pastLen * vNb1,
+					kNb1,
+					kNb2,
+					pastLen * kNb1,
 				);
-			} else {
-				const vNb0 = wasm.tensorNb(kv.v, 0);
-				v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-				vWriteView = wasm.opView3d(
-					kv.v,
-					nTokens,
-					headDim,
-					hp.headCountKv,
-					vNb1,
-					vNb2,
-					pastLen * vNb0,
-				);
+				const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
+				const kWrite = wasm.opCpy(kRopeP, kWriteView);
+				wasm.graphBuildForwardExpand(graph, kWrite);
+
+				// V cache write — same dual-layout pattern as forward(); see Task 3.
+				let v3P: TensorPtr;
+				let vWriteView: TensorPtr;
+				if (this.flashAttn) {
+					v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						headDim,
+						nTokens,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						pastLen * vNb1,
+					);
+				} else {
+					const vNb0 = wasm.tensorNb(kv.v, 0);
+					v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						nTokens,
+						headDim,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						pastLen * vNb0,
+					);
+				}
+				const vWrite = wasm.opCpy(v3P, vWriteView);
+				wasm.graphBuildForwardExpand(graph, vWrite);
 			}
-			const vWrite = wasm.opCpy(v3P, vWriteView);
-			wasm.graphBuildForwardExpand(graph, vWrite);
 
 			const fullK = wasm.opView3d(
 				kv.k,
@@ -2814,17 +2923,22 @@ export class ModelInference {
 			const ffnDim = hp.feedForwardLengthPerLayer
 				? hp.feedForwardLengthPerLayer[il]
 				: undefined;
+			const isShared = (hp.kvReuseFromLayer?.[il] ?? null) !== null;
 
 			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
 			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
 
-			const { qReady, kReady, v3 } = this.buildQKV(
-				lw,
-				normed,
-				nTokens,
-				headDim,
-				nHeads,
-			);
+			let qReady: TensorPtr;
+			let kReadyOwn: TensorPtr | null = null;
+			let v3Own: TensorPtr | null = null;
+			if (isShared) {
+				qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
+			} else {
+				const qkv = this.buildQKV(lw, normed, nTokens, headDim, nHeads);
+				qReady = qkv.qReady;
+				kReadyOwn = qkv.kReady;
+				v3Own = qkv.v3;
+			}
 
 			const qRope = this.applyRope(
 				qReady,
@@ -2834,59 +2948,62 @@ export class ModelInference {
 				ropeMode,
 				ropeFreqBase,
 			);
-			const kRope = this.applyRope(
-				kReady,
-				posTensor,
-				lw,
-				ropeDimCount,
-				ropeMode,
-				ropeFreqBase,
-			);
 
 			const kNb1 = wasm.tensorNb(kv.k, 1);
 			const kNb2 = wasm.tensorNb(kv.k, 2);
-			const kWriteView = wasm.opView3d(
-				kv.k,
-				headDim,
-				nTokens,
-				hp.headCountKv,
-				kNb1,
-				kNb2,
-				pastLen * kNb1,
-			);
-			const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
-			wasm.graphBuildForwardExpand(graph, wasm.opCpy(kRopeP, kWriteView));
-
-			// V cache write — same dual-layout pattern as forward(); see Task 3.
 			const vNb1 = wasm.tensorNb(kv.v, 1);
 			const vNb2 = wasm.tensorNb(kv.v, 2);
-			let v3P: TensorPtr;
-			let vWriteView: TensorPtr;
-			if (this.flashAttn) {
-				v3P = wasm.opPermute(v3, 0, 2, 1, 3);
-				vWriteView = wasm.opView3d(
-					kv.v,
+			if (!isShared) {
+				const kRope = this.applyRope(
+					kReadyOwn as TensorPtr,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+				const v3 = v3Own as TensorPtr;
+				const kWriteView = wasm.opView3d(
+					kv.k,
 					headDim,
 					nTokens,
 					hp.headCountKv,
-					vNb1,
-					vNb2,
-					pastLen * vNb1,
+					kNb1,
+					kNb2,
+					pastLen * kNb1,
 				);
-			} else {
-				const vNb0 = wasm.tensorNb(kv.v, 0);
-				v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-				vWriteView = wasm.opView3d(
-					kv.v,
-					nTokens,
-					headDim,
-					hp.headCountKv,
-					vNb1,
-					vNb2,
-					pastLen * vNb0,
-				);
+				const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
+				wasm.graphBuildForwardExpand(graph, wasm.opCpy(kRopeP, kWriteView));
+
+				// V cache write — same dual-layout pattern as forward(); see Task 3.
+				let v3P: TensorPtr;
+				let vWriteView: TensorPtr;
+				if (this.flashAttn) {
+					v3P = wasm.opPermute(v3, 0, 2, 1, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						headDim,
+						nTokens,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						pastLen * vNb1,
+					);
+				} else {
+					const vNb0 = wasm.tensorNb(kv.v, 0);
+					v3P = wasm.opPermute(v3, 1, 2, 0, 3);
+					vWriteView = wasm.opView3d(
+						kv.v,
+						nTokens,
+						headDim,
+						hp.headCountKv,
+						vNb1,
+						vNb2,
+						pastLen * vNb0,
+					);
+				}
+				wasm.graphBuildForwardExpand(graph, wasm.opCpy(v3P, vWriteView));
 			}
-			wasm.graphBuildForwardExpand(graph, wasm.opCpy(v3P, vWriteView));
 
 			const fullK = wasm.opView3d(
 				kv.k,
@@ -3403,6 +3520,14 @@ export class ModelInference {
 		) {
 			throw new Error(
 				`debugLayerOutput is split-QKV / split-gate-up only; ${hp.architecture} uses fused projections so per-Q/K/V or per-gate/up checkpoints are not addressable. Use forwardSingle for end-to-end output instead.`,
+			);
+		}
+		// debugLayerOutput drives checkpoints into the Q/K/V split path
+		// per-layer. Shared-KV layers don't own K/V projections, so
+		// inspecting attn_k / attn_v there is meaningless. Reject loudly.
+		if (hp.kvReuseFromLayer?.[layerIdx] != null) {
+			throw new Error(
+				`debugLayerOutput: layer ${layerIdx} is a shared-KV layer (reuses layer ${hp.kvReuseFromLayer[layerIdx]}); inspect the source layer instead.`,
 			);
 		}
 		const isFfnIntermediate =

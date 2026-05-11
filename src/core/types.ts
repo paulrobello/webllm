@@ -268,6 +268,21 @@ export interface ModelHyperparams {
 	 */
 	sharedKvLayers?: number;
 	/**
+	 * Per-layer KV-cache reuse map. `kvReuseFromLayer[il]` is the source
+	 * layer whose K/V cache slot layer `il` reads from; `null` means
+	 * layer `il` owns its K/V cache. Computed at load time from
+	 * `sharedKvLayers` + `slidingWindowPattern` using the canonical iSWA
+	 * remap rule from llama-model.cpp:2007-2014:
+	 *
+	 *     n_layer_kv_from_start = layerCount - sharedKvLayers
+	 *     for il < n_layer_kv_from_start: null
+	 *     for il >= n_layer_kv_from_start:
+	 *         n_layer_kv_from_start - (isSwa(il) ? 2 : 1)
+	 *
+	 * Absent for architectures without KV sharing (most models).
+	 */
+	kvReuseFromLayer?: (number | null)[];
+	/**
 	 * Final logit softcap value (`tanh(logits / s) * s`). 0 → no softcap.
 	 * Read from GGUF `<arch>.final_logit_softcapping`. Present for
 	 * Gemma family models (Gemma 4 E2B reports 30.0).

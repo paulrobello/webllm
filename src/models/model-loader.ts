@@ -523,6 +523,24 @@ export class ModelLoader {
 			const ropeFreqBasePerLayer = swaPattern.map((isSwa) =>
 				isSwa ? freqBaseSwa : freqBaseGlobal,
 			);
+			const sharedKvLayers = getMetaNumber(
+				ctx,
+				`${metaPrefix}.attention.shared_kv_layers`,
+				0,
+			);
+			// Per-layer KV reuse map. iSWA remap rule from llama-model.cpp:2007-2014:
+			// for shared layers (il >= n_layer_kv_from_start), point at the LAST
+			// pre-share layer of matching SWA/full type. Layer 13 (last SWA) carries
+			// every shared-SWA layer's K/V; layer 14 (last full) carries every
+			// shared-full layer's K/V. For Gemma 4 E2B: 15 owning + 20 shared.
+			const nLayerKvFromStart = layerCount - sharedKvLayers;
+			const kvReuseFromLayer: (number | null)[] =
+				sharedKvLayers > 0
+					? swaPattern.map((isSwa, il) => {
+							if (il < nLayerKvFromStart) return null;
+							return nLayerKvFromStart - (isSwa ? 2 : 1);
+						})
+					: new Array(layerCount).fill(null);
 
 			return {
 				...baseHp,
@@ -536,11 +554,8 @@ export class ModelLoader {
 					`${metaPrefix}.attention.sliding_window`,
 					512, // E2B default; Gemma 4 documents 512 as the standard local window
 				),
-				sharedKvLayers: getMetaNumber(
-					ctx,
-					`${metaPrefix}.attention.shared_kv_layers`,
-					0,
-				),
+				sharedKvLayers,
+				kvReuseFromLayer: sharedKvLayers > 0 ? kvReuseFromLayer : undefined,
 				finalLogitSoftcap: getMetaNumberOptional(
 					ctx,
 					`${metaPrefix}.final_logit_softcapping`,
