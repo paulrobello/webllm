@@ -486,15 +486,13 @@ export class ModelInference {
 			const nbytes = wasm.tensorNbytes(tensor);
 			const needsBf16Cast = this.bf16OverriddenNames.has(t.name);
 			if (needsBf16Cast) {
-				// Streamed-callback BF16 cast not supported (would need to
-				// re-align chunk boundaries to even byte counts and stitch
-				// across chunks). The smoke test path is non-callback; if a
-				// future caller hits this, the in-memory path below handles it.
-				if (isCallback) {
-					throw new Error(
-						`BF16 → F32 cast for "${t.name}" requires in-memory GGUF data; streamed-callback path is not supported.`,
-					);
-				}
+				// One-shot BF16 → F32 conversion. The source `bf16Bytes` view
+				// (potentially backed by WASM heap) is read entirely during
+				// `bf16BytesToF32Bytes`, which only does JS-side ops — no WASM
+				// calls between derivation and read, so the view can't detach
+				// mid-conversion. The resulting `f32Bytes` lives on the JS
+				// heap; the subsequent `uploadToTensorChunked` scratch malloc
+				// only invalidates the now-unused BF16 view.
 				const srcNbytes = nbytes / 2;
 				const bf16Bytes = dataAt(srcOffset, srcNbytes);
 				const f32Bytes = bf16BytesToF32Bytes(bf16Bytes);
