@@ -1136,138 +1136,86 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-12)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-13)
 
-**Stage 3 CLOSED 2026-05-11 EOS-12 at 68 % (≥40 % gate cleared,
-also above the ≥60 % Phi-3 closure baseline).** The Task 3.5 probe
-chain isolated a length-dependent forward-path bug, and code
-inspection of `getRopeModeForArchitecture` localized it to a
-missing entry: Gemma family uses NEOX-style (split-halves) RoPE per
-`llama-model.cpp:2275-2310`, but the project mapped only
-`nomic-bert`, `phi3`, and `qwen*` to NEOX and let Gemma fall
-through to `RopeMode.NORMAL` (interleaved). Fix (3 lines + a
-load-bearing comment block): add `gemma`/`gemma2`/`gemma3`/`gemma4`
-to the NEOX path. The whole 9 % → 68 % jump came from changing a
-single return statement.
+**Two campaigns from the 2026-05-11 EOS-12 queue have CLOSED.**
+Gemma 4 Stage 3 (NEOX-RoPE) closed EOS-12 at 68 %. Campaign Q1
+(Gemma 2 un-demote) closed EOS-13 at 60 %, restored to
+`SMOKE_PROFILE_SETS.full`. Two campaigns remain queued: **Q2 (Stage 4
+real SWA)** and **Q3 (Stage 5 bench + closure)**.
 
-Closure report (canonical for Task 3.5):
-[`eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md)
+**Start here next session:** read [Campaign Q2 — Stage 4: real
+sliding-window attention](#campaign-q2--stage-4-real-sliding-window-attention-queued-2026-05-11-eos-12)
+below (line ~1290 after Q1 archival). The Q2 pre-flight probe
+(Stage 4.0 — verify ggml-webgpu's `opSoftMaxExt` accepts a banded
+windowed mask shape) is the first thing to run before any
+implementation. If the shader has a baked-in causal assumption,
+filing the llama.cpp patch is the gating step; otherwise per-layer
+mask construction in `model-inference.ts` is straightforward.
 
-**Phase 5 CLOSED 2026-05-11 EOS-8:** chat-template tokenization fix
-landed. Closure report:
-[`eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md).
+**Workspace state at EOS-13:** working tree clean on `main`; tip is
+`dc3304a feat(eval): un-demote gemma-2-2b-warm + Campaign Q1 closure`.
+763 tests pass / 0 fail. `make checkall` green.
 
-**Task 3.5 chain (2026-05-11 EOS-9/10/11/12) — THREE §28-negative
-probes closed, length-dependent forward-path bug isolated via the
-chat-formatted parity probe, NEOX-RoPE fix landed.**
+**Smokes verified post-Q1 closure:** TinyLlama 168.1 tok/s
+bit-identical baseline; Gemma 2 `Paris.` 75.5 tok/s, finish=stop-token,
+console clean; Gemma 4 unchanged (NEOX-fix architecture-gated).
 
-| Probe                          | Temp | Score / Cosine | Outcome |
-|--------------------------------|------|----------------|---------|
-| 36-prompt eval baseline (greedy) | 0    | 4.33 / 48 = **9 %** | gate missed |
-| Default-system suppression A/B | 0    | 9 % bit-identical | §28: eval path bypasses it |
-| Temp 0.6 sweep                 | 0.6  | 6 % identical per-task outputs | §28: failure deterministic |
-| Stop-token audit (vocab + console probe + 1-line fix probe) | 0 | 9 % | §28: model emits `<eos>` as 1st token |
-| **Parity probe A — 95-token chat (emb-001)** | n/a | final-norm cos **0.5824**, top-1 MISMATCH, top-16 overlap **0/16** | **POSITIVE — forward path is broken on this input** |
-| **Parity probe B1 — 92-token plain completion** | n/a | final-norm cos **0.3894**, top-16 overlap **7/16** | **POSITIVE — length-dependent, no special tokens needed** |
-| **Parity probe B2 — 10-token short chat** | n/a | final-norm cos 0.9055, top-16 overlap 10/16 | mild divergence; chat scaffolding adds tail noise but isn't the gating issue |
+---
 
-Closure reports:
-- [`eval/reports/gemma-4-stage3-eval-baseline-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-eval-baseline-2026-05-11/SUMMARY.md)
-- [`eval/reports/gemma-4-stage3-default-system-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-default-system-probe-2026-05-11/SUMMARY.md)
-- [`eval/reports/gemma-4-stage3-temp-sweep-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-temp-sweep-probe-2026-05-11/SUMMARY.md)
-- [`eval/reports/gemma-4-stage3-stop-token-audit-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-stop-token-audit-2026-05-11/SUMMARY.md)
-- [`eval/reports/parity-gemma-4-e2b-chat-emb001-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-chat-emb001-2026-05-11/SUMMARY.md)
-- [`eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md)
+**Gemma 4 Stage 3 CLOSED 2026-05-11 EOS-12 at 68 %** (≥40 % gate
+cleared, also above the ≥60 % Phi-3 closure baseline). Root cause:
+Gemma family was falling through to interleaved RoPE in
+`getRopeModeForArchitecture`. Single-line fix at `be63158`; added
+gemma2/gemma3 to the NEOX list pre-emptively at `c8c8447`.
 
-**Root cause and fix (in-tree):** Gemma family architectures fell
-through to interleaved RoPE in `getRopeModeForArchitecture`. The
-canonical llama.cpp puts every Gemma variant in
-`LLAMA_ROPE_TYPE_NEOX` (split-halves). The wrong pairing was
-invisible at Phase 4's 6-token completion (rotation phases too
-small to compound) but propagated catastrophically at ≥ ~20-token
-chat-formatted prompts (cosine 0.58 vs HF at 95-token emb-001
-input). Single-line fix at commit `be63158`; pre-emptively added
-`gemma2`/`gemma3` to the NEOX list too (next commit) since the
-same llama.cpp case-list covers all Gemma variants and gemma2 was
-demoted on 2026-05-01 with multiple suspected causes —
-NEOX-RoPE plausibly being the dominant one.
+Closure report:
+[`eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md).
 
-**Stage 3 eval after fix (greedy temp 0, 48 tasks):**
+**Campaign Q1 (Gemma 2 un-demote) CLOSED 2026-05-11 EOS-13 at 60 %.**
+Root cause was **plural** (six fixes, three not on the original
+demote-SUMMARY candidate list): NEOX-RoPE (pre-Q1 `c8c8447`),
+attention + final logit soft-capping with op_tanh binding
+(`f2735d5` + `5d1aba4`), JSDoc placement (`bb73d4f`), embed-scale +
+GELU FFN extension to whole gemma family + scale-first softcap order
+(`31d53a5`), un-demote + closure docs (`dc3304a`). Eval: 92 %
+reasoning, 72 % instruction-following, 61 % semantic-reasoning, 17 %
+tool-calling@capability=false.
 
-| Dimension              | Before (9 %) | After (68 %) | Δ        |
-|------------------------|--------------|--------------|----------|
-| instruction-following  | 19.4 %       | **91.7 %**   | +72 pp   |
-| reasoning              | 0 %          | **83.3 %**   | +83 pp   |
-| semantic-reasoning     | 0 %          | **79.8 %**   | +80 pp   |
-| tool-calling           | 16.7 %       | 16.7 %       | 0 (capability=false) |
-| **Overall**            | **9 %**      | **68 %**     | **+59 pp** |
+Closure report:
+[`eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md`](eval/reports/gemma-2-2b-un-demote-2026-05-11/SUMMARY.md).
 
-**Parity verification (Phase A 95-token chat re-run):**
+**Doctrine lessons banked EOS-13 (candidates for CLAUDE.md):**
 
-| Metric         | Before     | After       |
-|----------------|------------|-------------|
-| Final-norm cos | 0.5824     | **0.9951**  |
-| Block 2 cos    | 0.6520     | **0.9996**  |
-| Top-1 argmax   | MISMATCH   | **MATCH**   |
-| Top-16 overlap | 0 / 16     | **14 / 16** |
+- **Demote candidates are usually plural.** Original Gemma 2
+  demote SUMMARY listed five candidate causes with similar weight;
+  un-demote needed six fixes, three of which weren't on the
+  original list. Future demote SUMMARYs should bias toward
+  "expect plural" rather than "one of these five".
+- **Soft-cap order is non-trivial.** Naïve order
+  (`softcap → scale`) silently corrupts the attention distribution
+  because the cap acts on the wrong-magnitude input. Reference
+  order (`scale → softcap → softmax`) is recorded in
+  `ggml-cpu/ops.cpp:8232-8233` as `scale /= logit_softcap`. The
+  WebGPU host (`ggml-webgpu.cpp:1942-1944`) does the same trick.
+  Add to the chat-template / RoPE family audit list at the next
+  llama.cpp rebase.
+- **Lookup-table extension audits pay off across the family.**
+  Three of the six Q1 fixes were "extend the `gemma4`-only branch
+  to the whole Gemma family" or "add gemma2/gemma3 to the NEOX
+  list". The audit caught the lot in one cycle. The
+  `getRopeModeForArchitecture` / `attnSoftmaxScale` / chat-template
+  detector / `isGemmaFamily` / GELU-vs-SwiGLU branch tables are
+  the canonical surface to audit per major rebase.
 
-**Follow-up candidates queued (in priority order):**
-
-1. **Re-run `make bench-full`** to refresh canonical baselines.
-   The NEOX fix only touches Gemma family — TinyLlama / Qwen3 /
-   Mistral / Llama 3.x / Phi-3 are unaffected on paper, but a
-   sweep verifies. Cheap, mostly idle wall time.
-2. **Re-probe gemma2.** **PROBED 2026-05-11 EOS-12 — NEOX-RoPE
-   alone is necessary but not sufficient.** Smoke probe via
-   `engine.chatCompletion` direct call with the NEOX fix in the
-   bundle: model loads cleanly (26 layers, vocab 256000),
-   decodes 64 tokens at 83.5 tok/s, **all 64 tokens are id 139
-   (whitespace), finishReason=max-tokens**. Different failure
-   mode from the pre-NEOX "RSSSF suprême suprême estúdio…"
-   gibberish — the residual stream is locked into a single
-   high-frequency token instead of producing chaotic noise.
-   Consistent with at least one of the demote SUMMARY's
-   non-RoPE items being load-bearing: **(a) logit soft-capping**
-   (Gemma 2 applies `tanh(x/cap)*cap` to attention + final
-   logits; not implemented for gemma2), **(b) tied output
-   embedding** (Gemma 2 ties lm_head to embed_tokens; our
-   loader carries them separately), **(c) alternating SWA
-   without `slidingWindowPattern` key** (Gemma 2's pattern is
-   in a different metadata schema than Gemma 4's). Un-demote
-   needs all three fixes, not just one. Filed as multi-task
-   follow-up if/when Gemma 2 becomes a registered target.
-3. **Stage 4 — real SWA windowed mask.** No longer gating Stage
-   3 (eval at 68 %, gate ≥40 %). Still pre-planned for long-
-   context (> 512-token generations) where SWA layers should
-   restrict to the local window. Optional, defer until there's
-   a documented long-context quality drop.
-4. **Stage 5 — bench + closure for shared-KV.** Phase 4 already
-   wired the ref-share at L15–34. With NEOX correct, a fresh
-   profile-mode bench on the canonical 6-model fleet + Gemma 4
-   will produce meaningful perf data for the dashboard.
-
-**Doctrine lessons banked from the Task 3.5 chain (added to
-CLAUDE.md candidate-doctrine for the next pass):**
-
-- **Length-dependent bugs hide behind short-prompt parity.** The
-  canonical parity inputs at `eval/tools/parity-capture/inputs.json`
-  ship a 6-token completion (`"The capital of France is"`). For
-  architectures with mid-context PLE / shared-KV / SWA, add a
-  ≥ eval-length plain-completion fixture (the Phase B1 `inputs.json`
-  is the model) — the bug only manifested past ~20 tokens.
-- **Cross-architecture lookup tables ossify.** Any model-family
-  branch table (`getRopeModeForArchitecture`, `attnSoftmaxScale`,
-  chat-template detector) should be audited against the latest
-  llama.cpp `llama-model.cpp` switch statements once per major
-  rebase cycle. The NEOX case-list is at lines 2275-2310.
-
-**Next-session queue (queued 2026-05-11 EOS-12, ordered):**
-
-The Gemma 4 Stage 3 closure unlocked three queued campaigns. Run
-them in this order — each is largely independent, but Gemma 2
-un-demote shares architectural patterns with Gemma 4 Stage 4 (real
-SWA), so doing Gemma 2 first gets the soft-cap + tied-embedding
-patterns landed and reused.
+**Gemma 4 Stage 3 supporting closures** (Phase 5 chat-template fix
++ Task 3.5 probe chain) are documented in the closure SUMMARY
+linked above. The Phase 5 standalone report lives at
+[`eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md);
+the Task 3.5 probe chain artifacts (eval-baseline, default-system,
+temp-sweep, stop-token-audit, parity probes A/B1/B2) are under
+`eval/reports/gemma-4-stage3-*-2026-05-11/` and
+`eval/reports/parity-gemma-4-e2b-*-2026-05-11/`.
 
 ────────────────────────────────────────────────────────────────
 ### Campaign Q1 — Gemma 2 un-demote — **CLOSED 2026-05-11 EOS-13** ✅
