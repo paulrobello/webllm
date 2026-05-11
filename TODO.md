@@ -1119,61 +1119,71 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-8)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-9)
 
 **Phase 5 CLOSED 2026-05-11 EOS-8:** chat-template tokenization fix
-landed. `formatGemma4` + `engine.addChatStopToken` now dispatch on
-the active template's `<|turn>` literal so the unsloth GGUF gets the
-matching `<|turn>` / `<turn|>` (ids 105 / 106) and classical Gemma
-2/3 GGUFs keep `<start_of_turn>` / `<end_of_turn>`. Greedy smoke went
-from `<eos>` × N to coherent English with clean `finish=stop-token`;
-`tokensIn` 75 → 41-46. Closure report:
+landed. Closure report:
 [`eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md).
 
-**Where to start next:** **Task 3.5 — Stage 3 closure 36-prompt eval**.
-With Phase 5 done, the chat path now produces coherent output and
-the eval gate (`≥40%` per the Stage 3 spec) can be measured.
+**Task 3.5 ran 2026-05-11 EOS-9 — Stage 3 gate MISSED. Two §28
+negative-result probes closed; deeper architectural probes queued.**
 
-**Smoke-quality observation (input to Task 3.5):** greedy decode is
-conversational and prone to mid-stream repetition (e.g.
-`"Please tell me what you want to ask?"` emitted twice on
-`"What is the capital of France?"`). None of this is a tokenization
-bug — Phase 5 closed correctly. Likely contributors, to be sorted by
-the 36-prompt eval results:
+| Run | Temp | Score |
+|-----|------|-------|
+| Baseline (greedy) | 0 | **4.33 / 48 = 9 %** (3.3 / 36 ex tool-calling ≈ 9 %) |
+| Default-system suppression A/B | 0 | 4.33 / 48 = 9 % (bit-identical; unreachable on eval path) |
+| Temp 0.6 sweep | 0.6 | 2.33 / 36 = 6 % (per-task outputs identical to baseline) |
 
-- The default-system injection (`shouldInjectDefaultSystem`) is
-  active for Gemma 4 because the template lacks the
-  `enable_thinking` + `<think>` markers. The GGUF's native template
-  only emits `<|turn>system\n` when a real system role is present;
-  injecting a default may push the IT model into a "wait for further
-  user instruction" mode. **Mitigation candidate:** add a
-  template-aware exception so Gemma 4 skips default-system injection
-  (one-liner in `chat-template.ts:shouldInjectDefaultSystem` or its
-  caller; estimate the eval-delta before committing).
-- Documented greedy-degeneracy on small Gemma IT variants. The
-  bench harness uses greedy-by-default (set 2026-05-04 policy), so
-  the 36-prompt eval is the right measurement instrument.
-- Stage 4 SWA hasn't landed. Probably irrelevant for the 36-prompt
-  eval (each generation < 512 tokens), but quantify against the
-  Phi-3 closure baseline (60%) to know if SWA is the gating lever
-  between 40% and 60%.
+Closure reports:
+- [`eval/reports/gemma-4-stage3-eval-baseline-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-eval-baseline-2026-05-11/SUMMARY.md)
+- [`eval/reports/gemma-4-stage3-default-system-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-default-system-probe-2026-05-11/SUMMARY.md)
+- [`eval/reports/gemma-4-stage3-temp-sweep-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-temp-sweep-probe-2026-05-11/SUMMARY.md)
 
-**Diagnostic plan — concrete steps for Task 3.5:**
+Failure-mode signature (deterministic across temps):
+- reasoning + semantic-reasoning: 0 / 24 in every run; outputs
+  collapse to `"Please provide the question..."` / immediate `<eos>`.
+- instruction-following: 2.33 / 12 = 19.4 % in every run; only
+  short-stem prompts pass.
+- Speed-pass smoke produces coherent jokes — the chat decode loop
+  itself is healthy.
 
-1. Locate the Gemma 4 entry in `eval/models.ts` and find the
-   matching `make bench-*` target (or assemble one via
-   `bun run eval/bench.ts --model gemma-4-e2b-it-q4km --temp 0`).
-2. Ensure the dashboard is up (`make dashboard-serve`, port 8033)
-   so the run lands in the live SQLite — or run with `?ingest=off`
-   if Phase 5 is still being re-validated and we don't want to
-   pollute the canonical timeline.
-3. Run a single 3-task probe first (3 most-discriminating tasks
-   from the 36-prompt suite) before committing to the full run;
-   confirm scoring is finite and the output isn't all-degenerate.
-4. Full 36-prompt run. Gate threshold ≥40%.
-5. If ≥40%: declare Stage 3 closed, pivot to **Stage 4 — real
-   SWA windowed mask**. If <40%: open a Stage 3-quality probe
-   (default-system suppression A/B is the cheapest first lever).
+**Three open hypotheses queued for the next session (priority
+order):**
+
+1. **`forwardSingle` vs `forwardPrefill` divergence post-shared-KV
+   (cheap-ish; new instrument).** Parity Phase 4 verified
+   `forwardPrefill` cosine 0.9722 on `"The capital of France is"`,
+   but the decode loop generates one token at a time via
+   `forwardSingle`. If `n_layer_kv_from_start=15` ref-share isn't
+   wired for decode steps, the model would produce the right
+   first token (consistent with sparse `"I'm"` outputs) then
+   garbage thereafter — exactly the observed pattern.
+   **Probe:** tap `forwardSingle` activations at L0/L15/L34 over
+   a 20-token decode run, compare to HF reference.
+2. **Stop-token leak / sampler boundary audit (cheapest).** Bare
+   `<eos>` outputs on emb-001..emb-002 and empty outputs in the
+   temp-0.6 probe imply something emits a stop token on the first
+   decode step. Audit which of `<|turn>` (105), `<turn|>` (106),
+   `<eos>`, `<bos>`, `<unused...>` end up in the active stop set,
+   and whether any of those token IDs appear in the prompt
+   tokenization (which would short-circuit decode).
+3. **Real SWA (Stage 4; biggest investment).** All-global fallback
+   is approximately right for <512-token generations but may leak
+   long-context dependencies on the 5-of-30 SWA layers, distorting
+   the residual stream enough to produce refusal-style outputs.
+   This is also pre-planned Stage 4 work.
+
+The §C-v2-A doctrine cap on speculative bets: each remaining
+probe is heavier than the two §28 closures above. Recommend the
+next session opens with hypothesis (2) — pure-inspection probe,
+zero code, single smoke-tab cycle. If it fires, hypothesis (1)
+becomes mandatory; otherwise hypothesis (1)'s `forwardSingle`
+tap is the next instrument to build.
+
+**Outcome summary (above) supersedes the prior pickup plan**:
+both cheap probes closed §28 negative and the next probes are
+architectural. The pre-flight checks below remain valid for the
+next session's `forwardSingle`/stop-token instrumenting work.
 
 **Required reading before touching code (Task 3.5 entry):**
 
