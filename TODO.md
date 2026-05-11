@@ -1210,60 +1210,59 @@ After Task 3.5, Stage 3 closes structurally and attention turns to
 **Stage 4 — real SWA windowed mask** (still pending; affects
 long-context generation > 512 tokens).
 
-**Required reading before touching code (Phase 5 entry):**
+**Pre-flight checks before opening the editor:**
 
-1. `src/inference/tokenizer.ts` — the main Tokenizer class.
-   Look at how it handles added/special tokens during encode.
-2. `src/models/model-loader.ts:buildTokenizerConfig` — how
-   added-tokens / special-token metadata is read from GGUF.
-3. `src/inference/chat-template.ts:formatGemma4` (line 303) — the
-   template string. Verify it matches Google's documented format
-   exactly (compare against
-   https://ai.google.dev/gemma/docs/core/prompt-structure).
-4. `smoke-test/real-model-smoke.js:buildSmokePrompt` (line 153) and
-   `encodeChatPrompt` — how the smoke harness encodes the
-   prompt; verify the BOS path.
-5. `smoke-test/scorer-registrations.js` — confirm Gemma 4 stop
-   tokens are wired alongside chat-template registration.
+1. **Confirm chat smoke still produces coherent output.** Phase 5 may
+   have bit-rotted if anything in the chat path changed between
+   sessions. Reload the smoke tab and verify a non-`<eos>` answer +
+   `finish=stop-token` before running any bench.
 
-**Quickstart (Phase 5 dev loop):**
+   ```bash
+   # Smoke server up; reuse the existing agentchrome session/tab.
+   agentchrome --port 63846 tabs list | head -1
+   V=$(date +%s)
+   agentchrome --port 63846 navigate \
+     "http://localhost:8031/real-model.html?model=gemma-4-e2b-it-q4km&prompt=The+capital+of+France+is&temp=0&max_tokens=24&v=$V" \
+     --tab <TAB_ID_FROM_ABOVE>
+   ```
 
-```bash
-# 1. Smoke server (probably already running on 8031).
-make smoke-serve &
+   Tail `document.getElementById('log').innerText` for
+   `tokensIn=4x` (not 75) and a coherent assistant string.
 
-# 2. Browse to the chat smoke for Gemma 4 with a fresh cache-bust.
-V=$(date +%s)
-agentchrome --port 63846 navigate \
-  "http://localhost:8031/real-model.html?model=gemma-4-e2b-it-q4km&prompt=The+capital+of+France+is&temp=0&max_tokens=24&v=$V" \
-  --tab 094440A57C7855615A7AE1070C4FF61D
+2. **Re-baseline the bundle if any TS file has changed.** Phase 5
+   modified `src/inference/chat-template.ts` and
+   `src/core/engine.ts`; both need to be in the bundle the smoke
+   tab loads.
 
-# 3. After [6/8] tokenizer ready, drop into the page console and run
-#    the encode/decode probes from step 1 of the diagnostic plan.
+   ```bash
+   bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+   ```
 
-# 4. After a TS edit, rebuild bundle:
-bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+3. **Read the current state on disk** before trusting any memory of
+   what the code looks like:
 
-# 5. Reload the tab with a new ?v=$(date +%s) suffix.
-
-# 6. When the chat smoke produces coherent output, lock in by
-#    running checkall + the Gemma 4 36-prompt eval profile.
-make checkall
-```
+   - `src/inference/chat-template.ts:303-340` — confirm
+     `formatGemma4` still has the `useTurnPipeVariant` dispatch and
+     accepts the `template` parameter.
+   - `src/core/engine.ts` (two sites: search for
+     `<turn|>`) — confirm `addChatStopToken` dispatches on the same
+     template sniff. If either has reverted (e.g. via a rebase), the
+     smoke step above will surface it.
+   - `eval/models.ts` — the Gemma 4 registration drives the bench
+     run. Check `samplingMode`, `chatStopTokens`, and the bench
+     target name before invoking it.
 
 **Estimated remaining work to ship Gemma 4 E2B:**
 
-- Phase 5 (chat-template tokenization fix): ~1 session, possibly
-  small (just wiring the right special-token metadata through).
-- Task 3.5 closure (36-prompt eval ≥ 40%): ~30 min once Phase 5
-  is green.
+- Task 3.5 closure (36-prompt eval ≥ 40%): ~30 min, plus any
+  default-system suppression A/B if the first run misses gate.
 - Stage 4 (real SWA windowed mask): 2 sub-tasks; may need 1
   llama.cpp patch if ggml-webgpu's softmax mask can't express the
   windowed shape.
 - Stage 5 (bench + closure report — Stage 5's original KV
   ref-sharing was pulled forward into Phase 4; this is now just
   bench + write-up): 1-2 sub-tasks.
-- Total wall-clock budget: **1-3 more focused sessions to ship**.
+- Total wall-clock budget: **1-2 more focused sessions to ship**.
 
 **Phase 3 closure (prior EOS) preserved below** for reference:
 
