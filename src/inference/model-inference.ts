@@ -47,6 +47,10 @@ interface LayerWeights {
 	gateProj: TensorPtr | null;
 	upProj: TensorPtr | null;
 	downProj: TensorPtr;
+	// Gemma 4 per-block Per-Layer Embedding tensors. Null for every other arch.
+	pleInpGate: TensorPtr | null; // blk.L.inp_gate.weight   [n_embd, pleDim]
+	plePerBlockProj: TensorPtr | null; // blk.L.proj.weight    [pleDim, n_embd]
+	plePostNorm: TensorPtr | null; // blk.L.post_norm.weight  [n_embd]
 }
 
 interface WeightTensors {
@@ -374,6 +378,9 @@ export class ModelInference {
 					gateProj: null,
 					upProj: null,
 					downProj: this.makeTensor(tensorMap, p("ffn_down.weight")),
+					pleInpGate: null,
+					plePerBlockProj: null,
+					plePostNorm: null,
 				});
 			} else {
 				// Default split-QKV / split-gate-up path used by llama / qwen* /
@@ -398,6 +405,9 @@ export class ModelInference {
 					gateProj: this.makeTensor(tensorMap, p("ffn_gate.weight")),
 					upProj: this.makeTensor(tensorMap, p("ffn_up.weight")),
 					downProj: this.makeTensor(tensorMap, p("ffn_down.weight")),
+					pleInpGate: opt("inp_gate.weight"),
+					plePerBlockProj: opt("proj.weight"),
+					plePostNorm: opt("post_norm.weight"),
 				});
 			}
 		}
@@ -1024,6 +1034,69 @@ export class ModelInference {
 	}
 
 	/**
+	 * Per-block gated PLE injection for Gemma 4. Slices `inpPerLayer` at the
+	 * current layer's slot, gates via per-block inp_gate + GELU, multiplies by
+	 * the slice, projects back to hidden via per_layer_proj, RMSNorms with
+	 * post_norm, and adds to the residual.
+	 *
+	 * Returns the new residual. Reference: gemma4.cpp:328-353
+	 * (build_lora_mm(W,x) -> opMulMat; build_norm(x, gain, _, RMS, _) -> opMul(opRmsNorm(...), gain)).
+	 *
+	 * Caller must verify lw.pleInpGate / lw.plePerBlockProj / lw.plePostNorm
+	 * are all non-null AND inpPerLayer is non-null before calling.
+	 */
+	private injectPerBlockPle(
+		lw: LayerWeights,
+		cur: TensorPtr,
+		inpPerLayer: TensorPtr,
+		layerIdx: number,
+		nTokens: number,
+	): TensorPtr {
+		const { hp, wasm } = this;
+		// Non-null contracts checked at call site; early-return if pleDim is absent.
+		if (
+			!lw.pleInpGate ||
+			!lw.plePerBlockProj ||
+			!lw.plePostNorm ||
+			!hp.pleDim
+		) {
+			return cur;
+		}
+		const pleDim = hp.pleDim;
+
+		// Save residual for the final add.
+		const peIn = cur;
+
+		// Gating: GELU(MUL_MAT(inp_gate, cur)) -> [pleDim, n_tokens]
+		let gated = wasm.opMulMat(lw.pleInpGate, cur);
+		gated = wasm.opGelu(gated);
+
+		// Slice inpPerLayer at slot layerIdx along dim 2 -> [pleDim, n_tokens].
+		// inpPerLayer is F32, shape [pleDim, n_tokens, layerCount] after buildPreLoopPle.
+		const rowBytes = F32_BYTES * pleDim;
+		const sliceBytes = F32_BYTES * pleDim * nTokens;
+		const inpThisLayer = wasm.opView2d(
+			inpPerLayer,
+			pleDim,
+			nTokens,
+			rowBytes,
+			layerIdx * sliceBytes,
+		);
+
+		// gated * slice -> [pleDim, n_tokens]
+		let proj = wasm.opMul(gated, inpThisLayer);
+
+		// Project back to hidden via per_layer_proj -> [n_embd, n_tokens]
+		proj = wasm.opMulMat(lw.plePerBlockProj, proj);
+
+		// post_norm: RMSNorm + gain -> [n_embd, n_tokens]
+		proj = wasm.opMul(wasm.opRmsNorm(proj, hp.normEpsilon), lw.plePostNorm);
+
+		// Residual add.
+		return wasm.opAdd(peIn, proj);
+	}
+
+	/**
 	 * Single-call forward pass: one ctxCreate → graph build → graph compute →
 	 * ctxFree cycle for the given tokens. **Do not call directly** — public
 	 * callers go through `forward()`, which dispatches to either this or the
@@ -1090,7 +1163,8 @@ export class ModelInference {
 		// this ordering, the cpy (write) and the view (read) have no dependency
 		// edge, so attention reads stale data (zeros).
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
-		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
+		// +8/layer over the prior 64 covers the ~6 per-block PLE injection nodes (injectPerBlockPle).
+		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
 		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
@@ -1293,6 +1367,14 @@ export class ModelInference {
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
 			cur = wasm.opAdd(ffnOut, attnResidual);
+			if (
+				inpPerLayer !== null &&
+				lw.pleInpGate &&
+				lw.plePerBlockProj &&
+				lw.plePostNorm
+			) {
+				cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
+			}
 		}
 
 		let finalNorm = wasm.opMul(
@@ -1775,7 +1857,8 @@ export class ModelInference {
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
-		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
+		// +8/layer over the prior 64 covers the ~6 per-block PLE injection nodes (injectPerBlockPle).
+		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
 		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
@@ -1943,6 +2026,14 @@ export class ModelInference {
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 
 			cur = wasm.opAdd(ffnOut, attnResidual);
+			if (
+				inpPerLayer !== null &&
+				lw.pleInpGate &&
+				lw.plePerBlockProj &&
+				lw.plePostNorm
+			) {
+				cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
+			}
 		}
 
 		let finalNorm = wasm.opMul(
@@ -2115,7 +2206,8 @@ export class ModelInference {
 
 		const x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
-		const graph = wasm.graphNew(hp.layerCount * 64 + 160);
+		// +8/layer over the prior 64 covers the ~6 per-block PLE injection nodes (injectPerBlockPle).
+		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
 		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
@@ -2279,6 +2371,14 @@ export class ModelInference {
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
 			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
 			cur = wasm.opAdd(ffnOut, attnResidual);
+			if (
+				inpPerLayer !== null &&
+				lw.pleInpGate &&
+				lw.plePerBlockProj &&
+				lw.plePostNorm
+			) {
+				cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
+			}
 		}
 
 		let finalNorm = wasm.opMul(
