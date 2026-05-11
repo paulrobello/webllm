@@ -104,3 +104,53 @@ budget. On 32 GB recommended hardware, comfortable.
 - Confirm the injection point (pre-norm vs. post-norm per block) by inspecting
   the llama.cpp Gemma 4 compute graph or the reference HuggingFace implementation
   before Task 3.3.
+
+---
+
+## Tensor list addendum — Task 3.2 broad probe (2026-05-10)
+
+Broader re-probe (`per_layer OR embd OR norm` filter) confirmed the full
+PLE tensor set. Three tensors, not two, are required:
+
+| Tensor name | Shape | Dtype | Role |
+|---|---|---|---|
+| `per_layer_token_embd.weight` | [8960, 262144] | Q5_K | Lookup table; row-index by token ID, column slices by layer |
+| `per_layer_model_proj.weight` | [1536, 8960] | BF16 | Linear projection: [pleDim × layerCount, n_tokens] → [hiddenDim, n_tokens] |
+| `per_layer_proj_norm.weight`  | [256]         | F32  | RMSNorm scale applied to the projection output before ADD |
+
+All three are present in `gemma-4-e2b-it-q4km.gguf`. No `per_layer_token_embd_norm.weight`
+or `per_layer_token_embd.norm.weight` variant exists — the norm key is
+`per_layer_proj_norm.weight` (confirmed by llama.cpp `src/llama-arch.cpp:428`
+mapping `LLM_TENSOR_PER_LAYER_PROJ_NORM → "per_layer_proj_norm"`).
+
+### Op sequence (confirmed from `~/Repos/llama.cpp/src/models/gemma3n.cpp`)
+
+**`build_inp_per_layer()`** — runs once before the layer loop:
+1. `GET_ROWS(per_layer_token_embd.weight, token_ids)` → `[pleDim×layerCount, n_tokens]`
+   scaled by `sqrt(pleDim)` (= sqrt(256) = 16)
+
+**`project_per_layer_inputs(inp_batch, inp_per_layer)`** — also pre-loop:
+2. `MUL_MAT(per_layer_model_proj.weight, inp_batch)` → `[pleDim×layerCount, n_tokens]`
+   scaled by `1/sqrt(hiddenDim)` (= 1/sqrt(1536))
+3. `RMS_NORM(per_layer_proj_norm.weight)` applied to step-2 result
+4. `ADD(step-3, step-1)` → scaled by `1/sqrt(2)` → `inp_per_layer [pleDim, n_tokens, layerCount]`
+   (permuted to `[pleDim, n_tokens, layerCount]` for fast per-layer slicing)
+
+**Per-block** (inside the layer loop, layer `L`):
+5. `SLICE(inp_per_layer, L)` → `[pleDim, n_tokens]`  ← the PLE residual for this block
+6. `MUL_MAT(blk.L.per_layer_inp_gate.weight, active_prediction)` + GELU
+7. `MUL(step-6, step-5)` → gated PLE contribution `[pleDim, n_tokens]`
+8. `MUL_MAT(blk.L.per_layer_proj.weight, step-7)` → `[hiddenDim, n_tokens]`
+9. `RMS_NORM(blk.L.per_layer_post_norm.weight)`
+10. ADD into `corrected[1:]` (all AltUp streams except the active one)
+
+**Injection point:** PLE does NOT sit between `attn_norm` and the attention op.
+It is applied **after the AltUp correct step** (`altup_correct(predictions, attn_ffw_laurel_gated)`),
+modifying the non-active AltUp streams. It is therefore a correction residual,
+not a main-stream residual addition.
+
+Note: `blk.L.per_layer_inp_gate.weight` and `blk.L.per_layer_proj.weight` are
+**per-block** weights (not global PLE tensors). Task 3.3 must also load these
+from the GGUF tensor list (`blk.%d.inp_gate`, `blk.%d.proj` via
+`LLM_TENSOR_PER_LAYER_INP_GATE` / `LLM_TENSOR_PER_LAYER_PROJ` in llama-arch.cpp).
+They are not part of the Task 3.2 surface (global PLE tensors only).
