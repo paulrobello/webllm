@@ -47,6 +47,11 @@ interface LayerWeights {
 	gateProj: TensorPtr | null;
 	upProj: TensorPtr | null;
 	downProj: TensorPtr;
+	// Gemma family post-norm pattern: extra RMSNorm applied to attention
+	// output AND FFN output, BEFORE the residual add. Null for every other
+	// architecture (Llama/Qwen/Mistral/Phi family does pre-norm only).
+	postAttentionNorm: TensorPtr | null;
+	postFfwNorm: TensorPtr | null;
 	// Gemma 4 per-block Per-Layer Embedding tensors. Null for every other arch.
 	pleInpGate: TensorPtr | null; // blk.L.inp_gate.weight   [n_embd, pleDim]
 	plePerBlockProj: TensorPtr | null; // blk.L.proj.weight    [pleDim, n_embd]
@@ -378,6 +383,8 @@ export class ModelInference {
 					gateProj: null,
 					upProj: null,
 					downProj: this.makeTensor(tensorMap, p("ffn_down.weight")),
+					postAttentionNorm: null,
+					postFfwNorm: null,
 					pleInpGate: null,
 					plePerBlockProj: null,
 					plePostNorm: null,
@@ -405,6 +412,8 @@ export class ModelInference {
 					gateProj: this.makeTensor(tensorMap, p("ffn_gate.weight")),
 					upProj: this.makeTensor(tensorMap, p("ffn_up.weight")),
 					downProj: this.makeTensor(tensorMap, p("ffn_down.weight")),
+					postAttentionNorm: opt("post_attention_norm.weight"),
+					postFfwNorm: opt("post_ffw_norm.weight"),
 					pleInpGate: opt("inp_gate.weight"),
 					plePerBlockProj: opt("proj.weight"),
 					plePostNorm: opt("post_norm.weight"),
@@ -1354,7 +1363,15 @@ export class ModelInference {
 				);
 			}
 
-			const oProj = wasm.opMulMat(lw.oProj, merged);
+			const oProjRaw = wasm.opMulMat(lw.oProj, merged);
+			// Gemma family post-attention norm: applied to attention output BEFORE the
+			// residual add. Other archs leave postAttentionNorm null and skip.
+			const oProj = lw.postAttentionNorm
+				? wasm.opMul(
+						wasm.opRmsNorm(oProjRaw, hp.normEpsilon),
+						lw.postAttentionNorm,
+					)
+				: oProjRaw;
 			const attnResidual = wasm.opAdd(oProj, cur);
 
 			let ffnNormed = wasm.opMul(
@@ -1365,7 +1382,11 @@ export class ModelInference {
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
 			// Fused silu(gate) * up — single GPU op instead of silu+mul.
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
-			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
+			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
+			const ffnOut = lw.postFfwNorm
+				? wasm.opMul(wasm.opRmsNorm(ffnOutRaw, hp.normEpsilon), lw.postFfwNorm)
+				: ffnOutRaw;
 
 			cur = wasm.opAdd(ffnOut, attnResidual);
 			if (
@@ -2014,7 +2035,15 @@ export class ModelInference {
 				);
 			}
 
-			const oProj = wasm.opMulMat(lw.oProj, merged);
+			const oProjRaw = wasm.opMulMat(lw.oProj, merged);
+			// Gemma family post-attention norm: applied to attention output BEFORE the
+			// residual add. Other archs leave postAttentionNorm null and skip.
+			const oProj = lw.postAttentionNorm
+				? wasm.opMul(
+						wasm.opRmsNorm(oProjRaw, hp.normEpsilon),
+						lw.postAttentionNorm,
+					)
+				: oProjRaw;
 			const attnResidual = wasm.opAdd(oProj, cur);
 
 			let ffnNormed = wasm.opMul(
@@ -2024,7 +2053,11 @@ export class ModelInference {
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
-			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
+			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
+			const ffnOut = lw.postFfwNorm
+				? wasm.opMul(wasm.opRmsNorm(ffnOutRaw, hp.normEpsilon), lw.postFfwNorm)
+				: ffnOutRaw;
 
 			cur = wasm.opAdd(ffnOut, attnResidual);
 			if (
@@ -2360,7 +2393,15 @@ export class ModelInference {
 					nTokens,
 				);
 			}
-			const oProj = wasm.opMulMat(lw.oProj, merged);
+			const oProjRaw = wasm.opMulMat(lw.oProj, merged);
+			// Gemma family post-attention norm: applied to attention output BEFORE the
+			// residual add. Other archs leave postAttentionNorm null and skip.
+			const oProj = lw.postAttentionNorm
+				? wasm.opMul(
+						wasm.opRmsNorm(oProjRaw, hp.normEpsilon),
+						lw.postAttentionNorm,
+					)
+				: oProjRaw;
 			const attnResidual = wasm.opAdd(oProj, cur);
 
 			let ffnNormed = wasm.opMul(
@@ -2370,7 +2411,11 @@ export class ModelInference {
 			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
 			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
 			const ffnHidden = wasm.opSwigluSplit(gate, up);
-			const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
+			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
+			const ffnOut = lw.postFfwNorm
+				? wasm.opMul(wasm.opRmsNorm(ffnOutRaw, hp.normEpsilon), lw.postFfwNorm)
+				: ffnOutRaw;
 			cur = wasm.opAdd(ffnOut, attnResidual);
 			if (
 				inpPerLayer !== null &&
