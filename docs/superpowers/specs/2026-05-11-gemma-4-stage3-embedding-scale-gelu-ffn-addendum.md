@@ -211,3 +211,88 @@ from `webgpu-bridge.cpp` and added to `EXPORTED_FUNCTIONS` in
   on 3.3h + 3.3i landing. If output is now coherent (any ASCII-readable
   English), 3.5 may also gate on a later post-lm-head softcap fix; for
   now, greedy gate on first token = "Paris" / " Paris".
+
+## Post-3.3h/3.3i diagnosis (surfaced 2026-05-11)
+
+After 3.3h + 3.3i landed (commits `a321df6` + `ac8bbe1`), the Gemma 4
+smoke probe still produced **bit-identical** output:
+`<unused14><unused11><unused29><unused13>…<eos>…`. The arithmetic
+should have diverged at multiple layers (V bare-RMS-norm in every
+attention; FA softcap = 0 in prefill); the bit-identical output is a
+strong signal that none of the prior fixes were load-bearing for the
+observed failure mode.
+
+Browser console inspection revealed a cascading WGSL shader compile
+failure:
+
+```
+ggml_webgpu: Device error! Reason: 2, Message: Error while parsing WGSL:
+  :77:60 error: unresolved type 'bf16'
+  @group(0) @binding(0) var<storage, read_write> src0: array<bf16>; // M rows, K columns
+ggml_webgpu: Device error! Reason: 2, Message:
+  [Invalid ShaderModule (unlabeled)] is invalid due to a previous error.
+  - While calling [Device].CreateComputePipeline([ComputePipelineDescriptor ""mul_mat_f32_bf16""]).
+... (cascades through BindGroup → CommandBuffer → Queue.Submit invalidation)
+```
+
+The `mul_mat_f32_bf16` shader is the F32 × BF16 matmul that fires when
+the project's `per_layer_model_proj` BF16 weight tensor (from unsloth
+Q4_K_M GGUF) participates in PLE pre-loop projection. WebGPU does NOT
+support BF16; the shader fails to compile, and the WHOLE command buffer
+gets invalidated. Execution "continues" but with garbage tensor output
+written by the failed kernel — and that garbage flows directly into
+the PLE residual injection at every block, polluting the residual
+stream catastrophically.
+
+**Important correction to prior session's TODO:** the closure note for
+3.3a stated that the bf16 error was a "one-shot" CPU fallback via ggml's
+`supports_op` scheduler. That claim is wrong. The console shows N
+identical failure cascades (one per layer / per token), not a one-shot
+fallback. CPU fallback never engages; the affected MUL_MAT silently
+produces garbage. This is a correctness-blocking bug, not the
+orthogonal-performance concern the prior session classified it as.
+
+### Task 3.3j — BF16 → F32 cast at weight load
+
+The canonical fix (option A from the existing TODO note) is to cast
+the `per_layer_model_proj` weight from BF16 to F32 at load time, so the
+matmul that fires is `mul_mat_f32_f32` (well-supported by the WebGPU
+backend) instead of `mul_mat_f32_bf16`.
+
+**Mechanism:**
+
+1. Generalize the cast to any BF16-typed tensor (not just
+   `per_layer_model_proj`). The single tensor in the current Gemma 4
+   E2B model is the only one we know of, but the pattern is reusable.
+2. In `ModelInference.makeTensor` (around line 3290): when
+   `info.type === GgmlType.BF16`, override the allocated tensor's
+   type to `GgmlType.F32` and track the tensor name in a private
+   `bf16OverriddenNames: Set<string>` field.
+3. In the upload loop (around line 443): for tensors in the set, the
+   GPU-side tensor is F32 (4 bytes/elem) but the GGUF source is BF16
+   (2 bytes/elem). Read `nbytes / 2` BF16 bytes from source, convert
+   to F32 (trivial: `f32_bits = bf16_u16 << 16`), upload the doubled
+   `nbytes` F32 bytes.
+4. For the streamed-callback path (`isCallback === true`), throw —
+   the smoke test uses the in-memory non-callback path, and the
+   complexity of mid-chunk BF16 alignment isn't worth solving until
+   a future caller actually hits it. Document the limitation.
+
+**Memory cost:** `per_layer_model_proj` is
+`[n_embd, pleDim*layerCount] = [1536, 256*35] = [1536, 8960]`. BF16
+size = 27.5 MB; F32 size = 55 MB. The +27.5 MB is well within the
+16 GB hardware floor + Three.js coexistence envelope.
+
+**Conversion correctness:** BF16's bit layout is the high 16 bits of
+the equivalent F32 value (sign + exponent layout identical, mantissa
+truncated). Therefore BF16 → F32 conversion is `f32_u32 = bf16_u16 << 16`
+with the low 16 mantissa bits zeroed. Lossless in the BF16 → F32
+direction.
+
+**Gate:** smoke probe after this lands should produce ASCII text in
+the chat response (even if not yet semantically correct). The cascade
+of `mul_mat_f32_bf16` errors in the browser console should disappear
+entirely.
+
+**Project file impact:** single file change in `model-inference.ts`
+(makeTensor + upload loop + new helper). No wasm rebuild needed.
