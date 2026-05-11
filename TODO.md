@@ -1261,17 +1261,255 @@ CLAUDE.md candidate-doctrine for the next pass):**
   llama.cpp `llama-model.cpp` switch statements once per major
   rebase cycle. The NEOX case-list is at lines 2275-2310.
 
-**Remaining work to ship Gemma 4 E2B (all optional now that the
-≥40 % gate is cleared):**
+**Next-session queue (queued 2026-05-11 EOS-12, ordered):**
 
-- Stage 4 (real SWA windowed mask): pre-planned for long-context
-  (> 512-token generations). Not gating Stage 3. 2 sub-tasks;
-  may need 1 llama.cpp patch if ggml-webgpu's softmax mask can't
-  express the windowed shape.
-- Stage 5 (bench + closure report — Stage 5's original KV
-  ref-sharing was pulled forward into Phase 4; this is now just
-  bench + write-up): 1-2 sub-tasks. Optional polish; perf data
-  will refresh on the next `make bench-full` sweep.
+The Gemma 4 Stage 3 closure unlocked three queued campaigns. Run
+them in this order — each is largely independent, but Gemma 2
+un-demote shares architectural patterns with Gemma 4 Stage 4 (real
+SWA), so doing Gemma 2 first gets the soft-cap + tied-embedding
+patterns landed and reused.
+
+────────────────────────────────────────────────────────────────
+### Campaign Q1 — Gemma 2 un-demote (queued 2026-05-11 EOS-12)
+
+**Goal:** un-demote `gemma-2-2b-it-q4f16` from the wave-2 demote
+list back into the canonical fleet. Current state: smoke produces
+64 tokens of id 139 (whitespace) at temp 0 with the NEOX-RoPE
+fix in. Different failure signature from the pre-NEOX `RSSSF
+suprême` gibberish — the residual stream is now locked into a
+single token instead of producing chaotic noise. Three concrete
+architectural pieces are missing (verified against
+`~/Repos/llama.cpp/src/models/gemma2.cpp` lines 9-176 and the GGUF
+metadata dump).
+
+**Pre-work — verified 2026-05-11 EOS-12:**
+- Architecture string: `gemma2` (already in the
+  `ModelArchitecture` union).
+- NEOX-RoPE: landed at `c8c8447` (covers gemma/gemma2/gemma3/gemma4).
+- post-attention-norm / post-ffw-norm: already loaded via `opt()`
+  in `model-inference.ts:528-529` and applied in `forwardSingle`
+  / `forwardWithLayerTaps` via `lw.postAttentionNorm` /
+  `lw.postFfwNorm` ternaries (Task 3.3d wired this generically;
+  Gemma 2 GGUFs ship the same `post_attention_norm.weight` /
+  `post_ffw_norm.weight` tensor names per llama.cpp's loader).
+- `attnSoftmaxScale("gemma2", headDim)` returns `1/sqrt(headDim)`
+  (default branch — matches Gemma 2's `f_attention_scale =
+  1/sqrt(n_embd_head_k)` for 2B per `gemma2.cpp:27-29`; for 27B
+  it differs but 27B is out of scope under the 8B ceiling).
+
+**Gemma 2 2B GGUF parameters** (from
+`smoke-test/models/gemma-2-2b-q4f16.gguf` metadata dump):
+
+```
+gemma2.attention.sliding_window      = 4096
+gemma2.attention.sliding_window_pattern = (not in GGUF; period=2 default)
+gemma2.attn_logit_softcapping        = 50.0
+gemma2.final_logit_softcapping       = 30.0
+gemma2.attention.head_count          = 8
+gemma2.attention.head_count_kv       = 4    (GQA, 2× group)
+gemma2.attention.key_length          = 256
+gemma2.embedding_length              = 2304
+gemma2.block_count                   = 26
+```
+
+Tensors present: `token_embd.weight`, per-block `attn_*`, `ffn_*`,
+`attn_post_norm`, `ffn_post_norm`. **NO `output.weight`** — Gemma
+2 ties `lm_head` to `token_embd` (per `gemma2.cpp:35,39` —
+`TENSOR_DUPLICATED` flag).
+
+**Stage Q1.1 — Tied output embedding.** Make the model loader
+fall back to `token_embd.weight` when `output.weight` is absent
+and the architecture is in the tied-embedding set (`gemma`,
+`gemma2`, `gemma3`, plus other small models known to tie: smollm,
+some qwen variants — audit separately). Today: the loader likely
+throws or silently fills with zeros, which would explain the
+whitespace lock. **Gate:** smoke loads without an "output.weight
+not found" error; greedy decode on `"The capital of France is"`
+emits a non-whitespace continuation (need not be coherent yet —
+the soft-caps below are still missing).
+
+**Stage Q1.2 — Attention logit soft-capping** (`attn_soft_cap`
+flag). Add a per-architecture `attnLogitSoftcap?: number` to
+`ModelHyperparams`, populated from `gemma2.attn_logit_softcapping`
+(50.0). In the attention math, wrap the pre-softmax logits with
+`tanh(qk / cap) * cap` per `llama-graph.cpp:2019-2026`. Two paths
+to touch: the manual softmax path (`opMulMat`/`opSoftMaxExt`) and
+the FlashAttention path (probably needs an FA disable for any
+arch with soft-cap, since FA fuses softmax without supporting a
+tanh wrap — check `ggml_flash_attn_ext` signature in the rebased
+llama.cpp). **Gate:** parity probe on a 95-token plain completion
+prompt — block-by-block cosine ≥ 0.95 vs HF reference at float32.
+**Artifact:**
+`eval/reports/gemma-2-2b-attn-softcap-<date>/SUMMARY.md`.
+
+**Stage Q1.3 — Final-logit soft-capping** (`f_final_logit_softcapping`,
+30.0 for Gemma 2 2B). Wrap the lm_head output with
+`tanh(logits / cap) * cap` per `gemma2.cpp:169-171`. Single-site
+change in `forwardSingle` after the output projection. Already
+present as a field on `ModelHyperparams.finalLogitSoftcap` but
+currently only respected for Gemma 4 (and incorrectly so — see
+Task 3.3i closure notes). **Gate:** top-1 argmax matches HF on
+the parity prompt; sampler doesn't degenerate (sample 10 greedy
+decodes on the smoke prompt and confirm non-trivial variety in
+the continuation distribution).
+
+**Stage Q1.4 — Eval verification.** Re-enable `gemma-2-2b-warm`
+in the `full` smoke profile set. Run
+`bun run eval/bench.ts --profiles gemma-2-2b-warm` at greedy
+temp 0. **Gate:** 36-prompt eval ≥ 60 % (Phi-3 closure baseline).
+If accuracy clears, un-demote (remove the demote comment block in
+`smoke-profiles.ts`, restore the entry in the `full` set). If
+still below 60 %, run a chat-formatted parity probe (Phase A
+template) to localize the residual issue.
+
+**Stage Q1.5 — Documentation.** Closure report at
+`eval/reports/gemma-2-2b-un-demote-<date>/SUMMARY.md` with
+before/after eval matrix and per-stage parity deltas. Update the
+demote SUMMARY at
+`eval/reports/gemma2-demote-2026-05-01/SUMMARY.md` with a
+"SUPERSEDED" notice pointing at the un-demote.
+
+**Out of scope (this campaign):** Gemma 2 9B and 27B SKUs (the 27B
+needs a different `f_attention_scale` formula and is above the
+8B ceiling regardless); Gemma 2 actually using SWA at lengths >
+4096 (window is wider than `bench-full`'s longest output, so
+all-global fallback is fine for the eval gate). SWA at scale is
+the Stage 4 work below; if Q1.4 misses on long-prompt tasks
+specifically, defer to Stage 4 rather than stretching this
+campaign.
+
+**Risks:**
+- FA + soft-cap incompatibility (Q1.2). Mitigation: gate FA off
+  whenever `hp.attnLogitSoftcap` is non-zero; verify in smoke
+  with `FA: OFF` toggle. If FA is the dominant Gemma 2 throughput
+  lever, a follow-up campaign can teach FA the soft-cap path.
+- Tied-embedding regression risk on other archs (Q1.1). Mitigation:
+  flip the fallback only when `output.weight` is genuinely absent
+  AND the architecture is in an explicit tied-embedding set;
+  models like Mistral that ship `output.weight` keep their
+  existing behavior.
+
+────────────────────────────────────────────────────────────────
+### Campaign Q2 — Stage 4: real sliding-window attention (queued 2026-05-11 EOS-12)
+
+**Goal:** replace the all-global causal-mask fallback with a real
+per-layer SWA windowed mask on Gemma 4 SWA layers (and any other
+SWA-using model that registers — Gemma 2, Gemma 3, potentially
+some Qwen3 variants).
+
+**Current state:** Gemma 4 SWA layers use full causal attention.
+At prompt+output lengths ≤ 512 tokens (the SWA window), this
+produces correct math because the window is wider than the
+sequence. At longer prompts the SWA layers see all positions
+instead of the local 512 window, which over-mixes information
+and degrades long-context coherence. The 36-prompt eval doesn't
+exercise this (each task < 200 tokens), so Stage 4 was not gating
+Stage 3 closure.
+
+**Pre-flight probe (Stage 4.0 — windowed-mask feasibility).**
+Before implementation, verify that `ggml-webgpu`'s `opSoftMaxExt`
+mask tensor can express a banded windowed mask. The current mask
+shape is `[totalLen, nTokens]` of f32 with `-inf` at masked
+positions; for SWA the mask should be `-inf` for positions
+`< i - 512` AND `> i` (current). If the shader accepts arbitrary
+mask shapes, no patch is needed — just build the mask differently
+per-layer. If the shader has a baked-in causal assumption, file
+a llama.cpp patch (1-2 SLOC). **Gate:** synthetic test — build a
+windowed mask in Bun, run `opSoftMaxExt` once, verify the output
+matches a CPU reference. **Artifact:** inline note in the Stage
+4.1 PR or a one-page probe report.
+
+**Stage 4.1 — Per-layer mask construction.** In
+`model-inference.ts`, switch the single shared `maskTensor` to a
+**pair of mask tensors** — `globalMask` (full causal) and
+`swaMask` (windowed causal). At graph build time, allocate both;
+at each layer iteration pick the right mask based on
+`hp.slidingWindowPattern[il]`. The SWA mask: `mask[i,j] = 0` if
+`j ≤ i AND j > i - swaWindow` else `-inf`. **Gate:** parity probe
+on a 1000-token Gemma 4 prompt — SWA layers cosine ≥ 0.95 vs HF
+at every position; full layers unaffected. **Artifact:**
+`eval/reports/gemma-4-stage4-swa-mask-<date>/SUMMARY.md`.
+
+**Stage 4.2 — Gemma 2 alternating-period SWA support.** Gemma 2's
+GGUF schema doesn't carry a per-layer SWA boolean array; it ships
+`swa_period = 2` (or omits it and defaults to 2) per
+`gemma2.cpp:6-8`. At load time, derive a per-layer SWA pattern
+from the integer period: `slidingWindowPattern[i] = (i % period
+!= 0)` (every period-th layer is global, others are local).
+**Gate:** load `gemma-2-2b-q4f16`, dump `hp.slidingWindowPattern`,
+confirm it matches the period-2 alternation. This work overlaps
+with Q1.4 — if Q1 ships first, this stage may already be done.
+
+**Stage 4.3 — Long-context regression probe.** Generate 1000-token
+output on a fixed long prompt with Gemma 4 E2B; measure perplexity
+or argmax-divergence vs a reference (HF or a known-good llama.cpp
+build). **Gate:** no quality cliff at the 512-token boundary;
+generation stays coherent. **Artifact:**
+`eval/reports/gemma-4-stage4-longcontext-<date>/SUMMARY.md`.
+
+**Stage 4.4 — Eval re-gate.** Re-run `bench-profile
+PROFILES=gemma-4-e2b-warm`. **Gate:** 36-prompt eval at ≥ 68 %
+(Stage 3 closure baseline — must not regress). Long-context Q&A
+pulled from existing eval suites should improve.
+
+**Out of scope:** SWA-with-FlashAttention (FA's mask path may not
+support windowed masks; if so, gate FA off when the mask is
+windowed, follow-up campaign for FA + windowed-mask).
+
+**Risks:**
+- `ggml-webgpu` mask shader may not accept arbitrary masks (Stage
+  4.0 verifies). If patched, +1 to the local patch stack.
+- Building two mask tensors instead of one ~doubles per-layer
+  mask-allocation cost. Probably negligible (tiny tensors) but
+  worth a smoke-bench cross-check.
+- Gemma 2 / Gemma 3 patterns may differ subtly from Gemma 4's; the
+  Stage 4.2 derivation needs to match each arch's reference.
+
+────────────────────────────────────────────────────────────────
+### Campaign Q3 — Stage 5: bench + closure write-up (queued 2026-05-11 EOS-12)
+
+**Goal:** refresh canonical perf baselines now that the NEOX fix
+landed, capture Gemma 4 E2B into the dashboard fleet, and close
+the Gemma 4 campaign with a single canonical SUMMARY.
+
+**Stage 5.1 — Pre-rebase baseline capture.** Per the §32a doctrine
+("Pre-rebase baseline doctrine"), capture profile-mode benches on
+the canonical 6 BEFORE any rebase fires. The NEOX fix changed
+`getRopeModeForArchitecture` behavior only for Gemma family; the
+canonical 6 (`tinyllama-warm`, `qwen3-0.6b-q4f16`,
+`qwen3-1.7b-q4f16`, `mistral-7b-instruct-v0.3-q4ks`,
+`llama-3.1-8b-instruct-iq3m`, `qwen3-8b-iq3m`) shouldn't move
+— but sweep verifies. **Artifact:**
+`eval/reports/pre-rebase-baselines-<date>/SUMMARY.md`.
+
+**Stage 5.2 — Add `gemma-4-e2b-warm` to the canonical 6 (now 7).**
+Update the `bench-full` profile set to include the Gemma 4 entry;
+update the dashboard's headline-baseline table; ensure the
+accuracy×speed scatter renders the new dot. **Artifact:**
+inline in 5.1's pre-rebase capture or a separate Stage 5.2 entry.
+
+**Stage 5.3 — Closure SUMMARY.** Write a single canonical Gemma 4
+campaign closure at
+`eval/reports/gemma-4-e2b-validation-<date>/SUMMARY.md`. Folds in:
+Stages 1-3 closure highlights (already documented per-stage),
+Stage 4 outcome (if landed), Stage 5 perf data, the §27/§28/§32
+classification (the NEOX fix is a §27 free-win retrospectively —
+single-line code change, eval +59 pp). Cross-link from the
+README BENCHMARKS table.
+
+**Gate:** dashboard renders Gemma 4 in the accuracy×speed scatter
+at the post-fix score; perf median for `gemma-4-e2b-warm` lands
+in the dashboard SQLite; closure SUMMARY merges to main.
+
+**Out of scope:** un-demoting Gemma 2 in this campaign (Q1's job);
+Gemma 4 E4B / 9B / 14B SKUs (above the 8B ceiling or out of the
+unsloth/E2B canonical path).
+
+**Risks:** low. The NEOX fix is architecture-gated; non-Gemma
+models on `bench-full` should be bit-identical (regression
+sanity-check is the headline output).
+
+────────────────────────────────────────────────────────────────
 
 **Phase 3 closure (prior EOS) preserved below** for reference:
 
