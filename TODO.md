@@ -914,7 +914,7 @@ and §3 for the table of GGUF keys → project impact.
    **Artifact:** `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`
    (PROBE.md + PROBE addendum already landed in commits c98dc1a + 0c91ce8).
 
-   **Stage 3 sub-task progress (2026-05-11):**
+   **Stage 3 sub-task progress (2026-05-11, updated end-of-session):**
    - ✅ Task 3.1 (commit `c98dc1a`): PLE pre-impl sizing probe →
      `eval/reports/gemma-4-stage3-ple-dualrope-2026-05-10/PROBE.md`
    - ✅ Task 3.2 (commits `0c91ce8` PROBE addendum, `6c5da48` feat):
@@ -928,25 +928,70 @@ and §3 for the table of GGUF keys → project impact.
      **unblocks `buildQKV` reshape3d crash**; smoke probe now reaches
      `[7/8]` and emits 64 tokens at 87 tok/s (output `<unused6226>…`
      — garbage, expected without PLE injection)
-   - ⏳ Task 3.3a: pre-loop PLE projection chain (GET_ROWS →
-     `per_layer_model_proj` MUL_MAT → `per_layer_proj_norm` RMSNorm →
-     ADD → permute to `[pleDim, n_tokens, layerCount]` for per-block
-     slicing). Reference: gemma3n.cpp pre-loop op sequence in addendum §C.
-   - ⏳ Task 3.3b: per-block gated PLE injection (slice
-     `inp_per_layer[:, :, L]` → `inp_gate` MUL_MAT + GELU → multiply by
-     slice → `proj` MUL_MAT → `post_norm` RMSNorm → add to residual
-     for active stream — non-active AltUp paths not exercised on this
-     GGUF). Reference: gemma3n.cpp per-block op sequence in addendum §C.
-   - ⏳ Task 3.3c: QK norm dispatch — apply `attn_q_norm.weight` to Q
-     and `attn_k_norm.weight` to K after projection, before RoPE.
-     Already loaded as standard per-block tensors; just wire the op.
-   - ⏳ Task 3.3d: post-attention norm + post-FFW norm — apply
-     `post_attention_norm.weight` RMSNorm to attention output before
-     residual add; same for `post_ffw_norm.weight` on FFN output.
-   - ⏳ Task 3.3e: `layer_output_scale.weight` — per-layer scalar/vector
-     multiply applied to the final layer output before residual continuation.
-   - ⏳ Task 3.5: smoke probe gate (Paris first-token), 36-prompt eval
-     ≥40% gate, Stage 3 closure report.
+   - ✅ Task 3.3a (commits `ba0f90e` feat + `7fd0167` docs): pre-loop
+     PLE projection chain. `buildPreLoopPle()` helper materializes
+     `inpPerLayer` with shape `[pleDim, n_tokens, layerCount]` and
+     `graphBuildForwardExpand`-es it in all three forward methods.
+     Op sequence per `gemma3n.cpp:317-371` (steps 1-4).
+   - ✅ Task 3.3b (commits `cf56960` feat + `6f9db1b` docs): per-block
+     gated PLE injection. `injectPerBlockPle()` helper slices
+     `inpPerLayer` at slot `il` → `inp_gate` MUL_MAT + GELU → MUL slice
+     → `proj` MUL_MAT → RMSNorm with `post_norm` → residual add.
+     Op sequence per `gemma4.cpp:328-353`.
+   - ✅ Task 3.3c (no commit needed): QK norm was already wired
+     generically — `qNorm`/`kNorm` loaded at `model-inference.ts:399-400`
+     via `opt("attn_q_norm.weight")` / `opt("attn_k_norm.weight")` and
+     applied in `buildQKV:908-913`. Pre-existed for Qwen3 family; fires
+     automatically for Gemma 4.
+   - ✅ Task 3.3d (commits `73f77df` feat + `ff8965d` docs):
+     post-attention norm + post-FFW norm. New `LayerWeights` fields
+     `postAttentionNorm` / `postFfwNorm` loaded via
+     `opt("post_attention_norm.weight")` / `opt("post_ffw_norm.weight")`.
+     Ternary-gated `opMul(opRmsNorm(x, hp.normEpsilon), gain)` applied
+     to `oProj` before `attnResidual` add, and to `ffnOut` before final
+     residual add. Op sequence per `gemma4.cpp:246-249` + `323-326`.
+   - ✅ Task 3.3e (commit `c4e5659`): `layerOutputScale` field +
+     `opMul(cur, lw.layerOutputScale)` applied at the end of each
+     per-layer iteration, right after PLE injection. Op sequence per
+     `gemma4.cpp:355-358`.
+   - ⏳ **Task 3.3f (NEW — surfaced 2026-05-11):** Gemma embedding
+     scaling. The standard embedding lookup
+     `wasm.opGetRows(weights.tokEmb, tokenIdsTensor)` in all four
+     forward methods (`forwardSingle:1175`, `forwardForEmbedding:1582`,
+     `forwardAllPositions:1894`, `forwardDecode:2261`) does NOT
+     pre-scale `x` by `sqrt(hp.embeddingLength)`. Gemma family does
+     this universally (`gemma4.cpp:104`:
+     `inpL = ggml_scale(inpL, sqrtf(n_embd))`). Llama / Qwen / Mistral
+     / Phi don't, so a generic per-architecture gate is required.
+     Suggested: add `scaleEmbedding?: boolean` hyperparam OR predicate
+     `hp.architecture === "gemma4"` in the relevant forward methods.
+     **Expected impact:** load-bearing for semantic correctness —
+     residual stream is currently off by `1/sqrt(1536) ≈ 0.0255` on
+     Gemma 4. Best-guess: this single fix unlocks coherent output.
+   - ⏳ **Task 3.3g (NEW — surfaced 2026-05-11):** Gemma FFN
+     activation is GELU not SiLU. Sites: `forwardSingle:1390`,
+     `forwardForEmbedding:1677`, `forwardAllPositions:2070`,
+     `forwardDecode:2433` all use `wasm.opSwigluSplit(gate, up)`
+     which is `silu(gate) * up`. Per `gemma4.cpp:320`
+     (`LLM_FFN_GELU, LLM_FFN_PAR`), Gemma uses `gelu(gate) * up`.
+     Replace with `wasm.opMul(wasm.opGelu(gate), up)` when
+     `hp.architecture === "gemma4"` (or add a `ffnActivation`
+     hyperparam: `"silu"` default vs `"gelu"` Gemma). **Expected
+     impact:** also load-bearing for semantic correctness.
+   - ⏳ Task 3.5: smoke probe gate (Paris first-token) — adjudicable
+     once 3.3f + 3.3g land. 36-prompt eval ≥40% gate, Stage 3 closure
+     report at `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`.
+
+   **Smoke-gate observation 2026-05-11 (post-3.3e):** All five planned
+   Stage 3 sub-tasks landed (3.3a–e + pre-wired 3.3c). Gemma 4 reaches
+   `[8/8]` and decodes 64 tokens at 71 tok/s, but output is still
+   `<unused14><unused11>…<eos>…` garbage. Diagnosis traced the two
+   above gaps; neither was in the original spec or the no-AltUp
+   correction. The bf16 WGSL "device error" in the tab title is a
+   one-shot `mul_mat_f32_bf16` shader parse error on Task 3.3a's
+   BF16 `per_layer_model_proj` MUL_MAT; ggml's `supports_op` scheduler
+   falls back to CPU and execution continues — orthogonal performance
+   concern, not a correctness blocker.
 
 4. **Stage 4 — Real sliding-window attention.** Replace Stage-3
    "all-global" fallback with real SWA on the 4-of-5 layers marked
@@ -981,75 +1026,107 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (2026-05-11)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS)
 
-**Where to start:** Task 3.3a (pre-loop PLE projection chain). The
-buildQKV crash is fixed; forward pass runs end-to-end; output is
-garbage pending PLE injection. The next concrete edit is in
-`src/inference/model-inference.ts` — add the pre-loop PLE projection
-before the per-layer forward loop in each `forward*` method.
+**Where to start:** **Task 3.3f** (Gemma embedding scaling). All 3.3a–e
+landed and reviewed but the model still emits garbage — diagnosis on
+this same session traced the gap to two Gemma-family architectural
+pieces that were never in the original spec or no-AltUp correction:
+embedding scale (3.3f) and FFN activation (3.3g). Both are 1–2 line
+per-site changes plus one hyperparam (or arch-string predicate) gate.
+
+**Recommended ordering:** ship 3.3f first as a stand-alone change with
+smoke probe (`"The capital of France is"` → first token). If 3.3f
+alone produces ASCII output (even if not yet "Paris"), ship 3.3g
+second and re-probe for the "Paris" semantic gate. If 3.3f produces
+no qualitative change, ship 3.3g without iterating — both are required
+and won't fight each other.
 
 **Required reading before touching code:**
-1. `docs/superpowers/specs/2026-05-10-gemma-4-e2b-correctness-first-support-design.md`
-   — base spec (Stage 3 sections are partially superseded by the
-   correction below, but §1–§3 scope decisions and §4 Stage 3 op
-   sequence are still authoritative for non-PLE Stage 3 work)
-2. `docs/superpowers/specs/2026-05-10-gemma-4-stage3-correction-no-altup.md`
-   — **authoritative for Stage 3 component list**. Reads in 2 minutes.
-3. `eval/reports/gemma-4-stage3-ple-dualrope-2026-05-10/PROBE.md` + its
-   addendum (committed via `0c91ce8`) — the tensor inventory + Q5_K /
-   shape details for the PLE table
-4. `~/Repos/llama.cpp/src/models/gemma3n.cpp` (or wherever the gemma4
-   builder lives upstream — `grep -rn LLM_ARCH_GEMMA4 ~/Repos/llama.cpp/src/`
-   to locate). **Canonical op-sequence source of truth.**
-5. `src/models/model-loader.ts` — confirm the new optional weights
-   fields landed in commit `95a5c21` are what the implementation needs
-   (e.g., `parsed.weights.perLayerEmbed`, `perLayerProj`,
-   `perLayerProjNorm`, and the per-block `gemma3nPerBlock.pleInpGate` /
-   `plePerBlockProj` / `plePostNorm` arrays)
-6. `src/inference/model-inference.ts:1100+` — the per-layer forward
-   loops where per-layer head_dim / FFN / RoPE dispatch already lands
-   (commit `064611d`); PLE pre-loop projection injects *before* this
-   loop in each forward function
+1. `docs/superpowers/specs/2026-05-10-gemma-4-stage3-correction-no-altup.md`
+   — Stage 3 scope correction (authoritative for the no-AltUp/Laurel
+   decision; does NOT mention 3.3f/3.3g — those are this-session
+   findings that need a spec amendment).
+2. `~/Repos/llama.cpp/src/models/gemma4.cpp` — **canonical op-sequence
+   source of truth**. For 3.3f read line 104; for 3.3g read line 320.
+3. `src/inference/model-inference.ts` for the existing wired pieces.
+   Grep `opGetRows(weights.tokEmb` (4 sites for 3.3f) and
+   `opSwigluSplit` (4 sites for 3.3g) to find injection points.
+4. `src/core/types.ts:282` for the `pleDim?: number` precedent — pick
+   the same field-shape for any new `scaleEmbedding` / `ffnActivation`
+   field, OR predicate directly on `hp.architecture === "gemma4"`.
 
-**Last verified state (2026-05-11):**
-- Branch `main` HEAD: `064611d` (Task 3.4 implementation)
-- `make checkall`: green (762 pass / 36 skip / 0 fail)
+**Last verified state (2026-05-11 EOS, after this session):**
+- Branch `main` HEAD: `c4e5659` (Task 3.3e). Tree clean.
+- `make checkall`: green (762 pass / 36 skip / 0 fail).
 - Patch stack on `~/Repos/llama.cpp` branch `webllm-browser-patches`:
-  9 patches (unchanged from session start; no llama.cpp patches
-  needed yet)
-- Smoke probe `?model=gemma-4-e2b-it-q4km`: reaches `[7/8]`, generates
-  64 tokens (`<unused6226>…` garbage), 87 tok/s decode. Confirms forward
-  pass structural correctness without semantic correctness.
-- agentchrome session: was on port 63846 at session end (may need
-  reconnect on resume — check `agentchrome connect --status` first)
-- GGUF symlink at `smoke-test/models/gemma-4-e2b-it-q4km.gguf` →
-  `~/.cache/huggingface/hub/...gemma-4-E2B-it-Q4_K_M.gguf` (2.9 GB)
+  9 patches (unchanged this session; no llama.cpp patches needed for
+  3.3f/3.3g).
+- Smoke probe `?model=gemma-4-e2b-it-q4km` reaches `[8/8]`, generates
+  64 tokens at 71 tok/s, output `<unused14><unused11>…` (still garbage;
+  3.3f/3.3g pending).
+- Smoke probe `?model=tinyllama-1.1b-chat-q4_0` unchanged across all
+  Stage-3 commits (145+ tok/s, embed cosine 0.76). Non-regression
+  proven five times this session.
+- agentchrome session on port 63846 active, tab id
+  `094440A57C7855615A7AE1070C4FF61D` (reuse it — don't launch new
+  Chrome). `make smoke-serve` running on 8031.
+- GGUF symlink at `smoke-test/models/gemma-4-e2b-it-q4km.gguf` is
+  still in place.
 
-**Workflow to resume:**
-1. Invoke `superpowers:subagent-driven-development` with: "Continue
-   executing the Gemma 4 plan at `docs/superpowers/plans/2026-05-10-gemma-4-e2b-correctness-first-support.md`,
-   starting from Task 3.3a (pre-loop PLE projection). Reference the
-   correction at `docs/superpowers/specs/2026-05-10-gemma-4-stage3-correction-no-altup.md`
-   for the corrected component list (no AltUp / Laurel)."
-2. Each task: dispatch implementer → spec reviewer → code quality
-   reviewer per the skill flow
-3. After Task 3.3b lands, expect first non-garbage output even before
-   QK norm / post-norms / scaling ship — PLE alone changes the residual
-   stream significantly. The "Paris" semantic gate may not fire until
-   3.3c + 3.3d + 3.3e all land together.
-4. The Stage 3 closure report at
-   `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`
-   captures the gate result and per-task commit list.
+**Per-task commits this session (most-recent first):**
+- `c4e5659` Task 3.3e — `layer_output_scale`
+- `ff8965d` Task 3.3d closure doc (forwardForEmbedding guard comment)
+- `73f77df` Task 3.3d — post-attention + post-FFW norms
+- `6f9db1b` Task 3.3b closure doc (helper contract + op count)
+- `cf56960` Task 3.3b — per-block gated PLE injection
+- `7fd0167` Task 3.3a closure doc (de-task + size-bump annotation)
+- `ba0f90e` Task 3.3a — pre-loop PLE projection chain
+
+**Workflow to resume (each new task):**
+1. Add a brief spec note to
+   `docs/superpowers/specs/2026-05-10-gemma-4-stage3-correction-no-altup.md`
+   (or a fresh "no-altup-followup" addendum) capturing the 3.3f /
+   3.3g rationale — they're not in any current spec.
+2. Invoke `superpowers:subagent-driven-development` with: "Implement
+   Task 3.3f (Gemma embedding scaling). Reference gemma4.cpp:104 for
+   the op (`ggml_scale(x, sqrt(n_embd))` applied to the embedding
+   lookup result, gated on Gemma architecture). Sites:
+   `src/inference/model-inference.ts` lines 1175 (forwardSingle),
+   1582 (forwardForEmbedding — include this one), 1894
+   (forwardAllPositions), 2261 (forwardDecode)."
+3. Each task: dispatch implementer → spec reviewer → code quality
+   reviewer per the skill flow. The pattern from this session worked
+   well: terse implementer prompts with explicit `gemma4.cpp` line
+   refs + line numbers in webllm + the existing-pattern style guide
+   (mirror `opt()` loading, ternary-gate at sites).
+4. After 3.3f and 3.3g land, run the Stage 3 closure smoke probe.
+   Capture first 10 generated tokens. If first token is `Paris` (or
+   ` Paris`), file Stage 3 closure report at
+   `eval/reports/gemma-4-stage3-ple-dualrope-<date>/SUMMARY.md`,
+   then advance to the 36-prompt eval ≥40% gate (Task 3.5).
+
+**Bf16 WGSL device-error note for next session:** The
+`mul_mat_f32_bf16` kernel parse error from Task 3.3a's
+`per_layer_model_proj` (BF16) MUL_MAT is a one-shot device-error log
+followed by ggml-webgpu's `supports_op`-driven CPU fallback. Execution
+continues correctly; the tab title flips to the error message but
+`[8/8]` still completes. **Not a correctness blocker** for 3.3f/3.3g.
+If a future cycle wants to keep the op on GPU, two options: (a) cast
+`per_layer_model_proj` to F16 at load time in `model-inference.ts`
+(weight transform during `uploadToTensorChunked`), or (b) patch
+`ggml-webgpu` to support BF16 MUL_MAT (likely 1 llama.cpp patch +
+WGSL kernel). Both are deferred.
 
 **Estimated remaining work to ship Gemma 4 E2B:**
-- Stage 3 remaining: ~6 sub-tasks (3.3a/b/c/d/e + 3.5), each
-  reviewable in ~30–60 min agent time including reviews
+- Stage 3 remaining: Task 3.3f (~30 min) + Task 3.3g (~30 min) +
+  Task 3.5 closure (~30 min — smoke gate + eval + report). One
+  session should close Stage 3 cleanly.
 - Stage 4 (real SWA): 2 sub-tasks (mask-shape probe + per-layer
-  dispatch); may need 1 llama.cpp patch
+  dispatch); may need 1 llama.cpp patch.
 - Stage 5 (shared-KV + bench + closure): 5 sub-tasks; may need
-  1 llama.cpp patch on the KV-cache allocator
-- Total wall-clock budget: probably 2–4 more focused sessions
+  1 llama.cpp patch on the KV-cache allocator.
+- Total wall-clock budget: probably 2–3 more focused sessions to ship.
 
 ### Tier 3 migration to upstream `llama_decode` (REDIRECTED 2026-05-05)
 
