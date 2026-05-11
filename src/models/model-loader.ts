@@ -122,7 +122,7 @@ export class ModelLoader {
 		const quantType =
 			ftypeRaw !== undefined ? mapFtypeToQuantName(ftypeRaw) : "unknown";
 
-		return {
+		const baseHp: ModelHyperparams = {
 			architecture: arch,
 			contextLength: getMetaNumber(ctx, `${metaPrefix}.context_length`, 2048),
 			embeddingLength,
@@ -157,6 +157,84 @@ export class ModelLoader {
 			causalAttention,
 			alibiMaxBias,
 		};
+
+		if (arch === "gemma4") {
+			const layerCount = baseHp.layerCount;
+			const keyLenGlobal = getMetaNumber(
+				ctx,
+				`${metaPrefix}.attention.key_length`,
+				baseHp.embeddingHeadLength,
+			);
+			const keyLenSwa = getMetaNumber(
+				ctx,
+				`${metaPrefix}.attention.key_length_swa`,
+				keyLenGlobal,
+			);
+			const ropeDimGlobal = getMetaNumber(
+				ctx,
+				`${metaPrefix}.rope.dimension_count`,
+				keyLenGlobal,
+			);
+			const ropeDimSwa = getMetaNumber(
+				ctx,
+				`${metaPrefix}.rope.dimension_count_swa`,
+				keyLenSwa,
+			);
+			const freqBaseGlobal = getMetaNumber(
+				ctx,
+				`${metaPrefix}.rope.freq_base`,
+				1_000_000,
+			);
+			const freqBaseSwa = getMetaNumber(
+				ctx,
+				`${metaPrefix}.rope.freq_base_swa`,
+				10_000,
+			);
+			const swaPattern = GgufParser.getMetadataBooleanArray(
+				ctx,
+				`${metaPrefix}.attention.sliding_window_pattern`,
+				new Array(layerCount).fill(false),
+			);
+			const ffnPerLayer = GgufParser.getMetadataNumberArray(
+				ctx,
+				`${metaPrefix}.feed_forward_length`,
+				new Array(layerCount).fill(baseHp.feedForwardLength),
+			);
+			const headPerLayer = swaPattern.map((isSwa) =>
+				isSwa ? keyLenSwa : keyLenGlobal,
+			);
+			const ropeDimPerLayer = swaPattern.map((isSwa) =>
+				isSwa ? ropeDimSwa : ropeDimGlobal,
+			);
+			const ropeFreqBasePerLayer = swaPattern.map((isSwa) =>
+				isSwa ? freqBaseSwa : freqBaseGlobal,
+			);
+
+			return {
+				...baseHp,
+				embeddingHeadLengthPerLayer: headPerLayer,
+				feedForwardLengthPerLayer: ffnPerLayer,
+				ropeDimensionCountPerLayer: ropeDimPerLayer,
+				ropeFreqBasePerLayer: ropeFreqBasePerLayer,
+				slidingWindowPattern: swaPattern,
+				slidingWindowSize: getMetaNumber(
+					ctx,
+					`${metaPrefix}.attention.sliding_window`,
+					512,
+				),
+				sharedKvLayers: getMetaNumber(
+					ctx,
+					`${metaPrefix}.attention.shared_kv_layers`,
+					0,
+				),
+				finalLogitSoftcap: getMetaNumberOptional(
+					ctx,
+					`${metaPrefix}.final_logit_softcapping`,
+				),
+			};
+		}
+
+		return baseHp;
 	}
 
 	/** Build tokenizer configuration from GGUF metadata. */
