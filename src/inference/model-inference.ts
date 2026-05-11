@@ -176,7 +176,18 @@ export function getRopeModeForArchitecture(
 	// Closure data: Task 3.5 Phase B bisection (length is the
 	// dominant variable) at
 	// `eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/`.
-	if (architecture === "gemma" || architecture === "gemma4") {
+	// gemma2/gemma3 are included pre-emptively: the demote of
+	// `gemma-2-2b-warm` from the canonical fleet on 2026-05-01
+	// attributed failure to multiple Gemma 2 quirks (post-norms,
+	// SWA, soft-capping, tied embeddings); the NEOX-RoPE bug was
+	// likely the dominant cause. Re-probing gemma2 is a separate
+	// follow-up filed under "post-NEOX-fix audit candidates".
+	if (
+		architecture === "gemma" ||
+		architecture === "gemma2" ||
+		architecture === "gemma3" ||
+		architecture === "gemma4"
+	) {
 		return RopeMode.NEOX;
 	}
 	return String(architecture).startsWith("qwen")

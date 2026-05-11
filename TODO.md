@@ -1136,15 +1136,30 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-9)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-12)
+
+**Stage 3 CLOSED 2026-05-11 EOS-12 at 68 % (≥40 % gate cleared,
+also above the ≥60 % Phi-3 closure baseline).** The Task 3.5 probe
+chain isolated a length-dependent forward-path bug, and code
+inspection of `getRopeModeForArchitecture` localized it to a
+missing entry: Gemma family uses NEOX-style (split-halves) RoPE per
+`llama-model.cpp:2275-2310`, but the project mapped only
+`nomic-bert`, `phi3`, and `qwen*` to NEOX and let Gemma fall
+through to `RopeMode.NORMAL` (interleaved). Fix (3 lines + a
+load-bearing comment block): add `gemma`/`gemma2`/`gemma3`/`gemma4`
+to the NEOX path. The whole 9 % → 68 % jump came from changing a
+single return statement.
+
+Closure report (canonical for Task 3.5):
+[`eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-closure-2026-05-11/SUMMARY.md)
 
 **Phase 5 CLOSED 2026-05-11 EOS-8:** chat-template tokenization fix
 landed. Closure report:
 [`eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage3-phase5-chat-template-2026-05-11/SUMMARY.md).
 
-**Task 3.5 ran 2026-05-11 EOS-9/10/11 — Stage 3 gate MISSED. THREE
-§28-negative probes closed AND a length-dependent forward-path bug
-isolated via the chat-formatted parity probe.**
+**Task 3.5 chain (2026-05-11 EOS-9/10/11/12) — THREE §28-negative
+probes closed, length-dependent forward-path bug isolated via the
+chat-formatted parity probe, NEOX-RoPE fix landed.**
 
 | Probe                          | Temp | Score / Cosine | Outcome |
 |--------------------------------|------|----------------|---------|
@@ -1164,142 +1179,90 @@ Closure reports:
 - [`eval/reports/parity-gemma-4-e2b-chat-emb001-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-chat-emb001-2026-05-11/SUMMARY.md)
 - [`eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md`](eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md)
 
-**Root cause narrowed:** The per-block forward path diverges
-catastrophically from HF reference as a function of sequence
-length. Block-2 cosine drops from ≥0.95 (6-token Phase 4
-baseline) to ~0.65 (92–95-token probes); block 11 drops to
-0.15–0.24. The bug is **inside the SWA layers** (layers 0-13 are
-SWA in Gemma 4 E2B; the divergence is well established before any
-full-attention or shared-KV layer fires). Length is the dominant
-variable; special-token content (`<|turn>`, system block) adds a
-secondary tail effect on logits but doesn't change the per-block
-divergence profile.
+**Root cause and fix (in-tree):** Gemma family architectures fell
+through to interleaved RoPE in `getRopeModeForArchitecture`. The
+canonical llama.cpp puts every Gemma variant in
+`LLAMA_ROPE_TYPE_NEOX` (split-halves). The wrong pairing was
+invisible at Phase 4's 6-token completion (rotation phases too
+small to compound) but propagated catastrophically at ≥ ~20-token
+chat-formatted prompts (cosine 0.58 vs HF at 95-token emb-001
+input). Single-line fix at commit `be63158`; pre-emptively added
+`gemma2`/`gemma3` to the NEOX list too (next commit) since the
+same llama.cpp case-list covers all Gemma variants and gemma2 was
+demoted on 2026-05-01 with multiple suspected causes —
+NEOX-RoPE plausibly being the dominant one.
 
-**Next probe (Phase C — intra-block taps):** Add taps inside
-block 1 to localize the first divergent op. Highest-yield
-candidates per the Phase B SUMMARY:
+**Stage 3 eval after fix (greedy temp 0, 48 tasks):**
 
-1. **SWA causal mask math** (block 6 in the candidate list).
-   Gemma SWA layers should mask all positions outside the
-   512-window. At seq < 512 the mask should degenerate to plain
-   causal, but if the WebGPU mask logic applies the window
-   anyway (e.g. always masks positions ≤ pos − 512 even when
-   pos < 512), the result is fully-zeroed attention reads on
-   shorter sequences. Cheap to verify by inspecting the mask
-   tensor for one block-1 forward pass.
-2. **RoPE / RoPE-with-freq_factors** at higher positions.
-   Per-layer freq factors landed in Task 3.3k. At positions
-   0-91 the rotation accumulates much more than at 0-5; a
-   precision or formula error would surface only at length.
+| Dimension              | Before (9 %) | After (68 %) | Δ        |
+|------------------------|--------------|--------------|----------|
+| instruction-following  | 19.4 %       | **91.7 %**   | +72 pp   |
+| reasoning              | 0 %          | **83.3 %**   | +83 pp   |
+| semantic-reasoning     | 0 %          | **79.8 %**   | +80 pp   |
+| tool-calling           | 16.7 %       | 16.7 %       | 0 (capability=false) |
+| **Overall**            | **9 %**      | **68 %**     | **+59 pp** |
 
-**Stage 4 SWA implementation** (replacing the all-global fallback
-with the real windowed mask) is now elevated from "long-context
-fix" to "likely Stage 3 gating fix" — the two work items may
-collapse into one lever.
+**Parity verification (Phase A 95-token chat re-run):**
 
-**Pickup plan for the next session:**
+| Metric         | Before     | After       |
+|----------------|------------|-------------|
+| Final-norm cos | 0.5824     | **0.9951**  |
+| Block 2 cos    | 0.6520     | **0.9996**  |
+| Top-1 argmax   | MISMATCH   | **MATCH**   |
+| Top-16 overlap | 0 / 16     | **14 / 16** |
 
-1. Read `eval/reports/parity-gemma-4-e2b-phaseB-bisect-2026-05-11/SUMMARY.md`
-   for the full context and candidate-op ordering.
-2. Add intra-block taps to `ModelInference.forwardWithLayerTaps`:
-   for a specified `--probeBlock=1` argument, capture the
-   post-RMSNorm input, post-Q/K/V, post-QKnorm, post-RoPE,
-   post-attention output, post-PLE, and post-block residual.
-3. Run Phase C on the **B1 fixture** (92-token plain completion
-   — no chat-template noise to triage).
-4. The first op-level divergence (cosine drop > 0.02 vs HF
-   reference) is the bug.
-5. If that op is the SWA mask: Stage 4 lands the fix.
-   Otherwise: file a tighter probe on the named op.
+**Follow-up candidates queued (in priority order):**
 
-**Required reading before touching code (Task 3.5 entry):**
+1. **Re-run `make bench-full`** to refresh canonical baselines.
+   The NEOX fix only touches Gemma family — TinyLlama / Qwen3 /
+   Mistral / Llama 3.x / Phi-3 are unaffected on paper, but a
+   sweep verifies. Cheap, mostly idle wall time.
+2. **Re-probe gemma2.** The 2026-05-01 `gemma-2-2b-warm` demote
+   blamed multiple Gemma 2 quirks (post-norms, SWA, soft-capping,
+   tied embeddings). With NEOX-RoPE now correct, gemma2 may work
+   significantly better. Probe path: re-enable the
+   `gemma-2-2b-warm` profile in the `full` set, run
+   `bench-profile PROFILES=gemma-2-2b-warm`, check whether it
+   stops producing the "RSSSF suprême suprême estúdio…" pattern.
+   If accuracy clears the Phi-3 60 % baseline, un-demote and
+   commit. If still broken, the demote SUMMARY's other quirks
+   are the residual gating issues.
+3. **Stage 4 — real SWA windowed mask.** No longer gating Stage
+   3 (eval at 68 %, gate ≥40 %). Still pre-planned for long-
+   context (> 512-token generations) where SWA layers should
+   restrict to the local window. Optional, defer until there's
+   a documented long-context quality drop.
+4. **Stage 5 — bench + closure for shared-KV.** Phase 4 already
+   wired the ref-share at L15–34. With NEOX correct, a fresh
+   profile-mode bench on the canonical 6-model fleet + Gemma 4
+   will produce meaningful perf data for the dashboard.
 
-1. `eval/models.ts` — confirm the Gemma 4 profile (chat template
-   wiring, stop tokens, sampling defaults).
-2. `eval/bench.ts` + `eval/perf.ts` — the harness driving the
-   36-prompt sweep.
-3. `eval/tasks/*` — what the 36 prompts actually are (so a low
-   score can be diagnosed by category rather than treated as a
-   uniform "the model is weak" verdict).
-4. `eval/reports/parity-gemma-4-e2b-shared-kv-2026-05-11/SUMMARY.md`
-   — recap of where the model parity sits before this eval.
+**Doctrine lessons banked from the Task 3.5 chain (added to
+CLAUDE.md candidate-doctrine for the next pass):**
 
-**Quickstart (Task 3.5 dev loop):**
+- **Length-dependent bugs hide behind short-prompt parity.** The
+  canonical parity inputs at `eval/tools/parity-capture/inputs.json`
+  ship a 6-token completion (`"The capital of France is"`). For
+  architectures with mid-context PLE / shared-KV / SWA, add a
+  ≥ eval-length plain-completion fixture (the Phase B1 `inputs.json`
+  is the model) — the bug only manifested past ~20 tokens.
+- **Cross-architecture lookup tables ossify.** Any model-family
+  branch table (`getRopeModeForArchitecture`, `attnSoftmaxScale`,
+  chat-template detector) should be audited against the latest
+  llama.cpp `llama-model.cpp` switch statements once per major
+  rebase cycle. The NEOX case-list is at lines 2275-2310.
 
-```bash
-# 1. Smoke server + dashboard.
-make smoke-serve &
-make dashboard-serve &        # optional but useful for tracking
+**Remaining work to ship Gemma 4 E2B (all optional now that the
+≥40 % gate is cleared):**
 
-# 2. Sanity probe: 3 tasks against the new chat-template path.
-bun run eval/bench.ts --model gemma-4-e2b-it-q4km --temp 0 \
-  --tasks "easy-001,easy-002,easy-003" --runs 1
-
-# 3. Full 36-prompt eval (matches the Stage 3 gate threshold).
-make bench-gemma-4-e2b-it-q4km   # or the equivalent target in Makefile
-
-# 4. If accuracy < 40%, probe the default-system suppression
-#    lever before any other change. The TODO entry above lists
-#    other candidates in priority order.
-```
-
-After Task 3.5, Stage 3 closes structurally and attention turns to
-**Stage 4 — real SWA windowed mask** (still pending; affects
-long-context generation > 512 tokens).
-
-**Pre-flight checks before opening the editor:**
-
-1. **Confirm chat smoke still produces coherent output.** Phase 5 may
-   have bit-rotted if anything in the chat path changed between
-   sessions. Reload the smoke tab and verify a non-`<eos>` answer +
-   `finish=stop-token` before running any bench.
-
-   ```bash
-   # Smoke server up; reuse the existing agentchrome session/tab.
-   agentchrome --port 63846 tabs list | head -1
-   V=$(date +%s)
-   agentchrome --port 63846 navigate \
-     "http://localhost:8031/real-model.html?model=gemma-4-e2b-it-q4km&prompt=The+capital+of+France+is&temp=0&max_tokens=24&v=$V" \
-     --tab <TAB_ID_FROM_ABOVE>
-   ```
-
-   Tail `document.getElementById('log').innerText` for
-   `tokensIn=4x` (not 75) and a coherent assistant string.
-
-2. **Re-baseline the bundle if any TS file has changed.** Phase 5
-   modified `src/inference/chat-template.ts` and
-   `src/core/engine.ts`; both need to be in the bundle the smoke
-   tab loads.
-
-   ```bash
-   bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
-   ```
-
-3. **Read the current state on disk** before trusting any memory of
-   what the code looks like:
-
-   - `src/inference/chat-template.ts:303-340` — confirm
-     `formatGemma4` still has the `useTurnPipeVariant` dispatch and
-     accepts the `template` parameter.
-   - `src/core/engine.ts` (two sites: search for
-     `<turn|>`) — confirm `addChatStopToken` dispatches on the same
-     template sniff. If either has reverted (e.g. via a rebase), the
-     smoke step above will surface it.
-   - `eval/models.ts` — the Gemma 4 registration drives the bench
-     run. Check `samplingMode`, `chatStopTokens`, and the bench
-     target name before invoking it.
-
-**Estimated remaining work to ship Gemma 4 E2B:**
-
-- Task 3.5 closure (36-prompt eval ≥ 40%): ~30 min, plus any
-  default-system suppression A/B if the first run misses gate.
-- Stage 4 (real SWA windowed mask): 2 sub-tasks; may need 1
-  llama.cpp patch if ggml-webgpu's softmax mask can't express the
-  windowed shape.
+- Stage 4 (real SWA windowed mask): pre-planned for long-context
+  (> 512-token generations). Not gating Stage 3. 2 sub-tasks;
+  may need 1 llama.cpp patch if ggml-webgpu's softmax mask can't
+  express the windowed shape.
 - Stage 5 (bench + closure report — Stage 5's original KV
   ref-sharing was pulled forward into Phase 4; this is now just
-  bench + write-up): 1-2 sub-tasks.
-- Total wall-clock budget: **1-2 more focused sessions to ship**.
+  bench + write-up): 1-2 sub-tasks. Optional polish; perf data
+  will refresh on the next `make bench-full` sweep.
 
 **Phase 3 closure (prior EOS) preserved below** for reference:
 
