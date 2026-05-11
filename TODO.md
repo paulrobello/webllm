@@ -1473,82 +1473,115 @@ right unit of work.
 5. After Stage 3 closes structurally, run greedy smoke + the
    36-prompt eval ≥40% gate (Task 3.5).
 
-**Last verified state (2026-05-11 EOS-4, after this session):**
-- Branch `main` HEAD: `c317671` (Phase 1 parity-capture scaffolding).
-  Tree clean after this TODO update commits.
+**Last verified state (2026-05-11 EOS-6, after this session):**
+- Branch `main` HEAD: `5db5e70` (docs(TODO) — Phase 3 closed; Phase
+  4 queued). Tree clean.
 - `make checkall`: green (762 pass / 36 skip / 0 fail).
 - WASM build current: `webllm-wasm.js` + `webllm-wasm.wasm` in
-  `smoke-test/` were rebuilt this session for the new
-  `_op_rope_with_freqs` export. wasm64 / mem64 targets NOT rebuilt
-  (the Gemma 4 E2B model fits in the wasm32 4 GB cap).
+  `smoke-test/` from EOS-4 (no new WASM exports needed in Phase 2/3 —
+  pure TS changes). wasm64 / mem64 targets NOT rebuilt (Gemma 4 E2B
+  fits the wasm32 4 GB cap).
+- Bundle current: `smoke-test/webllm-bundle.js` rebuilt this session
+  with the `attnSoftmaxScale` helper + `forwardWithLayerTaps` +
+  embedding-output tap. Re-run `bun build src/index.ts --outfile
+  smoke-test/webllm-bundle.js --target browser` after touching TS
+  in Phase 4.
 - Patch stack on `~/Repos/llama.cpp` branch `webllm-browser-patches`:
-  9 patches (unchanged this session). 3.3k did NOT need a llama.cpp
-  patch — upstream `ggml_rope_ext` already accepts `freq_factors`.
-- Smoke probe `?model=gemma-4-e2b-it-q4km&ingest=off&temp=0` (greedy):
-  64 tokens in ~1.3s (~70 tok/s); output is degenerate-repetitive
-  (`--T $\precGetenv_cownt_cownt…_cることownt…COUGHTECHPYEDECHPY…`).
-  No runtime errors. `[8/8]` embed cosine = 0.76 (Arctic-Embed-s OK).
-- Smoke probe `?model=tinyllama-1.1b-chat-q4_0` NON-REGRESSION
-  unverified this session. **Must re-run** before any further
-  changes — the new `op_rope_with_freqs` path is gated on
-  `lw.ropeFreqs !== null`, and TinyLlama doesn't ship rope_freqs,
-  so the predicate should never fire and behavior should be
-  bit-identical. Verify.
+  9 patches (unchanged this session). Phase 3 fix was pure TS; no
+  llama.cpp patch needed. Phase 4 (shared-KV) is also expected to be
+  pure TS unless we discover the KV-cache allocator needs upstream
+  changes.
+- **Gemma 4 chat smoke (greedy temp=0) post-fix:** 20 tokens in 0.6s
+  (~74 tok/s); output is mixed-script noise
+  (`เชพอ'ircleこれから話precise‌เชพิusercontent ROLLP SL`); no
+  runtime errors; `[8/8]` embed cosine = 0.76. Output signature
+  transitioned from low-entropy repetition (`_cownt_cownt…`) to
+  high-entropy mixed-vocab noise — consistent with "layers 0-14 now
+  mostly correct, layer 15+ destroyed by missing shared-KV".
+- **TinyLlama smoke + parity:** unchanged — parity end-stack cos
+  0.9855, top-1 argmax matches HF. Architecture-gated scale fix is
+  scoped correctly.
 - agentchrome session on port 63846 active, tab id
   `094440A57C7855615A7AE1070C4FF61D` (reuse it — don't launch new
-  Chrome). `make smoke-serve` running on 8031.
-- GGUF symlink at `smoke-test/models/gemma-4-e2b-it-q4km.gguf` is
-  still in place.
+  Chrome). `make smoke-serve` running on 8031. Capture-server on
+  8035 was killed at end of session — restart per Phase 4
+  recapture quickstart.
+- GGUF symlink at `smoke-test/models/gemma-4-e2b-it-q4km.gguf` still
+  in place.
+- Pinned parity runs (gitignored under `eval/reports/`):
+  - `parity-tinyllama-2026-05-11/` — Phase 2 baseline (PASS)
+  - `parity-gemma-4-e2b-2026-05-11/` — Phase 2 Gemma 4 FAIL baseline
+  - `parity-gemma-4-e2b-stage3-block0-2026-05-11/` — Phase 3 with
+    embedding tap (FAIL; pre-fix snapshot)
+  - `parity-gemma-4-e2b-attnscale-fix-2026-05-11/` — Phase 3
+    post-fix (FAIL only at L15+; baseline for Phase 4 comparison)
+  - `parity-tinyllama-attnscale-regression-2026-05-11/` — Phase 3
+    regression-check (PASS; confirms scale fix is gated)
 
 **Per-task commits this session (most-recent first):**
-- `c317671` Phase 1 parity-capture scaffolding (HF side + README + format spec)
-- `db9ee8d` docs(TODO): 3.3k landed + 3.3l queued
-- `dec6f2d` Task 3.3k — rope_freqs (freq_factors) in RoPE
-- `bac18f1` docs(spec): Task 3.3k design
-- `f69f438` docs(TODO): Stage 3 progress through 3.3j handoff
-- `2591525` Task 3.3j follow-up — BF16 cast streaming-path support
-- `d6132ed` Task 3.3j — BF16 → F32 cast at weight load
-- `f4929c1` docs(spec): post-3.3h/3.3i diagnosis — BF16 mul_mat root cause
-- `ac8bbe1` Task 3.3i — drop final-logit-softcap misuse in FA
-- `a321df6` Task 3.3h — Gemma V bare-RMS-norm in buildQKV
-- `4626150` docs(spec): post-3.3g diagnosis — 3.3h + 3.3i
-- `79dd05d` Task 3.3g — Gemma GELU FFN activation
-- `63c1a6d` Task 3.3f — Gemma embedding scaling
-- `e48d751` docs(spec): Stage 3 embedding-scale + GELU FFN addendum
+- `5db5e70` docs(TODO): Stage 3 — 3.3l Phase 3 closed; Phase 4 queued
+- `78f12e1` **fix(gemma4): attention softmax scale = 1.0** (not
+  1/sqrt(head_dim)) — load-bearing correctness fix; 8 call sites
+  updated; embedding-output tap added on both HF + WebLLM sides
+- `8975b9b` docs(TODO): Stage 3 — 3.3l Phase 2 closed; Phase 3 plan queued
+- `b7c2e0f` **feat(parity-capture): Phase 2** — WebLLM tap + harness
+  + server + compare driver
+- `e67926b` docs(TODO): Stage 3 — 3.3l Phase 2 plan (from prior session)
 
-**Workflow to resume (Task 3.3l Phase 2 — tap + harness + compare):**
+Prior session (EOS-4) commits: `c317671` (Phase 1 scaffolding),
+`db9ee8d` (3.3k closure + 3.3l queue), `dec6f2d` (3.3k rope_freqs),
+`bac18f1` (3.3k spec).
 
-Detailed plan is in the "Phase 2 plan" block above; quick checklist:
+**Workflow to resume (Task 3.3l Phase 4 — wire shared-KV):**
 
-1. ✅ TinyLlama non-regression verified this session (151 tok/s,
-   "Here's a short joke:..." output) — skip step in fresh session
-   unless `git log` shows new changes since `c317671`.
-2. Run HF capture for both `TinyLlama/TinyLlama-1.1B-Chat-v1.0` and
-   `unsloth/gemma-4-E2B-it`. Pre-fetch via `hfdownloader`.
-3. Add `forwardWithLayerTaps` to `ModelInference` (mirror
-   `forwardSingle`; tap each block's `cur` into the graph; readback
-   last-token row per tap).
-4. Add `smoke-test/parity-capture.html` (loader harness; POSTs
-   capture JSON to capture-server).
-5. Add `eval/tools/parity-capture/capture-server.ts` (Bun HTTP on
-   port 8035 — register in `~/.claude/used_ports.md`).
-6. Add `eval/tools/parity-capture/compare.py` (cosine + L2 per layer,
-   emit `REPORT.md`).
-7. Run TinyLlama pipeline end-to-end — gate: cosine ≥ 0.99 at every
-   layer. If pass, the pipeline is trustworthy.
-8. Run Gemma 4 pipeline. Read the REPORT.md. The first layer with
-   cosine < 0.95 (or a sudden ≥ 0.05 drop between consecutive
-   layers) is the bug. Fix that op-block; re-run.
+Detailed plan is in the "Phase 4 plan" block above. Quick checklist:
+
+1. Read `~/Repos/llama.cpp/src/llama-kv-cache-iswa.cpp` and
+   `llama-kv-cache.cpp:249` (the `reuse layer %d, is_swa = %d`
+   log line + surrounding context) to confirm the layer-type-aware
+   remap rule. Phase 4 plan above states the conjecture; verify
+   before coding.
+2. Add `kvReuseFromLayer[il]: number | null` to
+   `ModelHyperparams` (or as a separate field on
+   `ModelInference`). Compute in `src/models/model-loader.ts`
+   from `sharedKvLayers` + `slidingWindowPattern`.
+3. In `forwardSingle` and `forwardWithLayerTaps`, gate the K/V
+   projection + KV-cache write block on `kvReuseFromLayer[il] ===
+   null`. For shared layers, point `fullK` / `fullV` view ops at
+   `this.kvLayers[kvReuseFromLayer[il]].{k,v}` instead.
+4. Q projection stays per-layer at every layer.
+5. Rebuild bundle: `bun build src/index.ts --outfile
+   smoke-test/webllm-bundle.js --target browser`.
+6. Restart capture-server pointed at a fresh run-dir; copy HF ref
+   from `parity-gemma-4-e2b-stage3-block0-2026-05-11/hf-ref.json`
+   (no re-capture needed — HF reference is deterministic at fp32).
+7. Re-run parity. **Gate:** layers 15-34 cosines recover to
+   ≥ 0.85 (target ≥ 0.93 like 0-14, but allow some slack since
+   compounding error is unavoidable).
+8. If layers 15-34 still drift, the remap rule is wrong → check
+   actual llama.cpp KV-cache init logs (add a printf in
+   `llama-kv-cache.cpp:249` if needed, rebuild llama.cpp side,
+   skip — but we're not running libllama here, so the cleaner
+   path is to instrument the WebLLM loader to log which slot it
+   thinks layer 15 should reuse).
+9. Run Gemma 4 chat smoke (greedy temp=0) — expect coherent English
+   output, not mixed-script noise.
+10. Run the 36-prompt eval on Gemma 4 (`make bench-*` for the
+    targeted profile, or just the smoke bench task ID). **Gate:**
+    ≥ 40% (Stage 3 closure target).
 
 **Estimated remaining work to ship Gemma 4 E2B:**
-- Task 3.3l hidden-state diagnostic (~1 session — likely surfaces
-  1 architectural gap; possibly 2 sessions if multiple compounding
-  issues).
-- Task 3.5 closure report (~30 min).
-- Stage 4 (real SWA): 2 sub-tasks; may need 1 llama.cpp patch.
-- Stage 5 (shared-KV + bench + closure): 5 sub-tasks; may need
-  1 llama.cpp patch on the KV-cache allocator.
-- Total wall-clock budget: probably 2–4 more focused sessions to ship.
+- Task 3.3l Phase 4 (shared-KV) — ~1 session if the remap rule is
+  straightforward; possibly 2 sessions if the iSWA cache plumbing
+  needs deeper rework.
+- Task 3.5 closure report (~30 min after Phase 4 closes structurally).
+- Stage 4 (real SWA windowed mask): 2 sub-tasks; may need 1
+  llama.cpp patch if ggml-webgpu's softmax mask can't express the
+  windowed shape.
+- Stage 5 (bench + closure — much of the original Stage 5 KV
+  ref-sharing was pulled forward into Phase 4): 1-2 sub-tasks for
+  bench + closure report; should be light.
+- Total wall-clock budget: 2-3 more focused sessions to ship.
 
 ### Tier 3 migration to upstream `llama_decode` (REDIRECTED 2026-05-05)
 
