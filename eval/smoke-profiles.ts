@@ -282,6 +282,17 @@ export const SMOKE_PROFILES: readonly SmokeProfile[] = [
 		temperature: 0.6,
 		prompt: DEFAULT_PROMPT,
 	},
+	// ── Gemma 4 E2B IT — Stage 3 closure (2026-05-11) ─────────
+	// Correctness-first staging: PLE + dual RoPE + shared-KV
+	// (layers 15-34) all landed in commits c98dc1a..d8a0835.
+	// Phase 5 chat-template fix unblocks coherent multi-turn
+	// generation; this profile drives the Stage 3 ≥40% gate.
+	{
+		name: "gemma-4-e2b-warm",
+		model: "gemma-4-e2b-it-q4km",
+		temperature: 0.6,
+		prompt: DEFAULT_PROMPT,
+	},
 	// ── Mistral 7B Instruct v0.3 IQ4_XS — IQ-family data point ─
 	{
 		name: "mistral-7b-v0.3-iq4xs-warm",
