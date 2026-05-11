@@ -1007,7 +1007,17 @@ and §3 for the table of GGUF keys → project impact.
      gap (matches gemma4.cpp), but a deeper architectural piece
      remains responsible for the residual stream getting locked into
      a low-entropy state on this short prompt.
-   - ⏳ Task 3.3l (NEW — queued 2026-05-11 EOS-3): deeper diagnostic.
+   - 🟡 Task 3.3l (in progress): deeper diagnostic via parity-capture.
+     - ✅ Phase 1 (2026-05-11 EOS-3, commit `c317671`): HF reference
+       capture script + standard JSON schema + README.
+     - ✅ Phase 2 (2026-05-11 EOS-5, commit `b7c2e0f`): WebLLM tap +
+       harness + capture-server + compare driver. TinyLlama gate
+       PASSES; Gemma 4 surfaces layer-0 drift + layer-2 catastrophic
+       drop. Reports under `eval/reports/parity-*-2026-05-11/`.
+     - ⏳ Phase 3 (queued 2026-05-11 EOS-5): checkpoint-level taps
+       inside block 0 to localize WHERE in the block the residual
+       drifts. See "Resume in fresh session" block below for the
+       full plan + recapture quickstart.
      Candidates in priority order:
      (a) **Intermediate hidden-state comparison** vs HuggingFace
          `transformers` Gemma 4 reference run on the same prompt
@@ -1078,20 +1088,115 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-4)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-5)
 
-**Where to start:** **Task 3.3l Phase 2** — the WebLLM side of the
-parity-capture pipeline scaffolded this session (`eval/tools/parity-capture/`).
-The HF reference capture script is checked in, generic, and ready to
-run. Phase 2 adds: a WebLLM tap on `forwardSingle` that emits the
-same standard JSON shape, plus a comparison driver that reports the
-first divergent layer.
+**Phase 2 CLOSED 2026-05-11 (commit `b7c2e0f`):** end-to-end parity-
+capture pipeline shipped and validated. TinyLlama parity PASSES (gate-
+trustworthy); Gemma 4 parity surfaces the bug. **Where to start next:**
+**Task 3.3l Phase 3** — finer-grained checkpoint taps inside block 0
+to localize where in the block the residual stream first drifts.
 
-**Why this is the right move:** the architectural blind-fix loop is
-exhausted — 3.3f→3.3k closed the obvious gemma4.cpp gaps but greedy
-Gemma 4 still emits degenerate output. The next move needs DATA, not
-more guesses. The parity-capture tool is the data source; once it
-runs end-to-end the diagnosis is mechanical.
+**Phase 2 results (eval/reports/parity-*-2026-05-11/REPORT.md):**
+
+| Run | Layer 0 cos | First sudden Δ ≤ -0.05 | End-stack cos | Top-16 / top-1 |
+|---|---|---|---|---|
+| TinyLlama Q4_0 | 0.9987 ✓ | none | 0.9855 | 15/16 · argmax MATCH (id 3681) |
+| Gemma 4 E2B Q4_K_M | 0.9756 ⚠ | block 2 (−0.31) | 0.1450 | 2/16 · argmax MISS (web 236761 vs ref 9079 "Paris") |
+
+Gemma 4 per-layer trace: 0.9756 / 0.9685 / **0.6591** / 0.8056 / 0.9375
+/ 0.9090 / 0.8507 / 0.7925 / 0.8075 / 0.6730 / 0.5649 / 0.3436 / 0.6177
+/ 0.5743 / 0.8445 / 0.5572 / … / 0.0335 at layer 34. The jitter (not
+monotonic) is unusual — most architectural bugs cause smooth decay.
+Possible signatures: per-block aliasing in `inpPerLayer` slicing,
+non-deterministic op order in PLE inject, or numerical instability in
+the `layer_output_scale` × residual chain.
+
+**SWA pattern (confirmed via `window.parsedModel.hyperparams`):**
+local layers 0,1,2,3,5,6,7,8,…,33; global layers 4,9,14,19,24,29,34
+(every 5th). Local: head_dim=256, ropeBase=10000, ropeDim=256. Global:
+head_dim=512, ropeBase=1e6, ropeDim=512, ropeFreqs.weight present.
+FFN dim: 6144 for layers 0-14; 12288 for layers 15-34 (Gemma 4 E2B's
+per-layer FFN-dim ladder). PLE / layerOutputScale / postAttnNorm /
+postFfwNorm / qNorm / kNorm all present on every layer.
+
+**The layer-2 drop is NOT a local/global transition** — layers 0,1,2,3
+are all local SWA with identical hyperparams. So the bug is something
+intrinsic to the per-block forward path that compounds non-uniformly.
+Layer 0 already at 0.9756 (below 0.99 first-block gate) is itself a
+finding: even FP32-vs-Q4 on block 0 should be ≥ 0.99 (precedent:
+TinyLlama layer 0 at 0.9987).
+
+**Where to start (Phase 3 plan):** add finer taps inside `forwardWith­
+LayerTaps` for block 0 specifically so we can pinpoint the op that
+first drifts. Phase 3 candidates:
+
+1. **Embedding-output tap.** HF's `hidden_states[0]` is the embedding-
+   table lookup BEFORE block 0 (already captured but discarded by
+   `capture-hf-ref.py:114-117` — index `hidden[0]` is dropped).
+   Surface `embedding_output_last_token` in both HF + webllm captures;
+   compare. If embedding output already drifts, the bug is in
+   `opGetRows(tokEmb, ids) + opScale(sqrt(1536))`. If embedding output
+   matches HF perfectly, the bug is inside block 0.
+
+2. **Within-block-0 checkpoint ladder.** Add an optional capture mode
+   that taps the residual stream at 6 checkpoints inside block 0:
+   (a) after `attn_norm + scaled` (pre-QKV); (b) after `qNorm/kNorm`
+   on Q,K; (c) after RoPE on Q,K; (d) after attention out_proj +
+   post_attention_norm; (e) after first residual add; (f) after FFN +
+   post_ffw_norm + second residual add; (g) after PLE inject;
+   (h) after layer_output_scale. Capture these for both HF (via
+   forward hooks) and webllm.
+
+3. **Compare ATTENTION OUTPUT specifically.** Gemma 3+ uses Q/K norms
+   AND no attention softcap (Gemma 4 drops softcap entirely per
+   gemma4.cpp:11). The Q/K norm + softmax + V chain has narrow
+   surface area; tap before/after each piece. Bug candidates: the
+   `qNorm/kNorm` is applied AFTER the per-head reshape rather than
+   before (or vice versa); the per-head RMS-norm operates on the
+   wrong tensor layout for Gemma's head_dim=256 SWA layers.
+
+4. **Stretch: capture ALL token positions (not just last).** PLE
+   injection per-block uses `slot[il]` of `inpPerLayer[pleDim,
+   nTokens, layerCount]`. If the slicing is off-by-one or
+   transposed, only some token columns get corrupt PLE data, and
+   the "last token" tap would see only a partial picture. Capturing
+   all token positions reveals per-position divergence shape.
+
+**Where the data lives:** `eval/reports/parity-tinyllama-2026-05-11/`
++ `eval/reports/parity-gemma-4-e2b-2026-05-11/` (both have
+`hf-ref.json`, `webllm.json`, `REPORT.md`). HF reference captures
+take ~30s each on CPU (re-runnable; they're deterministic at fp32).
+
+**Quickstart (recapture + compare from scratch):**
+```bash
+# 1. Start capture-server for the run dir
+RUN_DIR=eval/reports/parity-gemma-4-e2b-$(date +%Y-%m-%d)
+mkdir -p "$RUN_DIR"
+bun run eval/tools/parity-capture/capture-server.ts \
+  --run-dir "$RUN_DIR" --port 8035 &
+
+# 2. HF reference capture (re-uses hfdownloader cache)
+uv run --no-project --with-requirements \
+  eval/tools/parity-capture/requirements.txt \
+  python eval/tools/parity-capture/capture-hf-ref.py \
+  --model unsloth/gemma-4-E2B-it \
+  --inputs eval/tools/parity-capture/inputs.json \
+  --output "$RUN_DIR/hf-ref.json" --add-bos
+
+# 3. WebLLM capture (use HF's input_token_ids to isolate from tokenizer)
+make smoke-serve &
+agentchrome --port 63846 navigate \
+  "http://localhost:8031/parity-capture.html?model=gemma-4-e2b-it-q4km&inputIds=2,818,5279,529,7001,563&v=$(date +%s)"
+
+# 4. Compare
+uv run --no-project --with-requirements \
+  eval/tools/parity-capture/requirements.txt \
+  python eval/tools/parity-capture/compare.py --run-dir "$RUN_DIR"
+```
+
+**Original Phase 2 plan (now CLOSED):** kept below for reference;
+the workflow steps are still valid for re-running the captures.
+The pickup instructions for Phase 3 are above.
 
 **Phase 2 plan (this is the entire next session's scope):**
 
