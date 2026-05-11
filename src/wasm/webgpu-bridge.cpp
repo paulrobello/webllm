@@ -176,6 +176,10 @@ void* op_gelu(void* x) {
     return ggml_gelu(current_ctx(), (struct ggml_tensor*)x);
 }
 
+void* op_tanh(void* x) {
+    return ggml_tanh(current_ctx(), (struct ggml_tensor*)x);
+}
+
 void* op_rope(void* x, void* pos, int32_t n_dims, int32_t mode, int32_t n_ctx_orig,
               float freq_base, float freq_scale, float ext_factor,
               float attn_factor, float beta_fast, float beta_slow) {

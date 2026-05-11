@@ -790,6 +790,13 @@ export class GgmlWasm {
 		return this.m._op_gelu(x) >>> 0;
 	}
 
+	opTanh(x: TensorPtr): TensorPtr {
+		if (this.is64) {
+			return Number(this.m._op_tanh(BigInt(x)));
+		}
+		return this.m._op_tanh(x) >>> 0;
+	}
+
 	opRope(
 		x: TensorPtr,
 		pos: TensorPtr,
