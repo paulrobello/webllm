@@ -83,18 +83,29 @@ def _capture_single_prompt(
     *,
     add_bos: bool,
     top_k: int,
+    input_token_ids: list[int] | None = None,
 ) -> dict:
     """
     Run a single forward pass and return the captured tensors in the
     canonical JSON-friendly shape (lists of plain floats, not tensors).
+
+    When `input_token_ids` is provided the tokenizer is bypassed entirely
+    and the supplied IDs are used as the model input. This lets chat-
+    formatted parity probes feed the exact token sequence WebLLM sends
+    to the engine without round-tripping special tokens through HF's
+    SPM tokenizer (which doesn't always agree with the GGUF vocab on
+    added-token IDs).
     """
-    # Tokenize without specials, then optionally prepend BOS to match
-    # webllm's chat-template encode path (engine.ts adds BOS via the
-    # template for causal LMs; raw-text probes here mirror that).
-    ids = tokenizer.encode(prompt, add_special_tokens=False)
-    if add_bos and tokenizer.bos_token_id is not None:
-        if not ids or ids[0] != tokenizer.bos_token_id:
-            ids = [tokenizer.bos_token_id] + ids
+    if input_token_ids is not None:
+        ids = list(input_token_ids)
+    else:
+        # Tokenize without specials, then optionally prepend BOS to match
+        # webllm's chat-template encode path (engine.ts adds BOS via the
+        # template for causal LMs; raw-text probes here mirror that).
+        ids = tokenizer.encode(prompt, add_special_tokens=False)
+        if add_bos and tokenizer.bos_token_id is not None:
+            if not ids or ids[0] != tokenizer.bos_token_id:
+                ids = [tokenizer.bos_token_id] + ids
 
     input_ids = torch.tensor([ids], dtype=torch.long)
 
@@ -187,9 +198,17 @@ def main(argv: list[str] | None = None) -> int:
 
     inputs_doc = json.loads(args.inputs.read_text())
     prompts: list[str] = inputs_doc.get("prompts", [])
-    if not prompts:
-        print(f"error: no `prompts` array in {args.inputs}", file=sys.stderr)
+    input_token_ids = inputs_doc.get("input_token_ids")
+    if not prompts and not input_token_ids:
+        print(
+            f"error: inputs file {args.inputs} must contain either `prompts` or `input_token_ids`",
+            file=sys.stderr,
+        )
         return 2
+    # When raw IDs are supplied, prompt is informational only — record it
+    # but don't tokenize.
+    if not prompts:
+        prompts = ["(input_token_ids supplied — tokenizer bypassed)"]
     if len(prompts) > 1:
         # The output format is per-prompt; if multi-prompt support is
         # needed later, wrap captures in a list keyed by prompt. For
@@ -216,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
         prompts[0],
         add_bos=args.add_bos,
         top_k=args.top_k,
+        input_token_ids=input_token_ids,
     )
 
     doc = {
