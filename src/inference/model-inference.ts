@@ -320,6 +320,52 @@ export function bf16BytesToF32Bytes(bf16: Uint8Array): Uint8Array {
 }
 
 /**
+ * Fill an F16 causal mask buffer in ggml-webgpu layout for `opSoftMaxExt` /
+ * `opFlashAttn`. The mask is a `[totalLen, maskPaddedCols]` tensor (ne0=totalLen,
+ * ne1=maskPaddedCols), so element `(row q, col k)` lives at `view[q*totalLen+k]`.
+ * Cells are F16 bit patterns: `0x0000` = visible (0.0), `0xFC00` = masked (-Inf).
+ *
+ * `swaWindow` undefined → full causal mask (the existing behavior; visible iff
+ * `k ≤ pastLen + q`). Finite → banded causal / sliding-window mask
+ * (visible iff `pastLen + q - swaWindow < k ≤ pastLen + q`), used by Gemma
+ * SWA layers.
+ *
+ * Padding rows `[nTokens, maskPaddedCols)` are filled with 0; they're outside
+ * the query range but still read by the shader.
+ *
+ * Verified Stage 4.0 — both `soft_max.wgsl` and `flash_attn.wgsl` apply the
+ * mask as a purely additive per-element term, so a banded mask is admissible
+ * without shader changes. See `eval/reports/gemma-4-stage4-probe-2026-05-11/`.
+ */
+export function writeCausalMaskF16(
+	view: Uint16Array,
+	totalLen: number,
+	nTokens: number,
+	pastLen: number,
+	maskPaddedCols: number,
+	swaWindow?: number,
+): void {
+	const F16_NEG_INF = 0xfc00;
+	const useWindow =
+		swaWindow !== undefined &&
+		Number.isFinite(swaWindow) &&
+		(swaWindow as number) > 0;
+	for (let q = 0; q < nTokens; q++) {
+		const rowBase = q * totalLen;
+		const visibleUpTo = pastLen + q;
+		const visibleFrom = useWindow ? visibleUpTo - (swaWindow as number) + 1 : 0;
+		for (let k = 0; k < totalLen; k++) {
+			view[rowBase + k] =
+				k <= visibleUpTo && k >= visibleFrom ? 0 : F16_NEG_INF;
+		}
+	}
+	for (let q = nTokens; q < maskPaddedCols; q++) {
+		const rowBase = q * totalLen;
+		for (let k = 0; k < totalLen; k++) view[rowBase + k] = 0;
+	}
+}
+
+/**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
@@ -3479,7 +3525,16 @@ export class ModelInference {
 		};
 	}
 
-	/** Upload position, token ID, and mask data after backend alloc. */
+	/**
+	 * Upload position, token ID, and mask data after backend alloc.
+	 *
+	 * When `swaMaskTensor !== 0`, a second mask tensor is also populated with
+	 * a banded windowed-causal mask of width `swaWindow` for Gemma SWA layers.
+	 * The global mask (`maskTensor`) carries the full causal mask consumed by
+	 * non-SWA layers. Both masks share the same shape — the caller picks
+	 * between them at attention dispatch time based on
+	 * `hp.slidingWindowPattern[il]`.
+	 */
 	private uploadLeaves(
 		wasm: GgmlWasm,
 		tokenIds: Int32Array,
@@ -3492,17 +3547,22 @@ export class ModelInference {
 		posTensor: TensorPtr,
 		tokenIdsTensor: TensorPtr,
 		maskTensor: TensorPtr,
+		swaMaskTensor: TensorPtr = 0,
+		swaWindow = 0,
 	): void {
 		const posBytes = nTokens * 4;
 		const idsBytes = nTokens * 4;
 		const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
-		const totalBytes = posBytes + idsBytes + maskBytes;
+		const swaMaskBytes =
+			swaMaskTensor !== 0 ? totalLen * maskPaddedCols * 2 : 0;
+		const totalBytes = posBytes + idsBytes + maskBytes + swaMaskBytes;
 
 		const heap = wasm.malloc(totalBytes);
 		try {
 			const posPtr = heap;
 			const idsPtr = heap + posBytes;
 			const maskPtr = heap + posBytes + idsBytes;
+			const swaMaskPtr = heap + posBytes + idsBytes + maskBytes;
 
 			const posView = new Int32Array(wasm.heapU8.buffer, posPtr, nTokens);
 			const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, nTokens);
@@ -3517,18 +3577,22 @@ export class ModelInference {
 					maskPtr,
 					totalLen * maskPaddedCols,
 				);
-				const F16_NEG_INF = 0xfc00;
-				for (let q = 0; q < nTokens; q++) {
-					const rowBase = q * totalLen;
-					const visibleUpTo = pastLen + q;
-					for (let k = 0; k < totalLen; k++) {
-						mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
-					}
-				}
-				for (let q = nTokens; q < maskPaddedCols; q++) {
-					const rowBase = q * totalLen;
-					for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
-				}
+				writeCausalMaskF16(mask, totalLen, nTokens, pastLen, maskPaddedCols);
+			}
+			if (swaMaskTensor !== 0) {
+				const swaMask = new Uint16Array(
+					wasm.heapU8.buffer,
+					swaMaskPtr,
+					totalLen * maskPaddedCols,
+				);
+				writeCausalMaskF16(
+					swaMask,
+					totalLen,
+					nTokens,
+					pastLen,
+					maskPaddedCols,
+					swaWindow,
+				);
 			}
 
 			wasm.backendTensorSet3(
@@ -3542,6 +3606,9 @@ export class ModelInference {
 				maskPtr,
 				maskBytes,
 			);
+			if (swaMaskTensor !== 0) {
+				wasm.backendTensorSet(swaMaskTensor, swaMaskPtr, 0, swaMaskBytes);
+			}
 		} finally {
 			wasm.free(heap);
 		}
