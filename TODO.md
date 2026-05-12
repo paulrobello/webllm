@@ -1136,78 +1136,71 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-12 EOS)
+#### Resume in fresh session — pickup instructions (updated 2026-05-12 EOS-4)
 
 **Read this first, then
 [`eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md)
-for the full diagnostic, repro recipes, and four recommended unblock paths.**
+"Root cause confirmed (2026-05-12 EOS-4)" section for the full diagnostic,
+N-sweep table, the upstream assertion chain, and the verified mitigation.**
 
 ---
 
-##### Where Stage 4 actually stands
+##### Status: FA-VEC clamp shipped (2026-05-12 EOS-4)
 
-- **Stage 4.0 + Stage 4.1 code shipped** as commits `b4f6bdf` (Phase A —
-  `writeCausalMaskF16` helper + `uploadLeaves` SWA params + 9 unit tests)
-  and `0739d80` (Phase B — per-layer SWA/global mask dispatch across all
-  four chat-path forwards).
-- **Closure smoke was misleading.** The TODO line below ("Gemma 4 E2B
-  Q4_K_M: `Paris` on 'The capital of France is', 57.1 tok/s") was run
-  on `real-model.html` which defaults to `flashAttn=false`. The FA path
-  used by `chat.html` + `createConversation` was never exercised on
-  Gemma 4 after Phase B, and it traps.
-- **Long-context end-to-end parity gate** (`forwardWithLayerTaps` on a
-  ~1000-token prompt vs HF reference) is **infeasible on Chrome/Apple**
-  due to the WebGPU `maxStorageBufferBindingSize=128 MiB` cap. Three
-  probe attempts at N=1129 / N=560 / N=1129+`skipLayerTaps` all OOM at
-  `backendAllocCtxTensors`.
+The chat.html `Error: unreachable` trap is **fixed** by commit
+`9ea3bfc fix(gemma): clamp prefillTileSize to 16 for FA + head_dim > 128`.
+Root cause was upstream `ggml-webgpu-shader-lib.hpp:734` rejecting the
+FA VEC path at `src0.ne[1] >= 20`; Gemma family head_dim ∈ {256, 512}
+doesn't fit any other FA path's LDS budget so `decisions.path = NONE` →
+assert at line 2560. NOT a Phase B regression — pre-existing bug,
+surfaced only when Stage 4 validation drove chat.html for the first time.
 
-##### Two open blockers (in priority order)
+The clamp activates when `flashAttn === true && max head_dim > 128`
+(covers Gemma 2 / 3 / 4 today; future models auto-covered by the head_dim
+threshold). 6 new unit tests cover the matrix in
+`tests/prefill-tiling-config.test.ts`. End-to-end verified via
+`fa-prefill-probe.html?chat=1`: chat-template N=46 prompt that traps in
+0.028s without the clamp now succeeds in 0.92s with healthy argmax.
 
-1. 🔴 **[CRITICAL] Gemma 4 + `flashAttn=true` traps with `Error:
-   unreachable` at every prompt length.** Confirmed reproducible on
-   committed tip `15b57dd` with all 2026-05-12 in-flight changes
-   stashed — so this is a Phase B (`0739d80`) regression, not a today's
-   change regression. Production chat is currently broken for Gemma 4:
-   `chat-models.js:68` hardcodes `flashAttn: true` because
-   `createConversation` (`engine.ts:711-713`) requires FA mode.
+##### Open work after EOS-4
 
-   **Repro:**
-   ```
-   make smoke-serve &
-   agentchrome --port <PORT> navigate \
-     "http://localhost:8031/chat.html?model=gemma-4-e2b-it-q4km&v=$(date +%s)"
-   # Wait for load, type "The capital of France is", click Send.
-   # Result: chat-msg.assistant.error rendered with "Error: unreachable".
-   ```
+1. **Stage 4.1 long-context closure (now reachable).** The chat path is
+   no longer trapping, so the cheap closure gate is "drive
+   `engine.chatCompletion` greedy on a long (~1129-token) prompt via
+   `chat.html`; verify non-crash + coherent output". Per-binding 128 MiB
+   cap still blocks per-layer tap parity — see option (3) `captureTaps`
+   scaffolding or option (4) backend patch in the SUMMARY's "Recommended
+   next steps" section.
 
-   **Cheap discriminator probe** (5-min budget): edit
-   `smoke-test/parity-capture-page.js:143` to set `flashAttn: true`
-   (currently `false`), rebuild bundle, rerun the 46-token Gemma 4
-   capture (the standard parity-capture path). Outcomes:
-   - Same OOM signature as before → FA bug is in the existing
-     long-context graph, not the mask. Probably need backend split or
-     different KV layout.
-   - Different / earlier failure → narrows to FA-shader's consumption
-     of the banded mask OR mixed-head-dim plumbing in the per-layer
-     FA dispatch (`forwardSingle:1610-1640`, `forwardAllPositions`,
-     `forwardDecode`).
-   - Success → the bug is in `chat.html`'s worker / engine init path
-     specifically, not in the FA forward.
+2. **Upstream patch follow-up: bump VEC `ne[1] < 20` ceiling.** With
+   the TS clamp in place this is now P2 hygiene — recover prefill
+   throughput on Gemma 4 by letting larger tiles use VEC at `q_tile=1`
+   instead of paying 3× tile overhead. Implementation: one-line edit
+   to `~/Repos/llama.cpp` `webllm-browser-patches` branch at
+   `ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp:734`. Cost: ~30 min
+   including rebuild + retest. Should also be filed upstream so future
+   rebases pick it up.
 
-   **Comparison evidence:** TinyLlama in chat.html (FA on) works fine;
-   Gemma 4 in real-model.html (FA off) returns "Paris" in 0.4s — so
-   the bug is FA × Gemma 4 specifically.
+3. **Stage 4.2 (Gemma 2 alternating SWA), 4.3 (long-context regression
+   probe), 4.4 (eval re-gate).** Sequenced after (1) closes.
 
-2. 🟡 **Long-context tap-based parity blocked by per-binding cap.** See
-   [`eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md)
-   "Recommended next steps" section for four ordered options. Once
-   blocker (1) is fixed, the lowest-cost option becomes viable: drive
-   the standard chat path (which uses `forwardSingle` — no per-layer
-   tap retention) at 1129 tokens and observe non-crash + coherent
-   output as a weak positive signal. Tap-based per-layer cosine is
-   only achievable via option 3 (incremental 35-forward capture using
-   the `captureTaps` scaffolding) or option 4 (backend patch to split
-   graph tensors across multiple WebGPU bindings).
+##### How to verify the fix held (drop-in repro)
+
+```bash
+make smoke-test
+make smoke-serve &
+# In Chrome:
+http://localhost:8031/chat.html?model=gemma-4-e2b-it-q4km
+# Type "The capital of France is", send.
+# Expected: greedy reply ("Paris") in coherent English; no
+# "RuntimeError: unreachable" in the console.
+```
+
+Or via the probe (no chat UI needed):
+```bash
+http://localhost:8031/fa-prefill-probe.html?model=gemma-4-e2b-it-q4km&ctx=4096&path=forward&chat=1
+# Expected: [FA-PREFILL-PROBE-DONE-PASS] in ~1s.
+```
 
 ##### In-flight uncommitted work (2026-05-12 EOS-2: cleared)
 
@@ -1229,65 +1222,28 @@ the "Surgical Changes" doctrine in `~/.claude/CLAUDE.md`.
 **Health check (post-commit, tip `01c00db`):** `make checkall` green
 (fmt + lint + typecheck + 772 tests pass / 36 skip / 0 fail).
 
-##### Recommended first actions for the next session
+##### EOS-4 session commits (FA-VEC clamp landed)
 
-**Pickup state 2026-05-12 EOS-3** — workspace dirty: new probe page
-`smoke-test/fa-prefill-probe.html` + `smoke-test/fa-prefill-probe-page.js`,
-plus SUMMARY.md update with the probe outcomes. Commit before next chunk.
-
-Tip: `a14d6b6`. Earlier commits this session:
+Tip: `9ea3bfc`. Five commits this session:
 - `447ff82` feat(gemma4): per-layer headCount/headCountKv plumbing + graphMem bump
 - `65ac040` feat(parity-capture): cache-buster + skipLayerTaps + long-context fixture
 - `01c00db` docs(stage4): FA discriminator probe outcome — Gemma 4 + FA succeeds on forwardWithLayerTaps
 - `a14d6b6` docs(TODO): refresh fresh-session pickup block with FA probe outcome
+- `9384709` feat(probe): fa-prefill-probe page for Gemma 4 + FA forward bisection
+- `4fdb875` docs(stage4): forwardSingle + forwardAllPositions FA probe — both pass at N=9
+- `76b6268` feat(probe): chat-template + length-sweep + prefillTile knobs
+- `b8e013a` docs(stage4): root-cause Gemma 4 + FA trap as upstream FA path-select assert
+- `9ea3bfc` fix(gemma): clamp prefillTileSize to 16 for FA + head_dim > 128
 
-**Discriminator probe round 2 (EOS-3) result: `forwardSingle` AND
-`forwardAllPositions` both SUCCEED on Gemma 4 + FA at N=9 raw tokens +
-ctx=4096.** All three forwards (`forwardSingle`, `forwardAllPositions`,
-`forwardWithLayerTaps`) work at the standalone-probe shape. Yet chat.html
-still traps `Error: unreachable` at the same model + FA combination.
+**Health check (post `9ea3bfc`):** `make checkall` green (fmt + lint +
+typecheck + 778 tests pass / 36 skip / 0 fail; +6 new tests under
+`tests/prefill-tiling-config.test.ts`'s "prefillTileSize FA VEC clamp"
+describe block).
 
-See
-[`eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md)
-"FA forwardAllPositions + forwardSingle discriminator probe (2026-05-12 EOS-3)"
-for the full table, the OOM trap encountered at ctx=131072 (default GGUF max),
-and a four-hypothesis ranking for the chat.html trap.
-
-**Refined bug location:** the trap is NOT in any of the four forward
-methods at the bare 9-token raw prefill shape. It is something specific
-to the chat.html path — most likely (in order):
-1. Chat-formatted prompt content (`<|turn>`, `<turn|>` special tokens
-   hitting a code path that raw IDs don't);
-2. `forwardDecode` (nTokens=1 + pastLen>0) — the trap may fire at the
-   first decode step, not at prefill;
-3. Conversation-pool / KV-snapshot state (mutated `nCached` before
-   first prefill puts forwardSingle in an unprobed shape);
-4. SWA mask path at chat-templated N=46 (only candidate that intersects
-   Phase B's structural changes; would also fire on Gemma 2/3 if true).
-
-**Next cheap probe (~10 min):** extend `fa-prefill-probe-page.js` to
-accept `?chat=1` (apply real `formatGemma4` template before tokenization)
-and `?nTokens=N` (repeat raw prompt to sweep length). Trial matrix:
-- chat=1 at N≈46 → if traps, hypothesis (1) confirmed.
-- chat=0 at N≈46 (repeated prompt) → if traps, hypothesis (4) confirmed.
-- Neither traps → switch to a `chatCompletion`-driven probe (hypotheses
-  2 or 3); add a `?via=engine` knob that constructs an Engine + calls
-  `chatCompletion` directly with greedy temp=0, captures the first
-  forward arrow.
-
-**Bisection plan once the failing shape reproduces:**
-- Per-layer mask leaf allocation site (each forward allocates one,
-  unlike pre-Phase-B's single shared mask);
-- Mask byte upload (`writeCausalMaskF16` with `swaWindow > 0`) producing
-  a layout the FA shader rejects;
-- Per-layer K/V views feeding FA with a stride that disagrees with the
-  per-layer head_dim.
-
-**Stage 4.1 final gate** (long-context Gemma 4 parity) remains blocked on
-the FA chat regression and the per-binding 128 MiB cap. Address the FA
-regression first; the cheapest gate then becomes "drive
-`engine.chatCompletion` greedy on the 1129-token prompt via `chat.html`;
-verify non-crash + coherent output".
+End-to-end smoke verified: `fa-prefill-probe.html?model=gemma-4-e2b-it-q4km
+&ctx=4096&path=forward&chat=1` succeeds in 0.92s with healthy argmax
+50429 / logit +9.5 (was: traps in 0.028s with `RuntimeError: unreachable`
+before the clamp landed).
 
 ##### Smokes verified post-Phase B (2026-05-11, manual-attn path only)
 - TinyLlama Q4_0: 165.6 tok/s decode, coherent English, non-SWA
