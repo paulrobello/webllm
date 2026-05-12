@@ -45,6 +45,11 @@ export async function runParityCapture() {
 			? null
 			: captureParam || "http://localhost:8035/capture";
 	const topK = Math.max(1, Number(params.get("topK") || 16));
+	// ?finalOnly=1 — skip per-layer residual tap capture (long-context probe).
+	// At N >= ~500 on a 35-layer model, 35 simultaneously-live tap buffers
+	// exceed the WebGPU per-binding 128 MiB cap. With this flag only embedding-
+	// tap + final-norm hidden + top-K logits are captured.
+	const skipLayerTaps = params.get("finalOnly") === "1";
 
 	const wasmVariant =
 		params.get("wasm") === "mem64" ? "webllm-wasm-mem64.js" : "webllm-wasm.js";
@@ -176,11 +181,14 @@ export async function runParityCapture() {
 		}
 		const tokenIdsArr = new Int32Array(ids);
 		const t0 = performance.now();
-		const tapped = await inference.forwardWithLayerTaps(tokenIdsArr, { topK });
+		const tapped = await inference.forwardWithLayerTaps(tokenIdsArr, {
+			topK,
+			skipLayerTaps,
+		});
 		const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
 		log(
 			"pass",
-			`[5/6] Tap forward complete in ${elapsed}s: ${tapped.perLayerResidual.length} layers, embDim=${tapped.finalNormHidden.length}, topK=${tapped.logitsTop16.ids.length}`,
+			`[5/6] Tap forward complete in ${elapsed}s: ${tapped.perLayerResidual.length} layers (${skipLayerTaps ? "skipped" : "captured"}), embDim=${tapped.finalNormHidden.length}, topK=${tapped.logitsTop16.ids.length}`,
 		);
 
 		capture = {

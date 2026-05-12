@@ -6,8 +6,8 @@
 <title>WebLLM Parity Capture</title>
 <link rel="stylesheet" href="./real-model.css">
 <script type="module">
-import { runParityCapture } from "./parity-capture-page.js";
-
+const cacheBust = window.location.search || "";
+const { runParityCapture } = await import(`./parity-capture-page.js${cacheBust}`);
 await runParityCapture();
 </script>
 </head>
