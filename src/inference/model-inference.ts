@@ -1467,6 +1467,11 @@ export class ModelInference {
 		// and uploading the tensor entirely and pass a null mask to
 		// soft_max_ext. Saves one tensor alloc + one `backendTensorSet` per
 		// decode step.
+		//
+		// Sliding-window (SWA) models (Gemma 2/3/4) carry a SECOND mask tensor
+		// of the same shape that holds a banded windowed-causal mask. Per-layer
+		// dispatch picks `swaMaskTensor` for layers with
+		// `hp.slidingWindowPattern[il] === true`, otherwise `maskTensor`.
 		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
@@ -1474,6 +1479,17 @@ export class ModelInference {
 		// so this works for both attention paths. Causal mask values are
 		// written as F16 bit patterns: 0x0000 = 0.0, 0xFC00 = -Inf.
 		const maskTensor = needsMask
+			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
+			: 0;
+		const swaWindow = hp.slidingWindowSize ?? 0;
+		const hasSwaLayers =
+			(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
+		// SWA mask is needed whenever prefill runs (nTokens > 1) OR a decode
+		// step at past-context wider than the window (the latter is the long-
+		// context fix Stage 4 targets).
+		const needsSwaMask =
+			hasSwaLayers && (nTokens > 1 || pastLen + nTokens > swaWindow);
+		const swaMaskTensor = needsSwaMask
 			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
 
@@ -1526,6 +1542,18 @@ export class ModelInference {
 			// the same `kv.k`/`kv.v` handles which were aliased to the source
 			// layer's tensors at `initKVCache` time.
 			const isShared = (hp.kvReuseFromLayer?.[il] ?? null) !== null;
+
+			// Per-layer attention mask: SWA layers use the banded windowed mask,
+			// non-SWA layers use the full-causal mask. When `swaMaskTensor` is 0
+			// (non-SWA model, or short-decode-step SWA case), fall through to the
+			// global mask (which may itself be 0 at single-token decode).
+			const isSwaLayer = hp.slidingWindowPattern?.[il] === true;
+			const layerMask =
+				isSwaLayer && swaMaskTensor !== 0
+					? swaMaskTensor
+					: needsMask
+						? maskTensor
+						: 0;
 
 			// LLaMA RMSNorm: (x / rms(x)) * gamma. ggml_rms_norm only does the
 			// normalize step — the per-dim gain `attn_norm.weight` must be applied
@@ -1654,7 +1682,7 @@ export class ModelInference {
 					qp,
 					fullK,
 					fullV,
-					maskTensor,
+					layerMask,
 					attnSoftmaxScale(hp, headDim),
 					0.0, // max_bias (ALiBi disabled)
 					// FA logit_softcap is the *attention* softcap (Gemma 2 only).
@@ -1694,7 +1722,7 @@ export class ModelInference {
 				}
 				const attnW = wasm.opSoftMaxExt(
 					qkProcessed,
-					maskTensor,
+					layerMask,
 					softmaxScale,
 					0.0,
 				);
@@ -1774,67 +1802,25 @@ export class ModelInference {
 
 		const t3 = trace ? performance.now() : 0;
 
-		// Upload leaf input data AFTER backend buffers are assigned.
-		// All three buffers (pos / tokenIds / mask) are written in a single
-		// WASM call via backendTensorSet3 to avoid 2–3 separate FFI hops per
-		// forward. Mask slot is skipped entirely (tensor = 0) when !needsMask.
-		{
-			const posBytes = nTokens * 4;
-			const idsBytes = nTokens * 4;
-			const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
-			const totalBytes = posBytes + idsBytes + maskBytes;
-
-			const heap = wasm.malloc(totalBytes);
-			try {
-				const posPtr = heap;
-				const idsPtr = heap + posBytes;
-				const maskPtr = heap + posBytes + idsBytes;
-
-				const posView = new Int32Array(wasm.heapU8.buffer, posPtr, nTokens);
-				const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, nTokens);
-				for (let i = 0; i < nTokens; i++) {
-					posView[i] = positions[i];
-					idsView[i] = tokenIds[i];
-				}
-
-				if (needsMask) {
-					// Causal mask: mask[key, query] = -Infinity if key > pastLen + query,
-					// else 0. Shape [totalLen, nTokensPadded] stored row-major.
-					const mask = new Uint16Array(
-						wasm.heapU8.buffer,
-						maskPtr,
-						totalLen * maskPaddedCols,
-					);
-					const F16_NEG_INF = 0xfc00;
-					for (let q = 0; q < nTokens; q++) {
-						const rowBase = q * totalLen;
-						const visibleUpTo = pastLen + q;
-						for (let k = 0; k < totalLen; k++) {
-							mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
-						}
-					}
-					// Padding rows past nTokens: zero (unused but keeps buffer defined).
-					for (let q = nTokens; q < maskPaddedCols; q++) {
-						const rowBase = q * totalLen;
-						for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
-					}
-				}
-
-				wasm.backendTensorSet3(
-					posTensor,
-					posPtr,
-					posBytes,
-					tokenIdsTensor,
-					idsPtr,
-					idsBytes,
-					needsMask ? maskTensor : 0,
-					maskPtr,
-					maskBytes,
-				);
-			} finally {
-				wasm.free(heap);
-			}
-		}
+		// Upload leaf input data AFTER backend buffers are assigned. The helper
+		// packs pos / tokenIds / mask into a single backendTensorSet3 call to
+		// avoid 2–3 separate FFI hops per forward; when SWA layers are active a
+		// follow-on backendTensorSet uploads `swaMaskTensor` from the same heap.
+		this.uploadLeaves(
+			wasm,
+			tokenIds,
+			positions,
+			nTokens,
+			pastLen,
+			totalLen,
+			needsMask,
+			maskPaddedCols,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+			swaMaskTensor,
+			swaWindow,
+		);
 
 		const t4 = trace ? performance.now() : 0;
 
@@ -2191,6 +2177,17 @@ export class ModelInference {
 			const maskTensor = needsMask
 				? wasm.tensorNew2d(GgmlType.F16, N, maskPaddedCols)
 				: 0;
+			// SWA mask for Gemma 2/3/4 sliding-window layers. Single-shot
+			// forward pass with pastLen=0 → mask is needed iff N > 1 OR
+			// N > swaWindow (the latter is unreachable here since N is
+			// the entire prefill, but kept for parity with forwardSingle).
+			const swaWindow = hp.slidingWindowSize ?? 0;
+			const hasSwaLayers =
+				(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
+			const needsSwaMask = hasSwaLayers && (N > 1 || N > swaWindow);
+			const swaMaskTensor = needsSwaMask
+				? wasm.tensorNew2d(GgmlType.F16, N, maskPaddedCols)
+				: 0;
 
 			let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 			// Gemma family: scale residual stream by sqrt(embedding_length)
@@ -2240,6 +2237,17 @@ export class ModelInference {
 					: undefined;
 				const kvReuse = hp.kvReuseFromLayer?.[il] ?? null;
 				const isShared = kvReuse !== null;
+
+				// Per-layer mask: SWA layers use the windowed mask, non-SWA use
+				// the full-causal mask. Falls through to 0 when neither mask
+				// was materialized (single-token paths; not reachable here at N>1).
+				const isSwaLayer = hp.slidingWindowPattern?.[il] === true;
+				const layerMask =
+					isSwaLayer && swaMaskTensor !== 0
+						? swaMaskTensor
+						: needsMask
+							? maskTensor
+							: 0;
 
 				let normed = wasm.opMul(
 					wasm.opRmsNorm(cur, hp.normEpsilon),
@@ -2308,7 +2316,7 @@ export class ModelInference {
 				}
 				const attnW = wasm.opSoftMaxExt(
 					qkProcessed,
-					maskTensor,
+					layerMask,
 					softmaxScale,
 					0.0,
 				);
@@ -2386,16 +2394,20 @@ export class ModelInference {
 
 			const graphBuf = wasm.backendAllocCtxTensors();
 			try {
-				// Upload inputs: positions = 0..N-1, causal mask.
+				// Upload inputs: positions = 0..N-1, causal mask. SWA models
+				// additionally upload a banded windowed mask consumed by
+				// sliding-window layers.
 				const idsBytes = N * 4;
 				const posBytes = N * 4;
 				const maskBytes = needsMask ? N * maskPaddedCols * 2 : 0;
-				const totalBytes = idsBytes + posBytes + maskBytes;
+				const swaMaskBytes = swaMaskTensor !== 0 ? N * maskPaddedCols * 2 : 0;
+				const totalBytes = idsBytes + posBytes + maskBytes + swaMaskBytes;
 				const heap = wasm.malloc(totalBytes);
 				try {
 					const idsPtr = heap;
 					const posPtr = heap + idsBytes;
 					const maskPtr = heap + idsBytes + posBytes;
+					const swaMaskPtr = maskPtr + maskBytes;
 
 					const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
 					const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
@@ -2405,22 +2417,20 @@ export class ModelInference {
 					}
 
 					if (needsMask) {
-						const F16_NEG_INF = 0xfc00;
 						const mask = new Uint16Array(
 							wasm.heapU8.buffer,
 							maskPtr,
 							N * maskPaddedCols,
 						);
-						for (let q = 0; q < N; q++) {
-							const rowBase = q * N;
-							for (let k = 0; k < N; k++) {
-								mask[rowBase + k] = k <= q ? 0 : F16_NEG_INF;
-							}
-						}
-						for (let q = N; q < maskPaddedCols; q++) {
-							const rowBase = q * N;
-							for (let k = 0; k < N; k++) mask[rowBase + k] = 0;
-						}
+						writeCausalMaskF16(mask, N, N, 0, maskPaddedCols);
+					}
+					if (swaMaskTensor !== 0) {
+						const swaMask = new Uint16Array(
+							wasm.heapU8.buffer,
+							swaMaskPtr,
+							N * maskPaddedCols,
+						);
+						writeCausalMaskF16(swaMask, N, N, 0, maskPaddedCols, swaWindow);
 					}
 
 					wasm.backendTensorSet3(
@@ -2434,6 +2444,9 @@ export class ModelInference {
 						maskPtr,
 						maskBytes,
 					);
+					if (swaMaskTensor !== 0) {
+						wasm.backendTensorSet(swaMaskTensor, swaMaskPtr, 0, swaMaskBytes);
+					}
 				} finally {
 					wasm.free(heap);
 				}
@@ -2663,6 +2676,15 @@ export class ModelInference {
 		const maskTensor = needsMask
 			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
+		// SWA mask for Gemma 2/3/4 sliding-window layers — see forwardSingle.
+		const swaWindow = hp.slidingWindowSize ?? 0;
+		const hasSwaLayers =
+			(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
+		const needsSwaMask =
+			hasSwaLayers && (nTokens > 1 || pastLen + nTokens > swaWindow);
+		const swaMaskTensor = needsSwaMask
+			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
+			: 0;
 
 		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		// Gemma family: scale residual stream by sqrt(embedding_length)
@@ -2701,6 +2723,15 @@ export class ModelInference {
 				? hp.feedForwardLengthPerLayer[il]
 				: undefined;
 			const isShared = (hp.kvReuseFromLayer?.[il] ?? null) !== null;
+
+			// Per-layer attention mask: SWA layers use the windowed mask.
+			const isSwaLayer = hp.slidingWindowPattern?.[il] === true;
+			const layerMask =
+				isSwaLayer && swaMaskTensor !== 0
+					? swaMaskTensor
+					: needsMask
+						? maskTensor
+						: 0;
 
 			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
 			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
@@ -2804,7 +2835,7 @@ export class ModelInference {
 					qp,
 					fullK,
 					fullV,
-					maskTensor,
+					layerMask,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
 					// Gemma 2 attention logit soft-cap (FA shader applies natively).
@@ -2827,7 +2858,7 @@ export class ModelInference {
 				}
 				const attnW = wasm.opSoftMaxExt(
 					qkProcessed,
-					maskTensor,
+					layerMask,
 					softmaxScale,
 					0.0,
 				);
@@ -2903,60 +2934,21 @@ export class ModelInference {
 
 		const t3 = trace ? performance.now() : 0;
 
-		{
-			const posBytes = nTokens * 4;
-			const idsBytes = nTokens * 4;
-			const maskBytes = needsMask ? totalLen * maskPaddedCols * 2 : 0;
-			const totalBytes = posBytes + idsBytes + maskBytes;
-
-			const heap = wasm.malloc(totalBytes);
-			try {
-				const posPtr = heap;
-				const idsPtr = heap + posBytes;
-				const maskPtr = heap + posBytes + idsBytes;
-
-				const posView = new Int32Array(wasm.heapU8.buffer, posPtr, nTokens);
-				const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, nTokens);
-				for (let i = 0; i < nTokens; i++) {
-					posView[i] = positions[i];
-					idsView[i] = tokenIds[i];
-				}
-
-				if (needsMask) {
-					const mask = new Uint16Array(
-						wasm.heapU8.buffer,
-						maskPtr,
-						totalLen * maskPaddedCols,
-					);
-					const F16_NEG_INF = 0xfc00;
-					for (let q = 0; q < nTokens; q++) {
-						const rowBase = q * totalLen;
-						const visibleUpTo = pastLen + q;
-						for (let k = 0; k < totalLen; k++) {
-							mask[rowBase + k] = k <= visibleUpTo ? 0 : F16_NEG_INF;
-						}
-					}
-					for (let q = nTokens; q < maskPaddedCols; q++) {
-						const rowBase = q * totalLen;
-						for (let k = 0; k < totalLen; k++) mask[rowBase + k] = 0;
-					}
-				}
-
-				wasm.backendTensorSet3(
-					posTensor,
-					posPtr,
-					posBytes,
-					tokenIdsTensor,
-					idsPtr,
-					idsBytes,
-					needsMask ? maskTensor : 0,
-					maskPtr,
-					maskBytes,
-				);
-			} finally {
-				wasm.free(heap);
-			}
-		}
+		this.uploadLeaves(
+			wasm,
+			tokenIds,
+			positions,
+			nTokens,
+			pastLen,
+			totalLen,
+			needsMask,
+			maskPaddedCols,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+			swaMaskTensor,
+			swaWindow,
+		);
 
 		const t4 = trace ? performance.now() : 0;
 
@@ -3052,6 +3044,15 @@ export class ModelInference {
 		const maskTensor = needsMask
 			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
+		// SWA mask for Gemma 2/3/4 sliding-window layers — see forwardSingle.
+		const swaWindow = hp.slidingWindowSize ?? 0;
+		const hasSwaLayers =
+			(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
+		const needsSwaMask =
+			hasSwaLayers && (nTokens > 1 || pastLen + nTokens > swaWindow);
+		const swaMaskTensor = needsSwaMask
+			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
+			: 0;
 
 		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
 		// Gemma family: scale residual stream by sqrt(embedding_length)
@@ -3089,6 +3090,15 @@ export class ModelInference {
 				? hp.feedForwardLengthPerLayer[il]
 				: undefined;
 			const isShared = (hp.kvReuseFromLayer?.[il] ?? null) !== null;
+
+			// Per-layer attention mask: SWA layers use the windowed mask.
+			const isSwaLayer = hp.slidingWindowPattern?.[il] === true;
+			const layerMask =
+				isSwaLayer && swaMaskTensor !== 0
+					? swaMaskTensor
+					: needsMask
+						? maskTensor
+						: 0;
 
 			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
 			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
@@ -3190,7 +3200,7 @@ export class ModelInference {
 					qp,
 					fullK,
 					fullV,
-					maskTensor,
+					layerMask,
 					attnSoftmaxScale(hp, headDim),
 					0.0,
 					// Gemma 2 attention logit soft-cap (FA shader applies natively).
@@ -3213,7 +3223,7 @@ export class ModelInference {
 				}
 				const attnW = wasm.opSoftMaxExt(
 					qkProcessed,
-					maskTensor,
+					layerMask,
 					softmaxScale,
 					0.0,
 				);
@@ -3299,6 +3309,8 @@ export class ModelInference {
 				posTensor,
 				tokenIdsTensor,
 				maskTensor,
+				swaMaskTensor,
+				swaWindow,
 			);
 			const t4 = trace ? performance.now() : 0;
 
@@ -3365,6 +3377,8 @@ export class ModelInference {
 				posTensor,
 				tokenIdsTensor,
 				maskTensor,
+				swaMaskTensor,
+				swaWindow,
 			);
 			const t4 = trace ? performance.now() : 0;
 
@@ -3429,6 +3443,8 @@ export class ModelInference {
 			posTensor,
 			tokenIdsTensor,
 			maskTensor,
+			swaMaskTensor,
+			swaWindow,
 		);
 		const t4 = trace ? performance.now() : 0;
 
