@@ -1231,59 +1231,63 @@ the "Surgical Changes" doctrine in `~/.claude/CLAUDE.md`.
 
 ##### Recommended first actions for the next session
 
-**Pickup state 2026-05-12 EOS-2** — workspace clean on tip `01c00db`.
-Three atomic commits landed this session:
+**Pickup state 2026-05-12 EOS-3** — workspace dirty: new probe page
+`smoke-test/fa-prefill-probe.html` + `smoke-test/fa-prefill-probe-page.js`,
+plus SUMMARY.md update with the probe outcomes. Commit before next chunk.
+
+Tip: `a14d6b6`. Earlier commits this session:
 - `447ff82` feat(gemma4): per-layer headCount/headCountKv plumbing + graphMem bump
 - `65ac040` feat(parity-capture): cache-buster + skipLayerTaps + long-context fixture
-- `01c00db` docs(stage4): FA discriminator probe outcome
+- `01c00db` docs(stage4): FA discriminator probe outcome — Gemma 4 + FA succeeds on forwardWithLayerTaps
+- `a14d6b6` docs(TODO): refresh fresh-session pickup block with FA probe outcome
 
-FA discriminator probe ran: **`forwardWithLayerTaps` + FA=true + Gemma 4
-at N=9 SUCCEEDS in 0.28s, 35 layers tapped.** chat.html still traps
-`Error: unreachable` at the same prompt. See
+**Discriminator probe round 2 (EOS-3) result: `forwardSingle` AND
+`forwardAllPositions` both SUCCEED on Gemma 4 + FA at N=9 raw tokens +
+ctx=4096.** All three forwards (`forwardSingle`, `forwardAllPositions`,
+`forwardWithLayerTaps`) work at the standalone-probe shape. Yet chat.html
+still traps `Error: unreachable` at the same model + FA combination.
+
+See
 [`eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md)
-"FA probe result" section for the refined picture and dispatch plan.
+"FA forwardAllPositions + forwardSingle discriminator probe (2026-05-12 EOS-3)"
+for the full table, the OOM trap encountered at ctx=131072 (default GGUF max),
+and a four-hypothesis ranking for the chat.html trap.
 
-**Refined bug location:** FA shader compiles + runs on Gemma 4 fine; the
-trap is specifically in `forwardSingle` / `forwardAllPositions` /
-`forwardDecode` when invoked via `engine.chatCompletion`. Since trap
-fires on the very first message (`forwardAllPositions` prefill, not
-`forwardDecode`), the most likely candidate is `forwardAllPositions`.
+**Refined bug location:** the trap is NOT in any of the four forward
+methods at the bare 9-token raw prefill shape. It is something specific
+to the chat.html path — most likely (in order):
+1. Chat-formatted prompt content (`<|turn>`, `<turn|>` special tokens
+   hitting a code path that raw IDs don't);
+2. `forwardDecode` (nTokens=1 + pastLen>0) — the trap may fire at the
+   first decode step, not at prefill;
+3. Conversation-pool / KV-snapshot state (mutated `nCached` before
+   first prefill puts forwardSingle in an unprobed shape);
+4. SWA mask path at chat-templated N=46 (only candidate that intersects
+   Phase B's structural changes; would also fire on Gemma 2/3 if true).
 
-1. **Next cheap probe (~5 min): `forwardAllPositions` FA=true smoke.**
-   Two options:
-   - Standalone probe page (`smoke-test/fa-prefill-probe.html`)
-     mirroring `parity-capture-page.js` but invoking
-     `forwardAllPositions` directly with the 9-token Gemma 4 prompt.
-     ~80 lines of JS, no engine wiring. (Recommended.)
-   - Invasive: temporary debug knob in `engine.chatCompletion` that
-     swaps `forwardAllPositions` for `forwardWithLayerTaps`. Easier
-     code-wise but mutates the production path.
+**Next cheap probe (~10 min):** extend `fa-prefill-probe-page.js` to
+accept `?chat=1` (apply real `formatGemma4` template before tokenization)
+and `?nTokens=N` (repeat raw prompt to sweep length). Trial matrix:
+- chat=1 at N≈46 → if traps, hypothesis (1) confirmed.
+- chat=0 at N≈46 (repeated prompt) → if traps, hypothesis (4) confirmed.
+- Neither traps → switch to a `chatCompletion`-driven probe (hypotheses
+  2 or 3); add a `?via=engine` knob that constructs an Engine + calls
+  `chatCompletion` directly with greedy temp=0, captures the first
+  forward arrow.
 
-   Outcomes:
-   - TRAPS → bug is in `forwardAllPositions` (prefill-batched FA).
-     Diff `forwardAllPositions` against `forwardWithLayerTaps` in
-     `0739d80` to find the offending line.
-   - SUCCEEDS → trap is in `forwardDecode` (`nTokens=1` decode-shape
-     FA), surfacing later than the "first message" framing suggested.
-     Different bisection target.
+**Bisection plan once the failing shape reproduces:**
+- Per-layer mask leaf allocation site (each forward allocates one,
+  unlike pre-Phase-B's single shared mask);
+- Mask byte upload (`writeCausalMaskF16` with `swaWindow > 0`) producing
+  a layout the FA shader rejects;
+- Per-layer K/V views feeding FA with a stride that disagrees with the
+  per-layer head_dim.
 
-2. **Once the offending forward is identified, bisect `0739d80` line by
-   line** — Phase B's per-layer SWA mask wiring is the only structural
-   change to those forwards since they last worked with FA. Likely
-   candidates:
-   - Per-layer mask leaf allocation site (each forward allocates one,
-     unlike pre-Phase-B's single shared mask).
-   - Mask byte upload (`writeCausalMaskF16` with `swaWindow > 0`)
-     producing a layout the FA shader rejects.
-   - Per-layer K/V views feeding FA with a stride that disagrees
-     with the per-layer head_dim.
-
-3. **Only after Gemma 4 + FA works again**, return to Stage 4.1
-   long-context closure. The cheapest gate is now "drive
-   `engine.chatCompletion` greedy on the 1129-token prompt via
-   `chat.html`; verify non-crash + coherent output". Per-layer
-   parity remains out of reach without the captureTaps producer or
-   a backend patch.
+**Stage 4.1 final gate** (long-context Gemma 4 parity) remains blocked on
+the FA chat regression and the per-binding 128 MiB cap. Address the FA
+regression first; the cheapest gate then becomes "drive
+`engine.chatCompletion` greedy on the 1129-token prompt via `chat.html`;
+verify non-crash + coherent output".
 
 ##### Smokes verified post-Phase B (2026-05-11, manual-attn path only)
 - TinyLlama Q4_0: 165.6 tok/s decode, coherent English, non-SWA

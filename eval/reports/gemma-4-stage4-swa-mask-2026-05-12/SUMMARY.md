@@ -300,3 +300,75 @@ Production Gemma 4 chat (`chat.html`) is broken since Phase B (`0739d80`,
 is a Stage 4 regression, not a new today's change regression — TS
 changes committed in this session (`447ff82` per-layer plumbing,
 `65ac040` parity-capture) preserve the same failure signature.
+
+## FA forwardAllPositions + forwardSingle discriminator probe (2026-05-12 EOS-3)
+
+New standalone probe page added at `smoke-test/fa-prefill-probe.html` +
+`smoke-test/fa-prefill-probe-page.js`. Drives `ModelInference` directly,
+calls either `forwardVerify` (→ `forwardAllPositions`) or `forward()` (→
+`forwardSingle`) on the same 9-token raw "The capital of France is" prompt.
+URL knobs: `?path=verify|forward`, `?ctx=N`, `?fa=off`.
+
+**Both forwards SUCCEED on Gemma 4 + FA at the 9-token raw prompt + ctx=4096.**
+
+| Path | Forward | FA | nTokens | ctxLen | Outcome |
+|---|---|---|---|---|---|
+| `chat.html` | `forwardSingle` (in conversation pool) | true | 46 (chat-templated) | 4096 | ❌ `Error: unreachable` |
+| `fa-prefill-probe.html?path=forward` | `forwardSingle` (via `inf.forward()`) | true | 9 (raw) | 4096 | ✅ 0.294s, argmax=236772 logit=-9.381 |
+| `fa-prefill-probe.html?path=verify` | `forwardAllPositions` (via `inf.forwardVerify()`) | true | 9 (raw) | 4096 | ✅ 0.283s, argmax=236772 logit=-9.381 |
+| `parity-capture.html` (FA=true edit) | `forwardWithLayerTaps` | true | 9 (raw) | n/a | ✅ 0.28s, 35 layers tapped |
+| `real-model.html` | `forwardSingle` (greedy) | false | varies | varies | ✅ `Assistant: Paris` 10.6 tok/s |
+
+**Initial probe with ctx=131072** (GGUF default) failed at `ggml_aligned_malloc:
+insufficient memory (attempted to allocate 3842.09 MB)` during `initKVCache`
+— the FA F16 KV cache at owningLayers=15 × maxHeadDim=512 × ctxLen=131072 × 2 bytes × 2 (K+V)
+= ~3.75 GiB. Clamping `ctxLen` to 4096 (chat.html's clamp via `model.contextLength`)
+makes the probe pass. The "Error: unreachable" trap on chat.html is NOT this OOM
+— chat.html clamps ctx to 4096 too.
+
+### What this means for the regression hunt
+
+The previous "narrow to `forwardSingle` / `forwardAllPositions` / `forwardDecode`"
+framing was too broad. None of the three traps on a raw 9-token prefill with FA=true
++ ctx=4096. The Gemma 4 + FA chat.html trap is therefore caused by one of:
+
+1. **Chat-formatted prompt content.** `formatGemma4` emits `<|turn>` (id 105),
+   `<turn|>` (id 106), BOS, and other special tokens; the conversation prefill
+   ends up ~46 tokens vs the probe's 9 raw tokens. Special-token IDs near vocab
+   bottom may engage a code path (e.g. unused-token row in `tok_emb`, or BF16-
+   cast row index) that raw IDs in the 40K–800K range don't.
+2. **`forwardDecode` (nTokens=1 + pastLen>0).** The trap might fire at the first
+   *decode* step rather than prefill — the chat UI message-rendering wouldn't
+   distinguish prefill-fail from first-decode-fail. The "first message" framing
+   in TODO.md was inferential, not measured.
+3. **Conversation pool / KV-snapshot pre-state.** `chatCompletionWithConversation`
+   does `inf.forward(midIds, midPos)` for shared-prefix-aware prefill at line
+   936, then `generateTextStream` re-prefills the last token. If the KV-cache
+   snapshot path mutates `nCached` to a non-zero value before the first prefill,
+   `forwardSingle` runs with `pastLen > 0` — a shape the probe never exercises.
+4. **Long-context cap (Phase B SWA mask byte layout).** At chat-template nTokens=46,
+   the banded SWA mask shape differs from the trivial all-zeros short-mask. The
+   probe doesn't exercise SWA mask (`needsSwaMask` requires either nTokens>1 OR
+   pastLen+nTokens>swaWindow, but window=512 and nTokens=9 falls in the
+   non-banded regime).
+
+Hypothesis ranking by likelihood: **(4) > (1) > (2) > (3)**. (4) is the only one
+that intersects Phase B's structural changes; the others would have produced an
+unreachable trap at *any* Phase B model not just Gemma 4.
+
+### Next cheap probe (~10 min)
+
+Extend `fa-prefill-probe-page.js` to:
+- Accept `?chat=1` — apply the actual chat-template via `formatGemma4`
+  (or copy the same logic) before tokenization.
+- Accept `?nTokens=N` — repeat the 9-token prompt to reach an arbitrary
+  prefill length, sweeping above and below the SWA window (512).
+- If the chat-formatted 46-token prefill traps and the raw 46-token-via-
+  repetition prefill doesn't → bug is content-specific (hypothesis 1).
+- If both 46-token forms trap and 9-token doesn't → bug is length-specific
+  (hypothesis 4 — SWA mask trap below or near boundary).
+- If neither traps → bug is in conversation-pool / decode path (hypotheses
+  2 or 3); switch to a `chatCompletion`-driven probe.
+
+Once the failing shape is reproduced in the standalone probe, the trap
+location bisection is straightforward.
