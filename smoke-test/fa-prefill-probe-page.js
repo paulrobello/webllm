@@ -12,6 +12,15 @@
 //   ?ctx=N           KV cache contextLength (default 4096 — matches chat.html).
 //   ?path=verify|forward   which forward to invoke (default verify →
 //                          forwardAllPositions; forward → forwardSingle via inf.forward()).
+//   ?chat=1          apply real chat template (encodeChatPrompt) before
+//                    tokenizing; isolates whether chat-format content
+//                    causes the chat.html FA trap.
+//   ?nTokens=N       repeat the prompt token sequence until length >= N
+//                    (rough length sweep; ignored when ?chat=1 — chat
+//                    template already determines length).
+//   ?prefillTile=N   override ModelInference.prefillTileSize (default
+//                    model-derived). Forces ?path=forward to use inf.forward()
+//                    which tiles when tileSize > 0 && N > tileSize.
 //   ?wasm=mem64      load mem64 WASM target.
 
 export async function runFaPrefillProbe() {
@@ -26,6 +35,13 @@ export async function runFaPrefillProbe() {
 	const flashAttn = params.get("fa") !== "off";
 	const ctxLenOverride = Math.max(64, Number(params.get("ctx") || 4096));
 	const pathParam = params.get("path") === "forward" ? "forward" : "verify";
+	const useChatTemplate = params.get("chat") === "1";
+	const nTokensTarget = Math.max(0, Number(params.get("nTokens") || 0));
+	const prefillTileRaw = params.get("prefillTile");
+	const prefillTileOverride =
+		prefillTileRaw !== null && prefillTileRaw !== ""
+			? Math.max(0, Number(prefillTileRaw))
+			: undefined;
 	const wasmVariant =
 		params.get("wasm") === "mem64" ? "webllm-wasm-mem64.js" : "webllm-wasm.js";
 	const bundleName = "webllm-bundle.js";
@@ -45,8 +61,14 @@ export async function runFaPrefillProbe() {
 		logEl.appendChild(el);
 	};
 
-	const { GgmlWasm, GgufParser, ModelInference, ModelLoader, Tokenizer } =
-		await import(`./${bundleName}${assetSuffix}`);
+	const {
+		GgmlWasm,
+		GgufParser,
+		ModelInference,
+		ModelLoader,
+		Tokenizer,
+		encodeChatPrompt,
+	} = await import(`./${bundleName}${assetSuffix}`);
 
 	log("running", "[1/6] WebGPU + WASM init...");
 	const wasm = new GgmlWasm();
@@ -87,7 +109,12 @@ export async function runFaPrefillProbe() {
 	log("running", "[4/6] loading weights + init KV...");
 	let inference;
 	try {
-		inference = new ModelInference(wasm, parsed.hyperparams, { flashAttn });
+		inference = new ModelInference(wasm, parsed.hyperparams, {
+			flashAttn,
+			...(prefillTileOverride !== undefined
+				? { prefillTileSize: prefillTileOverride }
+				: {}),
+		});
 		inference.loadWeights(ggufCtx, modelDataAt);
 		const ctxLen = Math.min(
 			parsed.kvCacheConfig.maxContextLength,
@@ -105,7 +132,31 @@ export async function runFaPrefillProbe() {
 
 	log("running", "[5/6] tokenize...");
 	const tokenizer = new Tokenizer(parsed.tokenizerConfig);
-	const ids = tokenizer.encode(prompt);
+	let ids;
+	if (useChatTemplate) {
+		const messages = [{ role: "user", content: prompt }];
+		ids = encodeChatPrompt(messages, tokenizer);
+		log(
+			"running",
+			`[5/6] chat-template applied; nTokens=${ids.length} (BOS=${tokenizer.bosId}, first 4=[${ids.slice(0, 4).join(",")}], last 4=[${ids.slice(-4).join(",")}])`,
+		);
+	} else {
+		ids = tokenizer.encode(prompt);
+		if (nTokensTarget > 0 && ids.length > 0) {
+			const baseLen = ids.length;
+			const out = [];
+			while (out.length < nTokensTarget) {
+				for (let i = 0; i < baseLen && out.length < nTokensTarget; i++) {
+					out.push(ids[i]);
+				}
+			}
+			ids = out;
+			log(
+				"running",
+				`[5/6] repeated raw prompt to nTokens=${ids.length} (target=${nTokensTarget}, base=${baseLen})`,
+			);
+		}
+	}
 	if (ids.length < 2) {
 		throw new Error(
 			`forwardAllPositions requires nTokens >= 2; got ${ids.length}`,
@@ -114,7 +165,7 @@ export async function runFaPrefillProbe() {
 	const tokenIdsArr = new Int32Array(ids);
 	const positions = new Int32Array(ids.length);
 	for (let i = 0; i < ids.length; i++) positions[i] = i;
-	log("pass", `[5/6] nTokens=${ids.length}: [${ids.join(",")}]`);
+	log("pass", `[5/6] nTokens=${ids.length}`);
 
 	const pathLabel =
 		pathParam === "forward"
