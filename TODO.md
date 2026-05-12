@@ -1136,30 +1136,43 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-13)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-14)
 
-**Two campaigns from the 2026-05-11 EOS-12 queue have CLOSED.**
-Gemma 4 Stage 3 (NEOX-RoPE) closed EOS-12 at 68 %. Campaign Q1
-(Gemma 2 un-demote) closed EOS-13 at 60 %, restored to
-`SMOKE_PROFILE_SETS.full`. Two campaigns remain queued: **Q2 (Stage 4
-real SWA)** and **Q3 (Stage 5 bench + closure)**.
+**Stage 4.0 + Stage 4.1 implementation landed EOS-14.** Probe report
+at [`eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md);
+implementation in commits `b4f6bdf` (Phase A — helper + uploadLeaves
+threading + 9 unit tests) and `0739d80` (Phase B — per-method
+allocation + per-layer dispatch across all four chat-path forwards).
+Smoke regression green (TinyLlama bit-identical, Gemma 4 still emits
+"Paris" with finish=stop-token, console clean). Two remaining
+Stage 4 sub-stages and Stage 5 still queued.
 
-**Start here next session:** read [Campaign Q2 — Stage 4: real
-sliding-window attention](#campaign-q2--stage-4-real-sliding-window-attention-queued-2026-05-11-eos-12)
-below (line ~1290 after Q1 archival). The Q2 pre-flight probe
-(Stage 4.0 — verify ggml-webgpu's `opSoftMaxExt` accepts a banded
-windowed mask shape) is the first thing to run before any
-implementation. If the shader has a baked-in causal assumption,
-filing the llama.cpp patch is the gating step; otherwise per-layer
-mask construction in `model-inference.ts` is straightforward.
+**Start here next session:** run the **Stage 4.1 final gate** — a
+1000-token parity probe of Gemma 4 E2B vs HF, verifying SWA layers
+hit cosine ≥ 0.95 at every position and global layers remain
+unaffected. The 6-token parity-capture harness from 3.3l-P2 is the
+closest precedent — extend the captured prompt length and re-run.
+Capture artifacts go under
+`eval/reports/gemma-4-stage4-swa-mask-<date>/SUMMARY.md`.
 
-**Workspace state at EOS-13:** working tree clean on `main`; tip is
-`dc3304a feat(eval): un-demote gemma-2-2b-warm + Campaign Q1 closure`.
-763 tests pass / 0 fail. `make checkall` green.
+Then move to **Stage 4.2** (Gemma 2 alternating-period SWA derivation
+at load time — but verify whether Q1.4's un-demote work already
+populated `slidingWindowPattern` correctly for Gemma 2; if so, this
+stage may already be done and just needs a confirmation dump),
+**Stage 4.3** (long-context regression probe — 1000-token output, no
+quality cliff at 512 boundary), and **Stage 4.4** (eval re-gate at
+≥68%, must not regress Stage 3).
 
-**Smokes verified post-Q1 closure:** TinyLlama 168.1 tok/s
-bit-identical baseline; Gemma 2 `Paris.` 75.5 tok/s, finish=stop-token,
-console clean; Gemma 4 unchanged (NEOX-fix architecture-gated).
+**Workspace state at EOS-14:** working tree clean on `main`; tip is
+`0739d80 feat(stage4): per-layer SWA mask wiring in all four chat-path forwards`.
+772 tests pass / 0 fail. `make checkall` green.
+
+**Smokes verified post-Phase B:** TinyLlama 165.6 tok/s decode (vs
+canonical 168.1, -1.5% in-noise), coherent English, finish=max-tokens;
+Gemma 4 E2B `Paris` 57.1 tok/s decode, finish=stop-token, console
+clean. SWA-aware code-path inactive for short prompts (window covers
+all past KV) — long-context behavior verified by the Stage 4.1
+parity gate above.
 
 ---
 
@@ -1281,15 +1294,40 @@ shape, dtype, and strides to the current causal mask — only the
 byte content differs. Closure report:
 [`eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md).
 
-**Stage 4.1 — Per-layer mask construction.** In
-`model-inference.ts`, switch the single shared `maskTensor` to a
-**pair of mask tensors** — `globalMask` (full causal) and
-`swaMask` (windowed causal). At graph build time, allocate both;
-at each layer iteration pick the right mask based on
-`hp.slidingWindowPattern[il]`. The SWA mask: `mask[i,j] = 0` if
-`j ≤ i AND j > i - swaWindow` else `-inf`. **Gate:** parity probe
-on a 1000-token Gemma 4 prompt — SWA layers cosine ≥ 0.95 vs HF
-at every position; full layers unaffected. **Artifact:**
+**Stage 4.1 — Per-layer mask construction.** Implementation
+**LANDED 2026-05-11** in two commits:
+
+- Phase A (`b4f6bdf`, foundation): extracted
+  `writeCausalMaskF16(view, totalLen, nTokens, pastLen,
+  maskPaddedCols, swaWindow?)` from `uploadLeaves`; threaded
+  optional `swaMaskTensor + swaWindow` through `uploadLeaves`
+  with zero-behavior-change defaults; 9 unit tests cover full-
+  causal + banded SWA + edge cases.
+- Phase B (`0739d80`, per-method wiring): allocates
+  `swaMaskTensor` alongside `maskTensor` in `forwardSingle`,
+  `forwardWithLayerTaps`, `forwardAllPositions`, `forwardDecode`
+  when `hp.slidingWindowPattern?.some(b => b)` AND
+  `hp.slidingWindowSize > 0`. Per-layer attention dispatch (FA +
+  manual softmax × 4 methods) picks
+  `layerMask = isSwaLayer && swaMaskTensor !== 0 ? swaMaskTensor
+  : needsMask ? maskTensor : 0`. Non-SWA models see
+  `swaMaskTensor = 0` always and stay bit-identical. SWA mask
+  needed when `nTokens > 1 || pastLen + nTokens > swaWindow`,
+  which covers both prefill and the long-context decode-step
+  case where the window no longer covers all past KV.
+- Smoke verified post-Phase B: TinyLlama 165.6 tok/s decode
+  (vs 168.1 baseline, -1.5% within noise; coherent English);
+  Gemma 4 E2B emits "Paris" on "The capital of France is",
+  finish=stop-token, 57.1 tok/s; console clean.
+- Ship gate: 772 pass / 0 fail / 39285 expect() calls.
+
+**Final gate** (parity probe — 1000-token Gemma 4 prompt, SWA
+layers cosine ≥ 0.95 vs HF) is the next step. Phase B is the
+load-bearing implementation; the parity probe verifies the
+windowed-mask behavior actually fires at >512 token contexts
+where SWA matters. The 6-token parity-capture harness from
+3.3l-P2 (Phases 3-5) is the closest precedent — extend the
+captured prompt length and re-run. **Artifact (pending):**
 `eval/reports/gemma-4-stage4-swa-mask-<date>/SUMMARY.md`.
 
 **Stage 4.2 — Gemma 2 alternating-period SWA support.** Gemma 2's
