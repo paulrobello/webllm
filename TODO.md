@@ -1322,14 +1322,33 @@ before the clamp landed).
    is a one-line closure note. If not, derive it in
    `model-loader.ts:519-523` from a `swa_period` integer fallback.
 
-2. **Stage 4.3 — Long-context regression probe.** Generate
-   1000-token output on a fixed long prompt; measure
-   argmax-divergence vs HF reference or a known-good `llama-cli` run.
-   Gate: no quality cliff at the 512-token SWA boundary.
+2. **Stage 4.3 — Long-context regression probe. PARTIAL 2026-05-12
+   EOS-7.** Incremental per-layer parity-capture infrastructure
+   landed (commit `2c32f80` — `captureLayer` + `lastTokenLogitsOnly`
+   options on `forwardWithLayerTaps`, `?mode=incremental` harness
+   loop). API verified on TinyLlama Q4_0 at N=6: 22/22 layers
+   captured, end-of-stack cosine 0.9855 vs HF, greedy argmax
+   matches. Strict numerical gate on **Gemma 4 E2B at N=560** is
+   **blocked** by the 128 MiB per-binding cap — `inpPerLayer` PLE
+   pin (20 MB) + shared-KV K/V retention for layers 0-14 (~60 MB)
+   + per-block intermediates push the graph alloc 1.5 MB past the
+   cap. Closure report:
+   [`eval/reports/gemma-4-stage4.3-longctx-parity-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4.3-longctx-parity-2026-05-12/SUMMARY.md).
+   The functional gate ("no quality cliff at 512-token SWA
+   boundary") is already met by the Stage 4.1 long-context chat
+   closure (N=2238 fact-correct retrieval drawn from prompt
+   position ~280). Numerical-parity escalation path for Gemma 4
+   specifically: bump `ggml-webgpu` to multi-binding scratch
+   allocation (path 4 of the 2026-05-12 decision) — defer until
+   the eval re-gate (Stage 4.4) shows whether the qualitative
+   gate is enough.
 
 3. **Stage 4.4 — Eval re-gate.** `bench-profile
    PROFILES=gemma-4-e2b-warm` — 36-prompt eval ≥ 68 % (must not
-   regress Stage 3 closure baseline).
+   regress Stage 3 closure baseline). With Stage 4.3 in PARTIAL
+   status, this is now the primary numerical evidence — model
+   outputs being eval-correct is the canonical end-to-end check
+   that the SWA path doesn't regress.
 
 4. **Campaign Q3 (Stage 5) — bench + closure.** Pre-rebase
    baselines on the canonical 6, add Gemma 4 to bench-full, single
