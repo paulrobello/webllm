@@ -212,34 +212,80 @@ export function getRopeModeForArchitecture(
 }
 
 /**
+ * Largest prefill tile that keeps each `forwardSingle` call inside the
+ * upstream `ggml-webgpu` FA VEC path. The VEC selector at
+ * `ggml-webgpu-shader-lib.hpp:734` requires `src0.ne[1] < 20` (Q tokens);
+ * VEC is the only FA shader path that fits Gemma family head_dim ∈ {256, 512}
+ * in WebGPU's 16 KiB LDS budget. At `q_tile=4` TILE/SUBGROUP_MATRIX consume
+ * too much shared memory and `max_kv_tile` rounds to 0 after the subgroup-size
+ * granularity quantizer → path = NONE → `GGML_ASSERT` fires at
+ * `ggml-webgpu-shader-lib.hpp:2560`. Repro + bisection at
+ * `eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`. 16 chosen
+ * over 19 (just under the bound) for a margin of safety and to keep the tile
+ * count obvious in profile traces.
+ */
+const FA_LARGE_HEAD_DIM_PREFILL_TILE = 16;
+
+/**
+ * Largest per-layer head_dim before the FA VEC clamp kicks in. Llama / Qwen /
+ * Mistral / Phi-3 family head_dims are all ≤ 128 and route through TILE
+ * comfortably; Gemma 2/3/4 use 256 (SWA) or 512 (global) and blow the LDS
+ * budget at every path except VEC.
+ */
+const FA_VEC_HEAD_DIM_THRESHOLD = 128;
+
+/**
  * Compute the default `prefillTileSize` for a model based on hyperparameters.
  *
- * Rule: `layerCount >= 32` → 128, else 0.
+ * Two layered rules, applied in order:
  *
- * Maps to the §22 abort signature observed in
- * `eval/reports/prefill-tiling-2026-04-27/00-phase0-diagnostic.txt`:
- * "ggml_tallocr_alloc: not enough space in the buffer" at ggml-alloc.c:82
- * during `backendAllocCtxTensors`. F32 intermediates scale with
- * layers × seq × emb; layer count is the dominant predictor of per-tile
- * graph allocator pressure, so the gate keys off layers alone.
+ * 1. **FA VEC clamp** (set 2026-05-12). When `flashAttn === true` AND any
+ *    layer's head_dim exceeds {@link FA_VEC_HEAD_DIM_THRESHOLD}, clamp the
+ *    tile size to {@link FA_LARGE_HEAD_DIM_PREFILL_TILE} so each
+ *    `forwardSingle` call sees `nTokens < 20` and FA VEC engages. Without
+ *    this clamp Gemma 4 + FA prefill at chat-template length traps with
+ *    `RuntimeError: unreachable` on the upstream `decisions.path != NONE`
+ *    assert. See the doc comment on `FA_LARGE_HEAD_DIM_PREFILL_TILE` for
+ *    the upstream constraint chain.
  *
- * Originally an AND gate (`layerCount >= 32 AND embeddingLength >= 4096`),
- * but qwen3-4B (36 layers × 2560 emb) reproducibly aborted on tc-005's
- * 3-tool prompt despite being below the emb gate. The 36-layer count is
- * exactly the §22 abort regime — at seq≈800 (tc-005's tool-heavy
- * prefill) the F32 intermediates total 295 MB, larger than the
- * Mistral-7B-at-seq-512 case the heuristic was originally tuned for.
- * Dropping the emb gate keeps qwen3-4B inside the tiling envelope while
- * still leaving sub-32-layer models (qwen3-1.7B, tinyllama, smollm2)
- * untiled — they stay well within the graph budget.
+ * 2. **§22 graph-allocator clamp.** `layerCount >= 32` → 128, else 0.
+ *    Maps to the §22 abort signature observed in
+ *    `eval/reports/prefill-tiling-2026-04-27/00-phase0-diagnostic.txt`:
+ *    "ggml_tallocr_alloc: not enough space in the buffer" at ggml-alloc.c:82
+ *    during `backendAllocCtxTensors`. F32 intermediates scale with
+ *    layers × seq × emb; layer count is the dominant predictor of per-tile
+ *    graph allocator pressure, so the gate keys off layers alone.
+ *
+ *    Originally an AND gate (`layerCount >= 32 AND embeddingLength >= 4096`),
+ *    but qwen3-4B (36 layers × 2560 emb) reproducibly aborted on tc-005's
+ *    3-tool prompt despite being below the emb gate. The 36-layer count is
+ *    exactly the §22 abort regime — at seq≈800 (tc-005's tool-heavy
+ *    prefill) the F32 intermediates total 295 MB, larger than the
+ *    Mistral-7B-at-seq-512 case the heuristic was originally tuned for.
+ *    Dropping the emb gate keeps qwen3-4B inside the tiling envelope while
+ *    still leaving sub-32-layer models (qwen3-1.7B, tinyllama, smollm2)
+ *    untiled — they stay well within the graph budget.
  *
  * Override surface (ctor opt / `?prefillTile=` / `--prefill-tile`) wins
  * unconditionally — including the explicit-zero force-disable path.
  *
  * Spec: `docs/superpowers/specs/2026-04-28-prefill-tile-heuristic-design.md`.
  */
-export function computeDefaultPrefillTileSize(hp: ModelHyperparams): number {
-	return hp.layerCount >= 32 ? 128 : 0;
+export function computeDefaultPrefillTileSize(
+	hp: ModelHyperparams,
+	flashAttn = false,
+): number {
+	const sec22 = hp.layerCount >= 32 ? 128 : 0;
+	if (!flashAttn) return sec22;
+	const maxHeadDim = hp.embeddingHeadLengthPerLayer
+		? Math.max(...hp.embeddingHeadLengthPerLayer)
+		: hp.embeddingHeadLength;
+	if (maxHeadDim <= FA_VEC_HEAD_DIM_THRESHOLD) return sec22;
+	// Large head_dim + FA: clamp to FA VEC ceiling. When §22 is already
+	// non-zero, take the min so we don't accidentally raise it.
+	return sec22 === 0
+		? FA_LARGE_HEAD_DIM_PREFILL_TILE
+		: Math.min(sec22, FA_LARGE_HEAD_DIM_PREFILL_TILE);
 }
 
 /**
@@ -447,7 +493,8 @@ export class ModelInference {
 		this.hp = hyperparams;
 		this.flashAttn = opts.flashAttn ?? false;
 		this.prefillTileSize =
-			opts.prefillTileSize ?? computeDefaultPrefillTileSize(hyperparams);
+			opts.prefillTileSize ??
+			computeDefaultPrefillTileSize(hyperparams, this.flashAttn);
 		if (this.prefillTileSize < 0) {
 			throw new Error(
 				`prefillTileSize must be >= 0; got ${this.prefillTileSize}`,
