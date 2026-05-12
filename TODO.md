@@ -1191,44 +1191,42 @@ threshold). 6 new unit tests cover the matrix in
    pushed prefill into a single batched dispatch on TILE; bumping the
    VEC ceiling lets us retry batched VEC at larger N.
 
-3. **Stage 4.2 (Gemma 2 alternating SWA), 4.3 (long-context regression
-   probe), 4.4 (eval re-gate).** Stage 4.1 closure now unblocks the
-   sequence.
+3. **Stage 4.2 — Gemma 2/3 SWA wiring landed (2026-05-12 EOS-6).**
+   `src/models/model-loader.ts` gained an `arch === "gemma2" ||
+   arch === "gemma3"` branch that derives the boolean
+   `slidingWindowPattern` from the scalar uint32 `swa_period`
+   GGUF key (default 2) per `llama-hparams.cpp:14` set_swa_pattern:
+   `swa_layers[il] = period == 0 || (il % period < period - 1)`.
+   For period=2 this yields `[T,F,T,F,...]` (NOT `[F,T,F,T,...]`
+   as the earlier sketch incorrectly stated — upstream uses
+   `(il % p < p-1)`, so layer 0 is SWA and layer 1 is global.
+   The pretrained weights expect that specific assignment).
+   `slidingWindowSize` reads `attention.sliding_window` (default
+   4096 per `gemma2.cpp:7`). Per-layer head_count / head_dim /
+   FFN / rope arrays are left undefined — Gemma 2 is uniform, so
+   downstream dispatch falls back to scalar `hp.*` fields.
+   `sharedKvLayers` / `kvReuseFromLayer` stay undefined.
 
-   **Stage 4.2 scope correction (EOS-5 static-code check).** The
-   "load Gemma 2 and dump `slidingWindowPattern`" preview underestimated
-   the scope. Inspecting `src/models/model-loader.ts:485-612`: the entire
-   SWA / per-layer-hyperparam wiring branch is gated on
-   `arch === "gemma4"`. Q1's `5d1aba4` only touched soft-capping
-   (`final_logit_softcapping`, `attn_logit_softcapping`), not SWA
-   pattern derivation. So `slidingWindowPattern` for Gemma 2 is
-   currently unset → Stage 4.1's per-layer mask switch falls back to
-   the full-causal mask everywhere → Gemma 2 SWA layers are silently
-   running global attention. This is the same pre-existing condition
-   that pre-dated Stage 4.1, just made visible by Phase B's per-layer
-   dispatch. Quality is fine at short context (window of 4096 covers
-   most evals); long-context regression would surface it.
+   **Gates (a) ✅ + (b) ✅:**
+   - (a) Pattern matches upstream alternation: new test file
+     `tests/models/model-loader-gemma2-hparams.test.ts` (4 tests,
+     17 expect() calls) verifies `slidingWindowPattern[0..3] =
+     [T,F,T,F]`, `slidingWindowSize=4096`, per-layer arrays
+     undefined, no `sharedKvLayers`. All pass against the local
+     `gemma-2-2b-q4f16.gguf`.
+   - (b) `make checkall` green — 782 pass / 36 skip / 0 fail /
+     39311 expect() calls; biome fmt + lint clean; tsc clean.
+     +4 tests vs the pre-change 778 baseline.
 
-   **Stage 4.2 implementation sketch.** Extend the SWA-wiring branch
-   gate from `arch === "gemma4"` to include Gemma family:
-   `arch === "gemma2" || arch === "gemma3" || arch === "gemma4"`.
-   For Gemma 2, the GGUF doesn't ship the boolean
-   `attention.sliding_window_pattern` array — derive it from
-   `attention.sliding_window_period` (or default 2 per
-   `gemma2.cpp:6-8`) using
-   `slidingWindowPattern[i] = (i % period) !== 0`. Per-layer head
-   counts and head_dim are uniform for Gemma 2 (no mixed-GQA), so
-   the per-layer arrays collapse to `Array(layerCount).fill(scalar)`.
-   No KV reuse for Gemma 2 (set `sharedKvLayers = 0` so
-   `kvReuseFromLayer = undefined`).
-
-   **Stage 4.2 gate.** Three-step:
-   (a) load `gemma-2-2b-q4f16`, dump `slidingWindowPattern` →
-       expect `[F,T,F,T,...]` period-2 alternation;
-   (b) regression-check `make checkall` → no test break on any
-       non-Gemma model;
-   (c) Gemma 2 long-context smoke (chat.html, prompt > 4096-token
-       SWA window) — verify no crash + coherent output.
+   **Gate (c) deferred to Stage 4.3** (long-context regression
+   probe). At prompts < 4096 tokens the SWA window covers the
+   entire sequence, so the new per-layer mask switch behaves
+   identically to the full-causal mask — regression-safe by
+   construction. The long-context Gemma 2 smoke is the same gate
+   Stage 4.3 already targets; folding it in avoids duplicate
+   browser runs. Stage 4.1 dispatch (the load-bearing per-layer
+   mask code) was already smoke-verified on Gemma 4 — Stage 4.2
+   just feeds it a different per-architecture boolean array.
 
 ##### How to verify the fix held (drop-in repro)
 
