@@ -1,0 +1,1 @@
+The first fifteen layers of the Gemma-4 family use sliding-window attention with a window size of 512 tokens and 8 query heads per layer.

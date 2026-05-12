@@ -1,0 +1,19 @@
+{
+  "model": "gemma-4-e2b-it-q4km",
+  "quant": "Q4_K_M",
+  "flashAttn": true,
+  "prefillTileSize": 16,
+  "contextLength": 4096,
+  "contextUsed": 2238,
+  "swaWindow": 512,
+  "promptChars": 5955,
+  "tokensOut": 33,
+  "ttftMs": 42337,
+  "decodeTokPerSec": 35.5,
+  "totalWallMs": 43300,
+  "finishReason": "stop-token",
+  "consoleErrors": 0,
+  "consoleAsserts": 0,
+  "runtimeErrors": 0,
+  "tip": "770c65f"
+}

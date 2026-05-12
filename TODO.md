@@ -1164,13 +1164,20 @@ threshold). 6 new unit tests cover the matrix in
 
 ##### Open work after EOS-4
 
-1. **Stage 4.1 long-context closure (now reachable).** The chat path is
-   no longer trapping, so the cheap closure gate is "drive
-   `engine.chatCompletion` greedy on a long (~1129-token) prompt via
-   `chat.html`; verify non-crash + coherent output". Per-binding 128 MiB
-   cap still blocks per-layer tap parity — see option (3) `captureTaps`
-   scaffolding or option (4) backend patch in the SUMMARY's "Recommended
-   next steps" section.
+1. **Stage 4.1 long-context closure (now reachable). CLOSED 2026-05-12 EOS-5.**
+   Drove `chat.html` with `gemma-4-e2b-it-q4km` (FA=true, ctx 4096) on
+   a 2,238-token prompt (4.4× the 512-token SWA window) — long context
+   passage + appended one-sentence question. **Result:** coherent
+   fact-correct reply ("The first fifteen layers of the Gemma-4
+   family use sliding-window attention with a window size of 512
+   tokens and 8 query heads per layer."), 33 tokens in 43.3s
+   (42.3s TTFT + 35.5 tok/s decode), 0 console errors, no
+   `Error: unreachable`. Confirms the FA-VEC `prefillTileSize=16`
+   clamp from `9ea3bfc` survives at >512-token contexts where SWA
+   layers actually exercise the banded mask. Closure report:
+   [`eval/reports/gemma-4-stage4.1-longctx-closure-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4.1-longctx-closure-2026-05-12/SUMMARY.md).
+   Per-binding 128 MiB cap still blocks per-layer tap parity — that
+   gate moves to Stage 4.3 (HF-reference long-context probe).
 
 2. **Upstream patch follow-up: bump VEC `ne[1] < 20` ceiling.** With
    the TS clamp in place this is now P2 hygiene — recover prefill
@@ -1179,10 +1186,17 @@ threshold). 6 new unit tests cover the matrix in
    to `~/Repos/llama.cpp` `webllm-browser-patches` branch at
    `ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp:734`. Cost: ~30 min
    including rebuild + retest. Should also be filed upstream so future
-   rebases pick it up.
+   rebases pick it up. **Quantified cost:** 42.3s TTFT for 2,238-token
+   prefill at q_tile=1 (Stage 4.1 closure run). Pre-clamp would have
+   pushed prefill into a single batched dispatch on TILE; bumping the
+   VEC ceiling lets us retry batched VEC at larger N.
 
 3. **Stage 4.2 (Gemma 2 alternating SWA), 4.3 (long-context regression
-   probe), 4.4 (eval re-gate).** Sequenced after (1) closes.
+   probe), 4.4 (eval re-gate).** Stage 4.1 closure now unblocks the
+   sequence. **Next action:** Stage 4.2 confirmation dump — load
+   `gemma-2-2b-q4f16`, log `window.parsedModel.hyperparams.slidingWindowPattern`,
+   verify it matches the period-2 alternation. If Q1.4's un-demote
+   already populated it correctly, this stage is a one-line closure.
 
 ##### How to verify the fix held (drop-in repro)
 
