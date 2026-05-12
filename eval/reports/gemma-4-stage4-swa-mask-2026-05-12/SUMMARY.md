@@ -372,3 +372,132 @@ Extend `fa-prefill-probe-page.js` to:
 
 Once the failing shape is reproduced in the standalone probe, the trap
 location bisection is straightforward.
+
+## Root cause confirmed (2026-05-12 EOS-4): upstream FA path-selection assert
+
+### Probe sweep narrows the threshold
+
+`fa-prefill-probe-page.js` extended with `?chat=1`, `?nTokens=N`, and
+`?prefillTile=N` knobs. Sweeping `path=forward` (forwardSingle via
+`inf.forward()`) at varying nTokens against Gemma 4 E2B Q4_K_M + FA=true
++ ctx=4096 + raw repeated prompt:
+
+| nTokens | Outcome |
+|---|---|
+| 16 | ✅ pass |
+| 17 | ✅ pass |
+| 18 | ✅ pass |
+| 19 | ✅ pass |
+| 20 | ❌ TRAPPED unreachable in 0.028s |
+| 22 | ❌ TRAPPED |
+| 32 | ❌ TRAPPED |
+| 46 (raw repeat) | ❌ TRAPPED |
+| 46 (real chat-template) | ❌ TRAPPED |
+| 20 with `fa=off` | ✅ pass |
+| 46 with `fa=off` | ✅ pass |
+
+Threshold is exactly **N=20** for forwardSingle + FA + Gemma 4. The
+`forwardAllPositions` path (via `forwardVerify`) shows the **identical**
+N=20 threshold — confirming the trap is shared between the two
+prefill forwards and is not specific to either's graph construction.
+
+### The assertion
+
+Console-captured at the trap:
+```
+ggml-webgpu-shader-lib.hpp:2560: GGML_ASSERT(decisions.path != GGML_WEBGPU_FLASH_ATTN_PATH_NONE) failed
+```
+
+This is upstream `ggml_webgpu_flash_attn_get_decisions` (line 710 in the
+patched `webllm-browser-patches` head). The decision logic at line 734:
+
+```cpp
+const bool use_vec = context.supports_subgroups
+                  && (context.src0->ne[1] < 20)   // ← hard upstream bound
+                  && (context.src0->ne[0] % 32 == 0)
+                  ...;
+```
+
+VEC is the only FA shader path that fits Gemma 4's `head_dim=256/512`
+in WebGPU's 16 KiB shared-memory budget. At `q_tile=1`, VEC's
+`base_q_bytes ≈ 2 KiB` for `head_dim=512` and `max_kv_tile` is large.
+TILE (`q_tile=4`) and SUBGROUP_MATRIX (`q_tile=sg_mat_m`) blow past
+the LDS budget at these head dims, and `max_kv_tile` rounds down to 0
+after the granularity quantizer at `ggml-webgpu-shader-lib.hpp:707` —
+the second NONE return at line 757.
+
+**Upstream gates VEC at `ne[1] < 20`** to bias longer prefill toward
+TILE/SUBGROUP_MATRIX. For models with head_dim ≤ 128 (TinyLlama 64,
+Qwen3-1.7B 128, Llama-3.1-8B 128) TILE fits → FA prefill works fine
+at any N. For Gemma 4 with head_dim ∈ {256, 512} TILE doesn't fit →
+FA prefill at N ≥ 20 cannot pick a path → assert.
+
+### This is NOT a Stage 4 / Phase B regression
+
+The Phase B commit `0739d80` is innocent. The constraint is purely
+upstream FA path-selection + Gemma 4's large head_dim. Pre-Phase-B,
+Gemma 4 + FA at chat-template N would have hit the same assert — but
+nobody had exercised `chat.html` with Gemma 4 + FA before Phase B's
+"Paris" smoke (which ran on `real-model.html` with FA=false). The
+"FA chat regression since Phase B" framing in EOS-1/EOS-2 sections
+above is incorrect — the bug pre-existed Phase B and was only
+discovered when we tried to validate Stage 4 by driving the
+production chat path.
+
+### Verified fix: clamp prefillTileSize
+
+With `?prefillTile=16` (so each `forwardSingle` call sees nTokens ≤ 16
+< 20 → FA VEC engages), the same N=46 prompt that traps with default
+tiling **succeeds** in 0.869s. (argmax=185278 — quality is degenerate
+without the proper chat template, but the FA path no longer asserts.)
+
+`computeDefaultPrefillTileSize(hp)` returns 128 for Gemma 4 (35 layers,
+trips the `layerCount >= 32` branch). For FA mode on Gemma 4 this is
+incompatible with the upstream FA VEC bound.
+
+### Recommended remediation paths (in cost order)
+
+1. **TS-only: clamp prefillTileSize for FA + Gemma family.** Extend
+   `computeDefaultPrefillTileSize` (or the ctor logic in
+   `ModelInference`) to return a value `< 20` (e.g., 16) when:
+   - `flashAttn === true`, AND
+   - `hp.architecture` is gemma family (gemma2/gemma3/gemma4), OR
+   - `max(hp.embeddingHeadLengthPerLayer ?? [hp.embeddingHeadLength]) > 128`
+     (more general — covers any future model whose head_dim exceeds
+     the TILE LDS budget).
+   No llama.cpp patch needed. Reversible. Cost: ~10 lines of TS + 1
+   unit test.
+
+2. **Upstream patch: bump VEC `ne[1] < 20` ceiling.** Edit the VEC
+   guard at `ggml-webgpu-shader-lib.hpp:734` to allow VEC at larger N
+   when no other path is viable. Cleanest semantic — VEC at `q_tile=1`
+   correctly handles any N, it's just slower than batched paths. This
+   would unblock Gemma 4 + FA without TS-side tiling tricks. Requires
+   adding a patch to `webllm-browser-patches`; risk surface is small
+   (the change is narrow) but the patch must survive future rebases.
+
+3. **Hybrid: do (1) now, file (2) as the long-term cleanup.** Ship
+   the TS clamp immediately to unblock chat.html. Land the upstream
+   patch in a follow-up so Gemma 4 prefill regains tiling-friendly
+   throughput where N > 19 batches would otherwise pay tile overhead.
+
+### Cross-model exposure check
+
+Gemma 2 (head_dim=256) and Gemma 3 (head_dim=256 typical) are also
+exposed. Anywhere FA mode is on AND prefill nTokens ≥ 20 AND head_dim
+> 128, the assert fires. Llama / Qwen / Mistral / Phi-3 head_dims are
+all ≤ 128 → unaffected. The TS clamp in (1) should gate on head_dim,
+not just architecture, so Gemma 2/3 get the same protection without
+hard-coding each name.
+
+### Stage 4 status update
+
+Stage 4.1's "Paris" smoke at `real-model.html` (FA=false) was a valid
+correctness signal for the SWA mask code path. Stage 4 implementation
+is NOT broken. The chat.html "Error: unreachable" is a pre-existing
+Gemma 4 + FA dispatch issue, surfaced because we tried to validate
+Stage 4 by driving the production chat path. Once the prefillTileSize
+clamp lands, chat.html Gemma 4 + FA should work end-to-end at any
+prompt length, and Stage 4.1's long-context parity gate becomes
+reachable via the chat path (no per-binding cap hit because each tile
+is small).
