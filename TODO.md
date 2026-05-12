@@ -1271,17 +1271,15 @@ exercise this (each task < 200 tokens), so Stage 4 was not gating
 Stage 3 closure.
 
 **Pre-flight probe (Stage 4.0 — windowed-mask feasibility).**
-Before implementation, verify that `ggml-webgpu`'s `opSoftMaxExt`
-mask tensor can express a banded windowed mask. The current mask
-shape is `[totalLen, nTokens]` of f32 with `-inf` at masked
-positions; for SWA the mask should be `-inf` for positions
-`< i - 512` AND `> i` (current). If the shader accepts arbitrary
-mask shapes, no patch is needed — just build the mask differently
-per-layer. If the shader has a baked-in causal assumption, file
-a llama.cpp patch (1-2 SLOC). **Gate:** synthetic test — build a
-windowed mask in Bun, run `opSoftMaxExt` once, verify the output
-matches a CPU reference. **Artifact:** inline note in the Stage
-4.1 PR or a one-page probe report.
+**CLOSED 2026-05-11 — ✅ no llama.cpp patch needed.** Both
+`opSoftMaxExt` (`soft_max.wgsl:184,211`) and `opFlashAttn`
+(`flash_attn.wgsl:230-232`) handle the mask as a purely additive
+per-element term (`v += slope * mask_val(i)`); `slope=1.0` when
+`max_bias=0` (project default). There is no position-driven
+masking in the shader. A banded windowed mask is identical in
+shape, dtype, and strides to the current causal mask — only the
+byte content differs. Closure report:
+[`eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md).
 
 **Stage 4.1 — Per-layer mask construction.** In
 `model-inference.ts`, switch the single shared `maskTensor` to a
