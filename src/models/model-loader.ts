@@ -526,8 +526,35 @@ export class ModelLoader {
 				`${metaPrefix}.feed_forward_length`,
 				new Array(layerCount).fill(baseHp.feedForwardLength),
 			);
+			const headCountGlobal = getMetaNumber(
+				ctx,
+				`${metaPrefix}.attention.head_count`,
+				baseHp.headCount,
+			);
+			const headCountSwa = getMetaNumber(
+				ctx,
+				`${metaPrefix}.attention.head_count_swa`,
+				headCountGlobal,
+			);
+			const headCountKvGlobal = getMetaNumber(
+				ctx,
+				`${metaPrefix}.attention.head_count_kv`,
+				baseHp.headCountKv,
+			);
+			const headCountKvSwa = getMetaNumber(
+				ctx,
+				`${metaPrefix}.attention.head_count_kv_swa`,
+				headCountKvGlobal,
+			);
+
 			const headPerLayer = swaPattern.map((isSwa) =>
 				isSwa ? keyLenSwa : keyLenGlobal,
+			);
+			const headCountPerLayer = swaPattern.map((isSwa) =>
+				isSwa ? headCountSwa : headCountGlobal,
+			);
+			const headCountKvPerLayer = swaPattern.map((isSwa) =>
+				isSwa ? headCountKvSwa : headCountKvGlobal,
 			);
 			const ropeDimPerLayer = swaPattern.map((isSwa) =>
 				isSwa ? ropeDimSwa : ropeDimGlobal,
@@ -535,11 +562,13 @@ export class ModelLoader {
 			const ropeFreqBasePerLayer = swaPattern.map((isSwa) =>
 				isSwa ? freqBaseSwa : freqBaseGlobal,
 			);
+
 			const sharedKvLayers = getMetaNumber(
 				ctx,
 				`${metaPrefix}.attention.shared_kv_layers`,
 				0,
 			);
+
 			// Per-layer KV reuse map. iSWA remap rule from llama-model.cpp:2007-2014:
 			// for shared layers (il >= n_layer_kv_from_start), point at the LAST
 			// pre-share layer of matching SWA/full type. Layer 13 (last SWA) carries
@@ -557,6 +586,8 @@ export class ModelLoader {
 			return {
 				...baseHp,
 				embeddingHeadLengthPerLayer: headPerLayer,
+				headCountPerLayer,
+				headCountKvPerLayer,
 				feedForwardLengthPerLayer: ffnPerLayer,
 				ropeDimensionCountPerLayer: ropeDimPerLayer,
 				ropeFreqBasePerLayer: ropeFreqBasePerLayer,

@@ -202,6 +202,17 @@ export interface ModelHyperparams {
 	expertCount: number;
 	expertUsedCount: number;
 	/**
+	 * Per-layer query head count. When present, dispatch code MUST index
+	 * by layer (`headCountPerLayer[i]`) instead of reading scalar `headCount`.
+	 * Present for Gemma 4 (8 heads first 15 layers, 16 remaining 20).
+	 */
+	headCountPerLayer?: number[];
+	/**
+	 * Per-layer KV head count. Present for architectures with mixed GQA
+	 * or varying head counts. Length === `layerCount`.
+	 */
+	headCountKvPerLayer?: number[];
+	/**
 	 * Canonical quantization name derived from GGUF `general.file_type`
 	 * (e.g., `"F16"`, `"Q4_K_M"`, `"IQ3_M"`). Defaults to `"unknown"` when
 	 * the metadata key is absent or carries an unmapped enum value. Used by

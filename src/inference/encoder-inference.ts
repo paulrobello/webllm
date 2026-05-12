@@ -453,8 +453,9 @@ export class EncoderInference {
 
 		// Graph memory budget — sized off layer count + token count, similar
 		// to the causal-LM pattern in model-inference.ts but without KV cache
-		// allocations.
-		const graphMem = hp.layerCount * 32768 + N * hp.embeddingLength * 24;
+		// allocations. Gemma 4 PLE materialization pushed the LM sibling to 256;
+		// encoders stay at 128 for now.
+		const graphMem = hp.layerCount * 32768 + N * hp.embeddingLength * 128;
 		wasm.ctxCreate(graphMem);
 
 		const finalHidden = this.buildGraph(N);

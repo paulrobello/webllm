@@ -1067,6 +1067,7 @@ export class ModelInference {
 		nTokens: number,
 		headDim: number,
 		nHeads: number,
+		nHeadsKv: number = this.hp.headCountKv,
 	): { qReady: TensorPtr; kReady: TensorPtr; v3: TensorPtr } {
 		const { wasm, hp } = this;
 		let q3: TensorPtr;
@@ -1077,7 +1078,7 @@ export class ModelInference {
 			// Phi-3.5-mini (kvDim == E); the math handles GQA-shrunk K/V
 			// correctly for any future Phi-3 variants that ship GQA.
 			const E = hp.embeddingLength;
-			const kvDim = headDim * hp.headCountKv;
+			const kvDim = headDim * nHeadsKv;
 			const fusedRowDim = E + 2 * kvDim;
 			const qkv = wasm.opMulMat(lw.qkvFused, normed); // [fusedRowDim, nTokens]
 			const headBytes = F32_BYTES * headDim;
@@ -1089,7 +1090,7 @@ export class ModelInference {
 				wasm.opView3d(
 					qkv,
 					headDim,
-					hp.headCountKv,
+					nHeadsKv,
 					nTokens,
 					headBytes,
 					tokenBytes,
@@ -1100,7 +1101,7 @@ export class ModelInference {
 				wasm.opView3d(
 					qkv,
 					headDim,
-					hp.headCountKv,
+					nHeadsKv,
 					nTokens,
 					headBytes,
 					tokenBytes,
@@ -1125,8 +1126,8 @@ export class ModelInference {
 			const k = lw.kBias ? wasm.opAdd(kRaw, lw.kBias) : kRaw;
 			const v = lw.vBias ? wasm.opAdd(vRaw, lw.vBias) : vRaw;
 			q3 = wasm.opReshape3d(q, headDim, nHeads, nTokens);
-			k3 = wasm.opReshape3d(k, headDim, hp.headCountKv, nTokens);
-			v3 = wasm.opReshape3d(v, headDim, hp.headCountKv, nTokens);
+			k3 = wasm.opReshape3d(k, headDim, nHeadsKv, nTokens);
+			v3 = wasm.opReshape3d(v, headDim, nHeadsKv, nTokens);
 		}
 		const qReady = lw.qNorm
 			? wasm.opMul(wasm.opRmsNorm(q3, hp.normEpsilon), lw.qNorm)
@@ -1444,12 +1445,12 @@ export class ModelInference {
 
 		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
 		// too tight at seq=512 on Mistral 7B).
-		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 64;
+		const graphMem =
+			hp.layerCount * 32768 + totalLen * hp.embeddingLength * 256;
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
 
-		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 		// Leaf input tensors — data is uploaded below, AFTER backendAllocCtxTensors
@@ -1522,12 +1523,18 @@ export class ModelInference {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
 
-			// Per-layer head_dim, RoPE dim, RoPE freq_base for mixed architectures
-			// (Gemma 4: SWA layers use 256 head_dim / 1e4 freq; global use 512 / 1e6).
+			// Per-layer head_dim, head_count, head_count_kv, RoPE dim, RoPE freq_base for mixed architectures
+			// (Gemma 4: SWA layers use 256 head_dim / 8 heads / 1e4 freq; global use 512 / 16 heads / 1e6).
 			// Fallback to scalar fields for uniform architectures (no behavioral delta).
 			const headDim = hp.embeddingHeadLengthPerLayer
 				? hp.embeddingHeadLengthPerLayer[il]
 				: hp.embeddingHeadLength;
+			const nHeads = hp.headCountPerLayer
+				? hp.headCountPerLayer[il]
+				: hp.headCount;
+			const nHeadsKv = hp.headCountKvPerLayer
+				? hp.headCountKvPerLayer[il]
+				: hp.headCountKv;
 			const ropeFreqBase = hp.ropeFreqBasePerLayer
 				? hp.ropeFreqBasePerLayer[il]
 				: hp.ropeFreqBase;
@@ -1567,7 +1574,14 @@ export class ModelInference {
 			if (isShared) {
 				qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
 			} else {
-				const qkv = this.buildQKV(lw, normed, nTokens, headDim, nHeads);
+				const qkv = this.buildQKV(
+					lw,
+					normed,
+					nTokens,
+					headDim,
+					nHeads,
+					nHeadsKv,
+				);
 				qReady = qkv.qReady;
 				kReadyOwn = qkv.kReady;
 				v3Own = qkv.v3;
@@ -1601,7 +1615,7 @@ export class ModelInference {
 					kv.k,
 					headDim,
 					nTokens,
-					hp.headCountKv,
+					nHeadsKv,
 					kNb1,
 					kNb2,
 					pastLen * kNb1,
@@ -1626,7 +1640,7 @@ export class ModelInference {
 						kv.v,
 						headDim,
 						nTokens,
-						hp.headCountKv,
+						nHeadsKv,
 						vNb1,
 						vNb2,
 						pastLen * vNb1,
@@ -1639,7 +1653,7 @@ export class ModelInference {
 						kv.v,
 						nTokens,
 						headDim,
-						hp.headCountKv,
+						nHeadsKv,
 						vNb1,
 						vNb2,
 						pastLen * vNb0,
@@ -1657,7 +1671,7 @@ export class ModelInference {
 				kv.k,
 				headDim,
 				totalLen,
-				hp.headCountKv,
+				nHeadsKv,
 				kNb1,
 				kNb2,
 				0,
@@ -1666,8 +1680,8 @@ export class ModelInference {
 			// with stride_v1 = headDim (in elements). Manual mode wants
 			// [totalLen, headDim, nKvHeads] for opMulMat(V, attn).
 			const fullV = this.flashAttn
-				? wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv, vNb1, vNb2, 0)
-				: wasm.opView3d(kv.v, totalLen, headDim, hp.headCountKv, vNb1, vNb2, 0);
+				? wasm.opView3d(kv.v, headDim, totalLen, nHeadsKv, vNb1, vNb2, 0)
+				: wasm.opView3d(kv.v, totalLen, headDim, nHeadsKv, vNb1, vNb2, 0);
 
 			// Permute Q: [headDim, nHeads, nTokens] -> [headDim, nTokens, nHeads]
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
@@ -1910,7 +1924,7 @@ export class ModelInference {
 		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
-		const graphMem = hp.layerCount * 32768 + N * E * 24;
+		const graphMem = hp.layerCount * 32768 + N * E * 128;
 		wasm.ctxCreate(graphMem);
 
 		try {
@@ -2145,7 +2159,7 @@ export class ModelInference {
 	 */
 	async forwardWithLayerTaps(
 		tokenIds: Int32Array,
-		opts?: { topK?: number },
+		opts?: { topK?: number; skipLayerTaps?: boolean },
 	): Promise<{
 		embeddingOutput: Float32Array;
 		perLayerResidual: Float32Array[];
@@ -2157,14 +2171,15 @@ export class ModelInference {
 		const N = tokenIds.length;
 		const E = hp.embeddingLength;
 		const V = hp.vocabularySize;
-		const nHeads = hp.headCount;
 		const K = Math.max(1, opts?.topK ?? 16);
+		const skipLayerTaps = opts?.skipLayerTaps === true;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 		// Same seasoning as forwardSingle (64 bytes/elem covers PLE +
 		// post-norm overhead for Gemma 4 at long prefill). Per-layer tap
-		// adds no nodes beyond the existing `cur` chain.
-		const graphMem = hp.layerCount * 32768 + N * E * 64;
+		// adds no nodes beyond the existing `cur` chain. Gemma 4 PLE
+		// materialization pushed this to 256.
+		const graphMem = hp.layerCount * 32768 + N * E * 256;
 		wasm.ctxCreate(graphMem);
 
 		try {
@@ -2226,6 +2241,12 @@ export class ModelInference {
 				const headDim = hp.embeddingHeadLengthPerLayer
 					? hp.embeddingHeadLengthPerLayer[il]
 					: hp.embeddingHeadLength;
+				const nHeads = hp.headCountPerLayer
+					? hp.headCountPerLayer[il]
+					: hp.headCount;
+				const nHeadsKv = hp.headCountKvPerLayer
+					? hp.headCountKvPerLayer[il]
+					: hp.headCountKv;
 				const ropeFreqBase = hp.ropeFreqBasePerLayer
 					? hp.ropeFreqBasePerLayer[il]
 					: hp.ropeFreqBase;
@@ -2271,7 +2292,7 @@ export class ModelInference {
 						);
 					}
 				} else {
-					const qkv = this.buildQKV(lw, normed, N, headDim, nHeads);
+					const qkv = this.buildQKV(lw, normed, N, headDim, nHeads, nHeadsKv);
 					qReady = qkv.qReady;
 					v3 = qkv.v3;
 					kRope = this.applyRope(
@@ -2369,9 +2390,16 @@ export class ModelInference {
 				}
 
 				// Tap point: ensure this tensor survives buffer alloc + compute
-				// so we can read back its contents below.
-				wasm.graphBuildForwardExpand(graph, cur);
-				layerTaps.push(cur);
+				// so we can read back its contents below. Skipped when
+				// `skipLayerTaps` is set — used for long-context probes where
+				// the 35 simultaneously-live tap buffers exceed the WebGPU
+				// per-binding 128 MiB cap (each tap is N*E*F32 bytes; at
+				// N=560 / E=1536 / L=35 that's 120 MB just for tap retention).
+				// Final hidden + logits are still captured.
+				if (!skipLayerTaps) {
+					wasm.graphBuildForwardExpand(graph, cur);
+					layerTaps.push(cur);
+				}
 			}
 
 			let finalHidden = wasm.opMul(
@@ -2659,12 +2687,12 @@ export class ModelInference {
 
 		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
 		// too tight at seq=512 on Mistral 7B).
-		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 64;
+		const graphMem =
+			hp.layerCount * 32768 + totalLen * hp.embeddingLength * 256;
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
 
-		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
@@ -2713,6 +2741,12 @@ export class ModelInference {
 			const headDim = hp.embeddingHeadLengthPerLayer
 				? hp.embeddingHeadLengthPerLayer[il]
 				: hp.embeddingHeadLength;
+			const nHeads = hp.headCountPerLayer
+				? hp.headCountPerLayer[il]
+				: hp.headCount;
+			const nHeadsKv = hp.headCountKvPerLayer
+				? hp.headCountKvPerLayer[il]
+				: hp.headCountKv;
 			const ropeFreqBase = hp.ropeFreqBasePerLayer
 				? hp.ropeFreqBasePerLayer[il]
 				: hp.ropeFreqBase;
@@ -2742,7 +2776,14 @@ export class ModelInference {
 			if (isShared) {
 				qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
 			} else {
-				const qkv = this.buildQKV(lw, normed, nTokens, headDim, nHeads);
+				const qkv = this.buildQKV(
+					lw,
+					normed,
+					nTokens,
+					headDim,
+					nHeads,
+					nHeadsKv,
+				);
 				qReady = qkv.qReady;
 				kReadyOwn = qkv.kReady;
 				v3Own = qkv.v3;
@@ -2775,7 +2816,7 @@ export class ModelInference {
 					kv.k,
 					headDim,
 					nTokens,
-					hp.headCountKv,
+					nHeadsKv,
 					kNb1,
 					kNb2,
 					pastLen * kNb1,
@@ -2793,7 +2834,7 @@ export class ModelInference {
 						kv.v,
 						headDim,
 						nTokens,
-						hp.headCountKv,
+						nHeadsKv,
 						vNb1,
 						vNb2,
 						pastLen * vNb1,
@@ -2805,7 +2846,7 @@ export class ModelInference {
 						kv.v,
 						nTokens,
 						headDim,
-						hp.headCountKv,
+						nHeadsKv,
 						vNb1,
 						vNb2,
 						pastLen * vNb0,
@@ -2819,14 +2860,14 @@ export class ModelInference {
 				kv.k,
 				headDim,
 				totalLen,
-				hp.headCountKv,
+				nHeadsKv,
 				kNb1,
 				kNb2,
 				0,
 			);
 			const fullV = this.flashAttn
-				? wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv, vNb1, vNb2, 0)
-				: wasm.opView3d(kv.v, totalLen, headDim, hp.headCountKv, vNb1, vNb2, 0);
+				? wasm.opView3d(kv.v, headDim, totalLen, nHeadsKv, vNb1, vNb2, 0)
+				: wasm.opView3d(kv.v, totalLen, headDim, nHeadsKv, vNb1, vNb2, 0);
 
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
 			let merged: TensorPtr;
@@ -3027,12 +3068,12 @@ export class ModelInference {
 
 		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
 		// too tight at seq=512 on Mistral 7B).
-		const graphMem = hp.layerCount * 32768 + totalLen * hp.embeddingLength * 64;
+		const graphMem =
+			hp.layerCount * 32768 + totalLen * hp.embeddingLength * 256;
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
 
-		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
@@ -3080,6 +3121,12 @@ export class ModelInference {
 			const headDim = hp.embeddingHeadLengthPerLayer
 				? hp.embeddingHeadLengthPerLayer[il]
 				: hp.embeddingHeadLength;
+			const nHeads = hp.headCountPerLayer
+				? hp.headCountPerLayer[il]
+				: hp.headCount;
+			const nHeadsKv = hp.headCountKvPerLayer
+				? hp.headCountKvPerLayer[il]
+				: hp.headCountKv;
 			const ropeFreqBase = hp.ropeFreqBasePerLayer
 				? hp.ropeFreqBasePerLayer[il]
 				: hp.ropeFreqBase;
@@ -3109,7 +3156,14 @@ export class ModelInference {
 			if (isShared) {
 				qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
 			} else {
-				const qkv = this.buildQKV(lw, normed, nTokens, headDim, nHeads);
+				const qkv = this.buildQKV(
+					lw,
+					normed,
+					nTokens,
+					headDim,
+					nHeads,
+					nHeadsKv,
+				);
 				qReady = qkv.qReady;
 				kReadyOwn = qkv.kReady;
 				v3Own = qkv.v3;
@@ -3142,7 +3196,7 @@ export class ModelInference {
 					kv.k,
 					headDim,
 					nTokens,
-					hp.headCountKv,
+					nHeadsKv,
 					kNb1,
 					kNb2,
 					pastLen * kNb1,
@@ -3159,7 +3213,7 @@ export class ModelInference {
 						kv.v,
 						headDim,
 						nTokens,
-						hp.headCountKv,
+						nHeadsKv,
 						vNb1,
 						vNb2,
 						pastLen * vNb1,
@@ -3171,7 +3225,7 @@ export class ModelInference {
 						kv.v,
 						nTokens,
 						headDim,
-						hp.headCountKv,
+						nHeadsKv,
 						vNb1,
 						vNb2,
 						pastLen * vNb0,
@@ -3184,14 +3238,14 @@ export class ModelInference {
 				kv.k,
 				headDim,
 				totalLen,
-				hp.headCountKv,
+				nHeadsKv,
 				kNb1,
 				kNb2,
 				0,
 			);
 			const fullV = this.flashAttn
-				? wasm.opView3d(kv.v, headDim, totalLen, hp.headCountKv, vNb1, vNb2, 0)
-				: wasm.opView3d(kv.v, totalLen, headDim, hp.headCountKv, vNb1, vNb2, 0);
+				? wasm.opView3d(kv.v, headDim, totalLen, nHeadsKv, vNb1, vNb2, 0)
+				: wasm.opView3d(kv.v, totalLen, headDim, nHeadsKv, vNb1, vNb2, 0);
 
 			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
 			let merged: TensorPtr;
