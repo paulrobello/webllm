@@ -1193,10 +1193,42 @@ threshold). 6 new unit tests cover the matrix in
 
 3. **Stage 4.2 (Gemma 2 alternating SWA), 4.3 (long-context regression
    probe), 4.4 (eval re-gate).** Stage 4.1 closure now unblocks the
-   sequence. **Next action:** Stage 4.2 confirmation dump — load
-   `gemma-2-2b-q4f16`, log `window.parsedModel.hyperparams.slidingWindowPattern`,
-   verify it matches the period-2 alternation. If Q1.4's un-demote
-   already populated it correctly, this stage is a one-line closure.
+   sequence.
+
+   **Stage 4.2 scope correction (EOS-5 static-code check).** The
+   "load Gemma 2 and dump `slidingWindowPattern`" preview underestimated
+   the scope. Inspecting `src/models/model-loader.ts:485-612`: the entire
+   SWA / per-layer-hyperparam wiring branch is gated on
+   `arch === "gemma4"`. Q1's `5d1aba4` only touched soft-capping
+   (`final_logit_softcapping`, `attn_logit_softcapping`), not SWA
+   pattern derivation. So `slidingWindowPattern` for Gemma 2 is
+   currently unset → Stage 4.1's per-layer mask switch falls back to
+   the full-causal mask everywhere → Gemma 2 SWA layers are silently
+   running global attention. This is the same pre-existing condition
+   that pre-dated Stage 4.1, just made visible by Phase B's per-layer
+   dispatch. Quality is fine at short context (window of 4096 covers
+   most evals); long-context regression would surface it.
+
+   **Stage 4.2 implementation sketch.** Extend the SWA-wiring branch
+   gate from `arch === "gemma4"` to include Gemma family:
+   `arch === "gemma2" || arch === "gemma3" || arch === "gemma4"`.
+   For Gemma 2, the GGUF doesn't ship the boolean
+   `attention.sliding_window_pattern` array — derive it from
+   `attention.sliding_window_period` (or default 2 per
+   `gemma2.cpp:6-8`) using
+   `slidingWindowPattern[i] = (i % period) !== 0`. Per-layer head
+   counts and head_dim are uniform for Gemma 2 (no mixed-GQA), so
+   the per-layer arrays collapse to `Array(layerCount).fill(scalar)`.
+   No KV reuse for Gemma 2 (set `sharedKvLayers = 0` so
+   `kvReuseFromLayer = undefined`).
+
+   **Stage 4.2 gate.** Three-step:
+   (a) load `gemma-2-2b-q4f16`, dump `slidingWindowPattern` →
+       expect `[F,T,F,T,...]` period-2 alternation;
+   (b) regression-check `make checkall` → no test break on any
+       non-Gemma model;
+   (c) Gemma 2 long-context smoke (chat.html, prompt > 4096-token
+       SWA window) — verify no crash + coherent output.
 
 ##### How to verify the fix held (drop-in repro)
 
