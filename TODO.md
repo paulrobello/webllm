@@ -1136,103 +1136,175 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11)
+#### Resume in fresh session — pickup instructions (updated 2026-05-12 EOS)
 
-**Stage 4.0 + Stage 4.1 implementation landed 2026-05-11.** Probe at
-[`eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md)
-(shader inspection — no llama.cpp patch needed). Code in commits
-`b4f6bdf` (Phase A — `writeCausalMaskF16` helper + `uploadLeaves`
-SWA params + 9 unit tests) and `0739d80` (Phase B — per-method
-allocation + per-layer dispatch across all four chat-path forwards:
-`forwardSingle`, `forwardWithLayerTaps`, `forwardAllPositions`,
-`forwardDecode`). Non-SWA models bit-identical at runtime; Gemma 4
-short-prompt unchanged.
-
-**Workspace state:** working tree clean on `main`; tip is
-`70a0348 docs(TODO): mark Stage 4.0/4.1 implementation closed`.
-772 tests pass / 0 fail. `make checkall` green. Bundle at
-`smoke-test/webllm-bundle.js` already rebuilt against Phase B.
-
-**Smokes verified post-Phase B (2026-05-11):**
-- TinyLlama Q4_0: 165.6 tok/s decode (vs 168.1 canonical, -1.5%
-  in-noise), coherent English, finish=max-tokens. Confirms the
-  `swaMaskTensor === 0` fall-through is bit-identical for non-SWA.
-- Gemma 4 E2B Q4_K_M: `Paris` on "The capital of France is",
-  finish=stop-token, 57.1 tok/s decode, console clean. Confirms
-  per-layer SWA/global dispatch routes correctly at short context
-  (window covers all past KV — banded mask is a no-op).
+**Read this first, then
+[`eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md)
+for the full diagnostic, repro recipes, and four recommended unblock paths.**
 
 ---
 
-**Start here next session: Stage 4.1 final gate — long-context
-parity probe.** The short-prompt smoke above doesn't exercise the
-banded mask (window 512 > prompt 46). Run a 1000-token parity
-capture to verify SWA layers hit cosine ≥ 0.95 vs HF and global
-layers stay unaffected.
+##### Where Stage 4 actually stands
 
-**First action: build a long-prompt fixture.** Today's
-`eval/tools/parity-capture/inputs.json` carries only "The capital
-of France is" (6 tokens). Add a new sibling fixture
-`eval/tools/parity-capture/inputs-longctx.json` with a single
-~1000-token prompt — a paragraph of natural text, a code block,
-or a synthetic repetition — so the harness can run both fixtures
-side-by-side without regressing the existing short probe.
+- **Stage 4.0 + Stage 4.1 code shipped** as commits `b4f6bdf` (Phase A —
+  `writeCausalMaskF16` helper + `uploadLeaves` SWA params + 9 unit tests)
+  and `0739d80` (Phase B — per-layer SWA/global mask dispatch across all
+  four chat-path forwards).
+- **Closure smoke was misleading.** The TODO line below ("Gemma 4 E2B
+  Q4_K_M: `Paris` on 'The capital of France is', 57.1 tok/s") was run
+  on `real-model.html` which defaults to `flashAttn=false`. The FA path
+  used by `chat.html` + `createConversation` was never exercised on
+  Gemma 4 after Phase B, and it traps.
+- **Long-context end-to-end parity gate** (`forwardWithLayerTaps` on a
+  ~1000-token prompt vs HF reference) is **infeasible on Chrome/Apple**
+  due to the WebGPU `maxStorageBufferBindingSize=128 MiB` cap. Three
+  probe attempts at N=1129 / N=560 / N=1129+`skipLayerTaps` all OOM at
+  `backendAllocCtxTensors`.
 
-**Then run the capture (commands mirror the 3.3l Phase 4 quickstart
-at line ~1531 of this TODO):**
+##### Two open blockers (in priority order)
 
-```bash
-make smoke-serve &           # port 8031, if not already up
+1. 🔴 **[CRITICAL] Gemma 4 + `flashAttn=true` traps with `Error:
+   unreachable` at every prompt length.** Confirmed reproducible on
+   committed tip `15b57dd` with all 2026-05-12 in-flight changes
+   stashed — so this is a Phase B (`0739d80`) regression, not a today's
+   change regression. Production chat is currently broken for Gemma 4:
+   `chat-models.js:68` hardcodes `flashAttn: true` because
+   `createConversation` (`engine.ts:711-713`) requires FA mode.
 
-RUN_DIR=eval/reports/gemma-4-stage4-swa-mask-$(date +%Y-%m-%d)
-mkdir -p "$RUN_DIR"
-lsof -ti:8035 | xargs kill -9 2>/dev/null
+   **Repro:**
+   ```
+   make smoke-serve &
+   agentchrome --port <PORT> navigate \
+     "http://localhost:8031/chat.html?model=gemma-4-e2b-it-q4km&v=$(date +%s)"
+   # Wait for load, type "The capital of France is", click Send.
+   # Result: chat-msg.assistant.error rendered with "Error: unreachable".
+   ```
 
-# 1. HF reference (fp32) on the long prompt — re-uses hfdownloader cache
-uv run --no-project --with-requirements \
-  eval/tools/parity-capture/requirements.txt \
-  python eval/tools/parity-capture/capture-hf-ref.py \
-  --model unsloth/gemma-4-E2B-it \
-  --inputs eval/tools/parity-capture/inputs-longctx.json \
-  --output "$RUN_DIR/hf-ref.json" --add-bos
+   **Cheap discriminator probe** (5-min budget): edit
+   `smoke-test/parity-capture-page.js:143` to set `flashAttn: true`
+   (currently `false`), rebuild bundle, rerun the 46-token Gemma 4
+   capture (the standard parity-capture path). Outcomes:
+   - Same OOM signature as before → FA bug is in the existing
+     long-context graph, not the mask. Probably need backend split or
+     different KV layout.
+   - Different / earlier failure → narrows to FA-shader's consumption
+     of the banded mask OR mixed-head-dim plumbing in the per-layer
+     FA dispatch (`forwardSingle:1610-1640`, `forwardAllPositions`,
+     `forwardDecode`).
+   - Success → the bug is in `chat.html`'s worker / engine init path
+     specifically, not in the FA forward.
 
-# 2. WebLLM capture — capture-server posts JSON to RUN_DIR
-bun run eval/tools/parity-capture/capture-server.ts \
-  --run-dir "$RUN_DIR" --port 8035 &
+   **Comparison evidence:** TinyLlama in chat.html (FA on) works fine;
+   Gemma 4 in real-model.html (FA off) returns "Paris" in 0.4s — so
+   the bug is FA × Gemma 4 specifically.
 
-# 3. Drive the browser harness. The inputIds list needs to come from
-#    the HF-ref tokenization step (capture-hf-ref.py prints it); copy
-#    them in (or add a flag to capture-hf-ref to emit a sibling
-#    inputIds.txt).
-agentchrome --port 63846 navigate \
-  "http://localhost:8031/parity-capture.html?model=gemma-4-e2b-it-q4km&inputIds=<comma-separated-ids>&v=$(date +%s)"
+2. 🟡 **Long-context tap-based parity blocked by per-binding cap.** See
+   [`eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md)
+   "Recommended next steps" section for four ordered options. Once
+   blocker (1) is fixed, the lowest-cost option becomes viable: drive
+   the standard chat path (which uses `forwardSingle` — no per-layer
+   tap retention) at 1129 tokens and observe non-crash + coherent
+   output as a weak positive signal. Tap-based per-layer cosine is
+   only achievable via option 3 (incremental 35-forward capture using
+   the `captureTaps` scaffolding) or option 4 (backend patch to split
+   graph tensors across multiple WebGPU bindings).
 
-# 4. Compare
-uv run --no-project --with-requirements \
-  eval/tools/parity-capture/requirements.txt \
-  python eval/tools/parity-capture/compare.py --run-dir "$RUN_DIR"
-```
+##### In-flight uncommitted work (2026-05-12 EOS-2: cleared)
 
-**Gate:** SWA layers (pattern positions T, see
-`window.parsedModel.hyperparams.slidingWindowPattern`) hit cosine
-≥ 0.95 at every position 0…N-1; global layers (F) match the
-existing Stage 3 closure cosine (~0.97). End-of-stack top-1 argmax
-must still match HF (Stage 3 Phase 4 reported id 9079 "Paris" on
-the 6-token prompt; the long-prompt argmax target is whatever HF
-produces). **Artifact:** `$RUN_DIR/SUMMARY.md` written by hand
-after running compare, summarizing the per-layer cosine table.
+Workspace clean on tip `01c00db`. The three EOS-1 in-flight TS
+chunks landed as commits `447ff82` (per-layer headCount plumbing +
+graphMem), `65ac040` (parity-capture cache-buster + skipLayerTaps +
+long-context fixture), and `01c00db` (FA discriminator probe
+SUMMARY). The `captureTaps`/`lastLayerTaps` scaffolding was deleted
+before commit (no producer). The three debris files
+(`input_ids_tmp.txt`, `navigate_tmp.py`,
+`webllm-divergence-localization.skill`) were deleted.
 
-**Failure modes to watch for:**
-- SWA layers regress vs Stage 3 closure → banded mask logic is
-  wrong or the per-layer dispatch picked the wrong tensor. Drop
-  into `model-inference.ts` and dump `(isSwaLayer, swaMaskTensor,
-  layerMask)` per layer at il=0,4,10,15 via a temporary console.log.
-- All layers regress → uploadLeaves SWA byte layout is off (Phase
-  A unit tests should have caught this, but cross-check by
-  printing the first 32 mask bytes at a known pastLen).
-- Cosines green but argmax MISS → unrelated bug surfaced by
-  long-context attention path (e.g. KV-cache write at past>1024
-  shape mismatch).
+**Load-bearing comments restored:** `model-loader.ts` had two
+load-bearing comment blocks deleted by the prior agent (iSWA remap
+rule citing `llama-model.cpp:2007-2014`, and the `finalLogitSoftcap`
+/ PLE field comments around `pleDim`). Restored before commit per
+the "Surgical Changes" doctrine in `~/.claude/CLAUDE.md`.
+
+**Health check (post-commit, tip `01c00db`):** `make checkall` green
+(fmt + lint + typecheck + 772 tests pass / 36 skip / 0 fail).
+
+##### Recommended first actions for the next session
+
+**Pickup state 2026-05-12 EOS-2** — workspace clean on tip `01c00db`.
+Three atomic commits landed this session:
+- `447ff82` feat(gemma4): per-layer headCount/headCountKv plumbing + graphMem bump
+- `65ac040` feat(parity-capture): cache-buster + skipLayerTaps + long-context fixture
+- `01c00db` docs(stage4): FA discriminator probe outcome
+
+FA discriminator probe ran: **`forwardWithLayerTaps` + FA=true + Gemma 4
+at N=9 SUCCEEDS in 0.28s, 35 layers tapped.** chat.html still traps
+`Error: unreachable` at the same prompt. See
+[`eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4-swa-mask-2026-05-12/SUMMARY.md)
+"FA probe result" section for the refined picture and dispatch plan.
+
+**Refined bug location:** FA shader compiles + runs on Gemma 4 fine; the
+trap is specifically in `forwardSingle` / `forwardAllPositions` /
+`forwardDecode` when invoked via `engine.chatCompletion`. Since trap
+fires on the very first message (`forwardAllPositions` prefill, not
+`forwardDecode`), the most likely candidate is `forwardAllPositions`.
+
+1. **Next cheap probe (~5 min): `forwardAllPositions` FA=true smoke.**
+   Two options:
+   - Standalone probe page (`smoke-test/fa-prefill-probe.html`)
+     mirroring `parity-capture-page.js` but invoking
+     `forwardAllPositions` directly with the 9-token Gemma 4 prompt.
+     ~80 lines of JS, no engine wiring. (Recommended.)
+   - Invasive: temporary debug knob in `engine.chatCompletion` that
+     swaps `forwardAllPositions` for `forwardWithLayerTaps`. Easier
+     code-wise but mutates the production path.
+
+   Outcomes:
+   - TRAPS → bug is in `forwardAllPositions` (prefill-batched FA).
+     Diff `forwardAllPositions` against `forwardWithLayerTaps` in
+     `0739d80` to find the offending line.
+   - SUCCEEDS → trap is in `forwardDecode` (`nTokens=1` decode-shape
+     FA), surfacing later than the "first message" framing suggested.
+     Different bisection target.
+
+2. **Once the offending forward is identified, bisect `0739d80` line by
+   line** — Phase B's per-layer SWA mask wiring is the only structural
+   change to those forwards since they last worked with FA. Likely
+   candidates:
+   - Per-layer mask leaf allocation site (each forward allocates one,
+     unlike pre-Phase-B's single shared mask).
+   - Mask byte upload (`writeCausalMaskF16` with `swaWindow > 0`)
+     producing a layout the FA shader rejects.
+   - Per-layer K/V views feeding FA with a stride that disagrees
+     with the per-layer head_dim.
+
+3. **Only after Gemma 4 + FA works again**, return to Stage 4.1
+   long-context closure. The cheapest gate is now "drive
+   `engine.chatCompletion` greedy on the 1129-token prompt via
+   `chat.html`; verify non-crash + coherent output". Per-layer
+   parity remains out of reach without the captureTaps producer or
+   a backend patch.
+
+##### Smokes verified post-Phase B (2026-05-11, manual-attn path only)
+- TinyLlama Q4_0: 165.6 tok/s decode, coherent English, non-SWA
+  fall-through bit-identical.
+- Gemma 4 E2B Q4_K_M `Paris` smoke: ran on `real-model.html`
+  (`flashAttn=false`). **Does NOT cover the FA path** that
+  `chat.html` + `createConversation` require.
+
+##### Architectural notes that didn't make it into earlier sessions
+- **KV-cache helpers** (`serializeKVCache`, `loadKVCache`, KV size
+  estimators at `model-inference.ts:715-970`) still read scalar
+  `hp.headCount` / `hp.headCountKv`. Technically wrong for
+  Gemma 4 mixed-GQA, but doesn't matter today: these helpers are only
+  used by `engine.ts` for in-process serialization (no cross-model
+  interop) and per-layer KV slots are already sized correctly at
+  `initKVCache` time via `embeddingHeadLengthPerLayer`. Fix is queued
+  as a follow-up only if Gemma 4 KV checkpointing ever ships.
+- **`injectPerBlockPle` view assertion** under prefill tiling (originally
+  surfaced 2026-05-12) was never reproduced after the `graphMem`
+  bump made tiling unnecessary for short-prompt Gemma 4. Status
+  unchanged from prior sessions: investigate only if it resurfaces.
 
 ---
 
