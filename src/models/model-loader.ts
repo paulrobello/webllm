@@ -482,6 +482,43 @@ export class ModelLoader {
 			),
 		};
 
+		if (arch === "gemma2" || arch === "gemma3") {
+			// Gemma 2 / Gemma 3 — uniform per-layer geometry; SWA pattern stored
+			// as a scalar uint32 *period* (not a boolean array like Gemma 4).
+			// Per llama.cpp src/models/gemma2.cpp + gemma3.cpp:
+			//   - `attention.sliding_window_pattern` is a uint32 period (default 2)
+			//   - `attention.sliding_window` is the window size (Gemma 2 default 4096)
+			// The boolean pattern is then derived via
+			// `llama_hparams::set_swa_pattern(period, dense_first=false)`
+			// (src/llama-hparams.cpp:14): `swa_layers[il] = period == 0 ||
+			// (il % period < period - 1)`. For period=2 → [T,F,T,F,...]:
+			// every odd-indexed layer is global, every even-indexed layer is SWA.
+			// This MUST match upstream — Gemma 2's pretrained weights expect that
+			// specific layer-type assignment.
+			const layerCount = baseHp.layerCount;
+			const swaPeriod =
+				getMetaNumberOptional(
+					ctx,
+					`${metaPrefix}.attention.sliding_window_pattern`,
+				) ?? 2;
+			const swaPattern: boolean[] = Array.from(
+				{ length: layerCount },
+				(_, il) => swaPeriod === 0 || il % swaPeriod < swaPeriod - 1,
+			);
+			return {
+				...baseHp,
+				slidingWindowPattern: swaPattern,
+				slidingWindowSize: getMetaNumber(
+					ctx,
+					`${metaPrefix}.attention.sliding_window`,
+					4096, // Gemma 2 default per gemma2.cpp:7
+				),
+				// No KV reuse for Gemma 2/3 (sharedKvLayers absent).
+				// Per-layer head_count / head_dim / FFN / rope arrays are absent:
+				// Gemma 2 is uniform across layers, so scalar fallbacks suffice.
+			};
+		}
+
 		if (arch === "gemma4") {
 			const layerCount = baseHp.layerCount;
 			const keyLenGlobal = getMetaNumber(
