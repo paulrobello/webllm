@@ -1136,43 +1136,138 @@ test surface). Wall-clock risk: 5 sessions plan; partial credit lands
 if Stage 4/5 stall (Stages 1–3 alone produce a usable correctness-first
 Gemma 4).
 
-#### Resume in fresh session — pickup instructions (updated 2026-05-11 EOS-14)
+#### Resume in fresh session — pickup instructions (updated 2026-05-11)
 
-**Stage 4.0 + Stage 4.1 implementation landed EOS-14.** Probe report
-at [`eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md);
-implementation in commits `b4f6bdf` (Phase A — helper + uploadLeaves
-threading + 9 unit tests) and `0739d80` (Phase B — per-method
-allocation + per-layer dispatch across all four chat-path forwards).
-Smoke regression green (TinyLlama bit-identical, Gemma 4 still emits
-"Paris" with finish=stop-token, console clean). Two remaining
-Stage 4 sub-stages and Stage 5 still queued.
+**Stage 4.0 + Stage 4.1 implementation landed 2026-05-11.** Probe at
+[`eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md`](eval/reports/gemma-4-stage4-probe-2026-05-11/SUMMARY.md)
+(shader inspection — no llama.cpp patch needed). Code in commits
+`b4f6bdf` (Phase A — `writeCausalMaskF16` helper + `uploadLeaves`
+SWA params + 9 unit tests) and `0739d80` (Phase B — per-method
+allocation + per-layer dispatch across all four chat-path forwards:
+`forwardSingle`, `forwardWithLayerTaps`, `forwardAllPositions`,
+`forwardDecode`). Non-SWA models bit-identical at runtime; Gemma 4
+short-prompt unchanged.
 
-**Start here next session:** run the **Stage 4.1 final gate** — a
-1000-token parity probe of Gemma 4 E2B vs HF, verifying SWA layers
-hit cosine ≥ 0.95 at every position and global layers remain
-unaffected. The 6-token parity-capture harness from 3.3l-P2 is the
-closest precedent — extend the captured prompt length and re-run.
-Capture artifacts go under
-`eval/reports/gemma-4-stage4-swa-mask-<date>/SUMMARY.md`.
+**Workspace state:** working tree clean on `main`; tip is
+`70a0348 docs(TODO): mark Stage 4.0/4.1 implementation closed`.
+772 tests pass / 0 fail. `make checkall` green. Bundle at
+`smoke-test/webllm-bundle.js` already rebuilt against Phase B.
 
-Then move to **Stage 4.2** (Gemma 2 alternating-period SWA derivation
-at load time — but verify whether Q1.4's un-demote work already
-populated `slidingWindowPattern` correctly for Gemma 2; if so, this
-stage may already be done and just needs a confirmation dump),
-**Stage 4.3** (long-context regression probe — 1000-token output, no
-quality cliff at 512 boundary), and **Stage 4.4** (eval re-gate at
-≥68%, must not regress Stage 3).
+**Smokes verified post-Phase B (2026-05-11):**
+- TinyLlama Q4_0: 165.6 tok/s decode (vs 168.1 canonical, -1.5%
+  in-noise), coherent English, finish=max-tokens. Confirms the
+  `swaMaskTensor === 0` fall-through is bit-identical for non-SWA.
+- Gemma 4 E2B Q4_K_M: `Paris` on "The capital of France is",
+  finish=stop-token, 57.1 tok/s decode, console clean. Confirms
+  per-layer SWA/global dispatch routes correctly at short context
+  (window covers all past KV — banded mask is a no-op).
 
-**Workspace state at EOS-14:** working tree clean on `main`; tip is
-`0739d80 feat(stage4): per-layer SWA mask wiring in all four chat-path forwards`.
-772 tests pass / 0 fail. `make checkall` green.
+---
 
-**Smokes verified post-Phase B:** TinyLlama 165.6 tok/s decode (vs
-canonical 168.1, -1.5% in-noise), coherent English, finish=max-tokens;
-Gemma 4 E2B `Paris` 57.1 tok/s decode, finish=stop-token, console
-clean. SWA-aware code-path inactive for short prompts (window covers
-all past KV) — long-context behavior verified by the Stage 4.1
-parity gate above.
+**Start here next session: Stage 4.1 final gate — long-context
+parity probe.** The short-prompt smoke above doesn't exercise the
+banded mask (window 512 > prompt 46). Run a 1000-token parity
+capture to verify SWA layers hit cosine ≥ 0.95 vs HF and global
+layers stay unaffected.
+
+**First action: build a long-prompt fixture.** Today's
+`eval/tools/parity-capture/inputs.json` carries only "The capital
+of France is" (6 tokens). Add a new sibling fixture
+`eval/tools/parity-capture/inputs-longctx.json` with a single
+~1000-token prompt — a paragraph of natural text, a code block,
+or a synthetic repetition — so the harness can run both fixtures
+side-by-side without regressing the existing short probe.
+
+**Then run the capture (commands mirror the 3.3l Phase 4 quickstart
+at line ~1531 of this TODO):**
+
+```bash
+make smoke-serve &           # port 8031, if not already up
+
+RUN_DIR=eval/reports/gemma-4-stage4-swa-mask-$(date +%Y-%m-%d)
+mkdir -p "$RUN_DIR"
+lsof -ti:8035 | xargs kill -9 2>/dev/null
+
+# 1. HF reference (fp32) on the long prompt — re-uses hfdownloader cache
+uv run --no-project --with-requirements \
+  eval/tools/parity-capture/requirements.txt \
+  python eval/tools/parity-capture/capture-hf-ref.py \
+  --model unsloth/gemma-4-E2B-it \
+  --inputs eval/tools/parity-capture/inputs-longctx.json \
+  --output "$RUN_DIR/hf-ref.json" --add-bos
+
+# 2. WebLLM capture — capture-server posts JSON to RUN_DIR
+bun run eval/tools/parity-capture/capture-server.ts \
+  --run-dir "$RUN_DIR" --port 8035 &
+
+# 3. Drive the browser harness. The inputIds list needs to come from
+#    the HF-ref tokenization step (capture-hf-ref.py prints it); copy
+#    them in (or add a flag to capture-hf-ref to emit a sibling
+#    inputIds.txt).
+agentchrome --port 63846 navigate \
+  "http://localhost:8031/parity-capture.html?model=gemma-4-e2b-it-q4km&inputIds=<comma-separated-ids>&v=$(date +%s)"
+
+# 4. Compare
+uv run --no-project --with-requirements \
+  eval/tools/parity-capture/requirements.txt \
+  python eval/tools/parity-capture/compare.py --run-dir "$RUN_DIR"
+```
+
+**Gate:** SWA layers (pattern positions T, see
+`window.parsedModel.hyperparams.slidingWindowPattern`) hit cosine
+≥ 0.95 at every position 0…N-1; global layers (F) match the
+existing Stage 3 closure cosine (~0.97). End-of-stack top-1 argmax
+must still match HF (Stage 3 Phase 4 reported id 9079 "Paris" on
+the 6-token prompt; the long-prompt argmax target is whatever HF
+produces). **Artifact:** `$RUN_DIR/SUMMARY.md` written by hand
+after running compare, summarizing the per-layer cosine table.
+
+**Failure modes to watch for:**
+- SWA layers regress vs Stage 3 closure → banded mask logic is
+  wrong or the per-layer dispatch picked the wrong tensor. Drop
+  into `model-inference.ts` and dump `(isSwaLayer, swaMaskTensor,
+  layerMask)` per layer at il=0,4,10,15 via a temporary console.log.
+- All layers regress → uploadLeaves SWA byte layout is off (Phase
+  A unit tests should have caught this, but cross-check by
+  printing the first 32 mask bytes at a known pastLen).
+- Cosines green but argmax MISS → unrelated bug surfaced by
+  long-context attention path (e.g. KV-cache write at past>1024
+  shape mismatch).
+
+---
+
+**After Stage 4.1 final gate clears, the queue is:**
+
+1. **Stage 4.2 — Gemma 2 alternating-period SWA derivation.**
+   First action: confirmation dump. Load `gemma-2-2b-q4f16` in the
+   browser, log `window.parsedModel.hyperparams.slidingWindowPattern`,
+   verify it matches the period-2 alternation (`[F,T,F,T,...]`). If
+   Q1.4's un-demote work already populated it correctly, this stage
+   is a one-line closure note. If not, derive it in
+   `model-loader.ts:519-523` from a `swa_period` integer fallback.
+
+2. **Stage 4.3 — Long-context regression probe.** Generate
+   1000-token output on a fixed long prompt; measure
+   argmax-divergence vs HF reference or a known-good `llama-cli` run.
+   Gate: no quality cliff at the 512-token SWA boundary.
+
+3. **Stage 4.4 — Eval re-gate.** `bench-profile
+   PROFILES=gemma-4-e2b-warm` — 36-prompt eval ≥ 68 % (must not
+   regress Stage 3 closure baseline).
+
+4. **Campaign Q3 (Stage 5) — bench + closure.** Pre-rebase
+   baselines on the canonical 6, add Gemma 4 to bench-full, single
+   canonical closure SUMMARY.
+
+**Out-of-stage opportunistic work (not gating Stage 4):**
+- **Embedding-path SWA support.** `forwardForEmbedding` (line 1907)
+  was deliberately left on the original single-mask path because
+  Gemma 4 isn't registered as an embedder. If a Gemma SWA model
+  ever ships as an embedder, mirror the Phase B SWA wiring there
+  too. Tracked here so the gap isn't forgotten.
+- **`debugLayerOutput` SWA support.** Same situation — debug-only
+  path skipped to keep the Phase B diff narrow. Add SWA wiring if
+  the path ever gets used for long-context SWA debugging.
 
 ---
 
