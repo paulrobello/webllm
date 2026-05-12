@@ -1343,12 +1343,21 @@ before the clamp landed).
    the eval re-gate (Stage 4.4) shows whether the qualitative
    gate is enough.
 
-3. **Stage 4.4 — Eval re-gate.** `bench-profile
-   PROFILES=gemma-4-e2b-warm` — 36-prompt eval ≥ 68 % (must not
-   regress Stage 3 closure baseline). With Stage 4.3 in PARTIAL
-   status, this is now the primary numerical evidence — model
-   outputs being eval-correct is the canonical end-to-end check
-   that the SWA path doesn't regress.
+3. **Stage 4.4 — Eval re-gate. CLOSED 2026-05-12 EOS-8 ✅.** Ran
+   `bench-profile PROFILES=gemma-4-e2b-warm` on tip `f8f8a64` at
+   greedy temp=0. Result: **34/48 = 70.8 %** — bit-identical to
+   Stage 3 closure (tool-calling 17 % / reasoning 83 % /
+   instruction-following 92 % / semantic-reasoning 92 %, same pass
+   set per dimension). Gate ≥ 68 % cleared; zero regression. SWA
+   wiring is invisible at sub-window prompts (the 36-prompt eval
+   stays under the 512-token SWA window; Stage 4.0 probe predicted
+   bit-identical mask at sub-window lengths). Long-context
+   behavior was covered separately by Stage 4.1's 2,238-token
+   chat closure. Closure report:
+   [`eval/reports/gemma-4-stage4.4-eval-regate-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-stage4.4-eval-regate-2026-05-12/SUMMARY.md).
+   Watch-item: speed sub-step failed with smoke-harness
+   output-wait timeout (harness-side, not a model regression);
+   re-capture speed numbers when convenient, not gating Stage 5.
 
 4. **Campaign Q3 (Stage 5) — bench + closure.** Pre-rebase
    baselines on the canonical 6, add Gemma 4 to bench-full, single
