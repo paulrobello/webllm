@@ -140,12 +140,7 @@ if(EMSCRIPTEN)
         # Stage 4.30 Probe 17 — post-load tensor->data byte-hash peek.
         # Lives in webgpu-bridge.cpp (this file's translation unit), so
         # ships in every build — no WEBLLM_BACKEND_JSEP gating needed.
-        "_webllm_get_tensor_data_hash,"
-        # Stage 4.29 Probe 16 — CPU-side set_tensor weight-hash probe.
-        # Lives in ggml-backend.cpp, which ships in every build (unlike
-        # the JSEP-only _ggml_jsep_set_weight_hash_probe export below),
-        # so no WEBLLM_BACKEND_JSEP gating needed.
-        "_ggml_cpu_set_weight_hash_probe"
+        "_webllm_get_tensor_data_hash"
     )
 
     # Stage 4.20 Probe 9b — JSEP-only export. The C++ symbol lives in
