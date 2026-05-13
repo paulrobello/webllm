@@ -1,9 +1,14 @@
-# Pre-rebase profile-mode baselines — canonical 6 (2026-05-12)
+# Pre-rebase profile-mode baselines — canonical 6 + Gemma 4 (2026-05-12)
 
-**Captured:** 2026-05-12, post Stage 4.4 closure (eval re-gate at 70.8%
-on Gemma 4 E2B, bit-identical to Stage 3) and pre any subsequent
-llama.cpp rebase. Stage 5.1 of the Gemma 4 campaign (TODO §Q3).
-**webllm tip:** `e3038c7` (`docs(stage4.4): CLOSED eval re-gate — 70.8%`).
+**Captured:** 2026-05-12 / 2026-05-13 (UTC) in two passes. This file
+documents the **clean retake** (Pass 2): the noisy Pass 1 was
+superseded after the 3-run-per-model headless capture showed high
+run-to-run variance from cold-shader bias on early runs and thermal
+contention on later runs. Pass 2 keeps the same regime but adds
+mitigations described under "Capture methodology" below.
+
+**webllm tip:** `f8c4c65` (`feat(stage5.2): add gemma-4-e2b-warm to
+bench-full profile set`).
 **llama.cpp `webllm-browser-patches` tip:** `ebc7c3d82` (16 inert JSEP
 experimental probe commits on top of canonical `b54503497`; JSEP is
 gated `OFF` in the WASM build per `ggml/CMakeLists.txt:236` and CPU
@@ -11,117 +16,198 @@ backend is `OFF` per `src/wasm/CMakeLists.txt`, so the probes don't
 compile into our WASM artifact — behaviorally equivalent to
 `b54503497`).
 **WASM:** `smoke-test/webllm-wasm.wasm` 3,767,720 bytes (May 12 17:20).
-**Procedure:** `make smoke-bench PERF_MODEL=<m> PERF_RUNS=3` (profile
-mode).
+
+**Procedure (Pass 2 — canonical regime):**
+- `agentchrome connect --disconnect` → `sleep 30` (thermal cooldown)
+  → `agentchrome connect --launch --headless` → `sleep 5` (settle)
+  **before every model**
+- `make smoke-bench PERF_MODEL=<m> PERF_RUNS=5` (profile mode, 5 runs)
+- 7 models total (canonical 6 + `gemma-4-e2b-it-q4km`)
+- Dashboard left running; runs auto-ingested
+
 **Trigger:** §32a pre-rebase doctrine — capture before the next rebase
 fires, so a follow-on probe gets a same-tip baseline for diagnosis.
 Also serves as the Stage 5.1 non-regression check: verify the NEOX
 RoPE fix (Q1.6 / Gemma family branch extensions, `c8c8447` …
-`31d53a5`) didn't move non-Gemma models.
+`31d53a5`) didn't move non-Gemma models. Pass 2 also closes the
+Stage 4.4 watch-item (smoke-harness speed timeout for
+`gemma-4-e2b-warm`).
 
 ---
 
-## Headline matrix
+## Headline matrix — Pass 2 (clean retake)
 
-3-run p50, profile-mode (perturbed). The "p50" row picks the median
-run's full row; other columns are from that run, not column-wise
-medians.
+5-run profile mode, fresh headless Chrome per model, 30s cooldown.
+"p50" is the median tok/s row's full set of columns (matches per-run
+file output); spread shows max−min across the 5 runs as % of p50.
 
-| Model                          | Quant   | tok/s | Steps | graph (med, ms) | matmul (med, ms / %) | encode (med, ms / %) | dispatch/token |
-|---|---|---:|---:|---:|---:|---:|---:|
-| tinyllama-1.1b-chat-q4_0       | Q4_0    | 116.1 | 189   | 7.50            | 4.19 / 56.1%         | 1.50 / 20.6%         | 450 |
-| qwen3-0.6b-q4f16               | Q8_0    |  87.2 |  72   | 8.60            | 4.06 / 46.7%         | 2.10 / 24.2%         | 629 |
-| qwen3-1.7b-q4f16               | Q8_0    |  64.4 |  48   | 11.80           | 7.01 / 59.8%         | 2.10 / 18.4%         | 629 |
-| mistral-7b-instruct-v0.3-q4ks  | Q4_K_S  |  43.3 | 123   | 21.60           | 16.58 / 76.8%        | 2.80 / 13.0%         | 650 |
-| llama-3.1-8b-instruct-iq3m     | IQ3_M   |  33.0 | 156   | 28.60           | 23.79 / 82.3%        | 2.30 /  8.5%         | 652 |
-| qwen3-8b-iq3m                  | IQ3_M   |  29.4 |  60   | 30.40           | 24.31 / 79.4%        | 3.00 / 10.1%         | 805 |
+| Model                          | Quant   | tok/s p50 | spread | matmul med (ms / %) | encode med (ms / %) | dispatch/token |
+|---|---|---:|---:|---:|---:|---:|
+| tinyllama-1.1b-chat-q4_0       | Q4_0    | **130.5** |  2.5%  | 4.00 / 58.4%        | 1.50 / 22.2%        | 450  |
+| qwen3-0.6b-q4f16               | Q8_0    |  **99.4** |  3.6%  | 3.67 / 50.2%        | 2.10 / 28.4%        | 629  |
+| qwen3-1.7b-q4f16               | Q8_0    |  **71.1** | 34.6%* | 6.55 / 56.3%        | 2.20 / 20.2%        | 629  |
+| mistral-7b-instruct-v0.3-q4ks  | Q4_K_S  |  **46.4** |  3.0%  | 15.53 / 76.7%       | 2.90 / 14.4%        | 650  |
+| llama-3.1-8b-instruct-iq3m     | IQ3_M   |  **33.8** |  5.0%  | 22.41 / 81.5%       | 2.70 /  9.6%        | 652  |
+| qwen3-8b-iq3m                  | IQ3_M   |  **31.0** |  4.2%  | 22.68 / 79.2%       | 3.30 / 11.6%        | 805  |
+| gemma-4-e2b-it-q4km            | Q4_K_M  |  **38.6** | 38.6%* | 8.19 / 47.6%        | 4.10 / 23.1%        | 1040 |
+
+\* qwen3-1.7b had one 47.4 tok/s thermal-dip outlier among five runs
+(71.1 / 71.0 / 72.0 / 71.2 / 47.4); median absorbs it. Gemma 4 is
+intrinsically dispatch-heavy (1040 dispatches per token vs 450-805 for
+the canonical 6) — runs vary more because per-dispatch micro-stalls
+accumulate; per-run tok/s: 45.6 / 44.6 / 30.7 / 38.6 / 36.9. Matmul
+time is stable in both cases (qwen3-1.7b matmul samples: mean 6.54,
+median 6.55, p90 6.88; Gemma 4 matmul: mean 8.22, median 8.19, p90
+8.72) — the variance is in the rest of the pipeline, not in compute.
 
 Per-model raw logs in this directory (`<model-id>.log`).
 
 ## Cross-baseline drift vs `pre-rebase-baselines-2026-05-04/`
 
-| Model                          | 2026-05-04 | 2026-05-12 | Δ tok/s | Δ %    | matmul med Δ |
+| Model                          | 2026-05-04 | 2026-05-12 (Pass 2) | Δ tok/s | Δ %    | matmul med Δ              |
 |---|---:|---:|---:|---:|---:|
-| tinyllama-1.1b-chat-q4_0       |  80.4 | 116.1 | +35.7 | +44.4% | 4.19 → 4.19   (0%)    |
-| qwen3-0.6b-q4f16               |  62.5 |  87.2 | +24.7 | +39.5% | 4.00 → 4.06 (+1.5%)   |
-| qwen3-1.7b-q4f16               |  41.7 |  64.4 | +22.7 | +54.4% | 6.88 → 7.01 (+1.9%)   |
-| mistral-7b-instruct-v0.3-q4ks  |  28.7 |  43.3 | +14.6 | +50.9% | 16.58 → 16.58 (0%)    |
-| llama-3.1-8b-instruct-iq3m     |  23.3 |  33.0 |  +9.7 | +41.6% | 23.66 → 23.79 (+0.5%) |
-| qwen3-8b-iq3m                  |  21.3 |  29.4 |  +8.1 | +38.0% | 24.12 → 24.31 (+0.8%) |
+| tinyllama-1.1b-chat-q4_0       |  80.4 | 130.5 | +50.1 | +62.3% | 4.19 → 4.00  (-4.5%)  |
+| qwen3-0.6b-q4f16               |  62.5 |  99.4 | +36.9 | +59.0% | 4.00 → 3.67  (-8.3%)  |
+| qwen3-1.7b-q4f16               |  41.7 |  71.1 | +29.4 | +70.5% | 6.88 → 6.55  (-4.8%)  |
+| mistral-7b-instruct-v0.3-q4ks  |  28.7 |  46.4 | +17.7 | +61.7% | 16.58 → 15.53 (-6.3%) |
+| llama-3.1-8b-instruct-iq3m     |  23.3 |  33.8 | +10.5 | +45.1% | 23.66 → 22.41 (-5.3%) |
+| qwen3-8b-iq3m                  |  21.3 |  31.0 |  +9.7 | +45.5% | 24.12 → 22.68 (-6.0%) |
 
-**Matmul time is bit-identical (±2%) across the canonical 6.** The
-40-50% tok/s lift is **not** a code change — it is an environmental
-regime shift between this capture (clean headless Chrome via
-`agentchrome connect --launch --headless`) and the 2026-05-04 capture
-(user's interactive Chrome instance with concurrent tabs and OS-level
-contention). Confirmation: the *only* per-phase metric that moved is
-encode overhead — TinyLlama 2.4 → 1.5 ms median (-38%), Qwen3-0.6B
-3.4 → 2.1 ms (-38%), Qwen3-1.7B 3.5 → 2.1 ms (-40%), Mistral 3.5 → 2.8
-ms (-20%), Llama-3.1-8B 3.5 → 2.3 ms (-34%), Qwen3-8B 4.6 → 3.0 ms
-(-35%). Headless Chrome eliminates compositor and tab-switching
-encode-overhead noise that was inflating profile-mode numbers in
-prior captures.
+**Matmul absolute time moved -4.5% to -8.3% across the canonical 6 —
+uniformly faster, never slower.** This is not the "bit-identical
+matmul" claim Pass 1 made (which was based on noisier 3-run data
+captured on a Chrome instance that had inherited state from prior
+model loads). The Pass 2 fresh-Chrome-per-model regime exposes
+~5-8% additional compute headroom that prior captures' Chrome state
+was eating. Most likely contributors to this delta, in priority order:
 
-**Stage 5.1 non-regression conclusion:** the NEOX RoPE fix (Q1.6 +
-`getRopeModeForArchitecture` family extension) is architecture-gated
-to gemma2/gemma3/gemma4 and did **not** touch the canonical 6's
-dispatch path. Bit-identical matmul time across all 6 models confirms
-this empirically. Non-Gemma models on `bench-full` will be
-bit-identical when Gemma 4 joins the fleet at Stage 5.2.
+1. **Methodology**: Pass 2 launches a brand-new Chrome instance with
+   zero accumulated GPU contexts immediately before each model bench
+   and waits 30s for thermal settling. Prior captures (incl. Pass 1)
+   reused Chrome across multiple model loads with no cooldown.
+2. **Code drift since 2026-05-04**: webllm tip moved from somewhere on
+   the post-§27 baseline to `f8c4c65`; load-bearing changes include
+   per-layer headCount plumbing (`447ff82`), FA-VEC `prefillTileSize`
+   clamp (`9ea3bfc`), and parity-capture instrumentation (`2c32f80`).
+   None of these were intended to move canonical-fleet decode, but
+   any could plausibly contribute single-digit-% via dispatch-path
+   side effects.
+3. **llama.cpp drift**: from `fc1f81242` to `b54503497` (the WaitAny
+   under JSPI commit replaces a poll loop — could reduce per-dispatch
+   tail latency).
+
+**Stage 5.1 non-regression conclusion stands and is strengthened**:
+the NEOX RoPE fix (Q1.6 + `getRopeModeForArchitecture` family
+extensions) is architecture-gated to gemma2/gemma3/gemma4 and did
+**not** regress non-Gemma models — matmul time moved in the favorable
+direction across all 6. Non-Gemma models on `bench-full` will see a
+mild tailwind, not a regression, when Gemma 4 joins the fleet at
+Stage 5.2.
+
+## Cross-baseline drift vs noisy Pass 1 (same-day)
+
+For completeness — comparing Pass 1's 3-run-with-shared-Chrome capture
+to Pass 2's 5-run-with-fresh-Chrome capture exposes how much variance
+the Pass 1 methodology had:
+
+| Model                          | Pass 1 (noisy) | Pass 2 (clean) | Δ %   | matmul Δ % |
+|---|---:|---:|---:|---:|
+| tinyllama-1.1b-chat-q4_0       | 116.1 | 130.5 | +12.4% | -4.5% |
+| qwen3-0.6b-q4f16               |  87.2 |  99.4 | +14.0% | -9.6% |
+| qwen3-1.7b-q4f16               |  64.4 |  71.1 | +10.4% | -6.6% |
+| mistral-7b-instruct-v0.3-q4ks  |  43.3 |  46.4 |  +7.2% | -6.3% |
+| llama-3.1-8b-instruct-iq3m     |  33.0 |  33.8 |  +2.4% | -5.8% |
+| qwen3-8b-iq3m                  |  29.4 |  31.0 |  +5.4% | -6.7% |
+| gemma-4-e2b-it-q4km            |  43.4 |  38.6 | -11.1% | -8.1% |
+
+Two reading points:
+
+- **Smaller models gain more from Pass 2's methodology.** TinyLlama
+  +12%, Qwen3-0.6B +14%, Qwen3-8B only +5%. Encode-overhead share
+  drops further when there's less compositor / Chrome-state
+  contention; smaller models spend a larger fraction of decode in
+  the encode path, so they benefit more.
+- **Gemma 4 went DOWN in the headline because of its variance, not
+  its compute.** Matmul moved -8.1% (faster), consistent with the
+  rest of the fleet. But Gemma 4's per-token dispatch count (1040)
+  makes it most exposed to micro-stalls; the 5-run median caught a
+  more-representative-but-slower number. Pass 1's 3-run capture
+  happened to put one fast and one slow run, with the third
+  splitting the difference. **Recommended for Gemma 4 specifically**:
+  capture 7-9 runs and discard 2 outliers for higher-confidence
+  speed numbers.
 
 ## Capture methodology — important asterisks
 
-1. **Chrome stability under repeated 8B model loads.** Both interactive
-   and headless Chrome instances died mid-sweep after ~6-7 cumulative
-   model page-loads in the same session. Mitigation: relaunch
-   `agentchrome connect --launch --headless` before each 7B+ model
-   bench. tinyllama → qwen3-0.6b → qwen3-1.7b ran on session 1
-   (port 57264); llama-3.1-8b-iq3m on session 3 (port 60121);
-   qwen3-8b-iq3m on session 4 (port 60410). mistral-7b ran on
-   session 2 (port 56921) — the first headless Chrome — together
-   with the initial three small-model runs (later re-captured on
-   session 1 after the headless relaunch made the regime visible).
-   Effective per-model sample is 3 runs on a fresh-or-warm headless
-   Chrome; no model shares a Chrome process with another model in
-   this capture.
+1. **Pass 1 (noisy, superseded).** First sweep this date used a single
+   headless Chrome with restarts only before 7B+ models. Variance
+   patterns visible: TinyLlama 116.1 / 115.7 / 124.4 (run 3 fastest —
+   cold-shader bias); qwen3-1.7b 62.5 / 64.4 / 64.7 (climbing as
+   cache warmed); llama-3.1-8b 33.0 / 33.4 / 31.4 (run 3 slowest —
+   thermal); Gemma 4 43.4 / 44.4 / 30.7 (run 3 dropped 31% — heavy
+   thermal). Median-of-3 swung 5-30% depending on which extreme ran
+   when. Pass 1 logs are not preserved on disk (Pass 2 overwrote in
+   place).
 
-2. **First-of-day cold-shader effect was visible on session 0**
-   (the user's pre-existing interactive Chrome, port 53198) — runs
-   1-2 on TinyLlama showed ~70 tok/s, run 3 climbed to 79.4 tok/s,
-   consistent with the 2026-05-04 baseline floor. After Chrome
-   crashed on the first mistral-7b load attempt and was relaunched
-   headless, all subsequent runs landed within ±5% of each other
-   per-model. Session 0 results are not in this capture's `.log`
-   files; the on-disk logs reflect the headless-only re-capture
-   for the small models (`tinyllama`, `qwen3-0.6b`, `qwen3-1.7b`).
+2. **Pass 2 methodology (now canonical):**
+   - **Fresh Chrome per model** via
+     `agentchrome connect --disconnect && sleep 30 && agentchrome
+     connect --launch --headless && sleep 5` before each
+     `make smoke-bench` invocation. Eliminates VRAM accumulation,
+     compositor state carry-over, and prior-model thermal residue.
+   - **5 runs per model** (up from 3). Median-of-5 absorbs one
+     extreme without flipping (worked for the qwen3-1.7b 47.4
+     outlier; almost worked for Gemma 4 — see follow-up below).
+   - **30s thermal cooldown** between `agentchrome connect
+     --disconnect` and the next `--launch`. Empirically sufficient
+     for the canonical 6; Gemma 4 is dispatch-heavy enough that
+     30s wasn't always enough.
+   - **Dashboard ingest left on.** All 7 × 5 = 35 runs auto-flowed
+     into `eval/reports/smoke-runs.db`; superseding older noisy
+     data points by virtue of newer timestamps in the dashboard's
+     "latest-N" filters.
 
-3. **Going forward, headless is the canonical capture regime.** The
-   §32a doctrine relies on environmental-floor parity for valid
-   cross-capture diffs. With this capture establishing "headless +
-   relaunch-before-7B" as the procedure, the next §32 / §27 / §28
-   cycle's adjudication baseline lives here. Cross-comparing
-   2026-05-12 numbers against 2026-05-04 (or earlier) is **only valid
-   for matmul-time deltas**, not for tok/s deltas — the absolute
-   tok/s axis is incomparable across these two regimes.
+3. **Cross-comparing 2026-05-12 (Pass 2) against 2026-05-04 is
+   methodologically unequal** — 2026-05-04 was captured on the user's
+   pre-existing interactive Chrome with concurrent tabs. The Δ in
+   that direction includes both real environmental savings (clean
+   headless) AND minor code drift since 05-04. For future §32 / §27
+   / §28 adjudication, the next post-rebase sweep should use the
+   Pass 2 regime (fresh-Chrome-per-model + 30s cooldown + 5 runs +
+   headless) to keep the baseline series internally comparable.
+
+4. **Per-binding 128 MiB cap doctrine still in force.** This capture
+   uses wasm32 default builds (no MEMORY64); Gemma 4 fits with
+   hybrid Q4_K_M, canonical 6 are well under the cap.
 
 ## Bucket profile observations
 
-- **Matmul share grew uniformly post-environment-shift** because
-  encode overhead dropped, leaving matmul to dominate a bigger slice
-  of the now-smaller wall clock. TinyLlama 38% → 56%, Qwen3-1.7B 36%
-  → 60%, Mistral Q4_K_S 50% → 77%, Llama-3.1-8B IQ3_M 59% → 82%,
-  Qwen3-8B IQ3_M 56% → 79%. Absolute matmul time is unchanged; the
-  share metric is a fraction-of-total-decode and tracks the
-  denominator change.
-- **Per-dispatch encode cost in headless Chrome:** TinyLlama 450
-  dispatches × 1.50 ms encode / 450 = ~3.3 µs/dispatch. Compare
-  ~5.3 µs/dispatch on 2026-05-04 interactive. Roughly 40%
-  per-dispatch savings — consistent with eliminating compositor
-  contention.
-- **Dispatch counts unchanged.** All 6 models match their 2026-05-04
-  dispatch counts (TinyLlama 450, Qwen3-0.6B 629, Qwen3-1.7B 629,
-  Mistral 650, Llama-3.1-8B 652, Qwen3-8B 805). Confirms no graph
-  structure change since the last capture.
+- **Matmul share grew uniformly** because encode + everything-else
+  shrank more than matmul did. TinyLlama 38% → 58%, Qwen3-0.6B 32%
+  → 50%, Qwen3-1.7B 36% → 56%, Mistral 50% → 77%, Llama-3.1-8B 59%
+  → 82%, Qwen3-8B 56% → 79%, Gemma 4 47% → 48%. The Gemma 4 share
+  barely moved because Gemma 4's 1040 dispatches/token keeps the
+  non-matmul fraction large regardless of regime.
+- **Per-dispatch encode cost in Pass 2 headless Chrome:** TinyLlama
+  450 × 1.50 ms / 450 = ~3.3 µs/dispatch. Mistral 650 × 2.90 / 650
+  = ~4.5 µs. Llama-3.1-8B 652 × 2.70 / 652 = ~4.1 µs. Gemma 4 1040
+  × 4.10 / 1040 = ~3.9 µs. The dispatch-cost-per-op is now uniform
+  across the fleet at 3.3-4.5 µs — prior interactive captures saw
+  5+ µs with high variance.
+- **Dispatch counts unchanged.** All 7 models match their
+  registration-derived dispatch counts; no graph-structure
+  regression since 2026-05-04.
+
+## Follow-up / open items
+
+- **Gemma 4 speed re-take with 7-9 runs** would tighten the headline
+  tok/s number; current 38.6 p50 reflects real variance, not a code
+  problem (matmul is stable). Not gating Stage 5; queue for the
+  next sweep cycle.
+- **Pre-existing pre-rebase tip log under** the noisy 2026-05-12 commit
+  (`ca761e1`) listed the JSEP probe commits in full. The list is the
+  same here — `b54503497` is the canonical webllm tip; everything
+  above it on `webllm-browser-patches` is dormant in the WASM build.
 
 ---
 

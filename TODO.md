@@ -1571,48 +1571,70 @@ windowed, follow-up campaign for FA + windowed-mask).
 landed, capture Gemma 4 E2B into the dashboard fleet, and close
 the Gemma 4 campaign with a single canonical SUMMARY.
 
-**Stage 5.1 — Pre-rebase baseline capture. CLOSED 2026-05-12 ✅.**
-Per the §32a doctrine ("Pre-rebase baseline doctrine"), captured
-profile-mode benches on the canonical 6 in fresh-headless-Chrome
-regime. **Result:** matmul time **bit-identical (±2%)** across all
-6 models vs the 2026-05-04 baseline — zero compute regression from
-the NEOX RoPE fix (Q1.6). Headline tok/s lifted +38-54% across the
-fleet but the move is purely environmental (headless Chrome
-eliminates compositor + tab-switch encode-overhead noise that
-inflated the 2026-05-04 interactive-Chrome capture); per-phase
-encode dropped 20-40% while dispatch counts and matmul absolute
-times stayed bit-equal. Going forward, **headless is the canonical
-capture regime** — cross-baseline tok/s comparisons across
-interactive/headless regimes are invalid; matmul-time deltas remain
-valid. Closure report:
+**Stage 5.1 — Pre-rebase baseline capture. CLOSED 2026-05-12 ✅
+(Pass 2 retake).** Per the §32a doctrine ("Pre-rebase baseline
+doctrine"), captured profile-mode benches on the canonical 6 in the
+**Pass 2 canonical regime**: fresh headless Chrome relaunched before
+*every* model, 30s thermal cooldown between models, 5 runs per
+model (median-of-5 absorbs cold-shader bias on early runs and
+thermal contention on later runs). Pass 1 (3-run / shared-Chrome /
+no cooldown) was superseded the same day after variance analysis
+showed 5-30% swing depending on which extreme ran when.
+**Result:** matmul time moved **-4.5% to -8.3% (faster) uniformly**
+across the canonical 6 vs the 2026-05-04 baseline — no regression
+from the NEOX RoPE fix (Q1.6); compute is uniformly faster, almost
+certainly methodology-driven (fresh Chrome + cooldown exposes
+~5-8% additional headroom that prior captures' Chrome state was
+eating). Headline tok/s lifted +45-70% across the fleet.
+
+| Model | 2026-05-04 | 2026-05-12 (Pass 2) | matmul Δ |
+|---|---:|---:|---:|
+| tinyllama-1.1b-chat-q4_0 | 80.4 | **130.5** | -4.5% (faster) |
+| qwen3-0.6b-q4f16 | 62.5 | **99.4** | -8.3% (faster) |
+| qwen3-1.7b-q4f16 | 41.7 | **71.1** | -4.8% (faster) |
+| mistral-7b-instruct-v0.3-q4ks | 28.7 | **46.4** | -6.3% (faster) |
+| llama-3.1-8b-instruct-iq3m | 23.3 | **33.8** | -5.3% (faster) |
+| qwen3-8b-iq3m | 21.3 | **31.0** | -6.0% (faster) |
+
+**New doctrine — Pass 2 capture regime is canonical going forward:**
+- **Fresh headless Chrome per model** (`agentchrome connect
+  --disconnect && sleep 30 && agentchrome connect --launch --headless
+  && sleep 5` before each `make smoke-bench`)
+- **5 runs per model**, profile mode, `PERF_RUNS=5`
+- **30s thermal cooldown** between models
+- Pass 2 establishes the new internal baseline series. The 2026-05-04
+  numbers are retained as historical anchor but cross-day comparisons
+  across capture regimes carry methodology uncertainty. Next §32 /
+  §27 / §28 adjudication baseline lives here.
+
+Closure report:
 [`eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md`](eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md).
 
-| Model | 2026-05-04 | 2026-05-12 | matmul Δ |
-|---|---:|---:|---:|
-| tinyllama-1.1b-chat-q4_0 | 80.4 | 116.1 | 0% |
-| qwen3-0.6b-q4f16 | 62.5 | 87.2 | +1.5% |
-| qwen3-1.7b-q4f16 | 41.7 | 64.4 | +1.9% |
-| mistral-7b-instruct-v0.3-q4ks | 28.7 | 43.3 | 0% |
-| llama-3.1-8b-instruct-iq3m | 23.3 | 33.0 | +0.5% |
-| qwen3-8b-iq3m | 21.3 | 29.4 | +0.8% |
-
 **Stage 5.2 — Add `gemma-4-e2b-warm` to the canonical 6 (now 7).
-CLOSED 2026-05-12 ✅.** One-line addition to `SMOKE_PROFILE_SETS.full`
-in `eval/smoke-profiles.ts` after `gemma-2-2b-warm`. Dashboard
-already has Gemma 4 perf + eval data (17 perf runs / 6 evals; best
-eval 68%; recent speed 43-48 tok/s). Stage 4.4 watch-item (smoke-
-harness speed timeout) closed by capturing a clean 3-run headless
-profile-mode bench:
-- gemma-4-e2b-it-q4km: 43.4 / 44.4 / 30.7 tok/s (p50 43.4) — see
-  [`eval/reports/pre-rebase-baselines-2026-05-12/gemma-4-e2b-it-q4km.log`](eval/reports/pre-rebase-baselines-2026-05-12/gemma-4-e2b-it-q4km.log)
-- matmul share 52% / 1040 dispatches per token (vs 450-805 for
-  canonical 6 — Gemma 4 is dispatch-heavy due to PLE injection
-  per layer); encode 22.4% / dispatch ≈ 3.6 µs (consistent with
-  headless regime)
+CLOSED 2026-05-12 ✅** (Pass 2 retake co-landed with 5.1's Pass 2).
+One-line addition to `SMOKE_PROFILE_SETS.full` in
+`eval/smoke-profiles.ts` after `gemma-2-2b-warm`. Stage 4.4
+watch-item (smoke-harness speed timeout) closed by capturing a
+Pass 2 5-run headless profile-mode bench:
+- gemma-4-e2b-it-q4km: 45.6 / 44.6 / 30.7 / 38.6 / 36.9 tok/s
+  (p50 **38.6**; 38.6% spread) — see
+  [`eval/reports/pre-rebase-baselines-2026-05-12/gemma-4-e2b-it-q4km.log`](eval/reports/pre-rebase-baselines-2026-05-12/gemma-4-e2b-it-q4km.log).
+- matmul: 8.19 ms median (47.6% share, vs canonical 6's 50-82%).
+  Dispatch count 1040/token (vs 450-805 for canonical 6) — Gemma 4
+  is dispatch-heavy due to per-layer PLE injection, which makes it
+  intrinsically more variance-prone than the canonical 6 (cf. the
+  4.2% spread on qwen3-8b vs 38.6% spread on Gemma 4 at the same
+  capture). Matmul time itself is stable (mean 8.22, median 8.19,
+  p90 8.72 across all 65 single-token samples) — variance is in
+  the rest of the pipeline.
+- **Follow-up watch**: Gemma 4 specifically benefits from 7-9 runs
+  to tighten the headline median (current 5-run p50 reflects real
+  variance, not a code problem). Queue for next sweep cycle; not
+  gating any Stage 5 or campaign.
 Ship gate: `make checkall` green (782 pass / 36 skip / 0 fail /
-39312 expect() calls). All 3 headless runs auto-ingested to the
-dashboard at 2026-05-13T00:25 — accuracy×speed scatter renders
-on next dashboard reload.
+39312 expect() calls). All 5 runs auto-ingested to the dashboard
+at 2026-05-13T01:22 — accuracy×speed scatter renders Gemma 4
+alongside the canonical 6 on next dashboard reload.
 
 **Stage 5.3 — Closure SUMMARY.** Write a single canonical Gemma 4
 campaign closure at

@@ -38,7 +38,7 @@ Call Stack (most recent call first):
 -- ggml version: 0.10.2
 -- ggml commit:  ebc7c3d82
 CMAKE_BUILD_TYPE=Release
--- Configuring done (2.2s)
+-- Configuring done (1.8s)
 -- Generating done (0.0s)
 -- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build
 [  0%] Built target generate_shaders
@@ -91,7 +91,7 @@ Call Stack (most recent call first):
 -- ggml version: 0.10.2
 -- ggml commit:  ebc7c3d82
 CMAKE_BUILD_TYPE=Release
--- Configuring done (2.2s)
+-- Configuring done (1.8s)
 -- Generating done (0.0s)
 -- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build-mem64
 [  0%] Built target generate_shaders
@@ -102,7 +102,7 @@ CMAKE_BUILD_TYPE=Release
 [ 98%] Built target llama
 [100%] Built target webllm-wasm-mem64
 bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
-Bundled 46 modules in 6ms
+Bundled 46 modules in 5ms
 
   webllm-bundle.js  0.38 MB  (entry point)
 
@@ -112,53 +112,57 @@ Bundled 2 modules in 2ms
   webllm-persistence.js  5.71 KB  (entry point)
 
 bun build eval/models.ts --outfile smoke-test/webllm-models.js --target browser
-Bundled 1 module in 2ms
+Bundled 1 module in 1ms
 
   webllm-models.js  19.85 KB  (entry point)
 
 cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
 cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
 smoke server running on http://localhost:8031
-=== smoke-bench: gemma-4-e2b-it-q4km, 3 runs ===
-WEBLLM_WASM_VARIANT= bun run eval/perf.ts --model gemma-4-e2b-it-q4km --runs 3 --profile  
-agentchrome: no smoke tab on port 61595 — creating one on the smoke-test page…
-Run 1/3... 43.4 tok/s
-Run 2/3... 44.4 tok/s
-Run 3/3... 30.7 tok/s
+=== smoke-bench: gemma-4-e2b-it-q4km, 5 runs ===
+WEBLLM_WASM_VARIANT= bun run eval/perf.ts --model gemma-4-e2b-it-q4km --runs 5 --profile  
+agentchrome: no smoke tab on port 58401 — creating one on the smoke-test page…
+Run 1/5... 45.6 tok/s
+Run 2/5... 44.6 tok/s
+Run 3/5... 30.7 tok/s
+Run 4/5... 38.6 tok/s
+Run 5/5... 36.9 tok/s
 
 Inference perf — Gemma 4 E2B Instruct (Q4_K_M) (gemma-4-e2b-it-q4km)
-Timestamp: 2026-05-13T00:25:16.791Z
+Timestamp: 2026-05-13T01:22:23.685Z
 Prompt:    "Tell one short joke."
 
 Run  Tokens  Wall(ms)  Total(ms)  Prefill(ms)  Decode(ms)  tok/s
 ---  ------  --------  ---------  -----------  ----------  -----
-  1      14      4406        600          312         323   43.4
-  2      14      4197        600          312         316   44.4
-  3      14     10351        800          317         456   30.7
+  1      14      3954        600          298         307   45.6
+  2      14      3865        600          298         314   44.6
+  3      14      9761        800          300         456   30.7
+  4      14     10057        700          299         363   38.6
+  5      14      4416        700          299         380   36.9
 ---  ------  --------  ---------  -----------  ----------  -----
-p50*     14      4406        600          312         323   43.4
+p50*     14     10057        700          299         363   38.6
 * row selected by median tok/s; other columns are from that run, not column-wise medians.
 
 Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
 
-Per-phase decode timing — mode=topk (39 single-token steps)
+Per-phase decode timing — mode=topk (65 single-token steps)
 Phase              mean(ms)  median(ms)  p90(ms)  %total
 -----------------  --------  ----------  -------  ------
-ctxCreateMs            0.01        0.00     0.00    0.0%
-buildGraphMs           0.26        0.20     0.40    1.3%
-backendAllocMs         0.15        0.10     0.20    0.7%
+ctxCreateMs            0.00        0.00     0.00    0.0%
+buildGraphMs           0.24        0.20     0.30    1.2%
+backendAllocMs         0.25        0.10     0.20    1.3%
 uploadLeavesMs         0.01        0.00     0.00    0.0%
-graphComputeMs        17.17       15.60    26.20   86.9%
-downloadResultMs       2.17        0.60    12.60   11.0%
-teardownMs             0.00        0.00     0.00    0.0%
-totalMs               19.76       16.70    28.90  100.0%
+graphComputeMs        17.27       16.00    23.00   88.2%
+downloadResultMs       1.80        0.70     4.40    9.2%
+teardownMs             0.01        0.00     0.00    0.0%
+totalMs               19.58       17.20    27.10  100.0%
 
 Backend decode attribution (when available)
 Field                   samples  mean      median    p90       %graph
 ----------------------  -------  --------  --------  --------  ------
-backendProfileTotalMs        39     16.46     15.40     22.70   95.8%
-backendEncodeOverheadMs       39      3.85      3.70      4.60   22.4%
-backendMatmulMs              39      8.93      8.91      9.50   52.0%
-backendAttentionMs           39      0.48      0.46      0.72    2.8%
-backendDispatchCount         39    1040.0    1040.0    1040.0       -
+backendProfileTotalMs        65     16.75     15.70     21.70   97.0%
+backendEncodeOverheadMs       65      3.99      4.10      4.60   23.1%
+backendMatmulMs              65      8.22      8.19      8.72   47.6%
+backendAttentionMs           65      0.51      0.52      0.72    2.9%
+backendDispatchCount         65    1040.0    1040.0    1040.0       -
 Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.

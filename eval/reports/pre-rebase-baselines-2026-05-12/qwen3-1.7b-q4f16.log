@@ -38,7 +38,7 @@ Call Stack (most recent call first):
 -- ggml version: 0.10.2
 -- ggml commit:  ebc7c3d82
 CMAKE_BUILD_TYPE=Release
--- Configuring done (2.2s)
+-- Configuring done (2.0s)
 -- Generating done (0.0s)
 -- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build
 [  0%] Built target generate_shaders
@@ -91,7 +91,7 @@ Call Stack (most recent call first):
 -- ggml version: 0.10.2
 -- ggml commit:  ebc7c3d82
 CMAKE_BUILD_TYPE=Release
--- Configuring done (2.2s)
+-- Configuring done (1.8s)
 -- Generating done (0.0s)
 -- Build files have been written to: /Users/probello/Repos/webllm/src/wasm/build-mem64
 [  0%] Built target generate_shaders
@@ -102,63 +102,67 @@ CMAKE_BUILD_TYPE=Release
 [ 98%] Built target llama
 [100%] Built target webllm-wasm-mem64
 bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
-Bundled 46 modules in 9ms
+Bundled 46 modules in 6ms
 
   webllm-bundle.js  0.38 MB  (entry point)
 
 bun build src/persistence/indexeddb-store.ts --outfile smoke-test/webllm-persistence.js --target browser
-Bundled 2 modules in 4ms
+Bundled 2 modules in 2ms
 
   webllm-persistence.js  5.71 KB  (entry point)
 
 bun build eval/models.ts --outfile smoke-test/webllm-models.js --target browser
-Bundled 1 module in 2ms
+Bundled 1 module in 1ms
 
   webllm-models.js  19.85 KB  (entry point)
 
 cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
 cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
 smoke server running on http://localhost:8031
-=== smoke-bench: qwen3-1.7b-q4f16, 3 runs ===
-WEBLLM_WASM_VARIANT= bun run eval/perf.ts --model qwen3-1.7b-q4f16 --runs 3 --profile  
-agentchrome: no smoke tab on port 57264 — creating one on the smoke-test page…
-Run 1/3... 62.5 tok/s
-Run 2/3... 64.4 tok/s
-Run 3/3... 64.7 tok/s
+=== smoke-bench: qwen3-1.7b-q4f16, 5 runs ===
+WEBLLM_WASM_VARIANT= bun run eval/perf.ts --model qwen3-1.7b-q4f16 --runs 5 --profile  
+agentchrome: no smoke tab on port 56822 — creating one on the smoke-test page…
+Run 1/5... 71.1 tok/s
+Run 2/5... 71.0 tok/s
+Run 3/5... 72.0 tok/s
+Run 4/5... 71.2 tok/s
+Run 5/5... 47.4 tok/s
 
 Inference perf — Qwen3 1.7B (qwen3-1.7b-q4f16)
-Timestamp: 2026-05-13T00:12:10.939Z
+Timestamp: 2026-05-13T01:16:22.557Z
 Prompt:    "Tell one short joke."
 
 Run  Tokens  Wall(ms)  Total(ms)  Prefill(ms)  Decode(ms)  tok/s
 ---  ------  --------  ---------  -----------  ----------  -----
-  1      17      3294        400          119         272   62.5
-  2      17      3244        400          119         264   64.4
-  3      17      3289        400          118         263   64.7
+  1      17      3044        400          113         239   71.1
+  2      17      2757        400          113         240   71.0
+  3      17      2802        300          113         236   72.0
+  4      17      2891        400          114         239   71.2
+  5      17      5617        500          116         359   47.4
 ---  ------  --------  ---------  -----------  ----------  -----
-p50*     17      3244        400          119         264   64.4
+p50*     17      3044        400          113         239   71.1
 * row selected by median tok/s; other columns are from that run, not column-wise medians.
 
 Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
 
-Per-phase decode timing — mode=topk (48 single-token steps)
+Per-phase decode timing — mode=topk (80 single-token steps)
 Phase              mean(ms)  median(ms)  p90(ms)  %total
 -----------------  --------  ----------  -------  ------
 ctxCreateMs            0.00        0.00     0.00    0.0%
-buildGraphMs           0.25        0.20     0.30    1.9%
+buildGraphMs           0.23        0.20     0.30    1.8%
 backendAllocMs         0.04        0.00     0.10    0.3%
 uploadLeavesMs         0.01        0.00     0.10    0.1%
-graphComputeMs        11.74       11.80    12.10   92.0%
-downloadResultMs       0.70        0.70     0.80    5.5%
+graphComputeMs        11.62       10.40    17.00   91.9%
+downloadResultMs       0.74        0.60     1.30    5.8%
 teardownMs             0.01        0.00     0.00    0.0%
-totalMs               12.76       12.70    13.50  100.0%
+totalMs               12.65       11.40    18.60  100.0%
 
 Backend decode attribution (when available)
 Field                   samples  mean      median    p90       %graph
 ----------------------  -------  --------  --------  --------  ------
-backendProfileTotalMs        48     11.65     11.70     12.00   99.2%
-backendEncodeOverheadMs       48      2.16      2.10      2.30   18.4%
-backendMatmulMs              48      7.02      7.01      7.34   59.8%
-backendAttentionMs           48      0.54      0.52      0.79    4.6%
-backendDispatchCount         48     629.0     629.0     629.0       -
+backendProfileTotalMs        80     11.18     10.30     14.80   96.2%
+backendEncodeOverheadMs       80      2.35      2.20      2.70   20.2%
+backendMatmulMs              80      6.54      6.55      6.88   56.3%
+backendAttentionMs           80      0.48      0.52      0.72    4.2%
+backendDispatchCount         80     629.0     629.0     629.0       -
 Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
