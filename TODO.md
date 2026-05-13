@@ -822,17 +822,29 @@ rebuilt, MANIFESTs verified — see closure entry in Watch list).
 **Algorithmic-perf backlog fully cleared.** All algorithmic levers
 at the canonical 4-baseline are exhausted (§17-§29 closed matmul,
 FA, drafter, encoder, prefill-tiling, spec-decode families).
-Rebase cadence: 2026-05-04 fired (§27 hybrid — maintenance free
-win, perf neutral; two local LayerNorm patches subsumed by
-upstream `d4b0c22f9`, patch stack 11 → 9). Encoder parity PASS at
-cosine 0.76. Cross-day perf vs 2026-05-01 baseline noise on 5/6;
-mistral-7b -14% outlier flagged for next-session rerun. Tip:
-`fc1f81242` on upstream base `a817a22bc`. Sweep matrix at
-[`eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md);
-same-day pre-rebase control at
-[`eval/reports/pre-rebase-baselines-2026-05-04/`](eval/reports/pre-rebase-baselines-2026-05-04/)
-(retained as a process lesson — same-day capture was anomalously
-cold and overstated the gain by ~30% on small models).
+Rebase cadence: **2026-05-12 fired (§32 — small regression,
+accepted)**. Rebased to upstream `856c3adac` (102 commits ahead;
+2 ggml-webgpu landings: #22906 mulmat-q refactor for gpt-oss-20b
++ #22808 multimodal precision/FA rework). 10 effective patches
+reapplied cleanly with zero manual conflict resolution; 18 JSEP
+probe commits dropped per the 2026-05-08 negative-closure. WASM
+build initially broke on a stranded JSEP-probe export
+(`_ggml_cpu_set_weight_hash_probe`) — fixed in `a469771`. Probe A
+(FA-VEC clamp obsolescence) — PARTIAL: forward-pass probe PASSES
+on un-clamped branch, but sustained eval wedged; keeping `9ea3bfc`
+clamp. Probe B (Gemma 4 eval): 33/48 = 68.75% vs 70.8% baseline,
+in noise band. Pass 2 sweep: tok/s -2% to -11% across canonical
+7 fleet, matmul +4-9%; thermal contamination significant on
+small models and Gemma 4 (run-1 vs run-5 fade up to -26%). Tip:
+`4192e05ba` on upstream base `856c3adac`. Sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-12/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-12/SUMMARY.md);
+pre-rebase Pass 2 baseline at
+[`eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md`](eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md).
+Prior cycle 2026-05-04 was §27 hybrid — maintenance free win,
+perf neutral; two local LayerNorm patches subsumed by upstream
+`d4b0c22f9`, patch stack 11 → 9. Encoder parity PASS at
+cosine 0.76. Sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-04/SUMMARY.md).
 Prior cycle 2026-05-01 was §27 (mul-mat vectorize #22578 +
 upscale shader; tip `e29753286`); sweep matrix at
 [`eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-01/SUMMARY.md).
@@ -856,284 +868,25 @@ preserved, sub-task probe chain): archived to
 support". Tip at archival: `d7f0170`.
 
 
-### llama.cpp rebase + sweep cycle — 2026-05-12 upstream cadence (queued 2026-05-12)
+### llama.cpp rebase + sweep cycle — 2026-05-12 — **CLOSED 2026-05-12** ✅
 
-**Status:** queued, not started. Cadence check 2026-05-12 EOS found
-two new ggml-webgpu commits on upstream master (both landed
-2026-05-12 wall-clock UTC); fire when ready to pick up. This entry
-is self-contained — a fresh session should be able to start at
-Phase 1 without paging through prior context.
+Cycle **CLOSED as §32 (small regression, accepted)**. Rebased to
+upstream `856c3adac` (post: llama.cpp tip → `4192e05ba`). 10
+effective patches reapplied with zero manual conflicts. Probe A
+(FA-VEC clamp) PARTIAL — keeping `9ea3bfc`; follow-up filed.
+Probe B (Gemma 4 eval) 33/48 = 68.75% vs 70.8% baseline (noise
+band). Pass 2 sweep: -2% to -11% tok/s, +4-9% matmul; thermal
+contamination significant.
 
-**Trigger:** upstream `ggerganov/llama.cpp` master moved from our
-rebase base `a817a22bc` (2026-05-04 cycle) to `856c3adac` (the
-cadence-check tip). 102 commits ahead, of which 2 touch
-`ggml-webgpu`:
+Canonical closure:
+[`eval/reports/llama-cpp-rebase-2026-05-12/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-05-12/SUMMARY.md)
+(headline matrix, thermal asterisks, classification rationale,
+three filed follow-ups). Cross-linked from active-next-steps
+"Rebase cadence" line above. Full original phased plan (fresh-
+session pickup, 6-phase decision trees, risk register): archived
+to [`TODO_ARCHIVE.md`](TODO_ARCHIVE.md) under "llama.cpp rebase +
+sweep cycle — 2026-05-12 upstream cadence".
 
-| Upstream commit | Date | Touch | Relevance |
-|---|---|---|---|
-| `927dada6c` "Enables running gpt-oss-20b" | 2026-05-12 | mulmat-q refactor + new shaders (add_id, get_rows); shader-lib +68, ggml-webgpu.cpp +61, 11K lines auto-generated ops.md table | Broad matmul perf — §27 / §32 candidate |
-| `239a497e5` "address precision issues for multimodal" | 2026-05-12 | GELU fix (gelu / gelu_quick / gelu_erf); FA tile + vec path rework; f16 → f32 for q_shmem / o_shmem; NaN-clamp; shader-lib +193, ggml-webgpu.cpp +30 | **Directly Gemma 4** — GELU is Gemma's FFN activation; FA path overhaul may obsolete our `9ea3bfc` clamp |
-
-Plus 1 ggml-core commit (`3e941b813` SCHED_DEBUG cosmetic — no
-behavioral impact). The other 99 upstream master commits are CUDA /
-Vulkan / Metal / server / docs — out of scope for our wasm32
-`ggml-webgpu` build.
-
-**Pre-rebase baseline (canonical §32a control):**
-[`eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md`](eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md).
-Pass 2 capture regime (fresh-Chrome-per-model + 30s cooldown + 5
-runs + headless + profile mode). Captured 2026-05-12 EOS (within
-hours of upstream commits landing); the freshest possible
-same-tip control. 7 models: canonical 6 + `gemma-4-e2b-it-q4km`.
-
-**Patch conflict surface:**
-- `ggml/src/ggml-webgpu/ggml-webgpu.cpp` — we patch 632 / -61 lines;
-  upstream adds 91 more in our area (61 from #22906 + 30 from
-  #22808). **Manual conflict resolution likely.** Affected local
-  patches: `ff362d4ae` (ASYNCIFY bundle), `846e0685e` (request-based
-  readback), `55fba3670` (request cleanup), `702d40ee9` (readback
-  notify), `009119b07` (graph profiling), `db2a3c38d`/`920c988a1`
-  (matmul dispatch specialize + revert), `fc1f81242` (UB shift
-  fix), `b54503497` (WaitAny under JSPI).
-- `ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp` — **we do not
-  patch this file**; upstream rewrites the FA path-selection helper.
-  No conflict; behavior changes affect our `9ea3bfc` TS-side clamp
-  (Probe A below).
-- `ggml/src/ggml-webgpu/wgsl-shaders/common_decls.tmpl` — we patch
-  here (load_u32_at_src UB fix); upstream doesn't touch in these
-  commits. No conflict expected.
-- `ggml/src/ggml-webgpu/wgsl-shaders/{flash_attn_*,unary,mul_mat_*}.wgsl`
-  — upstream rewrites; we don't patch. No conflict; behavior matters
-  for Probe A + Probe B.
-
-**Predicted §-cycle classification (to be confirmed by sweep):**
-- Most likely **§27 (free win)**: precision fixes are corrective;
-  mulmat-q refactors historically improve perf (cf. §27's #22344
-  fast i-quant mat-vec → +80 % on qwen3-8b).
-- Possible **§32 (small regression, accepted)**: mulmat-q refactor
-  could shift one model adversely; accept if 5-of-7 hold.
-- Less likely **§28 (negative result)**: would require these
-  commits to break a load-bearing assumption — none flagged so far.
-
----
-
-#### Fresh-session pickup — start here
-
-**Pre-flight (~2 min):**
-
-```bash
-cd /Users/probello/Repos/webllm
-git status                                  # must be clean
-git log --oneline -1                        # confirm tip at ec884a9 or later
-agentchrome connect --status                # confirm reachable (or relaunch later)
-ls eval/reports/pre-rebase-baselines-2026-05-12/  # confirm baselines present
-```
-
----
-
-#### Phase 1 — Rebase webllm-browser-patches onto upstream master
-
-**Goal:** rebase 11 effective patches onto `origin/master`
-(post-fetch tip `856c3adac` or whatever is current). Resolve
-`ggml-webgpu.cpp` conflicts. Drop the 16 JSEP probe commits stacked
-above `b54503497` (negative-closure 2026-05-08; not load-bearing).
-
-```bash
-cd ~/Repos/llama.cpp
-git fetch origin master
-git checkout webllm-browser-patches
-git checkout -b webllm-browser-patches-pre-rebase-2026-05-12  # safety backup
-git checkout webllm-browser-patches
-# Reset to canonical tip (drop the 16 JSEP probes):
-git reset --hard b54503497
-# Now rebase the 11 effective patches onto current master:
-git rebase origin/master
-# Resolve any conflicts in ggml-webgpu.cpp. Likely conflict points:
-#   - Around the `webgpu_context` struct (#22906 + #22808 both add fields)
-#   - In the FA pipeline-key struct (#22808 adds q_type, dst_type)
-#   - In flash-attention dispatch helpers (#22808 reworks path selection)
-# For each conflict: keep BOTH upstream's new fields/logic AND our
-# browser-side instrumentation (ASYNCIFY, async readback, profiling).
-# Use `git diff --merge-base origin/master HEAD` mid-rebase to sanity-check.
-```
-
-**Gate:** `git rebase --continue` reaches clean tip with all 11
-patches applied. Save the new tip SHA for Probe artifacts.
-
-**If a patch becomes obsolete** (e.g., upstream merged equivalent
-behavior), drop it via `git rebase --skip` and document in the
-post-rebase SUMMARY. Specifically watch:
-- `db2a3c38d` decode matmul dispatch specialize: already reverted
-  by `920c988a1` in our stack; consider whether the mulmat-q
-  refactor in `927dada6c` subsumes the motivation.
-
----
-
-#### Phase 2 — Rebuild WASM + sanity smoke (~5 min)
-
-```bash
-cd /Users/probello/Repos/webllm
-make wasm-build      # rebuilds both wasm32 and wasm64 targets
-make smoke-test      # bundles + copies WASM
-# Sanity check: a single fresh-Chrome smoke on TinyLlama
-agentchrome connect --disconnect && sleep 5 && agentchrome connect --launch --headless && sleep 5
-make smoke-bench PERF_MODEL=tinyllama-1.1b-chat-q4_0 PERF_RUNS=3
-```
-
-**Gate:** TinyLlama generates 64 tokens, finish=max-tokens (or
-stop-token), no console errors, tok/s within ±15 % of Pass 2
-baseline (130.5). If it crashes or outputs garbage, halt and back
-out (the safety backup branch `webllm-browser-patches-pre-rebase-2026-05-12`
-restores).
-
----
-
-#### Phase 3 — Probe A: FA-VEC clamp obsolescence (~10 min)
-
-**Hypothesis:** upstream `239a497e5` rewrote FA path-selection
-(f16 → f32 for q/o shmem, restructured PATH_VEC shared-memory math,
-added q_type/dst_type to pipeline key). Our `9ea3bfc` TS-side
-`prefillTileSize=16` clamp for Gemma family head_dim>128 may no
-longer be needed.
-
-```bash
-cd /Users/probello/Repos/webllm
-git checkout -b probe-fa-vec-clamp-obsolete
-# Revert the clamp (one commit on a probe branch):
-git revert --no-edit 9ea3bfc
-make smoke-test
-# Repro the original trap conditions:
-agentchrome connect --disconnect && sleep 5 && agentchrome connect --launch --headless && sleep 5
-# Navigate to the FA-prefill probe page:
-agentchrome navigate "http://localhost:8031/fa-prefill-probe.html?model=gemma-4-e2b-it-q4km&ctx=4096&path=forward&chat=1&v=$(date +%s)"
-# Wait for [FA-PREFILL-PROBE-DONE-PASS] in the page log, OR
-# RuntimeError: unreachable in the console.
-```
-
-**Gate / decision tree:**
-- **PASS** (probe completes without trap, healthy argmax) → upstream
-  fixed the constraint. **Drop `9ea3bfc` permanently** on the rebased
-  branch; document in SUMMARY. Recovers prefill throughput on
-  Gemma 4 (42.3s TTFT for 2,238-token prefill at q_tile=1 today
-  → potentially larger tile VEC).
-- **FAIL** (still traps) → keep the clamp. Revert the probe branch:
-  `git checkout webllm-browser-patches && git branch -D probe-fa-vec-clamp-obsolete`.
-- **PARTIAL** (different failure mode) → file a sub-probe; do not
-  block the cycle on it.
-
-**Artifact:** `eval/reports/llama-cpp-rebase-2026-05-12-or-13/probe-a-fa-vec-clamp/`.
-
----
-
-#### Phase 4 — Probe B: Gemma 4 eval delta (~5 min)
-
-**Hypothesis:** `239a497e5` GELU fix tightens numerical behavior of
-Gemma 4's FFN activation. Eval may move ±a few pp from the
-70.8 % Stage 4.4 baseline.
-
-```bash
-cd /Users/probello/Repos/webllm
-# Dashboard must be running for bench-profile:
-curl -sf http://localhost:8033/health || (echo "Start dashboard: make dashboard-serve"; exit 1)
-agentchrome connect --disconnect && sleep 5 && agentchrome connect --launch --headless && sleep 5
-WEBLLM_LIVE_BENCH_URL=http://localhost:8033 bun run eval/bench.ts --profiles gemma-4-e2b-warm
-```
-
-**Gate:** record the eval %, compare against 70.8 % Stage 4.4
-baseline.
-- ≥ 70.8 % → §27 free-win or neutral. Banner result.
-- 65-70.8 % → noise floor; re-run once to confirm.
-- < 65 % → §28 negative result; investigate (most likely
-  candidate: GELU precision interaction with greedy sampling).
-
-**Artifact:** `eval/reports/llama-cpp-rebase-2026-05-12-or-13/probe-b-gemma4-eval/`.
-
----
-
-#### Phase 5 — Pass 2 canonical 7-fleet perf sweep (~30 min)
-
-Repeat the Pass 2 capture regime against the rebased build. Same
-exact procedure as Stage 5.1's Pass 2:
-
-```bash
-cd /Users/probello/Repos/webllm
-mkdir -p eval/reports/llama-cpp-rebase-2026-05-12-or-13/post-rebase
-for m in tinyllama-1.1b-chat-q4_0 qwen3-0.6b-q4f16 qwen3-1.7b-q4f16 \
-         mistral-7b-instruct-v0.3-q4ks llama-3.1-8b-instruct-iq3m \
-         qwen3-8b-iq3m gemma-4-e2b-it-q4km; do
-  agentchrome connect --disconnect 2>&1 | head -1
-  sleep 30  # thermal cooldown
-  agentchrome connect --launch --headless 2>&1 | head -1
-  sleep 5   # settle
-  make smoke-bench PERF_MODEL="$m" PERF_RUNS=5 2>&1 \
-    | tee "eval/reports/llama-cpp-rebase-2026-05-12-or-13/post-rebase/${m}.log" \
-    | tail -20
-done
-```
-
-**Gate:** 7 logs landed cleanly; per-run spread under 10 % for
-canonical 6 (Gemma 4 may stay at ~30-40 % spread, intrinsic).
-
----
-
-#### Phase 6 — Adjudicate + write closure SUMMARY (~30 min)
-
-Build the post-rebase headline matrix; compare against
-`eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md` Pass 2
-numbers (same regime, same-day same-tip control = perfect §32a
-methodology). Classify cycle:
-
-- **§27 (free win):** if 5+ of 7 models show ≥ 2 % matmul faster
-  OR clear eval improvement on Gemma 4. Adopt baseline; pin new
-  canonical tip; close cycle.
-- **§28 (negative result):** if a prior lever closes harder (e.g.,
-  Probe A turns out positive AND Probe B regresses — would mean
-  the GELU fix interacts badly with the new FA path). Document;
-  retire affected lever's resurrection path; close cycle.
-- **§32 (small regression, accepted):** if 5/6 hold neutral but 1
-  holds a measurable regression. Don't revert — staying current has
-  option value (next cycle's wins land cleanly). Document; pin new
-  canonical baseline.
-
-**Artifact:** `eval/reports/llama-cpp-rebase-2026-05-12-or-13/SUMMARY.md`
-(headline matrix + drift table + Probe A/B outcomes + classification
-+ next-cadence trigger).
-
-**Update:**
-- TODO header "Current canonical baselines" block (line ~16-50)
-  with new perf numbers if §27.
-- TODO active-next-steps block "Rebase cadence" line (line ~825)
-  with the new cycle's outcome.
-- Commit cadence: `docs(rebase-2026-05-12-or-13):` for SUMMARY +
-  TODO updates; `feat(rebase-2026-05-12-or-13):` if Phase 3 drops
-  the `9ea3bfc` clamp.
-
----
-
-**Out of scope for this cycle:**
-- Multi-binding scratch allocation (Stage 4.3 numerical-parity
-  unblocker) — separate campaign if a probe needs it.
-- Embedding-path SWA support — out-of-stage opportunistic.
-- Upstream FA-VEC `ne[1] < 20` ceiling bump — P2 hygiene; only
-  needed if Probe A reveals upstream did NOT obsolete our clamp.
-- gpt-oss-20b model registration — above the 8B ceiling.
-
-**Risks:**
-- **Patch conflict in `ggml-webgpu.cpp`** (most likely): manual
-  resolution; safety backup branch protects against bad merge.
-  Worst case 1 hour of triage; back out via the backup branch.
-- **Probe A false positive** (clamp obsoleted but a different
-  edge case appears): scope it via the probe branch; don't bake
-  into rebased mainline until clean.
-- **Probe B false negative** (eval moves -3 pp into noise band):
-  re-run once; if still below noise, treat as §32.
-- **mulmat-q refactor regression on a specific quant**: most likely
-  IQ-quants (e.g., qwen3-8b-iq3m matmul); accept as §32 if
-  isolated.
-
-**Wall-clock budget:** ~1.5-2 hours total, mostly autonomous.
-Phase 1 is the only manual step (rebase conflict resolution); the
-rest is scripted.
 
 ────────────────────────────────────────────────────────────────
 
