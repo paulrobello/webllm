@@ -1,0 +1,205 @@
+=== Sweep started at Tue May 12 20:01:31 PDT 2026 ===
+----- model=tinyllama-1.1b-chat-q4_0 at Tue May 12 20:01:31 PDT 2026 -----
+{"disconnected":true,"killed_pid":81798}
+{"ws_url":"ws://127.0.0.1:53387/devtools/browser/22ab3763-57fb-44a1-94cb-42a3c44784be","port":53387,"pid":3920}
+[tinyllama-1.1b-chat-q4_0] tail of log:
+[ 98%] Built target llama
+[100%] Built target webllm-wasm-mem64
+bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+Bundled 46 modules in 6ms
+
+  webllm-bundle.js  0.38 MB  (entry point)
+
+bun build src/persistence/indexeddb-store.ts --outfile smoke-test/webllm-persistence.js --target browser
+Bundled 2 modules in 2ms
+
+  webllm-persistence.js  5.71 KB  (entry point)
+
+bun build eval/models.ts --outfile smoke-test/webllm-models.js --target browser
+Bundled 1 module in 5ms
+
+  webllm-models.js  19.85 KB  (entry point)
+
+cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/
+cp src/wasm/build-mem64/webllm-wasm-mem64.js src/wasm/build-mem64/webllm-wasm-mem64.wasm smoke-test/
+smoke server running on http://localhost:8031
+=== smoke-bench: tinyllama-1.1b-chat-q4_0, 5 runs ===
+WEBLLM_WASM_VARIANT= bun run eval/perf.ts --model tinyllama-1.1b-chat-q4_0 --runs 5 --profile  
+agentchrome: no smoke tab on port 53387 — creating one on the smoke-test page…
+Run 1/5...Fatal: Timed out waiting for smoke-test result line on the page
+make: *** [smoke-bench] Error 1
+----- model=qwen3-0.6b-q4f16 at Tue May 12 20:08:15 PDT 2026 -----
+{"disconnected":true,"killed_pid":3920}
+{"ws_url":"ws://127.0.0.1:56104/devtools/browser/e3bcbde9-52dd-4482-8459-dd3350ac7a31","port":56104,"pid":21621}
+[qwen3-0.6b-q4f16] tail of log:
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
+
+Per-phase decode timing — mode=topk (120 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.00        0.00     0.00    0.0%
+buildGraphMs           0.22        0.20     0.30    2.6%
+backendAllocMs         0.04        0.00     0.10    0.5%
+uploadLeavesMs         0.01        0.00     0.00    0.1%
+graphComputeMs         7.73        7.70     8.00   90.5%
+downloadResultMs       0.54        0.50     0.70    6.3%
+teardownMs             0.00        0.00     0.00    0.0%
+totalMs                8.54        8.50     8.90  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs       120      7.64      7.60      7.90   98.8%
+backendEncodeOverheadMs      120      2.14      2.10      2.30   27.7%
+backendMatmulMs             120      3.87      3.87      4.26   50.1%
+backendAttentionMs          120      0.48      0.46      0.79    6.2%
+backendDispatchCount        120     629.0     629.0     629.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
+----- model=qwen3-1.7b-q4f16 at Tue May 12 20:09:11 PDT 2026 -----
+{"disconnected":true,"killed_pid":21621}
+{"ws_url":"ws://127.0.0.1:56399/devtools/browser/8369ede0-6dd2-413e-ad33-6ce958a4f90f","port":56399,"pid":24078}
+[qwen3-1.7b-q4f16] tail of log:
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
+
+Per-phase decode timing — mode=topk (80 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.01        0.00     0.00    0.0%
+buildGraphMs           0.24        0.20     0.30    1.9%
+backendAllocMs         0.04        0.00     0.10    0.4%
+uploadLeavesMs         0.01        0.00     0.10    0.1%
+graphComputeMs        11.33       11.20    11.70   88.9%
+downloadResultMs       1.11        0.60     0.90    8.7%
+teardownMs             0.01        0.00     0.00    0.0%
+totalMs               12.75       12.20    15.00  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs        80     11.20     11.10     11.50   98.8%
+backendEncodeOverheadMs       80      2.41      2.30      2.80   21.3%
+backendMatmulMs              80      6.92      6.95      7.41   61.1%
+backendAttentionMs           80      0.49      0.46      0.72    4.3%
+backendDispatchCount         80     629.0     629.0     629.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
+----- model=mistral-7b-instruct-v0.3-q4ks at Tue May 12 20:10:15 PDT 2026 -----
+{"disconnected":true,"killed_pid":24078}
+{"ws_url":"ws://127.0.0.1:56705/devtools/browser/604c48d9-c268-4cb6-9cc9-99bd65081230","port":56705,"pid":26789}
+[mistral-7b-instruct-v0.3-q4ks] tail of log:
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
+
+Per-phase decode timing — mode=topk (205 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.01        0.00     0.00    0.0%
+buildGraphMs           0.22        0.20     0.30    1.0%
+backendAllocMs         0.04        0.00     0.10    0.2%
+uploadLeavesMs         0.01        0.00     0.00    0.0%
+graphComputeMs        21.13       21.10    21.50   95.3%
+downloadResultMs       0.77        0.80     0.90    3.5%
+teardownMs             0.01        0.00     0.00    0.0%
+totalMs               22.17       22.20    22.60  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs       205     20.95     20.90     21.30   99.2%
+backendEncodeOverheadMs      205      3.01      3.00      3.50   14.3%
+backendMatmulMs             205     16.25     16.25     16.71   76.9%
+backendAttentionMs          205      0.62      0.59      0.92    2.9%
+backendDispatchCount        205     650.0     650.0     650.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
+----- model=llama-3.1-8b-instruct-iq3m at Tue May 12 20:11:33 PDT 2026 -----
+{"disconnected":true,"killed_pid":26789}
+{"ws_url":"ws://127.0.0.1:57065/devtools/browser/310af9c6-5ffd-462f-80c0-37b7f27124e6","port":57065,"pid":30023}
+[llama-3.1-8b-instruct-iq3m] tail of log:
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
+
+Per-phase decode timing — mode=topk (260 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.01        0.00     0.00    0.0%
+buildGraphMs           0.21        0.20     0.30    0.7%
+backendAllocMs         0.04        0.00     0.10    0.1%
+uploadLeavesMs         0.01        0.00     0.00    0.0%
+graphComputeMs        28.95       29.00    29.50   96.5%
+downloadResultMs       0.79        0.80     1.00    2.6%
+teardownMs             0.01        0.00     0.00    0.0%
+totalMs               30.01       30.10    30.70  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs       260     28.77     28.80     29.30   99.4%
+backendEncodeOverheadMs      260      2.78      2.80      3.20    9.6%
+backendMatmulMs             260     23.47     23.46     23.99   81.1%
+backendAttentionMs          260      0.62      0.59      0.79    2.1%
+backendDispatchCount        260     652.0     652.0     652.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
+----- model=qwen3-8b-iq3m at Tue May 12 20:13:18 PDT 2026 -----
+{"disconnected":true,"killed_pid":30023}
+{"ws_url":"ws://127.0.0.1:57546/devtools/browser/2198b872-c773-4f2d-ba98-be36a3ae8759","port":57546,"pid":34115}
+[qwen3-8b-iq3m] tail of log:
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
+
+Per-phase decode timing — mode=topk (100 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.01        0.00     0.00    0.0%
+buildGraphMs           0.28        0.30     0.40    0.9%
+backendAllocMs         0.05        0.00     0.10    0.2%
+uploadLeavesMs         0.01        0.00     0.10    0.0%
+graphComputeMs        30.08       30.00    30.60   96.3%
+downloadResultMs       0.80        0.80     1.00    2.6%
+teardownMs             0.01        0.00     0.00    0.0%
+totalMs               31.24       31.30    31.90  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs       100     29.90     29.80     30.40   99.4%
+backendEncodeOverheadMs      100      3.54      3.50      4.00   11.8%
+backendMatmulMs             100     23.90     23.92     24.38   79.5%
+backendAttentionMs          100      0.70      0.72      0.92    2.3%
+backendDispatchCount        100     805.0     805.0     805.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
+----- model=gemma-4-e2b-it-q4km at Tue May 12 20:14:48 PDT 2026 -----
+{"disconnected":true,"killed_pid":34115}
+{"ws_url":"ws://127.0.0.1:57965/devtools/browser/6126edf0-c32e-41c3-b018-a2005c058d52","port":57965,"pid":37734}
+[gemma-4-e2b-it-q4km] tail of log:
+* row selected by median tok/s; other columns are from that run, not column-wise medians.
+
+Baseline model differs (tinyllama-1.1b-chat-q4_0) — skipping comparison.
+
+Per-phase decode timing — mode=topk (65 single-token steps)
+Phase              mean(ms)  median(ms)  p90(ms)  %total
+-----------------  --------  ----------  -------  ------
+ctxCreateMs            0.00        0.00     0.00    0.0%
+buildGraphMs           0.25        0.20     0.30    1.2%
+backendAllocMs         0.12        0.10     0.20    0.6%
+uploadLeavesMs         0.01        0.00     0.10    0.1%
+graphComputeMs        17.81       15.50    20.90   86.5%
+downloadResultMs       2.39        0.70     6.10   11.6%
+teardownMs             0.00        0.00     0.00    0.0%
+totalMs               20.59       16.60    29.40  100.0%
+
+Backend decode attribution (when available)
+Field                   samples  mean      median    p90       %graph
+----------------------  -------  --------  --------  --------  ------
+backendProfileTotalMs        65     17.15     15.30     19.80   96.3%
+backendEncodeOverheadMs       65      4.23      4.40      4.90   23.8%
+backendMatmulMs              65      8.85      8.91      9.37   49.7%
+backendAttentionMs           65      0.51      0.46      0.72    2.9%
+backendDispatchCount         65    1040.0    1040.0    1040.0       -
+Profile note: backend attribution is collected only in --profile mode and can perturb absolute timing; use non-profile runs for representative throughput comparisons.
+=== Sweep finished at Tue May 12 20:16:17 PDT 2026 ===
