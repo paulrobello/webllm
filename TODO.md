@@ -1571,15 +1571,30 @@ windowed, follow-up campaign for FA + windowed-mask).
 landed, capture Gemma 4 E2B into the dashboard fleet, and close
 the Gemma 4 campaign with a single canonical SUMMARY.
 
-**Stage 5.1 — Pre-rebase baseline capture.** Per the §32a doctrine
-("Pre-rebase baseline doctrine"), capture profile-mode benches on
-the canonical 6 BEFORE any rebase fires. The NEOX fix changed
-`getRopeModeForArchitecture` behavior only for Gemma family; the
-canonical 6 (`tinyllama-warm`, `qwen3-0.6b-q4f16`,
-`qwen3-1.7b-q4f16`, `mistral-7b-instruct-v0.3-q4ks`,
-`llama-3.1-8b-instruct-iq3m`, `qwen3-8b-iq3m`) shouldn't move
-— but sweep verifies. **Artifact:**
-`eval/reports/pre-rebase-baselines-<date>/SUMMARY.md`.
+**Stage 5.1 — Pre-rebase baseline capture. CLOSED 2026-05-12 ✅.**
+Per the §32a doctrine ("Pre-rebase baseline doctrine"), captured
+profile-mode benches on the canonical 6 in fresh-headless-Chrome
+regime. **Result:** matmul time **bit-identical (±2%)** across all
+6 models vs the 2026-05-04 baseline — zero compute regression from
+the NEOX RoPE fix (Q1.6). Headline tok/s lifted +38-54% across the
+fleet but the move is purely environmental (headless Chrome
+eliminates compositor + tab-switch encode-overhead noise that
+inflated the 2026-05-04 interactive-Chrome capture); per-phase
+encode dropped 20-40% while dispatch counts and matmul absolute
+times stayed bit-equal. Going forward, **headless is the canonical
+capture regime** — cross-baseline tok/s comparisons across
+interactive/headless regimes are invalid; matmul-time deltas remain
+valid. Closure report:
+[`eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md`](eval/reports/pre-rebase-baselines-2026-05-12/SUMMARY.md).
+
+| Model | 2026-05-04 | 2026-05-12 | matmul Δ |
+|---|---:|---:|---:|
+| tinyllama-1.1b-chat-q4_0 | 80.4 | 116.1 | 0% |
+| qwen3-0.6b-q4f16 | 62.5 | 87.2 | +1.5% |
+| qwen3-1.7b-q4f16 | 41.7 | 64.4 | +1.9% |
+| mistral-7b-instruct-v0.3-q4ks | 28.7 | 43.3 | 0% |
+| llama-3.1-8b-instruct-iq3m | 23.3 | 33.0 | +0.5% |
+| qwen3-8b-iq3m | 21.3 | 29.4 | +0.8% |
 
 **Stage 5.2 — Add `gemma-4-e2b-warm` to the canonical 6 (now 7).**
 Update the `bench-full` profile set to include the Gemma 4 entry;
