@@ -2506,7 +2506,6 @@ export class ModelInference {
 					wasm.graphBuildForwardExpand(graph, cur);
 					layerTaps.push(cur);
 				}
-
 			}
 			// Early termination was attempted but caused the GPU buffer to
 			// be under-sized by the graph allocator. Disabled — single-
