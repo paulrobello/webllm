@@ -437,8 +437,17 @@ wave-1 / wave-2 / arch-survey entries (see TODO.md `§10`–`§16`).
 |-------|--------|------|-------------:|----------|---------|
 | Llama 3.2 3B Instruct (Q4_0) | 3.21B | 2264 MB | 58 | No | Llama 3.2 |
 | Qwen2.5 3B Instruct (Q4_0) | 3.09B | 2505 MB | 45 | No | Apache 2.0 |
+| Gemma 4 E2B Instruct (Q4_K_M) | 2B | 3110 MB | **38.6** † | No | Gemma |
 | Qwen3 4B (Q4_0) | 4.0B | 3432 MB | 35.5 | Native | Apache 2.0 |
 | **Mistral-7B Instruct v0.3** (Q4_K_S) | 7.2B | 3953 MB | **35.0** | No | Apache 2.0 |
+
+† Gemma 4 E2B perf is from the 2026-05-12 Pass-2 capture
+(profile-mode, headless, 5 runs); per-run spread is intrinsically
+wide because Gemma 4 dispatches 1040 ops per token (vs 450-805 for
+canonical 6) — matmul compute itself is stable at 8.19 ms median.
+Eval **70.8 %** at greedy temp=0 (PLE + dual-RoPE + shared-KV +
+SWA — see closure
+[`eval/reports/gemma-4-e2b-validation-2026-05-12/SUMMARY.md`](../eval/reports/gemma-4-e2b-validation-2026-05-12/SUMMARY.md)).
 
 #### Quality (20-30 tok/s, 3-4 GB VRAM)
 

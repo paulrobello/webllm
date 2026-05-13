@@ -1636,26 +1636,23 @@ Ship gate: `make checkall` green (782 pass / 36 skip / 0 fail /
 at 2026-05-13T01:22 — accuracy×speed scatter renders Gemma 4
 alongside the canonical 6 on next dashboard reload.
 
-**Stage 5.3 — Closure SUMMARY.** Write a single canonical Gemma 4
-campaign closure at
-`eval/reports/gemma-4-e2b-validation-<date>/SUMMARY.md`. Folds in:
-Stages 1-3 closure highlights (already documented per-stage),
-Stage 4 outcome (if landed), Stage 5 perf data, the §27/§28/§32
-classification (the NEOX fix is a §27 free-win retrospectively —
-single-line code change, eval +59 pp). Cross-link from the
-README BENCHMARKS table.
+**Stage 5.3 — Closure SUMMARY. CLOSED 2026-05-12 ✅.** Canonical
+Gemma 4 E2B campaign closure landed at
+[`eval/reports/gemma-4-e2b-validation-2026-05-12/SUMMARY.md`](eval/reports/gemma-4-e2b-validation-2026-05-12/SUMMARY.md).
+Folds in Stages 1-5 per-stage closures, §27 NEOX free-win
+classification (single-line `getRopeModeForArchitecture` fix
+delivered +59 pp eval), perf snapshot, doctrine lessons (4 banked
+incl. the "demote candidates are usually plural" lesson and the
+Pass 2 capture-regime canonical), patch budget (**0 of +2 used**),
+and the four queued non-gating follow-ups (embedding-path SWA,
+debugLayerOutput SWA, Gemma 4 perf tightening, FA-VEC ceiling
+bump). Cross-linked from
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) (Balanced tier).
 
-**Gate:** dashboard renders Gemma 4 in the accuracy×speed scatter
-at the post-fix score; perf median for `gemma-4-e2b-warm` lands
-in the dashboard SQLite; closure SUMMARY merges to main.
-
-**Out of scope:** un-demoting Gemma 2 in this campaign (Q1's job);
-Gemma 4 E4B / 9B / 14B SKUs (above the 8B ceiling or out of the
-unsloth/E2B canonical path).
-
-**Risks:** low. The NEOX fix is architecture-gated; non-Gemma
-models on `bench-full` should be bit-identical (regression
-sanity-check is the headline output).
+**Gate met:** dashboard renders Gemma 4 in the accuracy×speed
+scatter at 70.8 % / 38.6 tok/s (22 perf runs + 6 evals in
+`eval/reports/smoke-runs.db`); closure SUMMARY merged at tip
+`225054e`.
 
 ────────────────────────────────────────────────────────────────
 
