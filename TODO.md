@@ -1596,11 +1596,23 @@ valid. Closure report:
 | llama-3.1-8b-instruct-iq3m | 23.3 | 33.0 | +0.5% |
 | qwen3-8b-iq3m | 21.3 | 29.4 | +0.8% |
 
-**Stage 5.2 — Add `gemma-4-e2b-warm` to the canonical 6 (now 7).**
-Update the `bench-full` profile set to include the Gemma 4 entry;
-update the dashboard's headline-baseline table; ensure the
-accuracy×speed scatter renders the new dot. **Artifact:**
-inline in 5.1's pre-rebase capture or a separate Stage 5.2 entry.
+**Stage 5.2 — Add `gemma-4-e2b-warm` to the canonical 6 (now 7).
+CLOSED 2026-05-12 ✅.** One-line addition to `SMOKE_PROFILE_SETS.full`
+in `eval/smoke-profiles.ts` after `gemma-2-2b-warm`. Dashboard
+already has Gemma 4 perf + eval data (17 perf runs / 6 evals; best
+eval 68%; recent speed 43-48 tok/s). Stage 4.4 watch-item (smoke-
+harness speed timeout) closed by capturing a clean 3-run headless
+profile-mode bench:
+- gemma-4-e2b-it-q4km: 43.4 / 44.4 / 30.7 tok/s (p50 43.4) — see
+  [`eval/reports/pre-rebase-baselines-2026-05-12/gemma-4-e2b-it-q4km.log`](eval/reports/pre-rebase-baselines-2026-05-12/gemma-4-e2b-it-q4km.log)
+- matmul share 52% / 1040 dispatches per token (vs 450-805 for
+  canonical 6 — Gemma 4 is dispatch-heavy due to PLE injection
+  per layer); encode 22.4% / dispatch ≈ 3.6 µs (consistent with
+  headless regime)
+Ship gate: `make checkall` green (782 pass / 36 skip / 0 fail /
+39312 expect() calls). All 3 headless runs auto-ingested to the
+dashboard at 2026-05-13T00:25 — accuracy×speed scatter renders
+on next dashboard reload.
 
 **Stage 5.3 — Closure SUMMARY.** Write a single canonical Gemma 4
 campaign closure at

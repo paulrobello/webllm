@@ -432,6 +432,7 @@ export const SMOKE_PROFILE_SETS: Readonly<Record<string, readonly string[]>> = {
 		"hermes-3-llama-3.2-3b-warm",
 		"phi-3.5-mini-warm",
 		"gemma-2-2b-warm",
+		"gemma-4-e2b-warm",
 		"qwen3-4b-warm",
 		"qwen3-4b-thinking-warm",
 		"mistral-7b-v0.3-warm",
