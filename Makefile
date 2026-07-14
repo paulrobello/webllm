@@ -201,6 +201,7 @@ vendor-refresh: ## Refresh smoke-test/vendor/ from node_modules after bumping ch
 # ---------------------------------------------------------------------------
 smoke-test: wasm-build ## Bundle + copy WASM artifacts (both wasm32 and wasm64) into smoke-test/
 	bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+	bun build src/internal.ts --outfile smoke-test/webllm-internal.js --target browser
 	bun build src/persistence/indexeddb-store.ts --outfile smoke-test/webllm-persistence.js --target browser
 	bun build eval/models.ts --outfile smoke-test/webllm-models.js --target browser
 	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/

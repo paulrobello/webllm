@@ -43,7 +43,6 @@ export {
 	WebLLMError,
 } from "./core/errors.js";
 export type { GameLoopCallback, GameLoopConfig } from "./core/game-loop.js";
-export { GameLoop } from "./core/game-loop.js";
 export type {
 	BufferAllocation,
 	MemoryEvent,
@@ -51,14 +50,12 @@ export type {
 } from "./core/memory-pool.js";
 export { MemoryPool } from "./core/memory-pool.js";
 export { ModelManager } from "./core/model-manager.js";
-export { PipelineCache } from "./core/pipeline-cache.js";
 export {
 	MISTRAL_DEFAULTS,
 	PHI3_DEFAULTS,
 	QWEN_NON_THINKING_DEFAULTS,
 	QWEN_THINKING_DEFAULTS,
 } from "./core/sampling-profiles.js";
-export { Scheduler } from "./core/scheduler.js";
 export type {
 	Backend,
 	EventHandler,
@@ -108,16 +105,10 @@ export type {
 	ToolCallRecord,
 } from "./evaluation/types.js";
 export { CausalLMEmbedder } from "./inference/causal-embedder-inference.js";
-// Re-exported for the smoke-test harness in `smoke-test/real-model-page.js`,
-// which builds prompts and inspects template family without going through
-// `engine.chatCompletion`. These are internal helpers — public consumers
-// should use `engine.chatCompletion` / `engine.generateStream` instead.
-// Removed from the public API in commit f1195407; restored 2026-04-30
-// after the smoke bundle rebundle surfaced the latent break.
-export {
-	detectChatTemplate,
-	encodeChatPrompt,
-} from "./inference/chat-template.js";
+// `detectChatTemplate` / `encodeChatPrompt` were removed from this public
+// barrel in ARC-003 — they are internal helpers and now live under the
+// unstable `./internal` subpath (`src/internal.ts`). The smoke harness
+// imports them from `webllm-internal.js`; see Makefile `smoke-test` target.
 export { EncoderInference } from "./inference/encoder-inference.js";
 export type {
 	GenerationConfig,
@@ -126,24 +117,17 @@ export type {
 	GenerationStreamChunk,
 	GenerationStreamResult,
 } from "./inference/generation.js";
-export { Generator } from "./inference/generation.js";
-export { GgmlWasm } from "./inference/ggml-wasm.js";
 export type {
 	LightweightModelConfig,
 	LightweightWeights,
 } from "./inference/lightweight.js";
-export { LightweightModel } from "./inference/lightweight.js";
-export { ModelInference } from "./inference/model-inference.js";
 export type { SamplerConfig } from "./inference/sampler.js";
-export { Sampler } from "./inference/sampler.js";
-export { StreamRouter } from "./inference/stream-router.js";
 export type { TokenData, TokenizerConfig } from "./inference/tokenizer.js";
 export {
 	StreamingDecoder,
 	Tokenizer,
 	TokenizerType,
 } from "./inference/tokenizer.js";
-export { GgufParser } from "./models/gguf-parser.js";
 export type {
 	GgufContext,
 	GgufHeader,
@@ -151,7 +135,6 @@ export type {
 	GgufTensorInfo,
 } from "./models/gguf-types.js";
 export type { InferenceSessionConfig } from "./models/inference-session.js";
-export { InferenceSession } from "./models/inference-session.js";
 export type { KVCacheConfig, KVCell } from "./models/kv-cache.js";
 export { KVCache } from "./models/kv-cache.js";
 export type { ParsedModel } from "./models/model-loader.js";

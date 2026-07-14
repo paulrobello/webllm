@@ -143,6 +143,21 @@ function addChatStopToken(
 const WASM32_HEAP_MARGIN = 3.5 * 1024 * 1024 * 1024;
 
 /**
+ * Default total byte budget for {@link MemoryPool} when `WebLLMConfig.memoryBudget`
+ * is omitted.
+ *
+ * Per CLAUDE.md's hardware baseline doctrine (16 GB unified-memory floor /
+ * 32 GB recommended / 128 GB dev), WebGPU sees ~10–11 GiB on the floor tier;
+ * Three.js coexistence takes another 0.5–1 GiB and KV cache + browser overhead
+ * 1–2 GiB, leaving ~7–8 GiB for the model. The project caps the chat model at
+ * 8B params (Q4_K_M ≈ 5 GiB), so an 8 GiB MemoryPool default fits the load-
+ * bearing agent + Three.js use case with headroom for one embedder alongside.
+ * Callers may override via `WebLLMConfig.memoryBudget` for dev-tier (128 GB)
+ * machines or constrained environments.
+ */
+export const DEFAULT_MEMORY_BUDGET_BYTES = 8 * 1024 * 1024 * 1024;
+
+/**
  * Pick the WASM binary based on model file size.
  *
  * Models ≤ 3.5 GiB (10% under the wasm32 4 GiB heap cap) route through
@@ -258,7 +273,9 @@ export class WebLLM {
 
 	private constructor(config: WebLLMConfig) {
 		this._config = config;
-		this._memoryPool = new MemoryPool(config.memoryBudget);
+		this._memoryPool = new MemoryPool(
+			config.memoryBudget ?? DEFAULT_MEMORY_BUDGET_BYTES,
+		);
 		this.characterManager = new CharacterManager();
 		this._modelManager = new ModelManager(this._memoryPool);
 		this._scheduler = new Scheduler({
@@ -1372,6 +1389,15 @@ export class WebLLM {
 		options?: {
 			embeddingCapable?: boolean;
 			embeddingPooling?: "last-token" | "mean";
+			/**
+			 * GGUF byteLength of the adopted model, used to record the
+			 * weight footprint in the MemoryPool so the budget gate
+			 * (`ModelManager.canFit`) and pressure/eviction events remain
+			 * truthful on the adopt path. Optional because some callers
+			 * hand off a pipeline built from a stream they no longer
+			 * reference; omitting it leaves the pool untouched (as before).
+			 */
+			weightBytes?: number;
 		},
 	): Promise<ModelHandle> {
 		const isEncoder = pipeline.inference instanceof EncoderInference;
@@ -1425,6 +1451,12 @@ export class WebLLM {
 				handle.id,
 				pipeline.inference as ModelInference,
 			);
+		}
+		// ARC-002: record the adopted pipeline's weight footprint when the
+		// caller knows it, so `unloadModel` → `_modelManager.unregister`
+		// → `memoryPool.evictModel` keeps the budget honest on this path.
+		if (options?.weightBytes !== undefined && options.weightBytes > 0) {
+			this._memoryPool.allocate(options.weightBytes, 0, handle.id);
 		}
 		return handle;
 	}
@@ -1497,6 +1529,7 @@ export class WebLLM {
 			name,
 			options,
 			undefined,
+			view.byteLength,
 		);
 	}
 
@@ -1637,6 +1670,7 @@ export class WebLLM {
 				name,
 				options,
 				ptr,
+				total,
 			);
 		} catch (e) {
 			// Partial-failure path: free the staging allocation if it
@@ -1691,6 +1725,7 @@ export class WebLLM {
 		name: string,
 		options?: Partial<ModelLoadOptions>,
 		stagingPtr?: number,
+		weightBytes?: number,
 	): Promise<{
 		handle: ModelHandle;
 		inference: ModelInference | EncoderInference | CausalLMEmbedder;
@@ -1767,6 +1802,23 @@ export class WebLLM {
 				this.causalEmbedderEngines.set(handle.id, inference);
 			} else {
 				this.inferenceEngines.set(handle.id, inference);
+			}
+
+			// ARC-002: record the model's weight footprint in the MemoryPool
+			// so `ModelManager.canFit` enforces `WebLLMConfig.memoryBudget`
+			// and the budget-pressure / eviction events can actually fire.
+			// The GGUF byteLength is the closest cheap proxy for resident
+			// GPU weight memory (dequant happens lazily; KV-cache accounting
+			// is tracked separately as a follow-up ENH). Allocation is tagged
+			// with `handle.id` so `_modelManager.unregister(id)` →
+			// `memoryPool.evictModel(id)` (already invoked by `unloadModel`)
+			// releases it without an explicit `free()` here.
+			if (weightBytes !== undefined && weightBytes > 0) {
+				this._memoryPool.allocate(
+					weightBytes,
+					options?.priority ?? 0,
+					handle.id,
+				);
 			}
 
 			// `parsed` is the loader-internal `ParsedModel`; its three fields

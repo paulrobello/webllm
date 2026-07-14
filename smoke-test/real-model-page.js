@@ -88,21 +88,30 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	const bundleName = useJsepBackend
 		? "webllm-bundle-jsep.js"
 		: "webllm-bundle.js";
+	// ARC-003: deep inference internals (ModelInference, GgmlWasm, GgufParser,
+	// detectChatTemplate, encodeChatPrompt) were moved off the public barrel
+	// (`src/index.ts`) into `src/internal.ts`. The smoke harness pulls them
+	// from the dedicated `webllm-internal.js` bundle; the public surface
+	// (WebLLM, error classes, sampling profiles, types) stays in
+	// `webllm-bundle.js`. Both bundles are rebuilt by the `smoke-test`
+	// Makefile target.
 	const {
 		CausalLMEmbedder,
 		EncoderInference,
-		GgufParser,
-		GgmlWasm,
-		ModelInference,
 		ModelLoader,
 		Tokenizer,
 		WebLLM,
 		collectBrowserSystemProfile,
-		detectChatTemplate,
-		encodeChatPrompt,
 		runTasks,
 		score,
 	} = await import(`./${bundleName}${assetSuffix}`);
+	const {
+		GgufParser,
+		GgmlWasm,
+		ModelInference,
+		detectChatTemplate,
+		encodeChatPrompt,
+	} = await import(`./webllm-internal.js${assetSuffix}`);
 	const { runInteractiveChatTurn } = await import(
 		`./real-model-runtime.js${assetSuffix}`
 	);

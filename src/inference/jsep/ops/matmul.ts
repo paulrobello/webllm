@@ -42,7 +42,7 @@
 
 import type { CommandEncoderBatcher } from "../command-encoder.js";
 import type { GpuDataManager } from "../gpu-data-manager.js";
-import type { PipelineCache } from "../pipeline-cache.js";
+import type { JsepPipelineCache } from "../pipeline-cache.js";
 
 // ggml_type enum values (subset; see ggml/include/ggml.h:389).
 export const GGML_TYPE_F32 = 0;
@@ -135,7 +135,7 @@ export interface JsepOpContext {
 	device: GPUDevice;
 	dataManager: GpuDataManager;
 	encoderBatcher: CommandEncoderBatcher;
-	pipelineCache: PipelineCache;
+	pipelineCache: JsepPipelineCache;
 	// Bind-group layouts, memoized per pipeline cache key. Owned by the
 	// runtime (not module scope) so each `JsepRuntime` / `GPUDevice` gets
 	// its own cache; reusing a layout across devices is a WebGPU error.

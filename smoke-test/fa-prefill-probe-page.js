@@ -61,14 +61,13 @@ export async function runFaPrefillProbe() {
 		logEl.appendChild(el);
 	};
 
-	const {
-		GgmlWasm,
-		GgufParser,
-		ModelInference,
-		ModelLoader,
-		Tokenizer,
-		encodeChatPrompt,
-	} = await import(`./${bundleName}${assetSuffix}`);
+	// ARC-003: deep internals come from webllm-internal.js (off the public
+	// barrel); ModelLoader + Tokenizer stay on the public bundle.
+	const { ModelLoader, Tokenizer } = await import(
+		`./${bundleName}${assetSuffix}`
+	);
+	const { GgmlWasm, GgufParser, ModelInference, encodeChatPrompt } =
+		await import(`./webllm-internal.js${assetSuffix}`);
 
 	log("running", "[1/6] WebGPU + WASM init...");
 	const wasm = new GgmlWasm();

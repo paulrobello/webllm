@@ -1,6 +1,10 @@
 // Tier 3 P0 spike — TypeScript bindings for the webllm_* bridge exports
 // that wrap upstream llama.cpp's llama_model / llama_context / llama_decode.
 //
+// @experimental This module is a Tier-3 prototype spike and is NOT part of
+// the published package's semver contract. Declaration emit is excluded
+// from npm types by `scripts/build-package.ts`. See ARC-007.
+//
 // See:
 //   docs/superpowers/specs/2026-05-05-tier3-llama-decode-migration-design.md
 //   docs/superpowers/plans/2026-05-05-tier3-p0-spike.md

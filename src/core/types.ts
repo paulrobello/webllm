@@ -8,13 +8,25 @@
  *   callbacks; everything else falls back to the CPU backend. Loads
  *   `webllm-wasm-jsep.{js,wasm}`. See
  *   `docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`.
+ *
+ * @experimental The `"jsep"` arm is active Phase-3 R&D and ships without
+ * semver guarantees; its declaration emit is excluded from the published
+ * package types (see `scripts/build-package.ts`). The `"default"` arm is
+ * the only production-supported backend.
  */
 export type Backend = "default" | "jsep";
 
 /** Configuration for initializing a WebLLM engine instance. */
 export interface WebLLMConfig {
 	cacheDir?: string;
-	memoryBudget: number;
+	/**
+	 * Total bytes the MemoryPool budgets across all loaded models. Optional;
+	 * defaults to 8 GiB when omitted (see {@link DEFAULT_MEMORY_BUDGET_BYTES}
+	 * in `engine.ts`). Sized per CLAUDE.md's 16 GB-floor / 8B-ceiling
+	 * doctrine: on the floor tier, ~7-8 GiB is the realistic model slice
+	 * after WebGPU/Three.js/KV overhead.
+	 */
+	memoryBudget?: number;
 	frameBudgetMs?: number;
 	/** Maximum concurrent conversations per loaded model. Default: 4. */
 	maxConversations?: number;
