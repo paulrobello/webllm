@@ -822,8 +822,24 @@ rebuilt, MANIFESTs verified — see closure entry in Watch list).
 **Algorithmic-perf backlog fully cleared.** All algorithmic levers
 at the canonical 4-baseline are exhausted (§17-§29 closed matmul,
 FA, drafter, encoder, prefill-tiling, spec-decode families).
-Rebase cadence: **2026-05-12 fired (§32 — small regression,
-accepted)**. Rebased to upstream `856c3adac` (102 commits ahead;
+Rebase cadence: **2026-07-14 fired (§27 — perf-neutral maintenance
+rebase)**. Rebased to upstream `bf2c86ddc` (883 commits ahead; 37
+ggml-webgpu/ggml-include landings — FA refactor #23834, MMVQ +
+legacy MUL_MAT cleanup #23594, k-quant matmul refactor #24225,
+i-quant mul_mat perf #24530, profiling timestamp flush #22995,
+batch_compute_passes guard #23457, concat aliasing #24000). 10
+patches replayed with 2 conflict rounds (patch 2 browser+ASYNCIFY
+bundle, patch 6 profiling) + 2 post-rebase compile fixups
+(`18ee82988`); 8 patches clean. Sweep: 6/6 models within ±1% of
+same-day pre-rebase baseline, zero regression. Encoder
+(arctic-embed-s) runs clean; cosine-0.76 G3 parity deferred to
+`make bench-full`. Tip `18ee82988` on base `bf2c86ddc`. Sweep
+matrix + conflict log at
+[`eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md);
+pre-rebase baseline at
+[`eval/reports/pre-rebase-baselines-2026-07-14/baseline-run.log`](eval/reports/pre-rebase-baselines-2026-07-14/baseline-run.log).
+Prior cycle 2026-05-12 was §32 (small regression, accepted) —
+rebased to upstream `856c3adac` (102 commits ahead;
 2 ggml-webgpu landings: #22906 mulmat-q refactor for gpt-oss-20b
 + #22808 multimodal precision/FA rework). 10 effective patches
 reapplied cleanly with zero manual conflict resolution; 18 JSEP
@@ -886,6 +902,30 @@ three filed follow-ups). Cross-linked from active-next-steps
 session pickup, 6-phase decision trees, risk register): archived
 to [`TODO_ARCHIVE.md`](TODO_ARCHIVE.md) under "llama.cpp rebase +
 sweep cycle — 2026-05-12 upstream cadence".
+
+
+### llama.cpp rebase + sweep cycle — 2026-07-14 — **CLOSED 2026-07-14** ✅
+
+Cycle **CLOSED as §27 (perf-neutral maintenance rebase)**. Rebased
+to upstream `bf2c86ddc` (883 commits ahead, 37 ggml-webgpu/ggml-
+include landings — the largest gap rebased across to date). 10
+patches replayed with 2 conflict rounds (patch 2 browser+ASYNCIFY
+bundle: `batch_compute_passes` gating + deferred-copies merge;
+patch 6 profiling: capability fields, dispatch `#ifdef`
+early-return restructure, `profile_timestamps_active` gating,
+buffer-init `supports_timestamp_query` guard, overflow-flush
+4-arg signature) + 2 post-rebase compile fixups (`18ee82988`).
+Sweep: 6/6 models within ±1.0% of same-day pre-rebase baseline,
+zero regression. Encoder (arctic-embed-s) runs clean; cosine-0.76
+G3 parity deferred to `make bench-full` (low risk).
+
+Canonical closure:
+[`eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md)
+(rebase summary, conflict log, pre/post sweep matrix,
+classification rationale). Cross-linked from active-next-steps
+"Rebase cadence" line above. Safety branch
+`webllm-browser-patches-backup-2026-07-14` preserves pre-rebase
+tip `4192e05ba`.
 
 
 ────────────────────────────────────────────────────────────────
@@ -1176,6 +1216,13 @@ appetite remains; none are forced.
   log and skip. Cadence policy set 2026-04-29: run daily even when
   the surface has been quiet, since the cost is ~30s and a missed
   rebase costs much more than catching one promptly. Last fired:
+  **2026-07-14** (§27 perf-neutral maintenance — rebased to
+  upstream `bf2c86ddc` (883 commits, 37 webgpu); 10 patches + 2
+  conflict rounds + 2 compile fixups (`18ee82988`); 6/6 models
+  within ±1%, zero regression; encoder runs clean, cosine-0.76
+  deferred to bench-full. Sweep matrix:
+  [`eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md`](eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md)).
+  Prior fired: **2026-05-12** (§32 — see closure stub below) and
   **2026-05-04** (§27 hybrid — `d4b0c22f9` ggml-webgpu LAYER_NORM
   upstream landing subsumed local patches `72b6d001e` +
   `c775ac26d`; rebased to upstream tip `a817a22bc`, local tip
