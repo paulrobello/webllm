@@ -34,12 +34,53 @@ binary that crashes the page during inference.
 
 ## Patch Inventory
 
-The branch currently carries **nine commits** on top of upstream
+The branch currently carries **ten commits** on top of upstream
 `master`, in the order shown (oldest first). Commit 7 and its revert
 (commit 8) are kept as a pair pending a proper replacement; treat them
-as a no-op until you hear otherwise.
+as a no-op until you hear otherwise. Commit 10 (wgpu::WaitAny under
+JSPI) was added 2026-05-12.
 
-Last rebased onto upstream master 2026-05-04 to tip `a817a22bc`
+Last rebased onto upstream master 2026-07-14 to tip `bf2c86ddc`
+("server : refactor prompt cache state ownership"). Local tip:
+`18ee82988`. The 2026-05-12 → 2026-07-14 delta was the largest rebased
+to date: 883 commits, 37 touching `ggml/src/ggml-webgpu/` or
+`ggml/include/` — FA refactor #23834, MMVQ + legacy MUL_MAT cleanup
+#23594 (deleted `mul_mat.wgsl`), k-quant matmul refactor #24225,
+i-quant mul_mat perf #24530, profiling timestamp flush #22995,
+batch_compute_passes guard #23457, concat aliasing #24000. 10 patches
+replayed with **2 conflict rounds** (patch 2 browser+ASYNCIFY bundle:
+`batch_compute_passes` gating + deferred-copies merge; patch 6
+profiling: capability fields, dispatch `#ifdef` early-return
+restructure, `profile_timestamps_active` runtime gating, buffer-init
+`supports_timestamp_query` guard, overflow-flush 4-arg signature) + 2
+post-rebase compile fixups (`18ee82988`); 8 patches clean.
+
+Sweep classification: **§27 (perf-neutral maintenance rebase)**. 6/6
+canonical models within ±1.0% of the same-day pre-rebase baseline,
+zero regression. Encoder G3 cosine-0.76 parity VERIFIED via chat-smoke
+`[8/8]` (embed('happy')·embed('joyful') cosine=0.76, ‖v‖=1.00 — matches
+baseline, encoder numerics unchanged). `make checkall` clean
+(782/0/36 skip). Full sweep matrix + conflict log at
+[`eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md`](../eval/reports/llama-cpp-rebase-2026-07-14/SUMMARY.md);
+same-day pre-rebase baseline at
+[`eval/reports/pre-rebase-baselines-2026-07-14/`](../eval/reports/pre-rebase-baselines-2026-07-14/).
+Safety branch `webllm-browser-patches-backup-2026-07-14` preserves
+pre-rebase tip `4192e05ba`.
+
+#### Earlier rebase (2026-05-12, §32)
+
+Rebased onto upstream master 2026-05-12 to tip `856c3adac`. 102 commits
+ahead; 2 ggml-webgpu landings (#22906 mulmat-q refactor for gpt-oss-20b,
+#22808 multimodal precision/FA rework). 10 effective patches reapplied
+with zero manual conflicts; 18 JSEP probe commits dropped per the
+2026-05-08 negative-closure. Sweep classified §32 (small regression,
+accepted): Pass 2 sweep tok/s −2% to −11%, matmul +4-9%, thermal
+contamination significant. Tip `4192e05ba`. Sweep matrix at
+[`eval/reports/llama-cpp-rebase-2026-05-12/SUMMARY.md`](../eval/reports/llama-cpp-rebase-2026-05-12/SUMMARY.md).
+
+#### Earlier rebase (2026-05-04, §27 hybrid)
+
+Rebased onto upstream master 2026-05-04 to tip `a817a22bc`
 ("ggml : implement fast walsh-hadamard transform for kv rotation").
 Local tip: `fc1f81242`. The 2026-05-01 → 2026-05-04 delta was small;
 1 upstream commit touched `ggml-webgpu/`: `d4b0c22f9` (LayerNorm ops
@@ -220,6 +261,17 @@ on `byte_in_word == 0` and returns the aligned word directly, never
 executing the UB shift. Verified: Mistral-7B Q3_K_M coherent at
 24.4 tok/s (was gibberish); Q4_K_S regression-safe at 36.0 tok/s.
 Closes webllm bug #28.
+
+### 10. ggml-webgpu: use wgpu::WaitAny under JSPI instead of polling loop
+
+Replaces the `emscripten_sleep(1)` busy-wait polling loop in the
+request-based async readback path (patches 3–5) with `wgpu::WaitAny`
+under JSPI, so the browser event loop blocks efficiently on queue
+completion instead of polling. Added 2026-05-12. Depends on JSPI being
+enabled in the WASM build (`-sJSPI` / `GGML_WEBGPU_JSPI`); the TS
+binding for the readback completion awaits the JSPI-promised export
+(see the CLAUDE.md `JSPI_EXPORTS` regression lesson — only exports
+whose TS bindings await the result belong on the list).
 
 ### Note: FA browser engagement (2026-04-25)
 

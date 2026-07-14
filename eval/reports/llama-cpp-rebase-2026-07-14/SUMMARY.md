@@ -77,7 +77,7 @@ signature noted in the 2026-05-12 cycle.
 - **WASM build:** both wasm32 + mem64 compile clean against rebased `bf2c86ddc`.
 - **`make checkall`:** 782 pass / 36 skip / 0 fail (818 tests); fmt + lint + typecheck + typecheck:tests clean.
 - **TinyLlama Q4_0 profile smoke:** 86.2 tok/s (vs pre-rebase 87.1, −0.9 / −1.0%, noise). Profiling attribution populated (`backendMatmulMs` 6.25, `backendEncodeOverheadMs` 1.60, `backendAttentionMs` 0.60, 450 dispatches/token) — confirms the patch-6 `#ifdef`/signature fix works at runtime.
-- **Encoder (arctic-embed-s) embed-perf:** single-short p50 3.60ms, single-long 17.00ms, batch 98.8 texts/sec, exit 0. Encoder backend runs clean. (Tight cosine-0.76 G3 parity is part of `make bench-full`; deferred — matmul refactor is pipeline-only, encoder runs clean → low numerical-shift risk.)
+- **Encoder (arctic-embed-s):** embed-perf single-short p50 3.60ms, single-long 17.00ms, batch 98.8 texts/sec, exit 0. **G3 cosine-0.76 parity VERIFIED** via the chat-smoke `[8/8]` step — `embed('happy')·embed('joyful') cosine=0.76`, ‖v‖=1.00 (matches the 0.76 baseline within tolerance; not the identical-vectors >0.999 bug). Encoder numerics unchanged post-rebase.
 
 ## Post-rebase sweep (Phase 5) + classification
 
@@ -100,10 +100,9 @@ improvements. The upstream matmul/FA refactors (`1506d39e7`, `1e1aca09d`,
 the canonical fleet — pipeline reorganization, not algorithmic change.
 Adopt the new baseline (`bf2c86ddc` / local tip `18ee82988`); staying
 current preserves option value (next cycle's free wins land cleanly). No
-follow-up work needed. Encoder cosine-0.76 G3 parity deferred to
-`make bench-full` (low risk: encoder runs clean, matmul refactor is
-pipeline-only).
+follow-up work needed. Encoder cosine-0.76 G3 parity verified (cosine=0.76
+via chat-smoke `[8/8]`, matching baseline).
 
 ## Re-evaluation triggers
 - Next upstream cadence check fires when `git log webllm-browser-patches..origin/master -- ggml/src/ggml-webgpu/ ggml/include/` is non-empty again.
-- Encoder cosine-0.76 parity: run `make bench-full` if a numerical-shift signal appears.
+- Encoder cosine-0.76 parity: verified 2026-07-14 (cosine=0.76 via chat-smoke `[8/8]`). Re-check if a numerical-shift signal appears.
