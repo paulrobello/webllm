@@ -1,4 +1,4 @@
-.PHONY: build test check-skip-count lint lint-fix fmt typecheck checkall clean install deps \
+.PHONY: build test check-skip-count check-jspi lint lint-fix fmt typecheck checkall clean install deps \
         wasm-build wasm-build-wasm32 wasm-build-mem64 wasm-build-jsep wasm-clean \
         bench bench-perf bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full \
@@ -51,6 +51,9 @@ test: ## Run all tests
 check-skip-count: ## Enforce static skip-count ratchet (QA-004) — fails if skipIf( count in tests/ exceeds pin
 	bun run scripts/check-skip-count.ts
 
+check-jspi: ## Enforce JSPI/ABI build-time invariants (ARC-012) — every webllm-wasm* target links -sJSPI_EXPORTS; every JSPI export binding is awaited (or pinned fire-and-forget); never a synchronous Number/BigInt/>>> coercion on a JSPI call
+	bun run scripts/check-jspi-exports.ts
+
 # ---------------------------------------------------------------------------
 # Code Quality
 # ---------------------------------------------------------------------------
@@ -69,7 +72,7 @@ typecheck: ## Run TypeScript type checking (production: src/**)
 typecheck-tests: ## Run TypeScript type checking against tests/** under tsconfig.test.json
 	bun run typecheck:tests
 
-checkall: fmt lint typecheck typecheck-tests test check-skip-count ## Format, lint, typecheck (src + tests), test, and enforce the skip-count ratchet
+checkall: fmt lint typecheck typecheck-tests test check-skip-count check-jspi ## Format, lint, typecheck (src + tests), test, enforce the skip-count ratchet, and enforce JSPI/ABI invariants
 
 pre-commit: ## Run pre-commit hooks across all files (secret scan + fmt/lint/typecheck)
 	pre-commit run --all-files
