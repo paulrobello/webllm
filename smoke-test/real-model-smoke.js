@@ -147,7 +147,10 @@ export function getSmokeSamplingOverridesFromParams(params) {
 }
 
 export function sanitizeDisplayText(text) {
-	return text.replace(/^\s+/, "").replace(/\n{4,}/g, "\n\n").trimStart();
+	return text
+		.replace(/^\s+/, "")
+		.replace(/\n{4,}/g, "\n\n")
+		.trimStart();
 }
 
 export function buildSmokePrompt(
@@ -243,11 +246,7 @@ export function createSmokeCompletionRunner({
 	};
 }
 
-export function createPrefillComparisonRunner({
-	inference,
-	tokenizer,
-	log,
-}) {
+export function createPrefillComparisonRunner({ inference, tokenizer, log }) {
 	return async function compareBatchVsSequentialPrefill(label, promptTokens) {
 		inference.resetKVCache();
 		const batchLogits = await inference.forward(

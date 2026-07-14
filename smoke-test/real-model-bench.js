@@ -116,7 +116,10 @@ export async function runBenchMode({
 		// greedy-pinning policy.
 		const runOpts = {
 			onTaskStart: (task) => {
-				log("running", `[bench]   ${task.id} (${task.dimension}/${task.difficulty})…`);
+				log(
+					"running",
+					`[bench]   ${task.id} (${task.dimension}/${task.difficulty})…`,
+				);
 			},
 		};
 		if (typeof params?.temperature === "number") {
@@ -135,7 +138,10 @@ export async function runBenchMode({
 				// scorer for any tasks that might have thrown. Keep authoritative.
 				// (In practice runTasks already called score(); this is defensive.)
 				if (result.score === undefined || Number.isNaN(result.score)) {
-					result.score = score(result.modelOutput, tasks.find((t) => t.id === result.taskId));
+					result.score = score(
+						result.modelOutput,
+						tasks.find((t) => t.id === result.taskId),
+					);
 				}
 				results.push(result);
 				window.__benchStatus.completedTasks++;
@@ -248,7 +254,9 @@ function buildReport(modelId, results, evalId) {
 		totalScore += avgScore * list.length;
 	}
 	const overall =
-		results.length > 0 ? Math.round((totalScore / results.length) * 100) / 100 : 0;
+		results.length > 0
+			? Math.round((totalScore / results.length) * 100) / 100
+			: 0;
 	return {
 		schemaVersion: 1,
 		timestamp: new Date().toISOString(),

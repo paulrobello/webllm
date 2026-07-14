@@ -57,6 +57,12 @@ smoke-test/webllm-wasm-jsep.js
 smoke-test/webllm-wasm-jsep.wasm
 smoke-test/p2-v2-spike.js
 smoke-test/p2-v2-offload-probe.js
+# Older probe bundles — bun-build outputs with committed .src.ts sources
+# (rebuilt via: bun build smoke-test/<name>.src.ts --outfile smoke-test/<name>.js --target browser)
+smoke-test/p0-spike.js
+smoke-test/p1-fixture-regen.js
+smoke-test/p1-tokenizer-parity.js
+smoke-test/p2-v2-ref-probe.js
 
 # Downloaded model files
 smoke-test/models/
