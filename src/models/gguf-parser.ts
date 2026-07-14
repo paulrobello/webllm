@@ -15,7 +15,7 @@ import {
  * Reads the binary layout: header (magic, version, counts), metadata KV pairs, tensor info
  * entries, and computes aligned data offsets for weight loading.
  */
-// biome-ignore lint/complexity/noStaticOnlyClass: instance methods planned for Phase 2
+// biome-ignore lint/complexity/noStaticOnlyClass: namespace-style grouping; exported API — module conversion tracked as enhancement.
 export class GgufParser {
 	/**
 	 * Parse a GGUF binary buffer into a structured context.

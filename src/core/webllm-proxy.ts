@@ -178,6 +178,11 @@ export class WebLLMProxy {
 			metadata: LoadedModelMetadata;
 		}>("loadModelFromUrl", [url, name, wasmUrl, options]);
 	unloadModel = (id: string) => this.callMethod<void>("unloadModel", [id]);
+	resetModelSession = (modelId: string) =>
+		this.callMethod<void>("resetModelSession", [modelId]);
+	/** @deprecated Use resetModelSession. */
+	resetConversation = (modelId: string) =>
+		this.callMethod<void>("resetConversation", [modelId]);
 	embed = (modelId: string, text: string) =>
 		this.callMethod<Float32Array>("embed", [modelId, text]);
 	chat = (modelId: string, prompt: string, config?: unknown) =>

@@ -165,7 +165,7 @@ export interface GenerationStreamOptions {
  * Ties together tokenization, forward passes, sampling, and session management
  * into a single async generator that yields tokens as they are produced.
  *
- * biome-ignore lint/complexity/noStaticOnlyClass: Class provides namespace for generation; may gain instance state in future phases.
+ * biome-ignore lint/complexity/noStaticOnlyClass: namespace-style grouping; exported API — module conversion tracked as enhancement.
  */
 export class Generator {
 	/**

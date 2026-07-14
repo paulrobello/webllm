@@ -1,8 +1,8 @@
 // chat-render.js — transcript message rendering with markdown,
 // syntax highlight, and Qwen3 <think>...</think> collapse.
 
-// Vendored deps register UMD globals (`marked`, `hljs`) — chat.html
-// loads them via classic `<script>` tags before this module runs.
+// Vendored deps register UMD globals (`marked`, `hljs`, `DOMPurify`) —
+// chat.html loads them via classic `<script>` tags before this module runs.
 // (ES-module `import()` of these files runs in module scope and never
 // reaches `globalThis`.)
 async function ensureLibs() {
@@ -27,15 +27,20 @@ export function splitThinking(raw) {
 }
 
 /**
- * Render markdown to HTML using vendored `marked`. Falls back to
- * escape-only rendering when `marked` hasn't loaded yet (test mode).
+ * Render markdown to sanitized HTML using vendored `marked` + DOMPurify.
+ * marked v5+ passes raw inline HTML through by default, so model output
+ * (or a prompt-injection payload in pasted content) would execute in the
+ * chat origin if assigned straight to innerHTML — DOMPurify strips
+ * scripts/event handlers before the caller assigns the result (SEC-004).
+ * Falls back to escape-only rendering when either lib hasn't loaded yet.
  */
 export function renderMarkdown(text) {
 	const marked = globalThis.marked;
-	if (!marked) return escapeHtml(text);
+	const purify = globalThis.DOMPurify;
+	if (!marked || !purify) return escapeHtml(text);
 	// marked v12 exposes a default `marked()` function and `marked.parse`.
 	const fn = typeof marked === "function" ? marked : marked.parse;
-	return fn(text, { gfm: true, breaks: true });
+	return purify.sanitize(fn(text, { gfm: true, breaks: true }));
 }
 
 function escapeHtml(s) {

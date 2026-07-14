@@ -143,7 +143,7 @@ export interface ParsedModel {
  *
  * The actual GPU weight loading is deferred to the WASM bridge integration.
  */
-// biome-ignore lint/complexity/noStaticOnlyClass: instance methods planned for Phase 2
+// biome-ignore lint/complexity/noStaticOnlyClass: namespace-style grouping; exported API — module conversion tracked as enhancement.
 export class ModelLoader {
 	/** Parse a GGUF model buffer into hyperparams, tokenizer config, and KV cache config. */
 	static parseModel(data: Uint8Array): ParsedModel {

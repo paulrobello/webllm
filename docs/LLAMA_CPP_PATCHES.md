@@ -67,6 +67,8 @@ same-day pre-rebase baseline at
 Safety branch `webllm-browser-patches-backup-2026-07-14` preserves
 pre-rebase tip `4192e05ba`.
 
+### Rebase history
+
 #### Earlier rebase (2026-05-12, §32)
 
 Rebased onto upstream master 2026-05-12 to tip `856c3adac`. 102 commits
@@ -344,8 +346,9 @@ work, and can be ignored when assessing whether the dependency is clean.
 
 **Regression after a rebase.** If a browser regression reappears after
 rebasing, inspect the local branch *before* assuming the bug is in
-WebLLM. Start with the three files above — the four patches all touch
-them or their call paths.
+WebLLM. The readback patches (3, 4, 5, and 10) all touch
+`ggml/src/ggml-webgpu/ggml-webgpu.cpp`, `ggml.c`, or
+`ggml/include/ggml-webgpu.h` (or their call paths) — start there.
 
 **Keep `-sASYNCIFY_STACK_SIZE=1048576` in the WASM build** unless there
 is a verified replacement strategy. The browser readback path relies on

@@ -217,10 +217,12 @@ function typeName(t: number): string {
  * matching n_kv_head K/V slice. For non-broadcast dispatches (src1.ne[2]
  * == src0.ne[2]) `r2 = 1` and the divide is a structural no-op.
  *
- * Stage 4.25 Probe 13 — when `kahan=true` (only honored for Q4_K), the
- * intra-thread K-loop accumulator uses Neumaier-corrected summation. The
- * dispatch gate (`__stage425KahanArm` global, shape match Qcur-0 only)
- * keeps the variant kernel out of every other dispatch's pipeline cache.
+ * Stage 4.25 — when `kahan=true` (only honored for Q4_K), the
+ * intra-thread K-loop accumulator uses Neumaier-corrected summation.
+ * The probe closed H-3b-structural (see TODO_ARCHIVE.md); the `kahan`
+ * parameter is retained as a future-probe knob, but the dispatch-time
+ * arming gate has been removed so the variant kernel never runs in
+ * production.
  */
 function buildMatmulShader(
 	src0Type: number,
@@ -608,82 +610,14 @@ export function dispatchMatmul(
 	}
 	const r2 = src1_ne2 / src0_ne2;
 
-	// Stage 4.34 Probe 21 — one-shot capture of the first MUL_MAT where
-	// src0.ne[2] !== src1.ne[2] (the GQA-broadcast case). Stashes ne / nb
-	// for both sources and dst into a global the spike harness reads back
-	// to verify what nb[2] ggml is actually packing for the kq MUL_MAT.
-	// Auto-disarms after one capture so Stage 4.34 can re-arm later if
-	// needed without touching the production decode path.
-	const probe21Global = globalThis as unknown as {
-		__stage434Probe21Arm?: boolean;
-		__stage434Probe21?: {
-			M: number;
-			K: number;
-			N: number;
-			batchCount: number;
-			src0_type: number;
-			src0_ne: number[];
-			src0_nb: number[];
-			src1_ne: number[];
-			src1_nb: number[];
-			dst_ne: number[];
-			dst_nb: number[];
-		};
-	};
-	if (
-		probe21Global.__stage434Probe21Arm &&
-		!probe21Global.__stage434Probe21 &&
-		src0.ne[2] !== src1.ne[2]
-	) {
-		probe21Global.__stage434Probe21 = {
-			M: M,
-			K: K,
-			N: N,
-			batchCount,
-			src0_type: src0.type,
-			src0_ne: [...src0.ne],
-			src0_nb: [...src0.nb],
-			src1_ne: [...src1.ne],
-			src1_nb: [...src1.nb],
-			dst_ne: [...dst.ne],
-			dst_nb: [...dst.nb],
-		};
-		probe21Global.__stage434Probe21Arm = false;
-		console.log(
-			`[stage4.34-probe21] kq MUL_MAT descriptor captured: ` +
-				`M=${M} K=${K} N=${N} batchCount=${batchCount} src0_type=${src0.type} ` +
-				`src0_ne=[${src0.ne.join(",")}] src0_nb=[${src0.nb.join(",")}] ` +
-				`src1_ne=[${src1.ne.join(",")}] src1_nb=[${src1.nb.join(",")}] ` +
-				`dst_ne=[${dst.ne.join(",")}] dst_nb=[${dst.nb.join(",")}]`,
-		);
-	}
-
-	// Stage 4.25 Probe 13 — gated Kahan-summed accumulator path. Armed by
-	// the spike via `globalThis.__stage425KahanArm`; auto-disarms after
-	// first eligible dispatch so only Qcur-0 layer 0 (M=2048, K=2048, N=6,
-	// Q4_K) takes the variant kernel. The variant kernel uses a separate
-	// pipeline cache key (`-kahan` suffix) so the production kernel cache
-	// is unchanged for every other dispatch.
-	const kahanGlobal = globalThis as unknown as {
-		__stage425KahanArm?: boolean;
-	};
-	let useKahan = false;
-	if (
-		kahanGlobal.__stage425KahanArm &&
-		src0.type === GGML_TYPE_Q4_K &&
-		M === 2048 &&
-		K === 2048 &&
-		N === 6
-	) {
-		useKahan = true;
-		kahanGlobal.__stage425KahanArm = false;
-		// One-shot confirmation that the Kahan dispatch fired. Read by the
-		// spike's Probe 13 verdict block to disambiguate "Kahan ran and
-		// produced identical output" from "Kahan gate never fired".
-		(
-			globalThis as unknown as { __stage425KahanFired?: boolean }
-		).__stage425KahanFired = true;
-	}
+	// `useKahan` is a permanent no-op: the Stage 4.25 arming gate
+	// (`__stage425KahanArm`) was removed when that probe closed
+	// (H-3b-structural; see TODO_ARCHIVE.md). The variable is retained so
+	// the `kahan=true` code path inside `buildMatmulShader` stays a
+	// future-probe-ready knob without rewriting the cacheKey / pipeline
+	// wiring. With no arming site, the `-kahan` cache suffix and the
+	// variant kernel are unreachable in production.
+	const useKahan = false;
 
 	const cacheKey = `mat-${typeName(src0.type)}-${typeName(src1.type)}-${typeName(dst.type)}-${ndim}${useKahan ? "-kahan" : ""}`;
 

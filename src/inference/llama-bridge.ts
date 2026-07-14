@@ -117,122 +117,103 @@ export interface LlamaBridge {
 }
 
 /**
+ * ABI-polymorphic pointer: `number` on wasm32, `bigint` on
+ * wasm64+WASM_BIGINT. Typed as a union so tsc catches the historical
+ * bug class where a JSPI-wrapped `Promise<WasmPtr>` is coerced by
+ * `>>> 0` (silent leak on wasm32) or `BigInt(NaN)` (RangeError on
+ * wasm64) — a `Promise` is assignable to `any` but NOT to this union.
+ */
+type WasmPtr = number | bigint;
+
+/**
  * Minimum subset of the Emscripten module surface this bridge needs.
- * Pointer parameters and returns are typed `any` because the concrete
- * type is `number` on wasm32 and `bigint` on wasm64+WASM_BIGINT — the
- * adapter below probes and translates.
+ * Pointer parameters and returns are typed `WasmPtr` (number on wasm32,
+ * bigint on wasm64+WASM_BIGINT); the adapter below probes the ABI and
+ * translates via `to64`/`from64`. Exports listed in JSPI_EXPORTS
+ * (CMakeLists.txt) are promising-wrapped and return `Promise<WasmPtr>` —
+ * the TS binding MUST await them before unwrapping (see regression
+ * lessons in CLAUDE.md).
  */
 interface RawLlamaModule {
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_load_model: (bufPtr: any, nBytes: any) => any;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_free_model: (handle: any) => void;
+	// JSPI-wrapped (see JSPI_EXPORTS in src/wasm/CMakeLists.txt) — await required.
+	_webllm_load_model: (bufPtr: WasmPtr, nBytes: WasmPtr) => Promise<WasmPtr>;
+	_webllm_free_model: (handle: WasmPtr) => void;
+	// JSPI-wrapped — await required.
 	_webllm_create_context: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		model: any,
+		model: WasmPtr,
 		nCtx: number,
 		embeddings: number,
 		poolingType: number,
 		flashAttn: number,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	) => any;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_free_context: (ctx: any) => void;
+	) => Promise<WasmPtr>;
+	_webllm_free_context: (ctx: WasmPtr) => void;
+	// JSPI-wrapped; returns a status code (0 = success), not a pointer.
 	_webllm_decode: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		ctx: any,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		tokensPtr: any,
+		ctx: WasmPtr,
+		tokensPtr: WasmPtr,
 		nTokens: number,
 		pastLen: number,
 	) => Promise<number>;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_get_logits: (ctx: any, ith: number) => any;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_n_vocab: (model: any) => number;
+	// JSPI-wrapped — await required.
+	_webllm_get_logits: (ctx: WasmPtr, ith: number) => Promise<WasmPtr>;
+	_webllm_n_vocab: (model: WasmPtr) => number;
 	_webllm_tokenize: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		model: any,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		textPtr: any,
+		model: WasmPtr,
+		textPtr: WasmPtr,
 		nText: number,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		tokensOut: any,
+		tokensOut: WasmPtr,
 		nTokensMax: number,
 		addBos: number,
 		parseSpecial: number,
 	) => number;
 	_webllm_detokenize: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		model: any,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		tokensPtr: any,
+		model: WasmPtr,
+		tokensPtr: WasmPtr,
 		nTokens: number,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		textOut: any,
+		textOut: WasmPtr,
 		nTextMax: number,
 	) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_token_bos: (model: any) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_token_eos: (model: any) => number;
+	_webllm_token_bos: (model: WasmPtr) => number;
+	_webllm_token_eos: (model: WasmPtr) => number;
 	_webllm_get_metadata: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		model: any,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		keyPtr: any,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		bufPtr: any,
+		model: WasmPtr,
+		keyPtr: WasmPtr,
+		bufPtr: WasmPtr,
 		bufSize: number,
 	) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_n_ctx_train: (model: any) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_n_embd: (model: any) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_n_layer: (model: any) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_n_head: (model: any) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_n_head_kv: (model: any) => number;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_n_ctx: (ctx: any) => number;
+	_webllm_n_ctx_train: (model: WasmPtr) => number;
+	_webllm_n_embd: (model: WasmPtr) => number;
+	_webllm_n_layer: (model: WasmPtr) => number;
+	_webllm_n_head: (model: WasmPtr) => number;
+	_webllm_n_head_kv: (model: WasmPtr) => number;
+	_webllm_n_ctx: (ctx: WasmPtr) => number;
 
 	_webllm_kv_seq_rm: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		ctx: any,
+		ctx: WasmPtr,
 		seqId: number,
 		p0: number,
 		p1: number,
 	) => void;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_kv_clear: (ctx: any) => void;
+	_webllm_kv_clear: (ctx: WasmPtr) => void;
 
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_state_seq_get_size: (ctx: any, seqId: number) => number;
+	_webllm_state_seq_get_size: (ctx: WasmPtr, seqId: number) => number;
 	_webllm_state_seq_get_data: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		ctx: any,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		dst: any,
+		ctx: WasmPtr,
+		dst: WasmPtr,
 		size: number,
 		seqId: number,
 	) => number;
 	_webllm_state_seq_set_data: (
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		ctx: any,
-		// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-		src: any,
+		ctx: WasmPtr,
+		src: WasmPtr,
 		size: number,
 		destSeqId: number,
 	) => number;
 
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_webllm_get_embeddings: (ctx: any, ith: number) => any;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_bridge_malloc: (size: any) => any;
-	// biome-ignore lint/suspicious/noExplicitAny: ABI-polymorphic pointer types
-	_bridge_free: (ptr: any) => void;
+	// JSPI-wrapped — await required.
+	_webllm_get_embeddings: (ctx: WasmPtr, ith: number) => Promise<WasmPtr>;
+	_bridge_malloc: (size: WasmPtr) => WasmPtr;
+	_bridge_free: (ptr: WasmPtr) => void;
 	HEAPU8: Uint8Array;
 }
 

@@ -23,7 +23,7 @@ export interface ChatEngine {
 	 * that maintain per-conversation cache state should implement this so
 	 * eval runners can isolate one task from the next.
 	 */
-	resetConversation?(modelId: string): void;
+	resetModelSession?(modelId: string): void;
 	/**
 	 * Optional: bidirectional encoder embedding. Required for
 	 * embedding-dimension eval tasks. Returns an L2-normalized sentence

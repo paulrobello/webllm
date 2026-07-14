@@ -1678,7 +1678,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					// so we drive the engine via `smokeEngineHandleId`.
 					const engineHandleId = smokeEngineHandleId;
 					const patternA = [];
-					smokeEngine.resetConversation(engineHandleId);
+					smokeEngine.resetModelSession(engineHandleId);
 					await settle();
 					for (const npc of NPCS_PFX) {
 						const r1 = await runChat(engineHandleId, buildTick1(npc));
@@ -1703,7 +1703,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						});
 						await settle();
 					}
-					smokeEngine.resetConversation(engineHandleId);
+					smokeEngine.resetModelSession(engineHandleId);
 					await settle();
 
 					// Pattern B: per-NPC ConversationHandle. Tick 1 populates the
@@ -1921,7 +1921,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					// per-NPC persona on every cross-NPC call.
 					const patternA = [];
 					const patternARecallCues = new Array(NPCS_INTERLEAVED.length);
-					smokeEngine.resetConversation(engineHandleId);
+					smokeEngine.resetModelSession(engineHandleId);
 					await settle();
 					for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
 						const npc = NPCS_INTERLEAVED[i];
@@ -1951,7 +1951,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						});
 						await settle();
 					}
-					smokeEngine.resetConversation(engineHandleId);
+					smokeEngine.resetModelSession(engineHandleId);
 					await settle();
 
 					// Pattern B interleaved: same matrix, per-NPC handles. Each
@@ -2138,7 +2138,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					// would already hold the shared prefix from pattern X's last
 					// call, masking the fork win — pattern Y's "base prime" call
 					// would be a session-tracker hit, not a fresh prefill.)
-					smokeEngine.resetConversation(engineHandleId);
+					smokeEngine.resetModelSession(engineHandleId);
 					await settle();
 
 					// Pattern Y (forked): prime a base conv with the shared

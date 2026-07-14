@@ -1,6 +1,6 @@
 # Benchmarks & Evaluation
 
-Comprehensive guide to WebLLM's performance microbenchmarks and model quality evaluation framework. Use these tools to measure component throughput, track regressions, and assess model capability across tool calling, reasoning, and instruction following.
+Comprehensive guide to WebLLM's performance microbenchmarks and model quality evaluation framework. Use these tools to measure component throughput, track regressions, and assess model capability across tool calling, reasoning, instruction following, semantic reasoning, and embeddings.
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ Comprehensive guide to WebLLM's performance microbenchmarks and model quality ev
 WebLLM provides two complementary benchmarking systems:
 
 - **Performance Microbenchmarks** — Measure throughput and latency of individual TypeScript components using mitata
-- **Model Quality Evaluation** — Assess model behavior across tool calling accuracy, reasoning ability, and instruction following
+- **Model Quality Evaluation** — Assess model behavior across five dimensions: tool calling, reasoning, instruction following, semantic reasoning, and embedding-vector cosine similarity
 
 Both systems run locally via Bun with no external dependencies beyond `mitata` for microbenchmarking.
 
@@ -131,13 +131,18 @@ applyTopK (k=40)                         45.67 µs/iter        47.20 µs
 
 ### Evaluation Dimensions
 
-The evaluation framework tests model quality across three dimensions, each with 12 tasks at three difficulty levels.
+The evaluation framework tests model quality across five dimensions. The
+three chat-quality dimensions (tool calling, reasoning, instruction
+following) and semantic reasoning each carry 12 tasks at three difficulty
+levels; the embedding dimension carries 8 tasks. That is 56 tasks total.
 
 ```mermaid
 graph TD
     Eval[Model Evaluation] --> TC[Tool Calling]
     Eval --> RS[Reasoning]
     Eval --> IN[Instruction Following]
+    Eval --> SR[Semantic Reasoning]
+    Eval --> EMB[Embedding]
 
     TC --> TCE[Easy — 4 tasks]
     TC --> TCM[Medium — 4 tasks]
@@ -151,10 +156,18 @@ graph TD
     IN --> INM[Medium — 4 tasks]
     IN --> INH[Hard — 4 tasks]
 
+    SR --> SRE[Easy — 4 tasks]
+    SR --> SRM[Medium — 4 tasks]
+    SR --> SRH[Hard — 4 tasks]
+
+    EMB --> EMBT[8 cosine-similarity tasks]
+
     style Eval fill:#e65100,stroke:#ff9800,stroke-width:3px,color:#ffffff
     style TC fill:#0d47a1,stroke:#2196f3,stroke-width:2px,color:#ffffff
     style RS fill:#1b5e20,stroke:#4caf50,stroke-width:2px,color:#ffffff
     style IN fill:#4a148c,stroke:#9c27b0,stroke-width:2px,color:#ffffff
+    style SR fill:#1a237e,stroke:#3f51b5,stroke-width:2px,color:#ffffff
+    style EMB fill:#880e4f,stroke:#c2185b,stroke-width:2px,color:#ffffff
     style TCE fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
     style TCM fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
     style TCH fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
@@ -164,6 +177,10 @@ graph TD
     style INE fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
     style INM fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
     style INH fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
+    style SRE fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
+    style SRM fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
+    style SRH fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
+    style EMBT fill:#37474f,stroke:#78909c,stroke-width:1px,color:#ffffff
 ```
 
 #### Tool Calling (`tc-001` through `tc-012`)
@@ -196,9 +213,41 @@ Measures format compliance, constraint adherence, and multi-step instruction exe
 | **Medium** | `in-005` to `in-008` | JSON schema output, numbered lists, required words, forbidden words |
 | **Hard** | `in-009` to `in-012` | Multi-constraint formatting, conditional responses, typed JSON, ordered answers |
 
+#### Semantic Reasoning (`sr-001` through `sr-012`)
+
+Measures chat-style semantic understanding — paraphrase, synonym,
+near-equivalence, and lightweight entailment — using cosine similarity
+against a reference answer rather than exact-match scoring. This dimension
+is distinct from the `embedding` dimension: semantic-reasoning tasks drive
+the model through `engine.chatCompletion` and score the *generated* answer's
+embedding against a reference, while embedding-dimension tasks score the
+embed of a raw input string.
+
+| Difficulty | Tasks | Skills Tested |
+|-----------|-------|---------------|
+| **Easy** | `sr-001` to `sr-004` | Direct synonym / paraphrase recognition |
+| **Medium** | `sr-005` to `sr-008` | Paraphrase under constraint, antonym distinction |
+| **Hard** | `sr-009` to `sr-012` | Multi-sentence entailment, nuanced semantic equivalence |
+
+#### Embedding (`emb-001` through `emb-008`)
+
+Measures embedding-vector quality via cosine similarity. The runner calls
+`engine.embed(modelId, text)` for both the input and the expected text,
+maps cosine ∈ [-1, 1] to a score ∈ [0, 1] via `(cos + 1) / 2`, and compares
+against a per-task `threshold`. This dimension only runs against models
+that dispatch through one of the three `engine.embed()` tiers (encoder,
+causal-embedder, or chat-model tap with `embeddingCapable: true`); see
+[`docs/MODEL_SUPPORT.md`](MODEL_SUPPORT.md#embeddings).
+
+| Tasks | Scoring | Notes |
+|-------|---------|-------|
+| 8 (no difficulty split) | `cosine_similarity` vs reference, threshold pass/fail | Requires an embedding-capable registered model |
+
 ### Scoring Methods
 
-Each task uses one of eight scoring methods defined in `eval/types.ts`:
+Each task uses one of nine scoring methods defined by the `ScoringMethod`
+union in `src/evaluation/types.ts` (`eval/types.ts` is a thin re-export
+shim that re-exports the library types into the eval harness namespace):
 
 | Method | How It Scores | Used For |
 |--------|---------------|----------|
@@ -210,6 +259,7 @@ Each task uses one of eight scoring methods defined in `eval/types.ts`:
 | `tool_call_chain` | Sequential step matching: ratio of correct steps | Multi-step tool usage |
 | `no_tool_call` | Absence of tool call: 1.0 or 0.0 | Recognizing non-tool inputs |
 | `custom` | Arbitrary scoring function: 0.0 to 1.0 | Complex multi-constraint checks |
+| `cosine_similarity` | Embedding cosine vs reference, mapped to [0,1]; threshold pass/fail | Embedding-dimension tasks (`emb-*`) and semantic-reasoning (`sr-*`) |
 
 ### Report Format
 
@@ -253,7 +303,7 @@ path. Use `bench-browser-eval` (per profile) or `bench-full` (full sweep) —
 both drive the smoke page in Chrome and stream results to the live dashboard.
 
 ```bash
-# List all 44 evaluation tasks (offline; no engine needed)
+# List the 44 evaluation tasks wired into eval/cli.ts (offline; no engine needed)
 make bench-eval-list
 
 # Single profile — needs `make dashboard-serve` running on $(DASHBOARD_PORT)
@@ -280,6 +330,15 @@ make bench-full
 only — it cannot run accuracy tasks because it has no engine. The browser
 harness is `eval/browser-eval.ts` (invoked by `bench-browser-eval`) and
 `eval/bench.ts` (invoked by `bench-full`).
+
+> **Note:** `eval/cli.ts`'s `allTasks` array is
+> `[...toolCallingTasks, ...reasoningTasks, ...instructionTasks, ...embeddingTasks]`
+> — it does **not** import `semanticReasoningTasks`, so `--list` / `make
+> bench-eval-list` reports 44 tasks, not the full 56. The semantic-reasoning
+> dimension is still exercised by the browser harnesses
+> (`eval/browser-eval.ts`, `eval/bench.ts`) which compose their own task
+> sets. Adding semantic-reasoning to the CLI `allTasks` is tracked as a
+> follow-up.
 
 | Flag | Description |
 |------|-------------|
@@ -379,7 +438,7 @@ export const myTasks: EvalTask[] = [
 
 ## Model Catalog
 
-The benchmark suite includes 15 models across 4 performance tiers, covering all supported architectures (llama, qwen, phi, gemma).
+The benchmark suite includes 30 models across 4 performance tiers, covering all supported chat architectures (llama, qwen, mistral, phi3, gemma, gemma4), three encoder architectures (bert, nomic-bert, jina-bert-v2), and the causal-embedder architecture (qwen3-embedding). The canonical source of truth is `eval/models.ts`; run `make bench-eval-models` for the live list rather than relying on the tier tables below, which drift as models are added and retired.
 
 ### Listing Models
 
@@ -457,11 +516,15 @@ SWA — see closure
 | **Qwen3 8B** (IQ3_M) | 8.0B | 3252 MB | **27.2** | Native | Apache 2.0 |
 | Mistral-7B Instruct v0.3 (Q3_K_M) | 7.2B | 3360 MB | 19.7 | No | Apache 2.0 |
 
-Wave-1 deferred (registered but not yet integrated — see
-TODO.md §10 wave-1 entry): Gemma 2 2B IT (pre+post norm pairs,
-logit/attn soft-cap, sliding-window, (1+w) RMSNorm); Phi-3.5
-Mini Instruct (fused QKV). Re-evaluate if a model in either
-family lands as a real deployment ask.
+Both Gemma 2 2B IT and Phi-3.5 Mini Instruct are registered
+(`gemma-2-2b-q4f16`, `phi-3.5-mini-q4km`) and integrated. Gemma 2 2B
+was un-demoted 2026-05-11 (closure at
+`eval/reports/gemma-2-2b-un-demote-2026-05-11/`); Phi-3.5 Mini ships
+in fused-forward Q4_K_M form (bucket-D self-embedding deliberately
+disabled — see `docs/MODEL_SUPPORT.md` Embeddings section). Neither
+appears in the tok/s tier tables above because neither is in the
+canonical rebase fleet; both run end-to-end via `make smoke-bench` and
+the browser harnesses.
 
 ### Recommended Models by Use Case
 
@@ -482,5 +545,7 @@ All model metadata lives in `eval/models.ts` and includes architecture, VRAM req
 
 - [README.md](../README.md) — Project overview and quick start
 - [DOCUMENTATION_STYLE_GUIDE.md](DOCUMENTATION_STYLE_GUIDE.md) — Documentation standards
-- `eval/types.ts` — Evaluation type definitions
+- [docs/MODEL_SUPPORT.md](MODEL_SUPPORT.md) — model, quant, and embedding support
+- [docs/reference/environment.md](reference/environment.md) — benchmark and harness environment variables
+- `src/evaluation/types.ts` — `ScoringMethod` / `EvalDimension` type definitions (re-exported by `eval/types.ts`)
 - `eval/scorer.ts` — Scoring engine implementation

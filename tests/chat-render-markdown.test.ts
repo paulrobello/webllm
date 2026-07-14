@@ -1,7 +1,12 @@
-// Stub the marked global so renderMarkdown's main path runs in Bun.
+// Stub the marked + DOMPurify globals so renderMarkdown's main (render +
+// sanitize) path runs in Bun. DOMPurify is a passthrough here — this unit
+// test checks rendering, not sanitization (the XSS guarantee is verified in
+// the browser workflow).
 // @ts-expect-error — extending globalThis for the test.
 globalThis.marked = (s) =>
 	`<pre><code>${s.replace(/^```\n?|\n?```$/g, "")}</code></pre>`;
+// @ts-expect-error — extending globalThis for the test.
+globalThis.DOMPurify = { sanitize: (html) => html };
 
 import { expect, test } from "bun:test";
 import { renderMarkdown, splitThinking } from "../smoke-test/chat-render.js";

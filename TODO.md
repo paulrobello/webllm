@@ -1,6 +1,6 @@
 # WebLLM Project Status & Roadmap
 
-> **Date:** 2026-04-27
+> **Baseline pinned**: 2026-04-27 · **Last updated**: 2026-07-14
 > **Status:** End-to-end browser inference is working for both causal LMs and
 > BERT-style encoders (Arctic-Embed). `make bench-full` now drives the
 > generative profiles plus the embedding profiles end-to-end into the live

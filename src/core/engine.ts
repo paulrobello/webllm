@@ -1287,11 +1287,22 @@ export class WebLLM {
 		);
 	}
 
-	/** Clear conversation history and KV cache for a model. */
-	resetConversation(modelId: string): void {
+	/**
+	 * Reset the per-model default session and KV cache for a loaded model.
+	 *
+	 * Takes a model id (not a {@link ConversationHandle} — the neighboring
+	 * conversation-pool APIs operate on those), drops the model's default
+	 * session-tracker entry, and clears its inference engine's KV cache.
+	 */
+	resetModelSession(modelId: string): void {
 		this.sessions.delete(modelId);
 		const inf = this.inferenceEngines.get(modelId);
 		if (inf) inf.resetKVCache();
+	}
+
+	/** @deprecated Use {@link resetModelSession}. */
+	resetConversation(modelId: string): void {
+		this.resetModelSession(modelId);
 	}
 
 	private prepareChatPrompt(

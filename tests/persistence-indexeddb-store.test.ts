@@ -1,11 +1,11 @@
+import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { PersistenceUnavailableError } from "../src/core/errors.js";
 import { IndexedDBConversationStore } from "../src/persistence/indexeddb-store.js";
 
-const indexedDBAvailable = typeof indexedDB !== "undefined";
 const DB_NAME = "test-conv-store";
 
-describe.skipIf(!indexedDBAvailable)("IndexedDBConversationStore", () => {
+describe("IndexedDBConversationStore", () => {
 	let store: IndexedDBConversationStore;
 
 	beforeEach(async () => {
