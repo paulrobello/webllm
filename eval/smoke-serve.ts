@@ -1,9 +1,9 @@
 import { existsSync, statSync, writeFileSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { extname, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 
 const DEFAULT_PORT = 8031;
-const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_ROOT = "smoke-test";
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -99,10 +99,8 @@ const server = Bun.serve({
 				writeFileSync(ROUTE_ALIASES["/parity-fixture.json"], body);
 				return new Response(`ok ${body.length} bytes\n`, { status: 200 });
 			} catch (err) {
-				return new Response(
-					`save failed: ${err instanceof Error ? err.message : String(err)}`,
-					{ status: 500 },
-				);
+				console.error("save-parity-fixture:", err);
+				return new Response("internal error", { status: 500 });
 			}
 		}
 
@@ -119,10 +117,16 @@ const server = Bun.serve({
 				},
 			});
 		}
-		// Strip query string, prevent path escape, default to index
+		// Containment check: resolve and verify the path stays under root.
+		// `resolve` with a leading-slash rel would ignore the root, so strip
+		// leading slashes first (kept from the original sanitizer).
 		const rel = url.pathname === "/" ? "/index.html" : url.pathname;
-		const safe = rel.replace(/\.\./g, "").replace(/^\/+/, "");
-		const filePath = join(options.root, safe);
+		const rootAbs = resolve(options.root);
+		const candidate = resolve(rootAbs, rel.replace(/^\/+/, ""));
+		if (candidate !== rootAbs && !candidate.startsWith(rootAbs + sep)) {
+			return new Response("Not found", { status: 404 });
+		}
+		const filePath = candidate;
 		if (!existsSync(filePath)) {
 			return new Response("Not found", { status: 404 });
 		}
@@ -139,16 +143,15 @@ const server = Bun.serve({
 				},
 			});
 		} catch (err) {
-			return new Response(
-				`server error: ${err instanceof Error ? err.message : String(err)}`,
-				{ status: 500 },
-			);
+			console.error("static-serve:", err);
+			return new Response("internal error", { status: 500 });
 		}
 	},
 	// Bun.serve already swallows connection-close errors silently;
 	// the explicit error handler keeps any genuine server faults visible.
 	error(err) {
-		return new Response(`server error: ${err.message}`, { status: 500 });
+		console.error("server:", err);
+		return new Response("internal error", { status: 500 });
 	},
 });
 

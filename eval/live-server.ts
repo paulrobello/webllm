@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { extname, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import {
 	type BenchSessionCompletePayload,
@@ -25,7 +25,7 @@ import { loadEvalSeries } from "./live-db.ts";
 import { BENCHMARK_MODELS } from "./models.ts";
 
 const DEFAULT_PORT = 8033;
-const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_DASHBOARD_ROOT = "smoke-test";
 const DEFAULT_DB_PATH = "eval/reports/smoke-runs.db";
 
@@ -91,23 +91,84 @@ function contentTypeFor(path: string): string {
 	return CONTENT_TYPES[extname(path)] ?? "application/octet-stream";
 }
 
-function corsHeaders(): Record<string, string> {
-	return {
-		"access-control-allow-origin": "*",
+// Dashboard pages are served from the smoke-test static server (:8031) and
+// this dashboard server (:8033); only those origins are echoed for CORS.
+// Requests with no Origin header (curl, same-origin GET) get no allow-origin
+// header and are unaffected. To serve the dashboard from another port, extend
+// this set — it is the single place that scopes cross-origin access.
+const ALLOWED_ORIGINS = new Set([
+	"http://localhost:8031",
+	"http://127.0.0.1:8031",
+	"http://localhost:8033",
+	"http://127.0.0.1:8033",
+]);
+
+// Caps for the in-memory task-list staging map: per-list entry count and
+// total staged lists. Prevents a malicious or buggy POST from wedging the
+// server with a multi-MB payload or unbounded key growth.
+const MAX_TASKS_PER_LIST = 500;
+const MAX_TASK_LISTS = 20;
+
+function corsHeaders(req: Request): Record<string, string> {
+	const origin = req.headers.get("origin");
+	const headers: Record<string, string> = {
 		"access-control-allow-methods": "GET, POST, OPTIONS",
 		"access-control-allow-headers": "content-type, last-event-id",
+		vary: "origin",
 	};
+	if (origin && ALLOWED_ORIGINS.has(origin)) {
+		headers["access-control-allow-origin"] = origin;
+	}
+	return headers;
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(
+	body: unknown,
+	status = 200,
+	req?: Request,
+): Response {
 	return new Response(JSON.stringify(body), {
 		status,
-		headers: { "content-type": "application/json", ...corsHeaders() },
+		headers: {
+			"content-type": "application/json",
+			...(req ? corsHeaders(req) : {}),
+		},
 	});
 }
 
-function errorResponse(code: string, message: string, status: number): Response {
-	return jsonResponse({ code, message }, status);
+function errorResponse(
+	code: string,
+	message: string,
+	status: number,
+	req?: Request,
+): Response {
+	return jsonResponse({ code, message }, status, req);
+}
+
+/**
+ * Marks an error thrown by a `validate*` function. These carry hand-authored
+ * field-name messages (e.g. `"run_started.runId must be a non-empty string"`)
+ * that are safe validation feedback for local harnesses, not exception leaks.
+ * The ingest catch boundary echoes these to the client while suppressing
+ * unexpected errors (DB/IO) that may carry filesystem paths.
+ */
+class ValidationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ValidationError";
+	}
+}
+
+/** Wrap a validate call so its thrown Error is tagged as validation feedback. */
+function validation<T>(fn: () => T): T {
+	try {
+		return fn();
+	} catch (err) {
+		if (err instanceof Error) {
+			throw new ValidationError(err.message);
+		}
+		throw err;
+	}
 }
 
 function encodeSseFrame(event: LiveEvent): string {
@@ -388,16 +449,23 @@ function validateEvalFailed(body: unknown): EvalFailedPayload {
 function tryServeStatic(
 	root: string,
 	pathname: string,
+	req: Request,
 ): Response | null {
 	const rel = pathname === "/" ? "/dashboard.html" : pathname;
-	const safeRel = rel.replace(/\.\./g, "").replace(/^\/+/, "");
-	const filePath = join(root, safeRel);
+	// Containment check: resolve and verify the path stays under root.
+	// `resolve` with a leading-slash rel would ignore the root, so strip
+	// leading slashes first (kept from the original sanitizer).
+	const rootAbs = resolve(root);
+	const candidate = resolve(rootAbs, rel.replace(/^\/+/, ""));
+	if (candidate !== rootAbs && !candidate.startsWith(rootAbs + sep)) {
+		return null;
+	}
 	try {
-		const data = readFileSync(filePath);
+		const data = readFileSync(candidate);
 		return new Response(data, {
 			status: 200,
 			headers: {
-				"content-type": contentTypeFor(filePath),
+				"content-type": contentTypeFor(candidate),
 				// `no-store, max-age=0` — never cache the dashboard's HTML/JS/CSS
 				// in the browser. Soft reload (Cmd-R) reliably picks up code
 				// changes without needing Cmd-Shift-R or a manual cache-bust.
@@ -406,7 +474,7 @@ function tryServeStatic(
 				// dashboard.js after live-server restarts because the response
 				// lacks ETag/Last-Modified validators.
 				"cache-control": "no-store, max-age=0",
-				...corsHeaders(),
+				...corsHeaders(req),
 			},
 		});
 	} catch {
@@ -434,7 +502,7 @@ export function createLiveServer(options: ServerOptions) {
 			const url = new URL(req.url);
 
 			if (req.method === "OPTIONS") {
-				return new Response(null, { status: 204, headers: corsHeaders() });
+				return new Response(null, { status: 204, headers: corsHeaders(req) });
 			}
 
 			if (url.pathname === "/health") {
@@ -445,20 +513,20 @@ export function createLiveServer(options: ServerOptions) {
 					runs: store.completedRuns().length,
 					evals: store.completedEvals().length,
 					systemProfiles: store.allSystemProfiles().length,
-				});
+				}, 200, req);
 			}
 
 			if (url.pathname === "/runs" && req.method === "GET") {
-				return jsonResponse({ runs: store.completedRuns() });
+				return jsonResponse({ runs: store.completedRuns() }, 200, req);
 			}
 
 			if (url.pathname === "/evals" && req.method === "GET") {
-				return jsonResponse({ evals: store.completedEvals() });
+				return jsonResponse({ evals: store.completedEvals() }, 200, req);
 			}
 
 			if (url.pathname === "/evals/series" && req.method === "GET") {
-				if (!db) return jsonResponse({ series: [] });
-				return jsonResponse({ series: loadEvalSeries(db) });
+				if (!db) return jsonResponse({ series: [] }, 200, req);
+				return jsonResponse({ series: loadEvalSeries(db) }, 200, req);
 			}
 
 			// ── Model registry ─────────────────────────────────────────
@@ -470,7 +538,7 @@ export function createLiveServer(options: ServerOptions) {
 				const models = [...BENCHMARK_MODELS].sort((a, b) =>
 					a.id.localeCompare(b.id),
 				);
-				return jsonResponse({ models });
+				return jsonResponse({ models }, 200, req);
 			}
 
 			// ── System profile registry ────────────────────────────────
@@ -484,6 +552,7 @@ export function createLiveServer(options: ServerOptions) {
 							"bad_request",
 							"system profile must include at least userAgent",
 							400,
+							req,
 						);
 					}
 					// Recompute the id server-side to keep dedup honest.
@@ -494,17 +563,14 @@ export function createLiveServer(options: ServerOptions) {
 						collectedAt: new Date().toISOString(),
 					};
 					store.registerSystemProfile(profile);
-					return jsonResponse({ ok: true, systemId });
+					return jsonResponse({ ok: true, systemId }, 200, req);
 				} catch (err) {
-					return errorResponse(
-						"bad_request",
-						err instanceof Error ? err.message : String(err),
-						400,
-					);
+					console.error("system-profiles POST:", err);
+					return errorResponse("bad_request", "invalid request", 400, req);
 				}
 			}
 			if (url.pathname === "/system-profiles" && req.method === "GET") {
-				return jsonResponse({ systemProfiles: store.allSystemProfiles() });
+				return jsonResponse({ systemProfiles: store.allSystemProfiles() }, 200, req);
 			}
 			if (
 				url.pathname.startsWith("/system-profiles/") &&
@@ -517,9 +583,10 @@ export function createLiveServer(options: ServerOptions) {
 						"not_found",
 						`unknown system profile: ${id}`,
 						404,
+						req,
 					);
 				}
-				return jsonResponse(profile);
+				return jsonResponse(profile, 200, req);
 			}
 
 			// ── Task list staging (browser bench mode) ─────────────────
@@ -534,28 +601,40 @@ export function createLiveServer(options: ServerOptions) {
 							"bad_request",
 							"tasks must be a non-empty array",
 							400,
+							req,
+						);
+					}
+					if (body.tasks.length > MAX_TASKS_PER_LIST) {
+						return errorResponse(
+							"bad_request",
+							`task list too large: max ${MAX_TASKS_PER_LIST} entries`,
+							400,
+							req,
 						);
 					}
 					const id =
 						body.id ??
 						`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 					taskLists.set(id, body.tasks);
-					return jsonResponse({ ok: true, id, count: body.tasks.length });
+					// Evict oldest insertion if we've hit the staging cap (Map
+					// preserves insertion order, so the first key is oldest).
+					if (taskLists.size > MAX_TASK_LISTS) {
+						const first = taskLists.keys().next().value;
+						if (first !== undefined) taskLists.delete(first);
+					}
+					return jsonResponse({ ok: true, id, count: body.tasks.length }, 200, req);
 				} catch (err) {
-					return errorResponse(
-						"bad_request",
-						err instanceof Error ? err.message : String(err),
-						400,
-					);
+					console.error("tasks POST:", err);
+					return errorResponse("bad_request", "invalid request", 400, req);
 				}
 			}
 			if (url.pathname.startsWith("/tasks/") && req.method === "GET") {
 				const id = url.pathname.slice("/tasks/".length);
 				const tasks = taskLists.get(id);
 				if (!tasks) {
-					return errorResponse("not_found", `unknown task list: ${id}`, 404);
+					return errorResponse("not_found", `unknown task list: ${id}`, 404, req);
 				}
-				return jsonResponse({ id, tasks });
+				return jsonResponse({ id, tasks }, 200, req);
 			}
 
 			if (url.pathname === "/ingest" && req.method === "POST") {
@@ -563,79 +642,79 @@ export function createLiveServer(options: ServerOptions) {
 				try {
 					const body = await parseJsonBody<unknown>(req);
 					if (kind === "run_started") {
-						const payload = validateRunStarted(body);
+						const payload = validation(() => validateRunStarted(body));
 						const stamped = store.stampEvent({ kind: "run_started", payload });
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "run_complete") {
-						const payload = validateRunComplete(body);
+						const payload = validation(() => validateRunComplete(body));
 						const stamped = store.stampEvent({
 							kind: "run_complete",
 							payload,
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "run_failed") {
-						const payload = validateRunFailed(body);
+						const payload = validation(() => validateRunFailed(body));
 						const stamped = store.stampEvent({ kind: "run_failed", payload });
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "eval_started") {
-						const payload = validateEvalStarted(body);
+						const payload = validation(() => validateEvalStarted(body));
 						const stamped = store.stampEvent({
 							kind: "eval_started",
 							payload,
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "eval_task_complete") {
-						const payload = validateEvalTaskComplete(body);
+						const payload = validation(() => validateEvalTaskComplete(body));
 						const stamped = store.stampEvent({
 							kind: "eval_task_complete",
 							payload,
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "eval_complete") {
-						const payload = validateEvalComplete(body);
+						const payload = validation(() => validateEvalComplete(body));
 						const stamped = store.stampEvent({
 							kind: "eval_complete",
 							payload,
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "eval_failed") {
-						const payload = validateEvalFailed(body);
+						const payload = validation(() => validateEvalFailed(body));
 						const stamped = store.stampEvent({
 							kind: "eval_failed",
 							payload,
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "bench_session_started") {
-						const payload = validateBenchSessionStarted(body);
+						const payload = validation(() => validateBenchSessionStarted(body));
 						const stamped = store.stampEvent({
 							kind: "bench_session_started",
 							payload,
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "bench_session_complete") {
-						const payload = validateBenchSessionComplete(body);
+						const payload = validation(() => validateBenchSessionComplete(body));
 						const stamped = store.stampEvent({
 							kind: "bench_session_complete",
 							payload,
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					if (kind === "reset") {
 						const reason =
@@ -647,16 +726,24 @@ export function createLiveServer(options: ServerOptions) {
 							payload: { reason },
 						});
 						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq });
+						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
 					}
 					return errorResponse(
 						"unknown_kind",
 						`?kind= must be run_started | run_complete | run_failed | eval_started | eval_task_complete | eval_complete | eval_failed | bench_session_started | bench_session_complete | reset (got ${kind ?? "none"})`,
 						400,
+						req,
 					);
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					return errorResponse("bad_request", message, 400);
+					// Validation errors carry safe, hand-authored field-name
+					// messages (intentional harness feedback). Any other error
+					// (DB/IO) may carry filesystem paths — log it server-side
+					// and return a generic message to the client.
+					if (err instanceof ValidationError) {
+						return errorResponse("bad_request", err.message, 400, req);
+					}
+					console.error("ingest:", err);
+					return errorResponse("bad_request", "invalid request", 400, req);
 				}
 			}
 
@@ -714,13 +801,13 @@ export function createLiveServer(options: ServerOptions) {
 						"cache-control": "no-cache, no-transform",
 						connection: "keep-alive",
 						"x-accel-buffering": "no",
-						...corsHeaders(),
+						...corsHeaders(req),
 					},
 				});
 			}
 
 			if (req.method === "GET") {
-				const served = tryServeStatic(options.dashboardRoot, url.pathname);
+				const served = tryServeStatic(options.dashboardRoot, url.pathname, req);
 				if (served) return served;
 			}
 
