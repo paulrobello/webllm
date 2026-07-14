@@ -1,0 +1,50 @@
+# Pre-commit hooks for @paulrobello/webllm
+# Install: pre-commit install
+# Run manually: make pre-commit   (or: pre-commit run --all-files)
+#
+# Secret scanning (gitleaks + detect-private-key) is the last line of defense
+# before a credential reaches the remote — wired before the first push.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^smoke-test/vendor/.*$
+      - id: end-of-file-fixer
+        exclude: ^smoke-test/vendor/.*$
+      - id: detect-private-key
+      - id: check-yaml
+      - id: check-json
+        exclude: ^eval/reports/.*$
+      - id: check-added-large-files
+        args: ['--maxkb=2048']
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+  # TS/Bun gates wired to the Makefile (single source of truth for tooling).
+  # `pass_filenames: false` because the Make targets operate on src/ + tests/
+  # as a whole; `types: [ts]` so they only fire when TypeScript changes.
+  - repo: local
+    hooks:
+      - id: biome-fmt
+        name: make fmt (biome format)
+        entry: make fmt
+        language: system
+        types: [ts]
+        pass_filenames: false
+      - id: biome-lint
+        name: make lint (biome check)
+        entry: make lint
+        language: system
+        types: [ts]
+        pass_filenames: false
+      - id: tsc-typecheck
+        name: make typecheck (tsc --noEmit)
+        entry: make typecheck
+        language: system
+        types: [ts]
+        pass_filenames: false

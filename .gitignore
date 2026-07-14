@@ -71,4 +71,23 @@ smoke-test/scenes/*.bin
 handoff.md
 .worktrees/
 .pi/extensions/discord-relay/state.json
-graphify-out/
+
+# Runtime logs / temp (CI guide baseline)
+*.log
+*.pid
+*.tmp
+tmp/
+temp/
+
+# Allow committing an env template (but never real .env files)
+!.env.example
+
+# Agent / tool local state
+.gemini/
+.claude/statusline-*
+.pi/status-footer.json
+docs/playgrounds/
+
+# Build caches
+.cache/
+.turbo/

@@ -68,6 +68,12 @@ typecheck-tests: ## Run TypeScript type checking against tests/** under tsconfig
 
 checkall: fmt lint typecheck typecheck-tests test ## Format, lint, typecheck (src + tests), and test
 
+pre-commit: ## Run pre-commit hooks across all files (secret scan + fmt/lint/typecheck)
+	pre-commit run --all-files
+
+pre-commit-update: ## Bump pre-commit hook revs to latest
+	pre-commit autoupdate
+
 # ---------------------------------------------------------------------------
 # WASM Build (Emscripten / ggml-webgpu)
 # ---------------------------------------------------------------------------
