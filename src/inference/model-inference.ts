@@ -451,8 +451,8 @@ function computeGraphSizing(
  * - `"taps"`: logits + per-layer hidden taps (forwardWithLayerTaps).
  *
  * B1 implements `"logits"` (forwardSingle); B2 adds `"decode"` (forwardDecode);
- * B3 delegates `forwardAllPositions` onto the same `"logits"` path; B4-B5 will
- * add `"embedding"` / `"taps"`.
+ * B3 delegates `forwardAllPositions` onto the same `"logits"` path; B4 adds
+ * `"embedding"` (forwardForEmbedding); B5 will add `"taps"`.
  */
 type ForwardOutputKind = "logits" | "decode" | "embedding" | "taps";
 
@@ -1603,7 +1603,8 @@ export class ModelInference {
 	 * path (forwardSingle); B2 adds `output: "decode"` (forwardDecode); B3
 	 * delegates forwardAllPositions onto the same `output: "logits"` path
 	 * (no new output kind — the pre-B3 body was a verbatim copy of
-	 * forwardSingle's); B4-B5 will add `embedding` / `taps`.
+	 * forwardSingle's); B4 adds `mode: "embedding"` + `output: "embedding"`
+	 * (forwardForEmbedding); B5 will add `taps`.
 	 *
 	 * The op sequence is byte-identical to the pre-B1 `forwardSingle` body —
 	 * a mechanical extraction. Do not reorder, fuse, or "optimize" ops; the
@@ -1613,6 +1614,10 @@ export class ModelInference {
 		opts: BuildForwardGraphOpts,
 	): Promise<BuiltForwardGraph> {
 		if (!this.weights) throw new Error("Weights not loaded");
+		// Embedding mode (B4) is stateless — it does not read or write the KV
+		// cache. The guard below is load-bearing for TS narrowing in the
+		// standard/taps layer loops; in practice kvLayers is always initialized
+		// alongside weights, so the check is a no-op on the embedding path.
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const { hp, wasm, weights } = this;
 		const {
@@ -1693,6 +1698,149 @@ export class ModelInference {
 		}
 
 		let cur = x;
+		if (mode === "embedding") {
+			// B4: embedding layer loop + tail — byte-identical to the pre-B4
+			// forwardForEmbedding body (mechanical move + N→nTokens rename).
+			// Stateless manual attention (no KV cache writes, no FA), no PLE
+			// injection, no SWA mask dispatch, no post-attention/post-FFW norms,
+			// no layerOutputScale, 5-arg buildQKV (nHeadsKv default). Diverges
+			// from the standard loop at 10 points; kept as a separate branch so
+			// both paths preserve their exact pre-B4 op sequence. Architecture
+			// rationale: qwen3.cpp res->t_embd = cur after final RMSNorm,
+			// before lm_head. See forwardForEmbedding for the full contract.
+			const nHeads = hp.headCount;
+			for (let il = 0; il < hp.layerCount; il++) {
+				const lw = weights.layers[il];
+
+				// Per-layer scalars for mixed-head-dim architectures (Gemma 4).
+				const headDim = hp.embeddingHeadLengthPerLayer
+					? hp.embeddingHeadLengthPerLayer[il]
+					: hp.embeddingHeadLength;
+				const ropeFreqBase = hp.ropeFreqBasePerLayer
+					? hp.ropeFreqBasePerLayer[il]
+					: hp.ropeFreqBase;
+				const ropeDimCount = hp.ropeDimensionCountPerLayer
+					? hp.ropeDimensionCountPerLayer[il]
+					: headDim;
+				const ffnDim = hp.feedForwardLengthPerLayer
+					? hp.feedForwardLengthPerLayer[il]
+					: undefined;
+
+				let normed = wasm.opMul(
+					wasm.opRmsNorm(cur, hp.normEpsilon),
+					lw.attnNorm,
+				);
+				if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
+
+				const { qReady, kReady, v3 } = this.buildQKV(
+					lw,
+					normed,
+					nTokens,
+					headDim,
+					nHeads,
+				);
+
+				const qRope = this.applyRope(
+					qReady,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+				const kRope = this.applyRope(
+					kReady,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+
+				// Manual attention chain — mirrors CausalLMEmbedder.
+				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+				const kp = wasm.opPermute(kRope, 0, 2, 1, 3);
+				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
+
+				const qk = wasm.opMulMat(kp, qp);
+				// Gemma 2 attention logit soft-cap: scale-first ordering
+				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
+				// forwardSingle for the longer rationale.
+				let qkProcessed = qk;
+				let softmaxScale = attnSoftmaxScale(hp, headDim);
+				if (hp.attnLogitSoftcap) {
+					qkProcessed = this.softCap(
+						wasm.opScale(qk, softmaxScale),
+						hp.attnLogitSoftcap,
+					);
+					softmaxScale = 1.0;
+				}
+				const attnW = wasm.opSoftMaxExt(
+					qkProcessed,
+					maskTensor,
+					softmaxScale,
+					0.0,
+				);
+				const attnOut = wasm.opMulMat(vp, attnW);
+				const merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					nHeads * headDim,
+					nTokens,
+				);
+
+				// This embedding tap path skips Gemma's post-attention / post-FFW
+				// norms because no embedder GGUF in the registry carries them; if
+				// a Gemma-family model is ever registered with embeddingCapable=true,
+				// wire postAttentionNorm / postFfwNorm here to match forwardSingle.
+				const oProj = wasm.opMulMat(lw.oProj, merged);
+				const attnResidual = wasm.opAdd(oProj, cur);
+
+				let ffnNormed = wasm.opMul(
+					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+					lw.ffnNorm,
+				);
+				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
+
+				const { gate, up } = this.buildFFNGateUp(
+					lw,
+					ffnNormed,
+					nTokens,
+					ffnDim,
+				);
+				// Gemma family: gelu(gate) * up instead of silu(gate) * up
+				// (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
+				const ffnHidden = isGemmaFamily(hp.architecture)
+					? wasm.opMul(wasm.opGelu(gate), up)
+					: wasm.opSwigluSplit(gate, up);
+				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
+
+				cur = wasm.opAdd(ffnOut, attnResidual);
+			}
+
+			// Final output_norm — TAP POINT. No lm_head; no sampling.
+			let finalHidden = wasm.opMul(
+				wasm.opRmsNorm(cur, hp.normEpsilon),
+				weights.norm,
+			);
+			if (weights.normBias)
+				finalHidden = wasm.opAdd(finalHidden, weights.normBias);
+
+			wasm.graphBuildForwardExpand(graph, finalHidden);
+
+			const t2 = trace ? performance.now() : 0;
+
+			return {
+				graph,
+				outputTensor: finalHidden,
+				secondaryTensor: 0,
+				posTensor,
+				tokenIdsTensor,
+				maskTensor,
+				swaMaskTensor,
+				t1,
+				t2,
+			};
+		}
 		for (let il = 0; il < hp.layerCount; il++) {
 			const lw = weights.layers[il];
 			const kv = this.kvLayers[il];
@@ -2178,11 +2326,17 @@ export class ModelInference {
 	 * post-`output_norm` hidden state as a flat `[E * N]` Float32Array
 	 * (row-major-reversed `[E, N]`). **Does not touch the KV cache.**
 	 *
-	 * Mirrors `CausalLMEmbedder.forwardEmbed` but uses this class's
-	 * `buildQKV` / `buildFFNGateUp` helpers so it handles every chat
+	 * Mirrors `CausalLMEmbedder.forwardEmbed` but handles every chat
 	 * architecture in the fleet (split + fused QKV; split + fused
 	 * gate-up). The chat session's `nCached`, `kvLayers`, and
 	 * conversation transcript are unchanged after this call.
+	 *
+	 * Graph construction is delegated to {@link buildForwardGraph} (B4:
+	 * `mode: "embedding"` + `output: "embedding"`); this method handles
+	 * input marshalling, graph compute, hidden-state readback, and
+	 * teardown. The pre-B4 op sequence (stateless manual attention, no
+	 * FA, no PLE, no post-attention/post-FFW norms, no lm_head) is
+	 * preserved byte-identical inside buildForwardGraph's embedding branch.
 	 *
 	 * Architecture truth source: `~/Repos/llama.cpp/src/models/qwen3.cpp`
 	 * (`res->t_embd = cur` after the final RMSNorm, before `lm_head`).
@@ -2195,7 +2349,7 @@ export class ModelInference {
 		tokenIds: Int32Array,
 	): Promise<Float32Array> {
 		if (!this.weights) throw new Error("Weights not loaded");
-		const { hp, wasm, weights } = this;
+		const { hp, wasm } = this;
 		// Shared-KV (Gemma 4 family) requires reusing earlier-layer K/V at
 		// shared layers. The stateless embedding path doesn't write K/V to
 		// a cache so it can't simply alias tensors — adding shared-KV here
@@ -2208,216 +2362,73 @@ export class ModelInference {
 		}
 		const N = tokenIds.length;
 		const E = hp.embeddingLength;
-		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
+		const maskPaddedCols = padTo(N, 32);
 
-		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(
-			hp,
-			N,
-			"embedding",
-		);
-		wasm.ctxCreate(graphMem);
+		// Positions always start at 0 — embed() processes an isolated sequence
+		// with no KV history; applying an offset would shift RoPE relative to
+		// the training distribution.
+		const positions = new Int32Array(N);
+		for (let i = 0; i < N; i++) positions[i] = i;
+
+		// Graph construction is delegated to buildForwardGraph (B4: mode
+		// "embedding" + output "embedding"); this method handles input
+		// marshalling, graph compute, hidden-state readback, and teardown.
+		// The pre-B4 op sequence (manual attention, no FA, no PLE, no
+		// post-norms, no lm_head) is preserved byte-identical inside
+		// buildForwardGraph's embedding branch. Trace stays off to match the
+		// pre-B4 behavior (the embedding path never recorded a trace).
+		const {
+			graph,
+			outputTensor: finalHidden,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+		} = await this.buildForwardGraph({
+			mode: "embedding",
+			output: "embedding",
+			tokenIds,
+			positions,
+			nTokens: N,
+			pastLen: 0,
+			totalLen: N,
+			ropeMode,
+			needsMask: true,
+			maskPaddedCols,
+			swaWindow: 0,
+			needsSwaMask: false,
+			trace: false,
+		});
+
+		const graphBuf = wasm.backendAllocCtxTensors();
 
 		try {
-			const posTensor = wasm.tensorNew1d(GgmlType.I32, N);
-			const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, N);
-
-			const maskPaddedRows = padTo(N, 32);
-			const maskTensor = wasm.tensorNew2d(GgmlType.F16, N, maskPaddedRows);
-
-			let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
-			// Gemma family: scale residual stream by sqrt(embedding_length)
-			// after embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
-			if (isGemmaFamily(hp.architecture)) {
-				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
-			}
-			const graph = wasm.graphNew(nodeCount);
-
-			let cur = x;
-			for (let il = 0; il < hp.layerCount; il++) {
-				const lw = weights.layers[il];
-
-				// Per-layer scalars for mixed-head-dim architectures (Gemma 4).
-				const headDim = hp.embeddingHeadLengthPerLayer
-					? hp.embeddingHeadLengthPerLayer[il]
-					: hp.embeddingHeadLength;
-				const ropeFreqBase = hp.ropeFreqBasePerLayer
-					? hp.ropeFreqBasePerLayer[il]
-					: hp.ropeFreqBase;
-				const ropeDimCount = hp.ropeDimensionCountPerLayer
-					? hp.ropeDimensionCountPerLayer[il]
-					: headDim;
-				const ffnDim = hp.feedForwardLengthPerLayer
-					? hp.feedForwardLengthPerLayer[il]
-					: undefined;
-
-				let normed = wasm.opMul(
-					wasm.opRmsNorm(cur, hp.normEpsilon),
-					lw.attnNorm,
-				);
-				if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
-
-				const { qReady, kReady, v3 } = this.buildQKV(
-					lw,
-					normed,
-					N,
-					headDim,
-					nHeads,
-				);
-
-				const qRope = this.applyRope(
-					qReady,
-					posTensor,
-					lw,
-					ropeDimCount,
-					ropeMode,
-					ropeFreqBase,
-				);
-				const kRope = this.applyRope(
-					kReady,
-					posTensor,
-					lw,
-					ropeDimCount,
-					ropeMode,
-					ropeFreqBase,
-				);
-
-				// Manual attention chain — mirrors CausalLMEmbedder.
-				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-				const kp = wasm.opPermute(kRope, 0, 2, 1, 3);
-				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
-
-				const qk = wasm.opMulMat(kp, qp);
-				// Gemma 2 attention logit soft-cap: scale-first ordering
-				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
-				// forwardSingle for the longer rationale.
-				let qkProcessed = qk;
-				let softmaxScale = attnSoftmaxScale(hp, headDim);
-				if (hp.attnLogitSoftcap) {
-					qkProcessed = this.softCap(
-						wasm.opScale(qk, softmaxScale),
-						hp.attnLogitSoftcap,
-					);
-					softmaxScale = 1.0;
-				}
-				const attnW = wasm.opSoftMaxExt(
-					qkProcessed,
-					maskTensor,
-					softmaxScale,
-					0.0,
-				);
-				const attnOut = wasm.opMulMat(vp, attnW);
-				const merged = wasm.opReshape2d(
-					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-					nHeads * headDim,
-					N,
-				);
-
-				// This embedding tap path skips Gemma's post-attention / post-FFW
-				// norms because no embedder GGUF in the registry carries them; if
-				// a Gemma-family model is ever registered with embeddingCapable=true,
-				// wire postAttentionNorm / postFfwNorm here to match forwardSingle.
-				const oProj = wasm.opMulMat(lw.oProj, merged);
-				const attnResidual = wasm.opAdd(oProj, cur);
-
-				let ffnNormed = wasm.opMul(
-					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
-					lw.ffnNorm,
-				);
-				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
-
-				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N, ffnDim);
-				// Gemma family: gelu(gate) * up instead of silu(gate) * up
-				// (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
-				const ffnHidden = isGemmaFamily(hp.architecture)
-					? wasm.opMul(wasm.opGelu(gate), up)
-					: wasm.opSwigluSplit(gate, up);
-				const ffnOut = wasm.opMulMat(lw.downProj, ffnHidden);
-
-				cur = wasm.opAdd(ffnOut, attnResidual);
-			}
-
-			// Final output_norm — TAP POINT. No lm_head; no sampling.
-			let finalHidden = wasm.opMul(
-				wasm.opRmsNorm(cur, hp.normEpsilon),
-				weights.norm,
+			this.uploadLeaves(
+				wasm,
+				tokenIds,
+				positions,
+				N,
+				0, // pastLen — embedding is stateless
+				N, // totalLen
+				true, // needsMask — embedding always creates the causal mask
+				maskPaddedCols,
+				posTensor,
+				tokenIdsTensor,
+				maskTensor,
 			);
-			if (weights.normBias)
-				finalHidden = wasm.opAdd(finalHidden, weights.normBias);
 
-			wasm.graphBuildForwardExpand(graph, finalHidden);
-			const graphBuf = wasm.backendAllocCtxTensors();
+			await wasm.graphCompute(graph);
 
-			try {
-				const idsBytes = N * 4;
-				const posBytes = N * 4;
-				const maskBytes = N * maskPaddedRows * 2;
-				const totalBytes = idsBytes + posBytes + maskBytes;
-				const heap = wasm.malloc(totalBytes);
-				try {
-					const idsPtr = heap;
-					const posPtr = heap + idsBytes;
-					const maskPtr = heap + idsBytes + posBytes;
-
-					const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
-					const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
-					// Positions always start at 0 — embed() processes an isolated
-					// sequence with no KV history; applying an offset would shift
-					// RoPE relative to the training distribution.
-					for (let i = 0; i < N; i++) {
-						idsView[i] = tokenIds[i];
-						posView[i] = i;
-					}
-
-					const F16_NEG_INF = 0xfc00;
-					const mask = new Uint16Array(
-						wasm.heapU8.buffer,
-						maskPtr,
-						N * maskPaddedRows,
-					);
-					for (let q = 0; q < N; q++) {
-						const rowBase = q * N;
-						for (let k = 0; k < N; k++) {
-							mask[rowBase + k] = k <= q ? 0 : F16_NEG_INF;
-						}
-					}
-					for (let q = N; q < maskPaddedRows; q++) {
-						const rowBase = q * N;
-						for (let k = 0; k < N; k++) mask[rowBase + k] = 0;
-					}
-
-					wasm.backendTensorSet3(
-						tokenIdsTensor,
-						idsPtr,
-						idsBytes,
-						posTensor,
-						posPtr,
-						posBytes,
-						maskTensor,
-						maskPtr,
-						maskBytes,
-					);
-				} finally {
-					wasm.free(heap);
-				}
-
-				await wasm.graphCompute(graph);
-
-				const totalFloats = E * N;
-				const bytes = await wasm.downloadFromTensor(
-					finalHidden,
-					totalFloats * 4,
-				);
-				const hidden = new Float32Array(
-					bytes.buffer,
-					bytes.byteOffset,
-					totalFloats,
-				);
-				return new Float32Array(hidden);
-			} finally {
-				wasm.backendBufferFree(graphBuf);
-			}
+			const totalFloats = E * N;
+			const bytes = await wasm.downloadFromTensor(finalHidden, totalFloats * 4);
+			const hidden = new Float32Array(
+				bytes.buffer,
+				bytes.byteOffset,
+				totalFloats,
+			);
+			return new Float32Array(hidden);
 		} finally {
+			wasm.backendBufferFree(graphBuf);
 			wasm.ctxFree();
 		}
 	}
