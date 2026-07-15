@@ -115,16 +115,16 @@ export interface SamplingResolutionInput {
 	 * non-thinking profile under `"auto"` + Qwen+ChatML; `true` /
 	 * `undefined` select the thinking profile.
 	 */
-	enableThinking?: boolean;
+	enableThinking?: boolean | undefined;
 	/**
 	 * Consumer-provided sampler overrides. Each defined value wins over
 	 * the resolved profile and the engine fallback.
 	 */
 	consumer: {
-		temperature?: number;
-		topK?: number;
-		topP?: number;
-		repetitionPenalty?: number;
+		temperature?: number | undefined;
+		topK?: number | undefined;
+		topP?: number | undefined;
+		repetitionPenalty?: number | undefined;
 	};
 }
 

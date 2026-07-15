@@ -88,21 +88,30 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	const bundleName = useJsepBackend
 		? "webllm-bundle-jsep.js"
 		: "webllm-bundle.js";
+	// ARC-003: deep inference internals (ModelInference, GgmlWasm, GgufParser,
+	// detectChatTemplate, encodeChatPrompt) were moved off the public barrel
+	// (`src/index.ts`) into `src/internal.ts`. The smoke harness pulls them
+	// from the dedicated `webllm-internal.js` bundle; the public surface
+	// (WebLLM, error classes, sampling profiles, types) stays in
+	// `webllm-bundle.js`. Both bundles are rebuilt by the `smoke-test`
+	// Makefile target.
 	const {
 		CausalLMEmbedder,
 		EncoderInference,
-		GgufParser,
-		GgmlWasm,
-		ModelInference,
 		ModelLoader,
 		Tokenizer,
 		WebLLM,
 		collectBrowserSystemProfile,
-		detectChatTemplate,
-		encodeChatPrompt,
 		runTasks,
 		score,
 	} = await import(`./${bundleName}${assetSuffix}`);
+	const {
+		GgufParser,
+		GgmlWasm,
+		ModelInference,
+		detectChatTemplate,
+		encodeChatPrompt,
+	} = await import(`./webllm-internal.js${assetSuffix}`);
 	const { runInteractiveChatTurn } = await import(
 		`./real-model-runtime.js${assetSuffix}`
 	);
@@ -366,8 +375,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 	let drafterHandleId = null;
 
 	async function loadAndTest() {
-		const t0 = performance.now();
-		const profileMode = new URLSearchParams(window.location.search).has("perfTrace");
+		const _t0 = performance.now();
+		const profileMode = new URLSearchParams(window.location.search).has(
+			"perfTrace",
+		);
 
 		// WebGPU init moved to step 1: subsequent steps stream the GGUF
 		// directly into the WASM heap, so the heap must exist first.
@@ -414,10 +425,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				}
 				log("pass", "[1/8] WebGPU backend initialized");
 			} catch (e) {
-				log(
-					"fail",
-					`[1/8] WebGPU init failed: ${e.message}\n${e.stack || ""}`,
-				);
+				log("fail", `[1/8] WebGPU init failed: ${e.message}\n${e.stack || ""}`);
 				return;
 			}
 		}
@@ -434,7 +442,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					maxComputeWorkgroupStorageSize: lim.maxComputeWorkgroupStorageSize,
 					maxBindGroups: lim.maxBindGroups,
 				};
-				log("running", `[diagnoseAlloc] WebGPU device limits: ${JSON.stringify(dump)}`);
+				log(
+					"running",
+					`[diagnoseAlloc] WebGPU device limits: ${JSON.stringify(dump)}`,
+				);
 				device.destroy();
 			} catch (e) {
 				log("fail", `[diagnoseAlloc] failed to query device: ${e.message}`);
@@ -490,9 +501,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						// from the main side (that's the whole point of this
 						// refactor — no main-side parse), so pass through the
 						// requested value as-is.
-						...(ctxLenForLoad > 0
-							? { contextLength: ctxLenForLoad }
-							: {}),
+						...(ctxLenForLoad > 0 ? { contextLength: ctxLenForLoad } : {}),
 						embeddingCapable,
 						embeddingPooling,
 					},
@@ -574,10 +583,12 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			const hp = parsed.hyperparams;
 			const subtitleContextLength =
 				requestedContextLength > 0
-					? Math.min(parsed.kvCacheConfig.maxContextLength, requestedContextLength)
+					? Math.min(
+							parsed.kvCacheConfig.maxContextLength,
+							requestedContextLength,
+						)
 					: parsed.kvCacheConfig.maxContextLength;
-			subtitleEl.textContent =
-				`${pageCopy.subtitle} · Model: ${modelId} · arch=${hp.architecture} · ctx=${subtitleContextLength}`;
+			subtitleEl.textContent = `${pageCopy.subtitle} · Model: ${modelId} · arch=${hp.architecture} · ctx=${subtitleContextLength}`;
 			log(
 				"pass",
 				`[3/8] GGUF parsed: arch=${hp.architecture} emb=${hp.embeddingLength} heads=${hp.headCount}/${hp.headCountKv} layers=${hp.layerCount} vocab=${hp.vocabularySize} ctx=${hp.contextLength}`,
@@ -727,10 +738,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					);
 					setProgress(85);
 				} catch (e) {
-					log(
-						"fail",
-						`[5/8] KV cache failed: ${e.message}\n${e.stack || ""}`,
-					);
+					log("fail", `[5/8] KV cache failed: ${e.message}\n${e.stack || ""}`);
 					return;
 				}
 			}
@@ -766,9 +774,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 		if (!useWorker) {
 			try {
 				if (!navigator.gpu) {
-					throw new Error(
-						"navigator.gpu unavailable; smoke test needs WebGPU",
-					);
+					throw new Error("navigator.gpu unavailable; smoke test needs WebGPU");
 				}
 				smokeEngine = await WebLLM.init({
 					memoryBudget: 2_000_000_000,
@@ -816,7 +822,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				try {
 					const drafterResp = await fetch(drafterUrl);
 					if (!drafterResp.ok) {
-						throw new Error(`HTTP ${drafterResp.status} fetching ${drafterUrl}`);
+						throw new Error(
+							`HTTP ${drafterResp.status} fetching ${drafterUrl}`,
+						);
 					}
 					// Guardrail: `arrayBuffer()` materializes the full body in
 					// a JS-heap ArrayBuffer, which V8 caps at ~3.5 GB per
@@ -867,10 +875,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						`[drafter] ${drafterId} loaded (ctx=${drafterCtxLen}, draftLength=${drafterDraftLength ?? "default"})`,
 					);
 				} catch (e) {
-					log(
-						"fail",
-						`[drafter] Load failed: ${e.message}\n${e.stack || ""}`,
-					);
+					log("fail", `[drafter] Load failed: ${e.message}\n${e.stack || ""}`);
 					return;
 				}
 			} else {
@@ -919,11 +924,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						);
 					}
 					const drafterDataAt = (off, len) =>
-						new Uint8Array(
-							drafterWasm.heapU8.buffer,
-							drafterPtr + off,
-							len,
-						);
+						new Uint8Array(drafterWasm.heapU8.buffer, drafterPtr + off, len);
 					const drafterFullView = drafterDataAt(0, drafterByteLength);
 					const drafterGgufCtx = GgufParser.parse(drafterFullView);
 					const drafterParsed = ModelLoader.parseModel(drafterFullView);
@@ -965,10 +966,7 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					);
 				} catch (e) {
 					if (drafterPtr && drafterWasm) drafterWasm.free(drafterPtr);
-					log(
-						"fail",
-						`[drafter] Load failed: ${e.message}\n${e.stack || ""}`,
-					);
+					log("fail", `[drafter] Load failed: ${e.message}\n${e.stack || ""}`);
 					return;
 				}
 			}
@@ -1003,12 +1001,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					},
 				);
 				// Drain the async iterator so all decode steps run.
-				// biome-ignore lint/suspicious/noEmptyBlockStatements: drain
 				for await (const _ of stream) {
 				}
 			}
 			const warmupMs = performance.now() - warmupStart;
-			log("pass", `[6/8] Shader-cache warmup complete in ${warmupMs.toFixed(0)}ms`);
+			log(
+				"pass",
+				`[6/8] Shader-cache warmup complete in ${warmupMs.toFixed(0)}ms`,
+			);
 		} catch (e) {
 			// Warmup failure is non-fatal — log and continue. The downstream
 			// timed steps will still run; they'll just include cold-shader
@@ -1029,15 +1029,21 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				const out = await inference.debugReadNormWeight("output", 8);
 				log(
 					"running",
-					`  blk.0.attn_norm first8: [${Array.from(attn).map((v) => v.toFixed(4)).join(",")}]`,
+					`  blk.0.attn_norm first8: [${Array.from(attn)
+						.map((v) => v.toFixed(4))
+						.join(",")}]`,
 				);
 				log(
 					"running",
-					`  blk.0.ffn_norm  first8: [${Array.from(ffn).map((v) => v.toFixed(4)).join(",")}]`,
+					`  blk.0.ffn_norm  first8: [${Array.from(ffn)
+						.map((v) => v.toFixed(4))
+						.join(",")}]`,
 				);
 				log(
 					"running",
-					`  output_norm     first8: [${Array.from(out).map((v) => v.toFixed(4)).join(",")}]`,
+					`  output_norm     first8: [${Array.from(out)
+						.map((v) => v.toFixed(4))
+						.join(",")}]`,
 				);
 			} catch (e) {
 				log("fail", `[7-norm] failed: ${e.message}`);
@@ -1063,10 +1069,17 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				const sumAbsV = Array.from(v0).reduce((sum, v) => sum + Math.abs(v), 0);
 				log(
 					"running",
-					`  kv.v[layer=0][pos=0..63][dim=0][head=0] nonzero=${nzV}/64 sumAbs=${sumAbsV.toFixed(4)} first4=[${Array.from(v0.slice(0, 4)).map((v) => v.toFixed(4)).join(",")}]`,
+					`  kv.v[layer=0][pos=0..63][dim=0][head=0] nonzero=${nzV}/64 sumAbs=${sumAbsV.toFixed(4)} first4=[${Array.from(
+						v0.slice(0, 4),
+					)
+						.map((v) => v.toFixed(4))
+						.join(",")}]`,
 				);
 			} catch (e) {
-				log("fail", `[7-debug] KV probe failed: ${e.message}\n${e.stack || ""}`);
+				log(
+					"fail",
+					`[7-debug] KV probe failed: ${e.message}\n${e.stack || ""}`,
+				);
 			}
 
 			log("running", "[7-sanity] single-token continuation...");
@@ -1114,7 +1127,9 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					"story",
 				]);
 				if (!probeInfo || !prefixAInfo || !prefixBInfo) {
-					throw new Error("could not find single-token probes for this tokenizer");
+					throw new Error(
+						"could not find single-token probes for this tokenizer",
+					);
 				}
 
 				async function logitsAfterPrefix(prefix, probe) {
@@ -1138,8 +1153,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 					if (diff > 1e-5) diffCount++;
 					if (diff > maxAbsDiff) maxAbsDiff = diff;
 				}
-				const topA = Array.from(lA).reduce((m, v, i, a) => (a[m] >= v ? m : i), 0);
-				const topB = Array.from(lB).reduce((m, v, i, a) => (a[m] >= v ? m : i), 0);
+				const topA = Array.from(lA).reduce(
+					(m, v, i, a) => (a[m] >= v ? m : i),
+					0,
+				);
+				const topB = Array.from(lB).reduce(
+					(m, v, i, a) => (a[m] >= v ? m : i),
+					0,
+				);
 				const verdict = diffCount > 100 ? "HISTORY MATTERS" : "HISTORY IGNORED";
 				log(
 					"running",
@@ -1155,7 +1176,10 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				);
 				inference.resetKVCache();
 			} catch (e) {
-				log("fail", `[7a] KV diagnostic failed: ${e.message}\n${e.stack || ""}`);
+				log(
+					"fail",
+					`[7a] KV diagnostic failed: ${e.message}\n${e.stack || ""}`,
+				);
 			}
 		}
 
@@ -1166,535 +1190,499 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 			);
 			setProgress(90);
 		} else {
-		log("running", "[7/8] Generating text...");
-		setProgress(90);
-		// Frame-probe: start the rAF logger BEFORE chat completion so the
-		// baseline window (configurable via ?frameProbeBaselineMs=) sits
-		// outside any inference work. Phase segmentation is wall-clock based
-		// — see `summarizeFrameProbe` in `./frame-probe.js`.
-		let frameProbeCtl = null;
-		let frameProbeChatStart = 0;
-		if (frameProbeEnabled && frameProbeModule) {
-			if (frameProbeSceneUrl) {
-				log("running", `[frameProbe] loading scene: ${frameProbeSceneUrl}`);
-			}
-			frameProbeCtl = await frameProbeModule.startFrameProbe({
-				sceneUrl: frameProbeSceneUrl,
-			});
-			if (frameProbeCtl.unsupported) {
-				log("warn", "[frameProbe] WebGL2 unavailable — probe disabled");
-				frameProbeCtl = null;
-			} else {
-				const info = frameProbeCtl.sceneInfo;
-				if (info?.kind === "gltf") {
+			log("running", "[7/8] Generating text...");
+			setProgress(90);
+			// Frame-probe: start the rAF logger BEFORE chat completion so the
+			// baseline window (configurable via ?frameProbeBaselineMs=) sits
+			// outside any inference work. Phase segmentation is wall-clock based
+			// — see `summarizeFrameProbe` in `./frame-probe.js`.
+			let frameProbeCtl = null;
+			let frameProbeChatStart = 0;
+			if (frameProbeEnabled && frameProbeModule) {
+				if (frameProbeSceneUrl) {
+					log("running", `[frameProbe] loading scene: ${frameProbeSceneUrl}`);
+				}
+				frameProbeCtl = await frameProbeModule.startFrameProbe({
+					sceneUrl: frameProbeSceneUrl,
+				});
+				if (frameProbeCtl.unsupported) {
+					log("warn", "[frameProbe] WebGL2 unavailable — probe disabled");
+					frameProbeCtl = null;
+				} else {
+					const info = frameProbeCtl.sceneInfo;
+					if (info?.kind === "gltf") {
+						log(
+							"pass",
+							`[frameProbe] scene loaded: ${info.triangles.toLocaleString()} tri in ${info.loadMs}ms`,
+						);
+					}
 					log(
-						"pass",
-						`[frameProbe] scene loaded: ${info.triangles.toLocaleString()} tri in ${info.loadMs}ms`,
+						"running",
+						`[frameProbe] baseline rAF (${frameProbeBaselineMs}ms idle)…`,
 					);
+					await new Promise((r) => setTimeout(r, frameProbeBaselineMs));
+					frameProbeChatStart = performance.now();
 				}
-				log(
-					"running",
-					`[frameProbe] baseline rAF (${frameProbeBaselineMs}ms idle)…`,
-				);
-				await new Promise((r) => setTimeout(r, frameProbeBaselineMs));
-				frameProbeChatStart = performance.now();
 			}
-		}
-		try {
-			if (debugMode) {
-				for (const prompt of ["The", "The quick brown", "Hello, how are you"]) {
+			try {
+				if (debugMode) {
+					for (const prompt of [
+						"The",
+						"The quick brown",
+						"Hello, how are you",
+					]) {
+						inference.resetKVCache();
+						const tks = shouldAutoInsertBos(parsed.tokenizerConfig)
+							? [tokenizer.bosId, ...tokenizer.encode(prompt)]
+							: tokenizer.encode(prompt);
+						const lgts = await inference.forward(
+							new Int32Array(tks),
+							new Int32Array(tks.map((_, i) => i)),
+						);
+						const arr = Array.from(lgts).map((v, i) => [i, v]);
+						arr.sort((a, b) => b[1] - a[1]);
+						const top = arr.slice(0, 5).map(([id, v]) => {
+							const token = tokenizer.getToken(id);
+							return `${id}:"${token ? token.text : "?"}"(${v.toFixed(2)})`;
+						});
+						log("running", `  ${JSON.stringify(prompt)} → ${top.join(", ")}`);
+					}
 					inference.resetKVCache();
-					const tks = shouldAutoInsertBos(parsed.tokenizerConfig)
-						? [tokenizer.bosId, ...tokenizer.encode(prompt)]
-						: tokenizer.encode(prompt);
-					const lgts = await inference.forward(
-						new Int32Array(tks),
-						new Int32Array(tks.map((_, i) => i)),
-					);
-					const arr = Array.from(lgts).map((v, i) => [i, v]);
-					arr.sort((a, b) => b[1] - a[1]);
-					const top = arr.slice(0, 5).map(([id, v]) => {
-						const token = tokenizer.getToken(id);
-						return `${id}:"${token ? token.text : "?"}"(${v.toFixed(2)})`;
-					});
-					log("running", `  ${JSON.stringify(prompt)} → ${top.join(", ")}`);
 				}
-				inference.resetKVCache();
-			}
 
-			const userMessage = promptOverride || "Tell one short joke.";
-			const chatTmpl = parsed.tokenizerConfig.chatTemplate;
-			const smokeChatOptions = getSmokeChatOptions(
-				parsed,
-				detectChatTemplate,
-				chatTmpl,
-				{ enableThinking: thinkingEnabled },
-			);
-			const smokePrompt = buildSmokePrompt(
-				userMessage,
-				smokeChatOptions,
-				encodeChatPrompt,
-				tokenizer,
-			);
-			const compareBatchVsSequentialPrefill = createPrefillComparisonRunner({
-				inference,
-				tokenizer,
-				log,
-			});
-
-			if (debugMode) {
-				await compareBatchVsSequentialPrefill(smokePrompt.mode, smokePrompt.tokens);
-			}
-
-			const runCompletion = createSmokeCompletionRunner({
-				engine: smokeEngine,
-				handleId: smokeEngineHandleId,
-				inference,
-				tokenizer,
-				log,
-				profileMode,
-			});
-			interactiveRunCompletion = runCompletion;
-
-			const smokeSamplingConfig = {
-				...getSmokeSamplingConfig(
+				const userMessage = promptOverride || "Tell one short joke.";
+				const chatTmpl = parsed.tokenizerConfig.chatTemplate;
+				const smokeChatOptions = getSmokeChatOptions(
 					parsed,
 					detectChatTemplate,
 					chatTmpl,
+					{ enableThinking: thinkingEnabled },
+				);
+				const smokePrompt = buildSmokePrompt(
+					userMessage,
 					smokeChatOptions,
-				),
-				...samplingOverrides,
-				// Optional spec-decode lever — `runCompletion` spreads the
-				// sampling config into `engine.chatCompletion`'s
-				// `CompletionConfig`, which already accepts these fields.
-				// Use the synthetic handle id, not the user-facing name —
-				// the engine's drafter gate lives in `inferenceEngines`,
-				// keyed by handle id.
-				...(drafterHandleId ? { drafter: drafterHandleId } : {}),
-				...(drafterDraftLength !== null
-					? { draftLength: drafterDraftLength }
-					: {}),
-			};
-			const smokeMaxTokens =
-				maxTokensOverride ?? (thinkingEnabled ? 1024 : 64);
-			// Probe 9c: optional warmup throwaway. Runs a 4-token
-			// chatCompletion BEFORE the timed multi-call probe so the
-			// per-shape pipeline JIT cost is amortized off the timed
-			// path. After warmup, re-anchor `frameProbeChatStart` so
-			// frame-probe segmentation excludes the warmup window.
-			if (frameProbeWarmup && frameProbeCtl) {
-				log("running", "[frameProbe] warmup throwaway (4 tokens)…");
-				try {
-					await runCompletion({
-						label: smokePrompt.mode,
-						messages: [{ role: "user", content: userMessage }],
-						samplingConfig: smokeSamplingConfig,
-						maxTokens: 4,
-						chatOptions: smokeChatOptions,
-					});
-				} catch (e) {
-					log("warn", `[frameProbe] warmup failed: ${e.message}`);
-				}
-				// Settle so warmup's GPU queue drains before the timed
-				// probe; matches the inter-call gap in multi-call mode.
-				await new Promise((r) => setTimeout(r, 500));
-				frameProbeChatStart = performance.now();
-			}
-			const smokeResult = await runCompletion({
-				label: smokePrompt.mode,
-				messages: [{ role: "user", content: userMessage }],
-				samplingConfig: smokeSamplingConfig,
-				maxTokens: smokeMaxTokens,
-				chatOptions: smokeChatOptions,
-			});
+					encodeChatPrompt,
+					tokenizer,
+				);
+				const compareBatchVsSequentialPrefill = createPrefillComparisonRunner({
+					inference,
+					tokenizer,
+					log,
+				});
 
-			log(
-				"pass",
-				`[7/8] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason}, tokensIn=${smokePrompt.tokens.length})`,
-			);
-			log("pass", `User: ${userMessage}`);
-			const assistantText = thinkingEnabled
-				? smokeResult.rawOutputText ||
-					smokeResult.displayOutputText ||
-					smokeResult.outputText
-				: smokeResult.displayOutputText || smokeResult.outputText;
-			log("pass", `Assistant: ${assistantText}`);
-			// Frame-probe wrap: capture tEnd, hold a 1s post window, then
-			// segment + report. Surfaced both to the page log and to
-			// `window.__frameProbeResult` for agentchrome scrape.
-			//
-			// Multi-call mode (`?frameProbeCalls=N`, N>1): after the smoke
-			// call above, runs N-1 additional chatCompletion calls (same
-			// prompt, fresh KV state per call) so the per-call decode-hitch
-			// distribution can be inspected. The first call's result is
-			// preserved as the smoke record.
-			if (frameProbeCtl && frameProbeModule) {
-				const probeCalls = [
-					{
-						tStart: frameProbeChatStart,
-						prefillMs: smokeResult.prefillMs ?? 0,
-						tEnd: performance.now(),
-						genTokens: smokeResult.genTokens ?? 0,
-					},
-				];
-				if (frameProbeCalls > 1) {
-					log(
-						"running",
-						`[frameProbe] running ${frameProbeCalls - 1} additional call(s) for hitch-distribution analysis…`,
+				if (debugMode) {
+					await compareBatchVsSequentialPrefill(
+						smokePrompt.mode,
+						smokePrompt.tokens,
 					);
-					for (let i = 1; i < frameProbeCalls; i++) {
-						// Inter-call settle so the prior post window doesn't
-						// bleed into the next prefill. 500ms is long enough
-						// for the GPU queue to drain on the test scene.
-						await new Promise((r) => setTimeout(r, 500));
-						const tStartI = performance.now();
-						let resultI;
-						try {
-							resultI = await runCompletion({
-								label: smokePrompt.mode,
-								messages: [{ role: "user", content: userMessage }],
-								samplingConfig: smokeSamplingConfig,
-								maxTokens: smokeMaxTokens,
-								chatOptions: smokeChatOptions,
-							});
-						} catch (e) {
-							log(
-								"warn",
-								`[frameProbe] call ${i + 1}/${frameProbeCalls} failed: ${e.message}`,
-							);
-							break;
-						}
-						const tEndI = performance.now();
-						probeCalls.push({
-							tStart: tStartI,
-							prefillMs: resultI.prefillMs ?? 0,
-							tEnd: tEndI,
-							genTokens: resultI.genTokens ?? 0,
+				}
+
+				const runCompletion = createSmokeCompletionRunner({
+					engine: smokeEngine,
+					handleId: smokeEngineHandleId,
+					inference,
+					tokenizer,
+					log,
+					profileMode,
+				});
+				interactiveRunCompletion = runCompletion;
+
+				const smokeSamplingConfig = {
+					...getSmokeSamplingConfig(
+						parsed,
+						detectChatTemplate,
+						chatTmpl,
+						smokeChatOptions,
+					),
+					...samplingOverrides,
+					// Optional spec-decode lever — `runCompletion` spreads the
+					// sampling config into `engine.chatCompletion`'s
+					// `CompletionConfig`, which already accepts these fields.
+					// Use the synthetic handle id, not the user-facing name —
+					// the engine's drafter gate lives in `inferenceEngines`,
+					// keyed by handle id.
+					...(drafterHandleId ? { drafter: drafterHandleId } : {}),
+					...(drafterDraftLength !== null
+						? { draftLength: drafterDraftLength }
+						: {}),
+				};
+				const smokeMaxTokens =
+					maxTokensOverride ?? (thinkingEnabled ? 1024 : 64);
+				// Probe 9c: optional warmup throwaway. Runs a 4-token
+				// chatCompletion BEFORE the timed multi-call probe so the
+				// per-shape pipeline JIT cost is amortized off the timed
+				// path. After warmup, re-anchor `frameProbeChatStart` so
+				// frame-probe segmentation excludes the warmup window.
+				if (frameProbeWarmup && frameProbeCtl) {
+					log("running", "[frameProbe] warmup throwaway (4 tokens)…");
+					try {
+						await runCompletion({
+							label: smokePrompt.mode,
+							messages: [{ role: "user", content: userMessage }],
+							samplingConfig: smokeSamplingConfig,
+							maxTokens: 4,
+							chatOptions: smokeChatOptions,
 						});
-						log(
-							"running",
-							`[frameProbe] call ${i + 1}/${frameProbeCalls}: ${resultI.genTokens}t in ${resultI.totalTime.toFixed(0)}ms (prefill ${resultI.prefillMs.toFixed(0)}ms, ${(resultI.genTokens / (resultI.genTime / 1000)).toFixed(1)} tok/s)`,
-						);
+					} catch (e) {
+						log("warn", `[frameProbe] warmup failed: ${e.message}`);
 					}
+					// Settle so warmup's GPU queue drains before the timed
+					// probe; matches the inter-call gap in multi-call mode.
+					await new Promise((r) => setTimeout(r, 500));
+					frameProbeChatStart = performance.now();
 				}
-				await new Promise((r) => setTimeout(r, 1000));
-				frameProbeCtl.stop({ removeOverlay: false });
-				const isMulti = probeCalls.length > 1;
-				let summary;
-				if (isMulti) {
-					summary = frameProbeModule.summarizeFrameProbeMulti({
-						samples: frameProbeCtl.samples,
-						tBaselineStart: frameProbeChatStart - frameProbeBaselineMs,
-						calls: probeCalls,
-					});
-					for (const line of frameProbeModule.formatFrameProbeMultiReport(
-						summary,
-					)) {
-						log("running", line);
-					}
-				} else {
-					summary = frameProbeModule.summarizeFrameProbe({
-						samples: frameProbeCtl.samples,
-						tStart: frameProbeChatStart,
-						prefillMs: smokeResult.prefillMs,
-						tEnd: probeCalls[0].tEnd,
-					});
-					for (const line of frameProbeModule.formatFrameProbeReport(
-						summary,
-					)) {
-						log("running", line);
-					}
-				}
-				const decodeMsFp = smokeResult.genTime ?? 0;
-				const baseFrameStats = isMulti
-					? {
-							baseline: summary.baseline,
-							post: summary.post,
-							perCall: summary.calls,
-						}
-					: {
-							baseline: summary.baseline,
-							prefill: summary.prefill,
-							decode: summary.decode,
-							post: summary.post,
-						};
-				window.__frameProbeResult = {
-					model: modelId,
-					mode: isMulti ? "multi" : "single",
-					callCount: probeCalls.length,
-					decodeTokens: smokeResult.genTokens ?? 0,
-					prefillMs: smokeResult.prefillMs ?? 0,
-					decodeMs: decodeMsFp,
-					tokensPerSec:
-						decodeMsFp > 0
-							? (smokeResult.genTokens ?? 0) / (decodeMsFp / 1000)
-							: 0,
-					frameStats: baseFrameStats,
-					verdict: isMulti ? null : summary.verdict,
-					sceneInfo: frameProbeCtl.sceneInfo,
-					calls: isMulti ? probeCalls : undefined,
-					sample: (
-						smokeResult.displayOutputText ||
-						smokeResult.outputText ||
-						""
-					).slice(0, 240),
-				};
-			}
-			// Probe 9b: batched vs sequential N-NPC scaling. Runs AFTER
-			// the [7/8] smoke flow has warmed the engine. Posts the
-			// timing + raw output of both scenarios to
-			// `window.__probe9bResult` for the Bun runner to scrape and
-			// score. No public-API change — uses `engine.chatCompletion`
-			// directly, same path the smoke flow uses.
-			if (probe9bEnabled) {
-				log("running", "[probe9b] running batched vs sequential scenarios…");
-				const NPC_PREFIX_9B =
-					"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action.";
-				const NPCS_9B = [
-					{
-						id: "goblin_1",
-						obs: "Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
-					},
-					{
-						id: "wolf_2",
-						obs: "Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
-					},
-					{
-						id: "merchant_3",
-						obs: "Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
-					},
-					{
-						id: "guard_4",
-						obs: "Guard sees suspicious player Thief sneaking near treasure room.",
-					},
-				];
+				const smokeResult = await runCompletion({
+					label: smokePrompt.mode,
+					messages: [{ role: "user", content: userMessage }],
+					samplingConfig: smokeSamplingConfig,
+					maxTokens: smokeMaxTokens,
+					chatOptions: smokeChatOptions,
+				});
 
-				async function runOnce(prompt, maxTokens) {
-					const tStart = performance.now();
-					const tokens = await runCompletion({
-						label: "probe9b",
-						messages: [{ role: "user", content: prompt }],
-						samplingConfig: smokeSamplingConfig,
-						maxTokens,
-						chatOptions: smokeChatOptions,
-					});
-					const tEnd = performance.now();
-					return {
-						wallMs: tEnd - tStart,
-						prefillMs: tokens.prefillMs,
-						genTokens: tokens.genTokens,
-						output:
-							tokens.outputText ?? tokens.displayOutputText ?? "",
-					};
-				}
-
-				// Inter-call settle so KV-cache reset + GPU queue drain
-				// don't bleed into the next prefill.
-				const settle = () => new Promise((r) => setTimeout(r, 500));
-
-				const seqRuns = [];
-				const seqTotalStart = performance.now();
-				for (const npc of NPCS_9B) {
-					const prompt = `${NPC_PREFIX_9B}\n\nNPC: ${npc.id}\nObservation: ${npc.obs}\n\nReply with one word — the tool name:`;
-					seqRuns.push({ npcId: npc.id, ...(await runOnce(prompt, 8)) });
-					await settle();
-				}
-				const seqTotalWallMs =
-					performance.now() - seqTotalStart - (NPCS_9B.length - 1) * 500;
-
-				await settle();
-
-				const batchedObsList = NPCS_9B.map(
-					(n) => `- ${n.id}: ${n.obs}`,
-				).join("\n");
-				const batchedPrompt = `${NPC_PREFIX_9B}\n\nDecide a tool action for each NPC below.\n${batchedObsList}\n\nReply with a JSON array of objects, one per NPC, e.g. [{"npc_id":"goblin_1","action":"attack"}, ...]:`;
-				const batchedRun = await runOnce(batchedPrompt, 96);
-
-				window.__probe9bResult = {
-					model: modelId,
-					sequential: {
-						totalWallMs: seqTotalWallMs,
-						perCall: seqRuns,
-					},
-					batched: {
-						wallMs: batchedRun.wallMs,
-						prefillMs: batchedRun.prefillMs,
-						genTokens: batchedRun.genTokens,
-						output: batchedRun.output,
-					},
-				};
 				log(
 					"pass",
-					`[probe9b] sequential total=${seqTotalWallMs.toFixed(0)}ms (${NPCS_9B.length} calls), batched=${batchedRun.wallMs.toFixed(0)}ms`,
+					`[7/8] Generated ${smokeResult.genTokens} tokens in ${(smokeResult.totalTime / 1000).toFixed(1)}s (prefill: ${smokeResult.prefillMs.toFixed(0)}ms, decode: ${smokeResult.genTime.toFixed(0)}ms, ${(smokeResult.genTokens / (smokeResult.genTime / 1000)).toFixed(1)} tok/s, finish=${smokeResult.finishReason}, tokensIn=${smokePrompt.tokens.length})`,
 				);
-			}
-
-			// Probe prefix-cache: validates that conversation-handle-mode
-			// `chatCompletion(conv, ...)` actually skips the shared prefix
-			// on a 2nd tick. Two patterns × 4 NPCs × 2 ticks per NPC = 16
-			// timed calls. Pattern A uses the modelId path (full re-prefill
-			// every call); pattern B uses per-NPC ConversationHandles.
-			// PASS = pattern B's tick-2 median lands in 75-150 ms band.
-			if (probePrefixCacheEnabled || probePrefixCacheAtScaleEnabled) {
-				const probeTag = probePrefixCacheAtScaleEnabled
-					? "probe-prefix-cache-at-scale"
-					: "probe-prefix-cache";
-				log(
-					"running",
-					`[${probeTag}] running pattern A (no handles) then pattern B (with handles)…`,
-				);
-
-				const NPC_PREFIX_BASE =
-					"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action. Detailed tool reference. move(x, y): walk the NPC to grid coordinates (x, y); fails if path is blocked, slowed by terrain. speak(text): emit a short utterance audible to NPCs and players within 12 tiles; logs to chat. attack(target): initiate combat with target NPC or player id; honors faction rules and aggro tables. use_item(item): consume from inventory; potions restore hp/mp, scrolls cast spells, food triggers regen ticks. trade(player): open trade window with target player id; both parties must accept. Stat semantics: hp is current health out of max_hp, depletes from damage and regenerates outside combat; mp is mana for spells, regenerates faster than hp; level scales damage and resists; position is current grid cell as (x, y); inventory is a list of item ids. Decision rules: prefer survival over aggression below 30% hp, prefer engagement above 70% hp, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction NPCs.";
-				const NPC_PREFIX_AT_SCALE_TAIL =
-					" Combat formulas: damage = (attacker.attack × roll(0.85, 1.15)) − defender.defense; critical = roll(0.05) doubles damage; magic resist applies after physical reduction; armor pen = max(0, attacker.armorPen − defender.armor × 0.5). Faction relations: orcs vs humans (-3); elves vs orcs (-2); humans vs elves (+1); dwarves vs orcs (-2); dwarves vs elves (-1); all factions neutral to merchants and guards; bounty hunters honor contracts above factions. Status effects: poison ticks 5 hp/turn for 3 turns; stun blocks attack and movement for 1 turn; haste doubles speed for 2 turns; bleed ticks 3 hp/turn for 4 turns; burn ticks 4 hp/turn for 2 turns and disables ice spells; freeze halts movement for 2 turns; charm flips faction temporarily; silence disables spell-cast for 3 turns; root anchors position for 2 turns. Loot tables: low-tier mobs drop 1-3 gp + 30% chance common item; mid-tier add 50% rare drop; bosses always drop legendary + 100-500 gp; chests scale with dungeon depth; quest items bypass random rolls and always drop. Aggro mechanics: damage taken adds threat = damage; healing adds threat = healing × 0.5; threat decays 10%/turn outside combat; taunt forces +200 threat; stealth halves all threat generation; pets generate threat scaled by 0.5. Inventory rules: max 50 slots; weight cap = 10 × strength; over-cap halves movement and disables sprint; equipped gear does not count toward slot count but counts toward weight; consumables stack to 99; quest items have dedicated tab. Trade rules: equal-faction trade tax 5%; cross-faction tax 15%; criminal-status disables trade entirely; black-market merchants accept stolen goods at 30% discount; bartering skill reduces tax by up to 5%. Speech rules: NPCs respond to mentioned proper nouns within 2-tile range; ambient chatter triggers every 10 turns of inactivity; greeting lines vary by faction stance; aggressive NPCs taunt before melee engagement; merchants advertise wares every 30 turns. World map: continents Aerthos (north), Vorden (east), Mirrowyn (south), Karaduun (west), Skyreach (sky-bound floating islands); 7 capitals (Aerthos: Ivormere, Whitestone; Vorden: Hexspire; Mirrowyn: Sunhold, Tideglass; Karaduun: Dustforge; Skyreach: Aerie); 24 minor towns; tunnels link via teleport gates aligned to leyline nodes. Day/night: 24 in-game hours = 1 real hour; nocturnal mobs +20% attack at night, day-active +20% perception by day; dawn and dusk are spawn windows for rare mobs; lunar phases gate werewolf transformations and certain quest triggers. Weather rules: rain slows fire spells by 25% and boosts water spells; snow halves movement on outdoor tiles and applies cold-vulnerability +10%; sandstorms blind ranged attacks beyond 4 tiles; fog masks stealth detection by +30%; thunderstorms power-spike lightning casters by 15% but interrupt long channels on 5% chance per turn. Crafting rules: tier-1 recipes need 1 common + 1 raw material; tier-2 add a refined component; legendary recipes require a quest-rare core; failed crafts return 50% of inputs; specialization perks reduce material cost by up to 20%. Quest log rules: at most 25 active quests; abandoned quests have a 24-hour cooldown; daily resets at server midnight; weekly raids cap at 7 entries; bounty boards refresh every 4 hours. Movement and pathing: NPCs use A* over a 4-connected grid; line-of-sight raycasts ignore translucent props; pets hold a leash radius of 12 tiles unless aggro overrides; mounted NPCs cost 2× weight but move at 2× speed. Animation timing: attack windup 250 ms, recovery 350 ms; cast windup scales with spell tier 200-1500 ms; interrupt windows occur during the first 60% of windup; dodge i-frames last 240 ms; block reduces damage by 50% for 200 ms after press. Audio cues: footsteps audible within 6 tiles indoors and 9 tiles outdoors; spellcasts emit element-specific cues; combat music kicks in within 12 tiles of any aggro source; merchant jingles play within 4 tiles of stalls.";
-				const NPC_PREFIX_PFX = probePrefixCacheAtScaleEnabled
-					? NPC_PREFIX_BASE + NPC_PREFIX_AT_SCALE_TAIL
-					: NPC_PREFIX_BASE;
-				const NPCS_PFX = [
-					{
-						id: "goblin_1",
-						obs1:
-							"Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
-						obs2:
-							"Hero is now at distance 4 and drew a sword. Goblin hp 22/40.",
-					},
-					{
-						id: "wolf_2",
-						obs1:
-							"Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
-						obs2:
-							"Rabbit fled into bushes. A second hunter wolf approached.",
-					},
-					{
-						id: "merchant_3",
-						obs1:
-							"Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
-						obs2:
-							"Hero asked about the rare potion. Hero gold balance now 80.",
-					},
-					{
-						id: "guard_4",
-						obs1:
-							"Guard sees suspicious player Thief sneaking near treasure room.",
-						obs2:
-							"Thief drew a dagger and lunged toward the chest.",
-					},
-				];
-
-				// Tick 1: [system, user(obs1)]
-				// Tick 2: [system, user(obs1), assistant(canned reply), user(obs2)]
-				// The shared prefix in tick-2 against tick-1's snapshot covers
-				// [system, user(obs1)] in token space; tick 2 only has to
-				// prefill the divergent [assistant, user(obs2)] tail.
-				const buildTick1 = (npc) => [
-					{ role: "system", content: NPC_PREFIX_PFX },
-					{
-						role: "user",
-						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
-					},
-				];
-				const buildTick2 = (npc, prevAssistant) => [
-					{ role: "system", content: NPC_PREFIX_PFX },
-					{
-						role: "user",
-						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
-					},
-					{ role: "assistant", content: prevAssistant },
-					{
-						role: "user",
-						content: `NPC: ${npc.id}\nObservation: ${npc.obs2}\n\nReply with one word — the tool name:`,
-					},
-				];
-
-				// Inter-call settle so KV-cache reset + GPU queue drain don't
-				// bleed into the next prefill (matches probe9b cadence).
-				const settle = () => new Promise((r) => setTimeout(r, 500));
-
-				async function runChat(arg, messages) {
-					const tStart = performance.now();
-					const stream = smokeEngine.chatCompletion(arg, messages, {
-						maxTokens: 32,
-					});
-					let prefillMs = 0;
-					let firstTokenAt = 0;
-					let firstChunkSeen = false;
-					const generatedIds = [];
-					let stats = null;
-					for await (const chunk of stream) {
-						if (chunk.done) {
-							stats = chunk.stats ?? null;
-							continue;
-						}
-						if (!firstChunkSeen) {
-							firstTokenAt = performance.now();
-							prefillMs = firstTokenAt - tStart;
-							firstChunkSeen = true;
-						}
-						if (chunk.tokenId !== undefined) {
-							generatedIds.push(chunk.tokenId);
+				log("pass", `User: ${userMessage}`);
+				const assistantText = thinkingEnabled
+					? smokeResult.rawOutputText ||
+						smokeResult.displayOutputText ||
+						smokeResult.outputText
+					: smokeResult.displayOutputText || smokeResult.outputText;
+				log("pass", `Assistant: ${assistantText}`);
+				// Frame-probe wrap: capture tEnd, hold a 1s post window, then
+				// segment + report. Surfaced both to the page log and to
+				// `window.__frameProbeResult` for agentchrome scrape.
+				//
+				// Multi-call mode (`?frameProbeCalls=N`, N>1): after the smoke
+				// call above, runs N-1 additional chatCompletion calls (same
+				// prompt, fresh KV state per call) so the per-call decode-hitch
+				// distribution can be inspected. The first call's result is
+				// preserved as the smoke record.
+				if (frameProbeCtl && frameProbeModule) {
+					const probeCalls = [
+						{
+							tStart: frameProbeChatStart,
+							prefillMs: smokeResult.prefillMs ?? 0,
+							tEnd: performance.now(),
+							genTokens: smokeResult.genTokens ?? 0,
+						},
+					];
+					if (frameProbeCalls > 1) {
+						log(
+							"running",
+							`[frameProbe] running ${frameProbeCalls - 1} additional call(s) for hitch-distribution analysis…`,
+						);
+						for (let i = 1; i < frameProbeCalls; i++) {
+							// Inter-call settle so the prior post window doesn't
+							// bleed into the next prefill. 500ms is long enough
+							// for the GPU queue to drain on the test scene.
+							await new Promise((r) => setTimeout(r, 500));
+							const tStartI = performance.now();
+							let resultI;
+							try {
+								resultI = await runCompletion({
+									label: smokePrompt.mode,
+									messages: [{ role: "user", content: userMessage }],
+									samplingConfig: smokeSamplingConfig,
+									maxTokens: smokeMaxTokens,
+									chatOptions: smokeChatOptions,
+								});
+							} catch (e) {
+								log(
+									"warn",
+									`[frameProbe] call ${i + 1}/${frameProbeCalls} failed: ${e.message}`,
+								);
+								break;
+							}
+							const tEndI = performance.now();
+							probeCalls.push({
+								tStart: tStartI,
+								prefillMs: resultI.prefillMs ?? 0,
+								tEnd: tEndI,
+								genTokens: resultI.genTokens ?? 0,
+							});
+							log(
+								"running",
+								`[frameProbe] call ${i + 1}/${frameProbeCalls}: ${resultI.genTokens}t in ${resultI.totalTime.toFixed(0)}ms (prefill ${resultI.prefillMs.toFixed(0)}ms, ${(resultI.genTokens / (resultI.genTime / 1000)).toFixed(1)} tok/s)`,
+							);
 						}
 					}
-					const wallMs = performance.now() - tStart;
-					// Prefer the engine's official prefill timing (covers the
-					// pure prefill phase, no first-decode overhead).
-					if (
-						stats &&
-						typeof stats.timeToFirstTokenMs === "number" &&
-						stats.timeToFirstTokenMs > 0
-					) {
-						prefillMs = stats.timeToFirstTokenMs;
+					await new Promise((r) => setTimeout(r, 1000));
+					frameProbeCtl.stop({ removeOverlay: false });
+					const isMulti = probeCalls.length > 1;
+					let summary;
+					if (isMulti) {
+						summary = frameProbeModule.summarizeFrameProbeMulti({
+							samples: frameProbeCtl.samples,
+							tBaselineStart: frameProbeChatStart - frameProbeBaselineMs,
+							calls: probeCalls,
+						});
+						for (const line of frameProbeModule.formatFrameProbeMultiReport(
+							summary,
+						)) {
+							log("running", line);
+						}
+					} else {
+						summary = frameProbeModule.summarizeFrameProbe({
+							samples: frameProbeCtl.samples,
+							tStart: frameProbeChatStart,
+							prefillMs: smokeResult.prefillMs,
+							tEnd: probeCalls[0].tEnd,
+						});
+						for (const line of frameProbeModule.formatFrameProbeReport(
+							summary,
+						)) {
+							log("running", line);
+						}
 					}
-					const outputText = tokenizer.decode(generatedIds);
-					return { wallMs, prefillMs, output: outputText };
+					const decodeMsFp = smokeResult.genTime ?? 0;
+					const baseFrameStats = isMulti
+						? {
+								baseline: summary.baseline,
+								post: summary.post,
+								perCall: summary.calls,
+							}
+						: {
+								baseline: summary.baseline,
+								prefill: summary.prefill,
+								decode: summary.decode,
+								post: summary.post,
+							};
+					window.__frameProbeResult = {
+						model: modelId,
+						mode: isMulti ? "multi" : "single",
+						callCount: probeCalls.length,
+						decodeTokens: smokeResult.genTokens ?? 0,
+						prefillMs: smokeResult.prefillMs ?? 0,
+						decodeMs: decodeMsFp,
+						tokensPerSec:
+							decodeMsFp > 0
+								? (smokeResult.genTokens ?? 0) / (decodeMsFp / 1000)
+								: 0,
+						frameStats: baseFrameStats,
+						verdict: isMulti ? null : summary.verdict,
+						sceneInfo: frameProbeCtl.sceneInfo,
+						calls: isMulti ? probeCalls : undefined,
+						sample: (
+							smokeResult.displayOutputText ||
+							smokeResult.outputText ||
+							""
+						).slice(0, 240),
+					};
 				}
+				// Probe 9b: batched vs sequential N-NPC scaling. Runs AFTER
+				// the [7/8] smoke flow has warmed the engine. Posts the
+				// timing + raw output of both scenarios to
+				// `window.__probe9bResult` for the Bun runner to scrape and
+				// score. No public-API change — uses `engine.chatCompletion`
+				// directly, same path the smoke flow uses.
+				if (probe9bEnabled) {
+					log("running", "[probe9b] running batched vs sequential scenarios…");
+					const NPC_PREFIX_9B =
+						"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action.";
+					const NPCS_9B = [
+						{
+							id: "goblin_1",
+							obs: "Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+						},
+						{
+							id: "wolf_2",
+							obs: "Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+						},
+						{
+							id: "merchant_3",
+							obs: "Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+						},
+						{
+							id: "guard_4",
+							obs: "Guard sees suspicious player Thief sneaking near treasure room.",
+						},
+					];
 
-				// Pattern A: handle-id path with no ConversationHandle. Each
-				// call sees full re-prefill via the engine's per-model session
-				// tracker. NB: the smoke page registers the model under a
-				// synthetic `handleId` (not the user-facing config `modelId`),
-				// so we drive the engine via `smokeEngineHandleId`.
-				const engineHandleId = smokeEngineHandleId;
-				const patternA = [];
-				smokeEngine.resetConversation(engineHandleId);
-				await settle();
-				for (const npc of NPCS_PFX) {
-					const r1 = await runChat(engineHandleId, buildTick1(npc));
-					patternA.push({
-						npcId: npc.id,
-						tick: 1,
-						prefillMs: r1.prefillMs,
-						wallMs: r1.wallMs,
-						output: r1.output,
-					});
+					async function runOnce(prompt, maxTokens) {
+						const tStart = performance.now();
+						const tokens = await runCompletion({
+							label: "probe9b",
+							messages: [{ role: "user", content: prompt }],
+							samplingConfig: smokeSamplingConfig,
+							maxTokens,
+							chatOptions: smokeChatOptions,
+						});
+						const tEnd = performance.now();
+						return {
+							wallMs: tEnd - tStart,
+							prefillMs: tokens.prefillMs,
+							genTokens: tokens.genTokens,
+							output: tokens.outputText ?? tokens.displayOutputText ?? "",
+						};
+					}
+
+					// Inter-call settle so KV-cache reset + GPU queue drain
+					// don't bleed into the next prefill.
+					const settle = () => new Promise((r) => setTimeout(r, 500));
+
+					const seqRuns = [];
+					const seqTotalStart = performance.now();
+					for (const npc of NPCS_9B) {
+						const prompt = `${NPC_PREFIX_9B}\n\nNPC: ${npc.id}\nObservation: ${npc.obs}\n\nReply with one word — the tool name:`;
+						seqRuns.push({ npcId: npc.id, ...(await runOnce(prompt, 8)) });
+						await settle();
+					}
+					const seqTotalWallMs =
+						performance.now() - seqTotalStart - (NPCS_9B.length - 1) * 500;
+
 					await settle();
-					const r2 = await runChat(
-						engineHandleId,
-						buildTick2(npc, r1.output),
+
+					const batchedObsList = NPCS_9B.map((n) => `- ${n.id}: ${n.obs}`).join(
+						"\n",
 					);
-					patternA.push({
-						npcId: npc.id,
-						tick: 2,
-						prefillMs: r2.prefillMs,
-						wallMs: r2.wallMs,
-						output: r2.output,
-					});
-					await settle();
-				}
-				smokeEngine.resetConversation(engineHandleId);
-				await settle();
+					const batchedPrompt = `${NPC_PREFIX_9B}\n\nDecide a tool action for each NPC below.\n${batchedObsList}\n\nReply with a JSON array of objects, one per NPC, e.g. [{"npc_id":"goblin_1","action":"attack"}, ...]:`;
+					const batchedRun = await runOnce(batchedPrompt, 96);
 
-				// Pattern B: per-NPC ConversationHandle. Tick 1 populates the
-				// snapshot; tick 2 should hit the prefix cache.
-				const patternB = [];
-				const convs = await Promise.all(
-					NPCS_PFX.map(() => smokeEngine.createConversation(engineHandleId)),
-				);
-				try {
-					for (let i = 0; i < NPCS_PFX.length; i++) {
-						const npc = NPCS_PFX[i];
-						const r1 = await runChat(convs[i], buildTick1(npc));
-						patternB.push({
+					window.__probe9bResult = {
+						model: modelId,
+						sequential: {
+							totalWallMs: seqTotalWallMs,
+							perCall: seqRuns,
+						},
+						batched: {
+							wallMs: batchedRun.wallMs,
+							prefillMs: batchedRun.prefillMs,
+							genTokens: batchedRun.genTokens,
+							output: batchedRun.output,
+						},
+					};
+					log(
+						"pass",
+						`[probe9b] sequential total=${seqTotalWallMs.toFixed(0)}ms (${NPCS_9B.length} calls), batched=${batchedRun.wallMs.toFixed(0)}ms`,
+					);
+				}
+
+				// Probe prefix-cache: validates that conversation-handle-mode
+				// `chatCompletion(conv, ...)` actually skips the shared prefix
+				// on a 2nd tick. Two patterns × 4 NPCs × 2 ticks per NPC = 16
+				// timed calls. Pattern A uses the modelId path (full re-prefill
+				// every call); pattern B uses per-NPC ConversationHandles.
+				// PASS = pattern B's tick-2 median lands in 75-150 ms band.
+				if (probePrefixCacheEnabled || probePrefixCacheAtScaleEnabled) {
+					const probeTag = probePrefixCacheAtScaleEnabled
+						? "probe-prefix-cache-at-scale"
+						: "probe-prefix-cache";
+					log(
+						"running",
+						`[${probeTag}] running pattern A (no handles) then pattern B (with handles)…`,
+					);
+
+					const NPC_PREFIX_BASE =
+						"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action. Detailed tool reference. move(x, y): walk the NPC to grid coordinates (x, y); fails if path is blocked, slowed by terrain. speak(text): emit a short utterance audible to NPCs and players within 12 tiles; logs to chat. attack(target): initiate combat with target NPC or player id; honors faction rules and aggro tables. use_item(item): consume from inventory; potions restore hp/mp, scrolls cast spells, food triggers regen ticks. trade(player): open trade window with target player id; both parties must accept. Stat semantics: hp is current health out of max_hp, depletes from damage and regenerates outside combat; mp is mana for spells, regenerates faster than hp; level scales damage and resists; position is current grid cell as (x, y); inventory is a list of item ids. Decision rules: prefer survival over aggression below 30% hp, prefer engagement above 70% hp, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction NPCs.";
+					const NPC_PREFIX_AT_SCALE_TAIL =
+						" Combat formulas: damage = (attacker.attack × roll(0.85, 1.15)) − defender.defense; critical = roll(0.05) doubles damage; magic resist applies after physical reduction; armor pen = max(0, attacker.armorPen − defender.armor × 0.5). Faction relations: orcs vs humans (-3); elves vs orcs (-2); humans vs elves (+1); dwarves vs orcs (-2); dwarves vs elves (-1); all factions neutral to merchants and guards; bounty hunters honor contracts above factions. Status effects: poison ticks 5 hp/turn for 3 turns; stun blocks attack and movement for 1 turn; haste doubles speed for 2 turns; bleed ticks 3 hp/turn for 4 turns; burn ticks 4 hp/turn for 2 turns and disables ice spells; freeze halts movement for 2 turns; charm flips faction temporarily; silence disables spell-cast for 3 turns; root anchors position for 2 turns. Loot tables: low-tier mobs drop 1-3 gp + 30% chance common item; mid-tier add 50% rare drop; bosses always drop legendary + 100-500 gp; chests scale with dungeon depth; quest items bypass random rolls and always drop. Aggro mechanics: damage taken adds threat = damage; healing adds threat = healing × 0.5; threat decays 10%/turn outside combat; taunt forces +200 threat; stealth halves all threat generation; pets generate threat scaled by 0.5. Inventory rules: max 50 slots; weight cap = 10 × strength; over-cap halves movement and disables sprint; equipped gear does not count toward slot count but counts toward weight; consumables stack to 99; quest items have dedicated tab. Trade rules: equal-faction trade tax 5%; cross-faction tax 15%; criminal-status disables trade entirely; black-market merchants accept stolen goods at 30% discount; bartering skill reduces tax by up to 5%. Speech rules: NPCs respond to mentioned proper nouns within 2-tile range; ambient chatter triggers every 10 turns of inactivity; greeting lines vary by faction stance; aggressive NPCs taunt before melee engagement; merchants advertise wares every 30 turns. World map: continents Aerthos (north), Vorden (east), Mirrowyn (south), Karaduun (west), Skyreach (sky-bound floating islands); 7 capitals (Aerthos: Ivormere, Whitestone; Vorden: Hexspire; Mirrowyn: Sunhold, Tideglass; Karaduun: Dustforge; Skyreach: Aerie); 24 minor towns; tunnels link via teleport gates aligned to leyline nodes. Day/night: 24 in-game hours = 1 real hour; nocturnal mobs +20% attack at night, day-active +20% perception by day; dawn and dusk are spawn windows for rare mobs; lunar phases gate werewolf transformations and certain quest triggers. Weather rules: rain slows fire spells by 25% and boosts water spells; snow halves movement on outdoor tiles and applies cold-vulnerability +10%; sandstorms blind ranged attacks beyond 4 tiles; fog masks stealth detection by +30%; thunderstorms power-spike lightning casters by 15% but interrupt long channels on 5% chance per turn. Crafting rules: tier-1 recipes need 1 common + 1 raw material; tier-2 add a refined component; legendary recipes require a quest-rare core; failed crafts return 50% of inputs; specialization perks reduce material cost by up to 20%. Quest log rules: at most 25 active quests; abandoned quests have a 24-hour cooldown; daily resets at server midnight; weekly raids cap at 7 entries; bounty boards refresh every 4 hours. Movement and pathing: NPCs use A* over a 4-connected grid; line-of-sight raycasts ignore translucent props; pets hold a leash radius of 12 tiles unless aggro overrides; mounted NPCs cost 2× weight but move at 2× speed. Animation timing: attack windup 250 ms, recovery 350 ms; cast windup scales with spell tier 200-1500 ms; interrupt windows occur during the first 60% of windup; dodge i-frames last 240 ms; block reduces damage by 50% for 200 ms after press. Audio cues: footsteps audible within 6 tiles indoors and 9 tiles outdoors; spellcasts emit element-specific cues; combat music kicks in within 12 tiles of any aggro source; merchant jingles play within 4 tiles of stalls.";
+					const NPC_PREFIX_PFX = probePrefixCacheAtScaleEnabled
+						? NPC_PREFIX_BASE + NPC_PREFIX_AT_SCALE_TAIL
+						: NPC_PREFIX_BASE;
+					const NPCS_PFX = [
+						{
+							id: "goblin_1",
+							obs1: "Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+							obs2: "Hero is now at distance 4 and drew a sword. Goblin hp 22/40.",
+						},
+						{
+							id: "wolf_2",
+							obs1: "Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+							obs2: "Rabbit fled into bushes. A second hunter wolf approached.",
+						},
+						{
+							id: "merchant_3",
+							obs1: "Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+							obs2: "Hero asked about the rare potion. Hero gold balance now 80.",
+						},
+						{
+							id: "guard_4",
+							obs1: "Guard sees suspicious player Thief sneaking near treasure room.",
+							obs2: "Thief drew a dagger and lunged toward the chest.",
+						},
+					];
+
+					// Tick 1: [system, user(obs1)]
+					// Tick 2: [system, user(obs1), assistant(canned reply), user(obs2)]
+					// The shared prefix in tick-2 against tick-1's snapshot covers
+					// [system, user(obs1)] in token space; tick 2 only has to
+					// prefill the divergent [assistant, user(obs2)] tail.
+					const buildTick1 = (npc) => [
+						{ role: "system", content: NPC_PREFIX_PFX },
+						{
+							role: "user",
+							content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+						},
+					];
+					const buildTick2 = (npc, prevAssistant) => [
+						{ role: "system", content: NPC_PREFIX_PFX },
+						{
+							role: "user",
+							content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+						},
+						{ role: "assistant", content: prevAssistant },
+						{
+							role: "user",
+							content: `NPC: ${npc.id}\nObservation: ${npc.obs2}\n\nReply with one word — the tool name:`,
+						},
+					];
+
+					// Inter-call settle so KV-cache reset + GPU queue drain don't
+					// bleed into the next prefill (matches probe9b cadence).
+					const settle = () => new Promise((r) => setTimeout(r, 500));
+
+					async function runChat(arg, messages) {
+						const tStart = performance.now();
+						const stream = smokeEngine.chatCompletion(arg, messages, {
+							maxTokens: 32,
+						});
+						let prefillMs = 0;
+						let firstTokenAt = 0;
+						let firstChunkSeen = false;
+						const generatedIds = [];
+						let stats = null;
+						for await (const chunk of stream) {
+							if (chunk.done) {
+								stats = chunk.stats ?? null;
+								continue;
+							}
+							if (!firstChunkSeen) {
+								firstTokenAt = performance.now();
+								prefillMs = firstTokenAt - tStart;
+								firstChunkSeen = true;
+							}
+							if (chunk.tokenId !== undefined) {
+								generatedIds.push(chunk.tokenId);
+							}
+						}
+						const wallMs = performance.now() - tStart;
+						// Prefer the engine's official prefill timing (covers the
+						// pure prefill phase, no first-decode overhead).
+						if (
+							stats &&
+							typeof stats.timeToFirstTokenMs === "number" &&
+							stats.timeToFirstTokenMs > 0
+						) {
+							prefillMs = stats.timeToFirstTokenMs;
+						}
+						const outputText = tokenizer.decode(generatedIds);
+						return { wallMs, prefillMs, output: outputText };
+					}
+
+					// Pattern A: handle-id path with no ConversationHandle. Each
+					// call sees full re-prefill via the engine's per-model session
+					// tracker. NB: the smoke page registers the model under a
+					// synthetic `handleId` (not the user-facing config `modelId`),
+					// so we drive the engine via `smokeEngineHandleId`.
+					const engineHandleId = smokeEngineHandleId;
+					const patternA = [];
+					smokeEngine.resetModelSession(engineHandleId);
+					await settle();
+					for (const npc of NPCS_PFX) {
+						const r1 = await runChat(engineHandleId, buildTick1(npc));
+						patternA.push({
 							npcId: npc.id,
 							tick: 1,
 							prefillMs: r1.prefillMs,
@@ -1702,8 +1690,11 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 							output: r1.output,
 						});
 						await settle();
-						const r2 = await runChat(convs[i], buildTick2(npc, r1.output));
-						patternB.push({
+						const r2 = await runChat(
+							engineHandleId,
+							buildTick2(npc, r1.output),
+						);
+						patternA.push({
 							npcId: npc.id,
 							tick: 2,
 							prefillMs: r2.prefillMs,
@@ -1712,263 +1703,246 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						});
 						await settle();
 					}
-				} finally {
-					for (const c of convs) await smokeEngine.disposeConversation(c);
-				}
-
-				const median = (xs) => {
-					const s = xs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-					if (s.length === 0) return 0;
-					return s[Math.floor(s.length / 2)];
-				};
-				const tick2A = patternA
-					.filter((r) => r.tick === 2)
-					.map((r) => r.prefillMs);
-				const tick2B = patternB
-					.filter((r) => r.tick === 2)
-					.map((r) => r.prefillMs);
-
-				const probeResultObj = {
-					model: modelId,
-					patternA,
-					patternB,
-				};
-				if (probePrefixCacheAtScaleEnabled) {
-					window.__probePrefixCacheAtScaleResult = probeResultObj;
-				} else {
-					window.__probePrefixCacheResult = probeResultObj;
-				}
-
-				log(
-					"pass",
-					`[${probeTag}] tick-2 medians: A=${median(tick2A).toFixed(0)}ms, B=${median(tick2B).toFixed(0)}ms`,
-				);
-			}
-
-			// Probe prefix-cache-interleaved: defeats Pattern A's session-
-			// tracker cache by round-robining NPC ticks. Per-NPC personas
-			// are distinct from token-3 onward (NPC name appears in the
-			// first sentence), so longest-shared-prefix between any two
-			// sibling NPCs is just the small shared framework intro. After
-			// NPC_4 tick-1, the session tracker holds NPC_4's KV; NPC_1
-			// tick-2 must re-prefill the entire NPC_1 persona (~1100
-			// tokens). Pattern B reloads NPC_1's per-conv snapshot in
-			// ~1.4 s (post-batch) and prefills only the divergent tail.
-			if (probePrefixCacheInterleavedEnabled) {
-				const probeTag = "probe-prefix-cache-interleaved";
-				log(
-					"running",
-					`[${probeTag}] running interleaved pattern A then pattern B…`,
-				);
-
-				// Tiny shared framework intro — small enough that all of
-				// Pattern A's session-tracker savings come from this one
-				// block, regardless of which NPC was last computed.
-				const FRAMEWORK_INTRO =
-					"You are an NPC AI controller. Pick exactly one tool name as the action. Available tools: move, speak, attack, use_item, trade.";
-
-				// Build a per-NPC persona by repeating a paragraph that
-				// embeds the NPC's id very early. The first occurrence of
-				// the id forces token-level divergence from any sibling
-				// NPC's persona; everything after that lives in the
-				// divergent tail and must be re-prefilled when the session
-				// tracker holds a different NPC's KV.
-				function buildPersona(npcId, role, locale, era) {
-					const para = `Persona for ${npcId} (role ${role}, locale ${locale}, era ${era}). ${npcId} was raised in the ${locale} territories during the ${era} cycle, where ${role} duties shaped a particular discipline of restraint, observation, and reaction. ${npcId} maintains the customary tactical doctrine of its kin: prefer survival below thirty percent vitality, prefer engagement above seventy percent vitality, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction agents. ${npcId} keeps a personal log of grievances, of bargains, of debts, of small mercies — these influence which tool ${npcId} reaches for first when pressed. ${npcId} prefers tools that reflect the ethic of ${role}: a guard chooses confrontation, a merchant chooses speech, a hunter chooses pursuit, a trader chooses bargain. ${npcId}'s ${era}-cycle training instructs that the first response is rarely the correct one, and that observing the field for an extra heartbeat distinguishes survivors from casualties.`;
-					// Repeat 6× so persona lands at ~1100 tokens.
-					return Array.from({ length: 6 }, () => para).join(" ");
-				}
-
-				const NPCS_INTERLEAVED = [
-					{
-						id: "goblin_1",
-						persona: buildPersona(
-							"goblin_1",
-							"raider",
-							"Bonewood",
-							"Skullsplit",
-						),
-						obs1:
-							"Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
-						obs2:
-							"Hero is now at distance 4 and drew a sword. Goblin hp 22/40.",
-					},
-					{
-						id: "wolf_2",
-						persona: buildPersona(
-							"wolf_2",
-							"hunter",
-							"Frostmoor",
-							"Longwinter",
-						),
-						obs1:
-							"Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
-						obs2:
-							"Rabbit fled into bushes. A second hunter wolf approached.",
-					},
-					{
-						id: "merchant_3",
-						persona: buildPersona(
-							"merchant_3",
-							"trader",
-							"Sunhold",
-							"Goldspring",
-						),
-						obs1:
-							"Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
-						obs2:
-							"Hero asked about the rare potion. Hero gold balance now 80.",
-					},
-					{
-						id: "guard_4",
-						persona: buildPersona(
-							"guard_4",
-							"sentinel",
-							"Ivormere",
-							"Stoneward",
-						),
-						obs1:
-							"Guard sees suspicious player Thief sneaking near treasure room.",
-						obs2:
-							"Thief drew a dagger and lunged toward the chest.",
-					},
-				];
-
-				const buildTick1 = (npc) => [
-					{
-						role: "system",
-						content: `${FRAMEWORK_INTRO}\n\n${npc.persona}`,
-					},
-					{
-						role: "user",
-						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
-					},
-				];
-				const buildTick2 = (npc, prevAssistant) => [
-					{
-						role: "system",
-						content: `${FRAMEWORK_INTRO}\n\n${npc.persona}`,
-					},
-					{
-						role: "user",
-						content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
-					},
-					{ role: "assistant", content: prevAssistant },
-					{
-						role: "user",
-						content: `NPC: ${npc.id}\nObservation: ${npc.obs2}\n\nReply with one word — the tool name:`,
-					},
-				];
-
-				const settle = () => new Promise((r) => setTimeout(r, 500));
-
-				async function runChat(arg, messages) {
-					const tStart = performance.now();
-					const stream = smokeEngine.chatCompletion(arg, messages, {
-						maxTokens: 32,
-					});
-					let prefillMs = 0;
-					let firstTokenAt = 0;
-					let firstChunkSeen = false;
-					const generatedIds = [];
-					let stats = null;
-					for await (const chunk of stream) {
-						if (chunk.done) {
-							stats = chunk.stats ?? null;
-							continue;
-						}
-						if (!firstChunkSeen) {
-							firstTokenAt = performance.now();
-							prefillMs = firstTokenAt - tStart;
-							firstChunkSeen = true;
-						}
-						if (chunk.tokenId !== undefined) {
-							generatedIds.push(chunk.tokenId);
-						}
-					}
-					const wallMs = performance.now() - tStart;
-					if (
-						stats &&
-						typeof stats.timeToFirstTokenMs === "number" &&
-						stats.timeToFirstTokenMs > 0
-					) {
-						prefillMs = stats.timeToFirstTokenMs;
-					}
-					const outputText = tokenizer.decode(generatedIds);
-					return { wallMs, prefillMs, output: outputText };
-				}
-
-				const engineHandleId = smokeEngineHandleId;
-
-				// Pattern A interleaved: round-robin all tick-1s, then all
-				// tick-2s. Session tracker is forced to invalidate the
-				// per-NPC persona on every cross-NPC call.
-				const patternA = [];
-				const patternARecallCues = new Array(NPCS_INTERLEAVED.length);
-				smokeEngine.resetConversation(engineHandleId);
-				await settle();
-				for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
-					const npc = NPCS_INTERLEAVED[i];
-					const r1 = await runChat(engineHandleId, buildTick1(npc));
-					patternA.push({
-						npcId: npc.id,
-						tick: 1,
-						prefillMs: r1.prefillMs,
-						wallMs: r1.wallMs,
-						output: r1.output,
-					});
-					patternARecallCues[i] = r1.output;
+					smokeEngine.resetModelSession(engineHandleId);
 					await settle();
-				}
-				for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
-					const npc = NPCS_INTERLEAVED[i];
-					const r2 = await runChat(
-						engineHandleId,
-						buildTick2(npc, patternARecallCues[i]),
+
+					// Pattern B: per-NPC ConversationHandle. Tick 1 populates the
+					// snapshot; tick 2 should hit the prefix cache.
+					const patternB = [];
+					const convs = await Promise.all(
+						NPCS_PFX.map(() => smokeEngine.createConversation(engineHandleId)),
 					);
-					patternA.push({
-						npcId: npc.id,
-						tick: 2,
-						prefillMs: r2.prefillMs,
-						wallMs: r2.wallMs,
-						output: r2.output,
-					});
-					await settle();
-				}
-				smokeEngine.resetConversation(engineHandleId);
-				await settle();
+					try {
+						for (let i = 0; i < NPCS_PFX.length; i++) {
+							const npc = NPCS_PFX[i];
+							const r1 = await runChat(convs[i], buildTick1(npc));
+							patternB.push({
+								npcId: npc.id,
+								tick: 1,
+								prefillMs: r1.prefillMs,
+								wallMs: r1.wallMs,
+								output: r1.output,
+							});
+							await settle();
+							const r2 = await runChat(convs[i], buildTick2(npc, r1.output));
+							patternB.push({
+								npcId: npc.id,
+								tick: 2,
+								prefillMs: r2.prefillMs,
+								wallMs: r2.wallMs,
+								output: r2.output,
+							});
+							await settle();
+						}
+					} finally {
+						for (const c of convs) await smokeEngine.disposeConversation(c);
+					}
 
-				// Pattern B interleaved: same matrix, per-NPC handles. Each
-				// NPC's tick-2 reloads its own KV snapshot rather than
-				// re-prefilling the persona.
-				const patternB = [];
-				const patternBRecallCues = new Array(NPCS_INTERLEAVED.length);
-				const convs = await Promise.all(
-					NPCS_INTERLEAVED.map(() =>
-						smokeEngine.createConversation(engineHandleId),
-					),
-				);
-				try {
+					const median = (xs) => {
+						const s = xs
+							.filter((v) => Number.isFinite(v))
+							.sort((a, b) => a - b);
+						if (s.length === 0) return 0;
+						return s[Math.floor(s.length / 2)];
+					};
+					const tick2A = patternA
+						.filter((r) => r.tick === 2)
+						.map((r) => r.prefillMs);
+					const tick2B = patternB
+						.filter((r) => r.tick === 2)
+						.map((r) => r.prefillMs);
+
+					const probeResultObj = {
+						model: modelId,
+						patternA,
+						patternB,
+					};
+					if (probePrefixCacheAtScaleEnabled) {
+						window.__probePrefixCacheAtScaleResult = probeResultObj;
+					} else {
+						window.__probePrefixCacheResult = probeResultObj;
+					}
+
+					log(
+						"pass",
+						`[${probeTag}] tick-2 medians: A=${median(tick2A).toFixed(0)}ms, B=${median(tick2B).toFixed(0)}ms`,
+					);
+				}
+
+				// Probe prefix-cache-interleaved: defeats Pattern A's session-
+				// tracker cache by round-robining NPC ticks. Per-NPC personas
+				// are distinct from token-3 onward (NPC name appears in the
+				// first sentence), so longest-shared-prefix between any two
+				// sibling NPCs is just the small shared framework intro. After
+				// NPC_4 tick-1, the session tracker holds NPC_4's KV; NPC_1
+				// tick-2 must re-prefill the entire NPC_1 persona (~1100
+				// tokens). Pattern B reloads NPC_1's per-conv snapshot in
+				// ~1.4 s (post-batch) and prefills only the divergent tail.
+				if (probePrefixCacheInterleavedEnabled) {
+					const probeTag = "probe-prefix-cache-interleaved";
+					log(
+						"running",
+						`[${probeTag}] running interleaved pattern A then pattern B…`,
+					);
+
+					// Tiny shared framework intro — small enough that all of
+					// Pattern A's session-tracker savings come from this one
+					// block, regardless of which NPC was last computed.
+					const FRAMEWORK_INTRO =
+						"You are an NPC AI controller. Pick exactly one tool name as the action. Available tools: move, speak, attack, use_item, trade.";
+
+					// Build a per-NPC persona by repeating a paragraph that
+					// embeds the NPC's id very early. The first occurrence of
+					// the id forces token-level divergence from any sibling
+					// NPC's persona; everything after that lives in the
+					// divergent tail and must be re-prefilled when the session
+					// tracker holds a different NPC's KV.
+					function buildPersona(npcId, role, locale, era) {
+						const para = `Persona for ${npcId} (role ${role}, locale ${locale}, era ${era}). ${npcId} was raised in the ${locale} territories during the ${era} cycle, where ${role} duties shaped a particular discipline of restraint, observation, and reaction. ${npcId} maintains the customary tactical doctrine of its kin: prefer survival below thirty percent vitality, prefer engagement above seventy percent vitality, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction agents. ${npcId} keeps a personal log of grievances, of bargains, of debts, of small mercies — these influence which tool ${npcId} reaches for first when pressed. ${npcId} prefers tools that reflect the ethic of ${role}: a guard chooses confrontation, a merchant chooses speech, a hunter chooses pursuit, a trader chooses bargain. ${npcId}'s ${era}-cycle training instructs that the first response is rarely the correct one, and that observing the field for an extra heartbeat distinguishes survivors from casualties.`;
+						// Repeat 6× so persona lands at ~1100 tokens.
+						return Array.from({ length: 6 }, () => para).join(" ");
+					}
+
+					const NPCS_INTERLEAVED = [
+						{
+							id: "goblin_1",
+							persona: buildPersona(
+								"goblin_1",
+								"raider",
+								"Bonewood",
+								"Skullsplit",
+							),
+							obs1: "Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+							obs2: "Hero is now at distance 4 and drew a sword. Goblin hp 22/40.",
+						},
+						{
+							id: "wolf_2",
+							persona: buildPersona(
+								"wolf_2",
+								"hunter",
+								"Frostmoor",
+								"Longwinter",
+							),
+							obs1: "Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+							obs2: "Rabbit fled into bushes. A second hunter wolf approached.",
+						},
+						{
+							id: "merchant_3",
+							persona: buildPersona(
+								"merchant_3",
+								"trader",
+								"Sunhold",
+								"Goldspring",
+							),
+							obs1: "Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+							obs2: "Hero asked about the rare potion. Hero gold balance now 80.",
+						},
+						{
+							id: "guard_4",
+							persona: buildPersona(
+								"guard_4",
+								"sentinel",
+								"Ivormere",
+								"Stoneward",
+							),
+							obs1: "Guard sees suspicious player Thief sneaking near treasure room.",
+							obs2: "Thief drew a dagger and lunged toward the chest.",
+						},
+					];
+
+					const buildTick1 = (npc) => [
+						{
+							role: "system",
+							content: `${FRAMEWORK_INTRO}\n\n${npc.persona}`,
+						},
+						{
+							role: "user",
+							content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+						},
+					];
+					const buildTick2 = (npc, prevAssistant) => [
+						{
+							role: "system",
+							content: `${FRAMEWORK_INTRO}\n\n${npc.persona}`,
+						},
+						{
+							role: "user",
+							content: `NPC: ${npc.id}\nObservation: ${npc.obs1}\n\nReply with one word — the tool name:`,
+						},
+						{ role: "assistant", content: prevAssistant },
+						{
+							role: "user",
+							content: `NPC: ${npc.id}\nObservation: ${npc.obs2}\n\nReply with one word — the tool name:`,
+						},
+					];
+
+					const settle = () => new Promise((r) => setTimeout(r, 500));
+
+					async function runChat(arg, messages) {
+						const tStart = performance.now();
+						const stream = smokeEngine.chatCompletion(arg, messages, {
+							maxTokens: 32,
+						});
+						let prefillMs = 0;
+						let firstTokenAt = 0;
+						let firstChunkSeen = false;
+						const generatedIds = [];
+						let stats = null;
+						for await (const chunk of stream) {
+							if (chunk.done) {
+								stats = chunk.stats ?? null;
+								continue;
+							}
+							if (!firstChunkSeen) {
+								firstTokenAt = performance.now();
+								prefillMs = firstTokenAt - tStart;
+								firstChunkSeen = true;
+							}
+							if (chunk.tokenId !== undefined) {
+								generatedIds.push(chunk.tokenId);
+							}
+						}
+						const wallMs = performance.now() - tStart;
+						if (
+							stats &&
+							typeof stats.timeToFirstTokenMs === "number" &&
+							stats.timeToFirstTokenMs > 0
+						) {
+							prefillMs = stats.timeToFirstTokenMs;
+						}
+						const outputText = tokenizer.decode(generatedIds);
+						return { wallMs, prefillMs, output: outputText };
+					}
+
+					const engineHandleId = smokeEngineHandleId;
+
+					// Pattern A interleaved: round-robin all tick-1s, then all
+					// tick-2s. Session tracker is forced to invalidate the
+					// per-NPC persona on every cross-NPC call.
+					const patternA = [];
+					const patternARecallCues = new Array(NPCS_INTERLEAVED.length);
+					smokeEngine.resetModelSession(engineHandleId);
+					await settle();
 					for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
 						const npc = NPCS_INTERLEAVED[i];
-						const r1 = await runChat(convs[i], buildTick1(npc));
-						patternB.push({
+						const r1 = await runChat(engineHandleId, buildTick1(npc));
+						patternA.push({
 							npcId: npc.id,
 							tick: 1,
 							prefillMs: r1.prefillMs,
 							wallMs: r1.wallMs,
 							output: r1.output,
 						});
-						patternBRecallCues[i] = r1.output;
+						patternARecallCues[i] = r1.output;
 						await settle();
 					}
 					for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
 						const npc = NPCS_INTERLEAVED[i];
 						const r2 = await runChat(
-							convs[i],
-							buildTick2(npc, patternBRecallCues[i]),
+							engineHandleId,
+							buildTick2(npc, patternARecallCues[i]),
 						);
-						patternB.push({
+						patternA.push({
 							npcId: npc.id,
 							tick: 2,
 							prefillMs: r2.prefillMs,
@@ -1977,184 +1951,176 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 						});
 						await settle();
 					}
-				} finally {
-					for (const c of convs) await smokeEngine.disposeConversation(c);
+					smokeEngine.resetModelSession(engineHandleId);
+					await settle();
+
+					// Pattern B interleaved: same matrix, per-NPC handles. Each
+					// NPC's tick-2 reloads its own KV snapshot rather than
+					// re-prefilling the persona.
+					const patternB = [];
+					const patternBRecallCues = new Array(NPCS_INTERLEAVED.length);
+					const convs = await Promise.all(
+						NPCS_INTERLEAVED.map(() =>
+							smokeEngine.createConversation(engineHandleId),
+						),
+					);
+					try {
+						for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
+							const npc = NPCS_INTERLEAVED[i];
+							const r1 = await runChat(convs[i], buildTick1(npc));
+							patternB.push({
+								npcId: npc.id,
+								tick: 1,
+								prefillMs: r1.prefillMs,
+								wallMs: r1.wallMs,
+								output: r1.output,
+							});
+							patternBRecallCues[i] = r1.output;
+							await settle();
+						}
+						for (let i = 0; i < NPCS_INTERLEAVED.length; i++) {
+							const npc = NPCS_INTERLEAVED[i];
+							const r2 = await runChat(
+								convs[i],
+								buildTick2(npc, patternBRecallCues[i]),
+							);
+							patternB.push({
+								npcId: npc.id,
+								tick: 2,
+								prefillMs: r2.prefillMs,
+								wallMs: r2.wallMs,
+								output: r2.output,
+							});
+							await settle();
+						}
+					} finally {
+						for (const c of convs) await smokeEngine.disposeConversation(c);
+					}
+
+					const med = (xs) => {
+						const s = xs
+							.filter((v) => Number.isFinite(v))
+							.sort((a, b) => a - b);
+						if (s.length === 0) return 0;
+						return s[Math.floor(s.length / 2)];
+					};
+					const tick2A = patternA
+						.filter((r) => r.tick === 2)
+						.map((r) => r.prefillMs);
+					const tick2B = patternB
+						.filter((r) => r.tick === 2)
+						.map((r) => r.prefillMs);
+					window.__probePrefixCacheInterleavedResult = {
+						model: modelId,
+						patternA,
+						patternB,
+					};
+					log(
+						"pass",
+						`[${probeTag}] tick-2 medians: A=${med(tick2A).toFixed(0)}ms, B=${med(tick2B).toFixed(0)}ms`,
+					);
 				}
 
-				const med = (xs) => {
-					const s = xs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-					if (s.length === 0) return 0;
-					return s[Math.floor(s.length / 2)];
-				};
-				const tick2A = patternA
-					.filter((r) => r.tick === 2)
-					.map((r) => r.prefillMs);
-				const tick2B = patternB
-					.filter((r) => r.tick === 2)
-					.map((r) => r.prefillMs);
-				window.__probePrefixCacheInterleavedResult = {
-					model: modelId,
-					patternA,
-					patternB,
-				};
-				log(
-					"pass",
-					`[${probeTag}] tick-2 medians: A=${med(tick2A).toFixed(0)}ms, B=${med(tick2B).toFixed(0)}ms`,
-				);
-			}
+				// Probe prefix-cache-fork: measures forkConversation's
+				// cross-conv prefix sharing win on the first-tick-per-NPC.
+				// Pattern X (baseline): each NPC creates a fresh conv;
+				// first chatCompletion prefills the entire ~1325-token
+				// shared system prefix. Pattern Y (forked): a base conv
+				// is primed with the shared prefix once, then forked per
+				// NPC; each fork's first chatCompletion finds the shared
+				// prefix in the inherited snapshot and prefills only the
+				// divergent tail.
+				if (probePrefixCacheForkEnabled) {
+					const probeTag = "probe-prefix-cache-fork";
+					log(
+						"running",
+						`[${probeTag}] running pattern X (baseline) then pattern Y (forked)…`,
+					);
 
-			// Probe prefix-cache-fork: measures forkConversation's
-			// cross-conv prefix sharing win on the first-tick-per-NPC.
-			// Pattern X (baseline): each NPC creates a fresh conv;
-			// first chatCompletion prefills the entire ~1325-token
-			// shared system prefix. Pattern Y (forked): a base conv
-			// is primed with the shared prefix once, then forked per
-			// NPC; each fork's first chatCompletion finds the shared
-			// prefix in the inherited snapshot and prefills only the
-			// divergent tail.
-			if (probePrefixCacheForkEnabled) {
-				const probeTag = "probe-prefix-cache-fork";
-				log(
-					"running",
-					`[${probeTag}] running pattern X (baseline) then pattern Y (forked)…`,
-				);
+					const SHARED_SYSTEM =
+						"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action. Detailed tool reference. move(x, y): walk the NPC to grid coordinates (x, y); fails if path is blocked, slowed by terrain. speak(text): emit a short utterance audible to NPCs and players within 12 tiles; logs to chat. attack(target): initiate combat with target NPC or player id; honors faction rules and aggro tables. use_item(item): consume from inventory; potions restore hp/mp, scrolls cast spells, food triggers regen ticks. trade(player): open trade window with target player id; both parties must accept. Stat semantics: hp is current health out of max_hp, depletes from damage and regenerates outside combat; mp is mana for spells, regenerates faster than hp; level scales damage and resists; position is current grid cell as (x, y); inventory is a list of item ids. Decision rules: prefer survival over aggression below 30% hp, prefer engagement above 70% hp, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction NPCs. Combat formulas: damage = (attacker.attack × roll(0.85, 1.15)) − defender.defense; critical = roll(0.05) doubles damage; magic resist applies after physical reduction; armor pen = max(0, attacker.armorPen − defender.armor × 0.5). Faction relations: orcs vs humans (-3); elves vs orcs (-2); humans vs elves (+1); dwarves vs orcs (-2); dwarves vs elves (-1); all factions neutral to merchants and guards; bounty hunters honor contracts above factions. Status effects: poison ticks 5 hp/turn for 3 turns; stun blocks attack and movement for 1 turn; haste doubles speed for 2 turns; bleed ticks 3 hp/turn for 4 turns; burn ticks 4 hp/turn for 2 turns and disables ice spells; freeze halts movement for 2 turns; charm flips faction temporarily; silence disables spell-cast for 3 turns; root anchors position for 2 turns. Loot tables: low-tier mobs drop 1-3 gp + 30% chance common item; mid-tier add 50% rare drop; bosses always drop legendary + 100-500 gp; chests scale with dungeon depth; quest items bypass random rolls and always drop. Aggro mechanics: damage taken adds threat = damage; healing adds threat = healing × 0.5; threat decays 10%/turn outside combat; taunt forces +200 threat; stealth halves all threat generation; pets generate threat scaled by 0.5.";
+					const NPCS_FORK = [
+						{
+							id: "goblin_1",
+							obs: "Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
+						},
+						{
+							id: "wolf_2",
+							obs: "Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
+						},
+						{
+							id: "merchant_3",
+							obs: "Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
+						},
+						{
+							id: "guard_4",
+							obs: "Guard sees suspicious player Thief sneaking near treasure room.",
+						},
+					];
 
-				const SHARED_SYSTEM =
-					"You are an NPC AI controller for a fantasy MMO. Available tools: move, speak, attack, use_item, trade. Each NPC has stats hp, mp, level, position. Pick exactly one tool name as the action. Detailed tool reference. move(x, y): walk the NPC to grid coordinates (x, y); fails if path is blocked, slowed by terrain. speak(text): emit a short utterance audible to NPCs and players within 12 tiles; logs to chat. attack(target): initiate combat with target NPC or player id; honors faction rules and aggro tables. use_item(item): consume from inventory; potions restore hp/mp, scrolls cast spells, food triggers regen ticks. trade(player): open trade window with target player id; both parties must accept. Stat semantics: hp is current health out of max_hp, depletes from damage and regenerates outside combat; mp is mana for spells, regenerates faster than hp; level scales damage and resists; position is current grid cell as (x, y); inventory is a list of item ids. Decision rules: prefer survival over aggression below 30% hp, prefer engagement above 70% hp, fall back to flee if outnumbered three to one or more, never break neutrality with same-faction NPCs. Combat formulas: damage = (attacker.attack × roll(0.85, 1.15)) − defender.defense; critical = roll(0.05) doubles damage; magic resist applies after physical reduction; armor pen = max(0, attacker.armorPen − defender.armor × 0.5). Faction relations: orcs vs humans (-3); elves vs orcs (-2); humans vs elves (+1); dwarves vs orcs (-2); dwarves vs elves (-1); all factions neutral to merchants and guards; bounty hunters honor contracts above factions. Status effects: poison ticks 5 hp/turn for 3 turns; stun blocks attack and movement for 1 turn; haste doubles speed for 2 turns; bleed ticks 3 hp/turn for 4 turns; burn ticks 4 hp/turn for 2 turns and disables ice spells; freeze halts movement for 2 turns; charm flips faction temporarily; silence disables spell-cast for 3 turns; root anchors position for 2 turns. Loot tables: low-tier mobs drop 1-3 gp + 30% chance common item; mid-tier add 50% rare drop; bosses always drop legendary + 100-500 gp; chests scale with dungeon depth; quest items bypass random rolls and always drop. Aggro mechanics: damage taken adds threat = damage; healing adds threat = healing × 0.5; threat decays 10%/turn outside combat; taunt forces +200 threat; stealth halves all threat generation; pets generate threat scaled by 0.5.";
-				const NPCS_FORK = [
-					{
-						id: "goblin_1",
-						obs:
-							"Goblin sees Hero approaching at distance 8, hp 22/40. Hero is hostile.",
-					},
-					{
-						id: "wolf_2",
-						obs:
-							"Wolf sees a wounded rabbit at distance 5, hp 30/30. Hungry.",
-					},
-					{
-						id: "merchant_3",
-						obs:
-							"Merchant has new wares. Player Hero approaching with 200 gold, neutral stance.",
-					},
-					{
-						id: "guard_4",
-						obs:
-							"Guard sees suspicious player Thief sneaking near treasure room.",
-					},
-				];
-
-				const buildFirstTick = (npc) => [
-					{ role: "system", content: SHARED_SYSTEM },
-					{
-						role: "user",
-						content: `NPC: ${npc.id}\nObservation: ${npc.obs}\n\nReply with one word — the tool name:`,
-					},
-				];
-
-				const settle = () => new Promise((r) => setTimeout(r, 500));
-
-				async function runChatFork(arg, messages) {
-					const tStart = performance.now();
-					const stream = smokeEngine.chatCompletion(arg, messages, {
-						maxTokens: 32,
-					});
-					let prefillMs = 0;
-					let firstTokenAt = 0;
-					let firstChunkSeen = false;
-					const generatedIds = [];
-					let stats = null;
-					for await (const chunk of stream) {
-						if (chunk.done) {
-							stats = chunk.stats ?? null;
-							continue;
-						}
-						if (!firstChunkSeen) {
-							firstTokenAt = performance.now();
-							prefillMs = firstTokenAt - tStart;
-							firstChunkSeen = true;
-						}
-						if (chunk.tokenId !== undefined) {
-							generatedIds.push(chunk.tokenId);
-						}
-					}
-					const wallMs = performance.now() - tStart;
-					if (
-						stats &&
-						typeof stats.timeToFirstTokenMs === "number" &&
-						stats.timeToFirstTokenMs > 0
-					) {
-						prefillMs = stats.timeToFirstTokenMs;
-					}
-					const outputText = tokenizer.decode(generatedIds);
-					return { wallMs, prefillMs, output: outputText };
-				}
-
-				const engineHandleId = smokeEngineHandleId;
-
-				// Pattern X (baseline): each NPC gets a fresh conv. First
-				// chatCompletion has no snapshot, so it prefills the entire
-				// shared prefix from scratch.
-				const patternX = [];
-				const baselineConvs = await Promise.all(
-					NPCS_FORK.map(() => smokeEngine.createConversation(engineHandleId)),
-				);
-				try {
-					for (let i = 0; i < NPCS_FORK.length; i++) {
-						const npc = NPCS_FORK[i];
-						const r = await runChatFork(baselineConvs[i], buildFirstTick(npc));
-						patternX.push({
-							npcId: npc.id,
-							prefillMs: r.prefillMs,
-							wallMs: r.wallMs,
-							output: r.output,
-						});
-						await settle();
-					}
-				} finally {
-					for (const c of baselineConvs)
-						await smokeEngine.disposeConversation(c);
-				}
-
-				// Reset the per-model session tracker so its KV doesn't bleed
-				// into pattern Y. (Without this, the engine's session tracker
-				// would already hold the shared prefix from pattern X's last
-				// call, masking the fork win — pattern Y's "base prime" call
-				// would be a session-tracker hit, not a fresh prefill.)
-				smokeEngine.resetConversation(engineHandleId);
-				await settle();
-
-				// Pattern Y (forked): prime a base conv with the shared
-				// prefix, fork per NPC, drive the same first-tick
-				// chatCompletion. The fork's first call should find the
-				// shared prefix in the inherited snapshot and prefill only
-				// the divergent NPC tail.
-				const baseConv = await smokeEngine.createConversation(engineHandleId);
-				let baseTickMs = 0;
-				try {
-					// Prime base with [system, user="ping"]. The "ping" user
-					// message is generic — every fork's first call will
-					// diverge at the first NPC-specific token, sharing only
-					// the [system] prefix. This is the realistic spawn pattern.
-					const baseStart = performance.now();
-					await runChatFork(baseConv, [
+					const buildFirstTick = (npc) => [
 						{ role: "system", content: SHARED_SYSTEM },
-						{ role: "user", content: "ping" },
-					]);
-					baseTickMs = performance.now() - baseStart;
+						{
+							role: "user",
+							content: `NPC: ${npc.id}\nObservation: ${npc.obs}\n\nReply with one word — the tool name:`,
+						},
+					];
 
-					const patternY = [];
-					const forkConvs = await Promise.all(
-						NPCS_FORK.map(() => smokeEngine.forkConversation(baseConv)),
+					const settle = () => new Promise((r) => setTimeout(r, 500));
+
+					async function runChatFork(arg, messages) {
+						const tStart = performance.now();
+						const stream = smokeEngine.chatCompletion(arg, messages, {
+							maxTokens: 32,
+						});
+						let prefillMs = 0;
+						let firstTokenAt = 0;
+						let firstChunkSeen = false;
+						const generatedIds = [];
+						let stats = null;
+						for await (const chunk of stream) {
+							if (chunk.done) {
+								stats = chunk.stats ?? null;
+								continue;
+							}
+							if (!firstChunkSeen) {
+								firstTokenAt = performance.now();
+								prefillMs = firstTokenAt - tStart;
+								firstChunkSeen = true;
+							}
+							if (chunk.tokenId !== undefined) {
+								generatedIds.push(chunk.tokenId);
+							}
+						}
+						const wallMs = performance.now() - tStart;
+						if (
+							stats &&
+							typeof stats.timeToFirstTokenMs === "number" &&
+							stats.timeToFirstTokenMs > 0
+						) {
+							prefillMs = stats.timeToFirstTokenMs;
+						}
+						const outputText = tokenizer.decode(generatedIds);
+						return { wallMs, prefillMs, output: outputText };
+					}
+
+					const engineHandleId = smokeEngineHandleId;
+
+					// Pattern X (baseline): each NPC gets a fresh conv. First
+					// chatCompletion has no snapshot, so it prefills the entire
+					// shared prefix from scratch.
+					const patternX = [];
+					const baselineConvs = await Promise.all(
+						NPCS_FORK.map(() => smokeEngine.createConversation(engineHandleId)),
 					);
 					try {
 						for (let i = 0; i < NPCS_FORK.length; i++) {
 							const npc = NPCS_FORK[i];
 							const r = await runChatFork(
-								forkConvs[i],
+								baselineConvs[i],
 								buildFirstTick(npc),
 							);
-							patternY.push({
+							patternX.push({
 								npcId: npc.id,
 								prefillMs: r.prefillMs,
 								wallMs: r.wallMs,
@@ -2163,72 +2129,125 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 							await settle();
 						}
 					} finally {
-						for (const c of forkConvs) await smokeEngine.disposeConversation(c);
+						for (const c of baselineConvs)
+							await smokeEngine.disposeConversation(c);
 					}
 
-					const med = (xs) => {
-						const s = xs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-						if (s.length === 0) return 0;
-						return s[Math.floor(s.length / 2)];
-					};
-					window.__probePrefixCacheForkResult = {
-						model: modelId,
-						baseTickMs,
-						patternX,
-						patternY,
-					};
-					log(
-						"pass",
-						`[${probeTag}] median wall: X=${med(patternX.map((r) => r.wallMs)).toFixed(0)}ms, Y=${med(patternY.map((r) => r.wallMs)).toFixed(0)}ms`,
-					);
-				} finally {
-					await smokeEngine.disposeConversation(baseConv);
-				}
-			}
+					// Reset the per-model session tracker so its KV doesn't bleed
+					// into pattern Y. (Without this, the engine's session tracker
+					// would already hold the shared prefix from pattern X's last
+					// call, masking the fork win — pattern Y's "base prime" call
+					// would be a session-tracker hit, not a fresh prefill.)
+					smokeEngine.resetModelSession(engineHandleId);
+					await settle();
 
-			// Stash a SmokeRunRecord so the post-[8/8] dashboard ingest hook
-			// can POST `run_complete`. We snapshot here (instead of re-deriving
-			// later) because `userMessage` and `smokeResult` are scoped to
-			// this try-block.
-			const decodeMs = Math.round(smokeResult.genTime ?? 0);
-			const totalMs = Math.round(smokeResult.totalTime ?? 0);
-			const prefillMs = Math.round(smokeResult.prefillMs ?? 0);
-			const tps =
-				decodeMs > 0
-					? Math.round(((smokeResult.genTokens ?? 0) / (decodeMs / 1000)) * 10) / 10
-					: 0;
-			window.__webllmSmokeRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-			window.__webllmSmokeRecord = {
-				schemaVersion: 1,
-				timestamp: new Date().toISOString(),
-				profile: profileName ?? undefined,
-				model: modelId,
-				page: "smoke",
-				thinking: thinkingEnabled ? "on" : "off",
-				mode: useWorker ? "worker" : "main",
-				prompt: userMessage,
-				params: {
-					contextLength: Number.isFinite(requestedContextLength)
-						? requestedContextLength
-						: undefined,
-					...samplingOverrides,
-				},
-				oneShot: {
-					assistantText,
-					finishReason: smokeResult.finishReason,
-					genTokens: smokeResult.genTokens ?? 0,
-					prefillMs,
-					decodeMs,
-					totalMs,
-					tokensPerSecond: tps,
-				},
-			};
-			setProgress(100);
-		} catch (e) {
-			log("fail", `[7/8] Generation failed: ${e.message}\n${e.stack || ""}`);
-			if (frameProbeCtl) frameProbeCtl.stop({ removeOverlay: true });
-			return;
-		}
+					// Pattern Y (forked): prime a base conv with the shared
+					// prefix, fork per NPC, drive the same first-tick
+					// chatCompletion. The fork's first call should find the
+					// shared prefix in the inherited snapshot and prefill only
+					// the divergent NPC tail.
+					const baseConv = await smokeEngine.createConversation(engineHandleId);
+					let baseTickMs = 0;
+					try {
+						// Prime base with [system, user="ping"]. The "ping" user
+						// message is generic — every fork's first call will
+						// diverge at the first NPC-specific token, sharing only
+						// the [system] prefix. This is the realistic spawn pattern.
+						const baseStart = performance.now();
+						await runChatFork(baseConv, [
+							{ role: "system", content: SHARED_SYSTEM },
+							{ role: "user", content: "ping" },
+						]);
+						baseTickMs = performance.now() - baseStart;
+
+						const patternY = [];
+						const forkConvs = await Promise.all(
+							NPCS_FORK.map(() => smokeEngine.forkConversation(baseConv)),
+						);
+						try {
+							for (let i = 0; i < NPCS_FORK.length; i++) {
+								const npc = NPCS_FORK[i];
+								const r = await runChatFork(forkConvs[i], buildFirstTick(npc));
+								patternY.push({
+									npcId: npc.id,
+									prefillMs: r.prefillMs,
+									wallMs: r.wallMs,
+									output: r.output,
+								});
+								await settle();
+							}
+						} finally {
+							for (const c of forkConvs)
+								await smokeEngine.disposeConversation(c);
+						}
+
+						const med = (xs) => {
+							const s = xs
+								.filter((v) => Number.isFinite(v))
+								.sort((a, b) => a - b);
+							if (s.length === 0) return 0;
+							return s[Math.floor(s.length / 2)];
+						};
+						window.__probePrefixCacheForkResult = {
+							model: modelId,
+							baseTickMs,
+							patternX,
+							patternY,
+						};
+						log(
+							"pass",
+							`[${probeTag}] median wall: X=${med(patternX.map((r) => r.wallMs)).toFixed(0)}ms, Y=${med(patternY.map((r) => r.wallMs)).toFixed(0)}ms`,
+						);
+					} finally {
+						await smokeEngine.disposeConversation(baseConv);
+					}
+				}
+
+				// Stash a SmokeRunRecord so the post-[8/8] dashboard ingest hook
+				// can POST `run_complete`. We snapshot here (instead of re-deriving
+				// later) because `userMessage` and `smokeResult` are scoped to
+				// this try-block.
+				const decodeMs = Math.round(smokeResult.genTime ?? 0);
+				const totalMs = Math.round(smokeResult.totalTime ?? 0);
+				const prefillMs = Math.round(smokeResult.prefillMs ?? 0);
+				const tps =
+					decodeMs > 0
+						? Math.round(
+								((smokeResult.genTokens ?? 0) / (decodeMs / 1000)) * 10,
+							) / 10
+						: 0;
+				window.__webllmSmokeRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+				window.__webllmSmokeRecord = {
+					schemaVersion: 1,
+					timestamp: new Date().toISOString(),
+					profile: profileName ?? undefined,
+					model: modelId,
+					page: "smoke",
+					thinking: thinkingEnabled ? "on" : "off",
+					mode: useWorker ? "worker" : "main",
+					prompt: userMessage,
+					params: {
+						contextLength: Number.isFinite(requestedContextLength)
+							? requestedContextLength
+							: undefined,
+						...samplingOverrides,
+					},
+					oneShot: {
+						assistantText,
+						finishReason: smokeResult.finishReason,
+						genTokens: smokeResult.genTokens ?? 0,
+						prefillMs,
+						decodeMs,
+						totalMs,
+						tokensPerSecond: tps,
+					},
+				};
+				setProgress(100);
+			} catch (e) {
+				log("fail", `[7/8] Generation failed: ${e.message}\n${e.stack || ""}`);
+				if (frameProbeCtl) frameProbeCtl.stop({ removeOverlay: true });
+				return;
+			}
 		}
 
 		// The [8/8] embed smoke check loads a *second* engine on a known-good
@@ -2251,86 +2270,81 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				log,
 			);
 		} else {
-		log(
-			"running",
-			"[8/8] Loading Arctic-Embed-s and computing embedding...",
-		);
-		try {
-			const embedUrl = `./models/snowflake-arctic-embed-s-f16.GGUF${assetSuffix}`;
-			const embedResp = await fetch(embedUrl);
-			if (!embedResp.ok) {
-				throw new Error(`HTTP ${embedResp.status} fetching ${embedUrl}`);
-			}
-			const embedBuf = await embedResp.arrayBuffer();
-			if (!navigator.gpu) {
-				throw new Error("navigator.gpu unavailable");
-			}
-			const embedAdapter = await navigator.gpu.requestAdapter();
-			if (!embedAdapter) {
-				throw new Error("requestAdapter() returned null");
-			}
-			const embedDevice = await embedAdapter.requestDevice();
-			const { engine: engine2, handle: embedHandle } =
-				await WebLLM.loadModelFromBuffer(
-					embedBuf,
-					"arctic-s",
-					{ device: embedDevice, memoryBudget: 500_000_000 },
-					`./${wasmVariant}${assetSuffix}`,
-				);
-			const va = await engine2.embed(embedHandle.id, "happy");
-			const vb = await engine2.embed(embedHandle.id, "joyful");
-			window.embedA = va;
-			window.embedB = vb;
+			log("running", "[8/8] Loading Arctic-Embed-s and computing embedding...");
+			try {
+				const embedUrl = `./models/snowflake-arctic-embed-s-f16.GGUF${assetSuffix}`;
+				const embedResp = await fetch(embedUrl);
+				if (!embedResp.ok) {
+					throw new Error(`HTTP ${embedResp.status} fetching ${embedUrl}`);
+				}
+				const embedBuf = await embedResp.arrayBuffer();
+				if (!navigator.gpu) {
+					throw new Error("navigator.gpu unavailable");
+				}
+				const embedAdapter = await navigator.gpu.requestAdapter();
+				if (!embedAdapter) {
+					throw new Error("requestAdapter() returned null");
+				}
+				const embedDevice = await embedAdapter.requestDevice();
+				const { engine: engine2, handle: embedHandle } =
+					await WebLLM.loadModelFromBuffer(
+						embedBuf,
+						"arctic-s",
+						{ device: embedDevice, memoryBudget: 500_000_000 },
+						`./${wasmVariant}${assetSuffix}`,
+					);
+				const va = await engine2.embed(embedHandle.id, "happy");
+				const vb = await engine2.embed(embedHandle.id, "joyful");
+				window.embedA = va;
+				window.embedB = vb;
 
-			if (va.length !== 384) {
-				throw new Error(`expected 384-dim vector, got ${va.length}`);
-			}
-			if (!Number.isFinite(va[0])) {
-				throw new Error(`embedding[0] is not finite (=${va[0]})`);
-			}
-			let na = 0;
-			for (let i = 0; i < va.length; i++) na += va[i] * va[i];
-			const norm = Math.sqrt(na);
-			if (!(norm >= 0.99 && norm <= 1.01)) {
-				throw new Error(`‖v‖=${norm.toFixed(4)} not in [0.99, 1.01]`);
-			}
-			let dot = 0;
-			let nb = 0;
-			for (let i = 0; i < va.length; i++) {
-				dot += va[i] * vb[i];
-				nb += vb[i] * vb[i];
-			}
-			const cosine =
-				na === 0 || nb === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
-			if (!(cosine >= 0.75)) {
-				throw new Error(
-					`cosine=${cosine.toFixed(4)} below 0.75 threshold`,
+				if (va.length !== 384) {
+					throw new Error(`expected 384-dim vector, got ${va.length}`);
+				}
+				if (!Number.isFinite(va[0])) {
+					throw new Error(`embedding[0] is not finite (=${va[0]})`);
+				}
+				let na = 0;
+				for (let i = 0; i < va.length; i++) na += va[i] * va[i];
+				const norm = Math.sqrt(na);
+				if (!(norm >= 0.99 && norm <= 1.01)) {
+					throw new Error(`‖v‖=${norm.toFixed(4)} not in [0.99, 1.01]`);
+				}
+				let dot = 0;
+				let nb = 0;
+				for (let i = 0; i < va.length; i++) {
+					dot += va[i] * vb[i];
+					nb += vb[i] * vb[i];
+				}
+				const cosine =
+					na === 0 || nb === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
+				if (!(cosine >= 0.75)) {
+					throw new Error(`cosine=${cosine.toFixed(4)} below 0.75 threshold`);
+				}
+				// Guard against the "all inputs produce identical vectors" pathology —
+				// would pass the ≥0.75 check trivially but indicates broken tokenization
+				// or a position/token-type embedding bug.
+				if (cosine > 0.999) {
+					throw new Error(
+						`cosine=${cosine.toFixed(6)} suspiciously close to 1.0 for distinct synonyms — likely identical-vectors bug`,
+					);
+				}
+				log(
+					"pass",
+					`[8/8] embed('happy') · embed('joyful') cosine=${cosine.toFixed(2)} (>=0.75 expected, ‖v‖=${norm.toFixed(2)})`,
 				);
-			}
-			// Guard against the "all inputs produce identical vectors" pathology —
-			// would pass the ≥0.75 check trivially but indicates broken tokenization
-			// or a position/token-type embedding bug.
-			if (cosine > 0.999) {
-				throw new Error(
-					`cosine=${cosine.toFixed(6)} suspiciously close to 1.0 for distinct synonyms — likely identical-vectors bug`,
+				await runEmbedPerfHook(
+					engine2,
+					embedHandle.id,
+					embedPerfMode,
+					embedReps,
+					embedFixture,
+					log,
 				);
+			} catch (e) {
+				log("fail", `[8/8] embed failed: ${e.message}\n${e.stack || ""}`);
+				throw e;
 			}
-			log(
-				"pass",
-				`[8/8] embed('happy') · embed('joyful') cosine=${cosine.toFixed(2)} (>=0.75 expected, ‖v‖=${norm.toFixed(2)})`,
-			);
-			await runEmbedPerfHook(
-				engine2,
-				embedHandle.id,
-				embedPerfMode,
-				embedReps,
-				embedFixture,
-				log,
-			);
-		} catch (e) {
-			log("fail", `[8/8] embed failed: ${e.message}\n${e.stack || ""}`);
-			throw e;
-		}
 		}
 
 		// Best-effort: collect + register the system profile whenever an
@@ -2496,9 +2510,14 @@ export async function runRealModelPage({ debugMode = false } = {}) {
 				detectChatTemplate,
 				interactiveRunCompletion,
 				getSmokeChatOptions: (nextParsedModel, chatTemplate) =>
-					getSmokeChatOptions(nextParsedModel, detectChatTemplate, chatTemplate, {
-						enableThinking: thinkingEnabled,
-					}),
+					getSmokeChatOptions(
+						nextParsedModel,
+						detectChatTemplate,
+						chatTemplate,
+						{
+							enableThinking: thinkingEnabled,
+						},
+					),
 				getSmokeSamplingConfig,
 				samplingOverrides,
 			});

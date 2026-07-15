@@ -9,6 +9,7 @@ frame-budget-aware execution for interactive applications.
 ## Table of Contents
 
 - [Features](#features)
+- [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
@@ -17,19 +18,43 @@ frame-budget-aware execution for interactive applications.
 - [Conversation persistence](#conversation-persistence)
 - [Development](#development)
 - [Evaluation & Live Dashboard](#evaluation--live-dashboard)
+- [Releasing](#releasing)
 - [License](#license)
 
 ## Features
 
 - **GGUF model parsing** — read quantized GGUF binary format directly in the browser
-- **Multi-model scheduling** — priority-based cooperative scheduler with configurable frame budgets
-- **KV cache management** — paged KV cache with multi-sequence sharing and cross-session prompt caching
+- **Multi-architecture inference** — Llama, Qwen, Mistral, Phi-3, Gemma 2 / Gemma 4, BERT-family encoders, and the Qwen3-Embedding causal-embedder over a patched `ggml-webgpu` WASM backend
+- **Memory budget enforcement** — `MemoryPool` tracks model-weight allocations against a configurable budget so `ModelManager.canLoad` reflects real VRAM headroom (post the 8B-ceiling / 16 GB-floor doctrine)
 - **Character system** — personas with system prompts, streaming chat, and tool / function calling
 - **Lightweight WGSL path** — pure TypeScript + WGSL shaders for sub-50M parameter models (no WASM)
-- **Memory management** — GPU buffer pool with pressure detection and priority-based eviction
-- **Game loop integration** — `requestAnimationFrame`-aware scheduling for real-time applications
+- **Three-tier embeddings** — `engine.embed()` dispatches across dedicated encoders, causal-embedders, and chat-model tap-point embedding (bucket D) gated per-model by `embeddingCapable: true`
 - **Tokenization** — SentencePiece (SPM) and Byte Pair Encoding (BPE) tokenizers
+- **Worker mode** — off-main-thread WebGPU + WASM via a typed RPC layer with an error codec that reconstructs the typed error hierarchy across `postMessage`
+- **Conversation persistence** — export/import primitives over a `WLKV` wire format (`schemaVersion` tracked as a compatibility surface) plus an optional `IndexedDBConversationStore`
 - **Evaluation harness** — micro-benchmarks, offline task evaluation, browser-driven chat regression with profile-based sweeps, and a live SSE + SQLite dashboard for side-by-side comparison of multiple runs
+
+## Prerequisites
+
+**Consumers** (apps that depend on `@paulrobello/webllm`):
+
+- A **WebGPU-capable browser**. The library is developed and regression-tested
+  against **Chrome**; the WASM backend assumes JSPI support and a 128 MiB
+  `maxStorageBufferBindingSize` per binding (Chrome-shaped constraints
+  documented in `CLAUDE.md`). Other WebGPU-shaped browsers are not tested.
+
+**Contributors** (working on this repo):
+
+- **Bun** — tooling, tests, and the eval harnesses (see `package.json` for
+  the pinned version).
+- **Chrome with WebGPU** — for the browser regression workflow (any GPU-path
+  change is gated by a manual smoke run, not the Bun suite).
+- **Emscripten SDK + a local patched `llama.cpp`** at `~/Repos/llama.cpp/`
+  on branch `webllm-browser-patches` — **only** for `make wasm-build`. Most
+  contributions do not need these; see
+  [`docs/LLAMA_CPP_PATCHES.md`](docs/LLAMA_CPP_PATCHES.md) when they do.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full contributor setup.
 
 ## Installation
 
@@ -41,37 +66,33 @@ bun add @paulrobello/webllm
 
 The library ships a WebAssembly module (`webllm-wasm.js` + `webllm-wasm.wasm`,
 plus a `webllm-wasm-mem64.*` variant for models > 3.5 GiB) that must be served
-from your application alongside the JS bundle. `WebLLM.loadModelFromBuffer`
-picks the right variant based on the model file size; pass an explicit
-`wasmUrl` to override.
+from your application alongside the JS bundle. The engine acquires its own
+WebGPU device internally via `navigator.gpu.requestAdapter()` — you do not
+pass a `device` into the config. `loadModelFromBuffer` picks the right WASM
+variant based on the model file size; pass an explicit `wasmUrl` to override.
 
 ```typescript
 import { WebLLM } from "@paulrobello/webllm";
 
-// 1. Acquire a WebGPU device.
-if (!navigator.gpu) throw new Error("WebGPU unavailable");
-const adapter = await navigator.gpu.requestAdapter();
-if (!adapter) throw new Error("requestAdapter() returned null");
-const device = await adapter.requestDevice();
-
-// 2. Fetch the GGUF model into memory.
+// 1. Fetch the GGUF model into memory.
 const buffer = await fetch("/models/llama-3.2-3b-q4_k_m.gguf")
   .then((r) => r.arrayBuffer());
 
-// 3. Load the model. This parses the GGUF, instantiates the WASM backend,
-//    uploads weights to the GPU, and returns an engine bound to the model.
+// 2. Load the model. The factory constructs the engine, acquires a WebGPU
+//    device, parses the GGUF, instantiates the WASM backend, uploads
+//    weights to the GPU, and returns an engine bound to the model.
+//    `memoryBudget` is optional and defaults to 8 GiB; set it lower to
+//    cap how much VRAM the MemoryPool will let loaded models consume.
 const { engine, handle } = await WebLLM.loadModelFromBuffer(
   buffer,
   "shopkeeper",
   {
-    device,
-    memoryBudget: 2048 * 1024 * 1024, // 2 GB VRAM headroom for KV cache
+    memoryBudget: 8 * 1024 * 1024 * 1024, // optional; defaults to 8 GiB
     cacheDir: "indexeddb://webllm-cache",
-    frameBudgetMs: 8,
   },
 );
 
-// 4a. Streaming chat completion (OpenAI-style messages):
+// 3a. Streaming chat completion (OpenAI-style messages):
 for await (const chunk of engine.chatCompletion(handle.id, [
   { role: "system", content: "You are a friendly shopkeeper." },
   { role: "user", content: "What do you sell?" },
@@ -80,7 +101,7 @@ for await (const chunk of engine.chatCompletion(handle.id, [
   if (chunk.done) console.log("\nstats:", chunk.stats);
 }
 
-// 4b. …or build a Character with a persistent system prompt and tools:
+// 3b. …or build a Character with a persistent system prompt and tools:
 const npc = engine.createCharacter({
   modelId: handle.id,
   systemPrompt: "You are a friendly shopkeeper in a fantasy village.",
@@ -108,22 +129,27 @@ await engine.shutdown();
 > If you need to wire several models against a shared engine instance, build
 > additional models with the same pattern and reuse the returned `engine`
 > reference, or pre-build the inference pipeline by hand and call
-> `engine.adoptPreloadedModel(name, pipeline)` instead.
+> `engine.adoptPreloadedModel(name, pipeline)` instead. For a worker-mode
+> setup, call `WebLLM.init({ worker: true })` and use the returned proxy.
 
 ## Architecture
 
 The TypeScript orchestration layer sits on top of two interchangeable
 inference backends: a WASM-compiled `ggml-webgpu` core for quantized
 production models, and a pure-WGSL path for tiny models that bypasses WASM
-entirely. Both backends share the same tokenization, sampling, streaming,
-and scheduling infrastructure.
+entirely. Both backends share the same tokenization, sampling, and
+streaming infrastructure. The `MemoryPool` tracks model-weight allocations
+against `WebLLMConfig.memoryBudget` (optional, defaults to 8 GiB) so that
+`ModelManager.canLoad` reflects real VRAM headroom — sizing follows the
+project's 16 GB-floor / 8B-ceiling doctrine (see `CLAUDE.md`).
 
 ```mermaid
 graph TD
     API[Developer API<br/>WebLLM · Character · ToolSystem]
-    Orchestration[TypeScript Orchestration<br/>Scheduler · KVCache · StreamRouter · MemoryPool<br/>GGUF Parser · Tokenizer · Sampler · GameLoop]
+    Orchestration[TypeScript Orchestration<br/>MemoryPool · ModelManager · KVCache<br/>Tokenizer · Conversation persistence]
     WASM[ggml-webgpu WASM<br/>Quantized ops, production path]
     WGSL[Lightweight WGSL Path<br/>Pure TypeScript + WGSL<br/>Embeddings, Classifiers, Tiny models]
+    Internal[Internal surface ./internal<br/>Scheduler · StreamRouter · GameLoop<br/>GgufParser · Sampler · Generator · GgmlWasm]
     Runtime[WebGPU Runtime<br/>Device · Queue · Pipeline Cache]
 
     API --> Orchestration
@@ -131,39 +157,58 @@ graph TD
     Orchestration --> WGSL
     WASM --> Runtime
     WGSL --> Runtime
+    Internal -.experimental.-> Orchestration
 
     style API fill:#0d47a1,stroke:#2196f3,stroke-width:3px,color:#ffffff
     style Orchestration fill:#1b5e20,stroke:#4caf50,stroke-width:2px,color:#ffffff
     style WASM fill:#e65100,stroke:#ff9800,stroke-width:2px,color:#ffffff
     style WGSL fill:#4a148c,stroke:#9c27b0,stroke-width:2px,color:#ffffff
+    style Internal fill:#37474f,stroke:#90a4ae,stroke-width:2px,color:#ffffff
     style Runtime fill:#37474f,stroke:#90a4ae,stroke-width:2px,color:#ffffff
 ```
 
+> **Note:** `Scheduler`, `StreamRouter`, `GameLoop`, and the core
+> `PipelineCache` are experimental orchestration modules that live under the
+> unstable `./internal` subpath (see
+> [`docs/RELEASING.md`](docs/RELEASING.md#publishing-surface)); they are not
+> part of the semver-stable consumer API and are not wired into the live
+> inference path the way `MemoryPool` and `ModelManager` are.
+
 ## API Overview
+
+The public root barrel (`src/index.ts`) is the semver-stable consumer
+surface. Unstable internals live under the `./internal` subpath with no
+semver guarantees; persistence helpers live under `./persistence`.
 
 | API | Description |
 |-----|-------------|
-| `WebLLM` | Main engine — initialization, model loading, character management |
+| `WebLLM` | Main engine — `init`, model loading, chat completion, conversation + character management, embeddings |
 | `Character` | Chat persona with system prompt, tools, and streaming output |
 | `CharacterManager` | Lifecycle management for character instances |
 | `ToolSystem` | Function / tool calling with XML and JSON pattern parsing |
-| `Tokenizer` | SPM and BPE tokenization with encode / decode |
-| `Sampler` | Token sampling with temperature, top-k, top-p, repetition penalty |
-| `Generator` | Autoregressive generation loop with async generators |
-| `StreamRouter` | Fan-out token streaming to multiple consumers with backpressure |
-| `GgufParser` | GGUF binary format parser for model files |
+| `Tokenizer`, `StreamingDecoder` | SPM and BPE tokenization with encode / decode |
+| `KVCache` | Per-model KV cache bookkeeping (real KV state lives WASM-side) |
 | `ModelLoader` | Model loading with hyperparameter and tokenizer extraction |
-| `KVCache` | Paged KV cache with multi-sequence sharing |
-| `InferenceSession` | Per-session inference state tracking |
-| `Scheduler` | Priority-based cooperative task scheduler |
-| `MemoryPool` | GPU buffer allocation with pressure-based eviction |
+| `MemoryPool` | Tracks weight allocations against `WebLLMConfig.memoryBudget`; feeds `ModelManager.canLoad` |
 | `ModelManager` | Multi-model lifecycle and memory coordination |
-| `PipelineCache` | IndexedDB-backed WebGPU pipeline cache |
-| `GameLoop` | Frame-budget-aware game loop for inference ticks |
-| `GgmlWasm` | WebAssembly bridge for ggml-webgpu tensor operations |
-| `LightweightModel` | Pure WGSL inference for small models |
-| `engine.removeCharacter(id)` | Remove a registered character by id |
-| `engine.shutdown()` | Release GPU buffers, dispose inference engines, and shut down WASM modules for all loaded models |
+| `EncoderInference`, `CausalLMEmbedder` | Encoder and causal-embedder inference engines (tiers 1 and 2 of `engine.embed()`) |
+| `runTask`, `runTasks`, `score`, `EngineDeadError` | Evaluation runner + scorer primitives (library-reusable) |
+| `registerCustomScorer`, `getCustomScorer`, `hasCustomScorer`, `listCustomScorer` | Custom-scorer registry for eval tasks |
+| `collectBrowserSystemProfile`, `computeSystemId` | Browser system-profile fingerprinting for eval |
+| `MISTRAL_DEFAULTS`, `PHI3_DEFAULTS`, `QWEN_THINKING_DEFAULTS`, `QWEN_NON_THINKING_DEFAULTS` | Sampling profiles for chat-template families |
+| `WebLLMError` and the typed error hierarchy (`ModelNotFoundError`, `IncompatibleConversationError`, `CorruptBlobError`, `PersistenceQuotaError`, …) | Typed errors thrown across the consumer surface |
+
+Persistence surface (imported from `@paulrobello/webllm/persistence`):
+`IndexedDBConversationStore`, plus `WebLLM.prototype.exportConversation`
+and `WebLLM.prototype.importConversation` for apps that need OPFS,
+server-side sync, or encrypted-at-rest via their own `Uint8Array` store
+against the same `WLKV` wire format.
+
+Internals (imported from `@paulrobello/webllm/internal` — no semver
+guarantees, used by the smoke harness and power users): `ModelInference`,
+`GgmlWasm`, `GgufParser`, `InferenceSession`, `Sampler`, `Generator`,
+`LightweightModel`, `Scheduler`, `StreamRouter`, `GameLoop`,
+`PipelineCache`, `detectChatTemplate`, `encodeChatPrompt`.
 
 ## Embeddings
 
@@ -296,7 +341,10 @@ make bench-full                       # Speed + accuracy across the full profile
 
 Browser-driven targets automatically restart a fresh smoke-test server each
 run. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology and
-metric definitions.
+metric definitions, and [`docs/reference/environment.md`](docs/reference/environment.md)
+for every `WEBLLM_*` environment variable and Makefile override the
+harnesses consume (`WEBLLM_LIVE_BENCH_URL`, `WEBLLM_BENCH_EVAL_TEMPERATURE`,
+`WEBLLM_STALL_TIMEOUT_MS`, `PERF_MODEL`, etc.).
 
 ## Evaluation & Live Dashboard
 
@@ -351,12 +399,28 @@ for reproducible comparison. Profile sets like `llama-vs-qwen`,
 `temperature-sweep`, and `thinking-modes` group related profiles for
 one-command sweeps.
 
+## Releasing
+
+Releases go through CI/CD only — never run `npm publish` locally. The flow
+is: bump `version` in `package.json` → move `CHANGELOG.md` entries from
+`[Unreleased]` into a new version section → tag `v<semver>` → push the tag
+so CI publishes. Conversation-persistence `schemaVersion` bumps are
+breaking changes for saved blobs and must be recorded in `CHANGELOG.md`.
+See [`docs/RELEASING.md`](docs/RELEASING.md) for the full flow,
+publishing-surface rules, and the tracked compatibility surfaces.
+
 ## Related Documentation
 
+- [`CHANGELOG.md`](CHANGELOG.md) — versioned change history
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, ship gate, browser workflow, commit conventions
+- [`docs/MODEL_SUPPORT.md`](docs/MODEL_SUPPORT.md) — supported models, quants, architectures, and embeddings
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — benchmark methodology and metrics
+- [`docs/LLAMA_CPP_PATCHES.md`](docs/LLAMA_CPP_PATCHES.md) — local patch inventory and rebase procedure
+- [`docs/reference/environment.md`](docs/reference/environment.md) — benchmark and harness environment variables
+- [`docs/RELEASING.md`](docs/RELEASING.md) — release flow, publishing surface, compatibility surfaces
 - [`docs/DOCUMENTATION_STYLE_GUIDE.md`](docs/DOCUMENTATION_STYLE_GUIDE.md) — documentation conventions
 - [`CLAUDE.md`](CLAUDE.md) — repo guidance for Claude Code sessions
 
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE).

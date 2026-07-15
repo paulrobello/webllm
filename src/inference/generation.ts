@@ -20,9 +20,9 @@ export interface GenerationConfig {
 	/** Repetition penalty multiplier. 1.0 = disabled. */
 	repetitionPenalty: number;
 	/** Optional custom stop token IDs that halt generation. */
-	stopTokens?: number[];
+	stopTokens?: number[] | undefined;
 	/** Optional AbortSignal to cancel generation mid-stream. */
-	signal?: AbortSignal;
+	signal?: AbortSignal | undefined;
 }
 
 /**
@@ -151,12 +151,14 @@ export interface GenerationStreamOptions {
 		positions: number[],
 	) => Float32Array | Promise<Float32Array>;
 	config: InternalGenerationOptions;
-	forwardDecode?: (
-		tokenIds: number[],
-		positions: number[],
-		mode: DecodeMode,
-		topK?: number,
-	) => Promise<DecodeResult>;
+	forwardDecode?:
+		| ((
+				tokenIds: number[],
+				positions: number[],
+				mode: DecodeMode,
+				topK?: number,
+		  ) => Promise<DecodeResult>)
+		| undefined;
 }
 
 /**
@@ -165,7 +167,7 @@ export interface GenerationStreamOptions {
  * Ties together tokenization, forward passes, sampling, and session management
  * into a single async generator that yields tokens as they are produced.
  *
- * biome-ignore lint/complexity/noStaticOnlyClass: Class provides namespace for generation; may gain instance state in future phases.
+ * biome-ignore lint/complexity/noStaticOnlyClass: namespace-style grouping; exported API — module conversion tracked as enhancement.
  */
 export class Generator {
 	/**

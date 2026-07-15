@@ -1,4 +1,4 @@
-.PHONY: build test lint lint-fix fmt typecheck checkall clean install deps \
+.PHONY: build test check-skip-count check-jspi lint lint-fix fmt typecheck checkall clean install deps \
         wasm-build wasm-build-wasm32 wasm-build-mem64 wasm-build-jsep wasm-clean \
         bench bench-perf bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full \
@@ -48,6 +48,12 @@ dev: ## Build and watch for changes
 test: ## Run all tests
 	bun run test
 
+check-skip-count: ## Enforce static skip-count ratchet (QA-004) — fails if skipIf( count in tests/ exceeds pin
+	bun run scripts/check-skip-count.ts
+
+check-jspi: ## Enforce JSPI/ABI build-time invariants (ARC-012) — every webllm-wasm* target links -sJSPI_EXPORTS; every JSPI export binding is awaited (or pinned fire-and-forget); never a synchronous Number/BigInt/>>> coercion on a JSPI call
+	bun run scripts/check-jspi-exports.ts
+
 # ---------------------------------------------------------------------------
 # Code Quality
 # ---------------------------------------------------------------------------
@@ -66,7 +72,7 @@ typecheck: ## Run TypeScript type checking (production: src/**)
 typecheck-tests: ## Run TypeScript type checking against tests/** under tsconfig.test.json
 	bun run typecheck:tests
 
-checkall: fmt lint typecheck typecheck-tests test ## Format, lint, typecheck (src + tests), and test
+checkall: fmt lint typecheck typecheck-tests test check-skip-count check-jspi ## Format, lint, typecheck (src + tests), test, enforce the skip-count ratchet, and enforce JSPI/ABI invariants
 
 pre-commit: ## Run pre-commit hooks across all files (secret scan + fmt/lint/typecheck)
 	pre-commit run --all-files
@@ -201,6 +207,7 @@ vendor-refresh: ## Refresh smoke-test/vendor/ from node_modules after bumping ch
 # ---------------------------------------------------------------------------
 smoke-test: wasm-build ## Bundle + copy WASM artifacts (both wasm32 and wasm64) into smoke-test/
 	bun build src/index.ts --outfile smoke-test/webllm-bundle.js --target browser
+	bun build src/internal.ts --outfile smoke-test/webllm-internal.js --target browser
 	bun build src/persistence/indexeddb-store.ts --outfile smoke-test/webllm-persistence.js --target browser
 	bun build eval/models.ts --outfile smoke-test/webllm-models.js --target browser
 	cp src/wasm/build/webllm-wasm.js src/wasm/build/webllm-wasm.wasm smoke-test/

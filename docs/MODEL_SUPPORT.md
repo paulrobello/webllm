@@ -16,6 +16,7 @@ model, quantization, or chat variant.
   - [Chat Templates](#chat-templates)
   - [Tool Calling](#tool-calling)
   - [Decode Modes](#decode-modes)
+  - [Embeddings](#embeddings)
   - [Registered Models](#registered-models)
 - [Work Needed](#work-needed)
   - [New Architectures](#new-architectures)
@@ -97,19 +98,28 @@ dicts.
 The `ModelArchitecture` union in `src/core/types.ts` declares the set.
 `getRopeModeForArchitecture` in `src/inference/model-inference.ts` is the main
 place architecture branches: qwen uses NEOX RoPE layout, everything else uses
-NORMAL.
+NORMAL. The encoder vs. causal-embedder vs. causal-LM split is dispatched in
+`engine.embed()` via `isEncoderArchitecture` / `isCausalEmbedderArchitecture`
+(see [Embeddings](#encoder-forward-pass-for-the-embedding-track)).
 
 | Architecture | Status | Notes |
 |--------------|--------|-------|
-| `llama` | Supported | Llama 3/3.2, SmolLM2, TinyLlama, Hermes-3 |
-| `qwen` | Supported | Qwen2.5, Qwen2.5-Coder, Qwen3 (NEOX RoPE) |
-| `gemma` | Supported | Gemma 2 |
-| `phi` | Supported | Phi-3.5-Mini |
-| `mistral` | Declared only | No registered model; forward path untested |
+| `llama` | Supported | Llama 3/3.2, Llama 3.1 8B, SmolLM2, TinyLlama, Hermes-3 |
+| `qwen` | Supported | Qwen2.5, Qwen2.5-Coder, Qwen3 family (0.6B–14B incl. 8B); NEOX RoPE |
+| `mistral` | Supported | Mistral-7B-Instruct-v0.3 (Q4_K_S canonical + Q3_K_M / Q5_K_M / IQ4_XS probes), Mistral-Nemo-12B |
+| `phi3` | Supported | Phi-3.5-Mini (fused QKV, fused gate-up FFN). `phi` is reserved for Phi-1/Phi-2 |
+| `gemma` | Supported | Gemma 2 2B IT (logit/attn soft-cap, sliding-window, (1+w) RMSNorm) |
+| `gemma4` | Supported | Gemma 4 E2B (PLE + dual-RoPE + shared-KV + SWA + QK-norm; closed 2026-05-12) |
+| `bert` | Supported (encoder) | Snowflake Arctic-Embed S/M, BGE small/large — bidirectional, CLS/mean pooling |
+| `nomic-bert` | Supported (encoder) | Nomic Embed Text v1.5 |
+| `jina-bert-v2` | Supported (encoder) | Jina Embeddings v2 Base EN (ALiBi bias) |
+| `qwen3-embedding` | Supported (causal-embedder) | Qwen3-Embedding 0.6B (hybrid quant), last-token pooling |
 
-Architectures beyond this list currently fall through the parser's fallback
-and are read as generic llama — usually they load but generate garbage, and
-some crash during forward when tensor names don't match the expected layout.
+Architectures in the union but not yet exercised by a registered model
+(`gemma2`, `gemma3`, `mixtral`, `deepseek`) currently fall through the
+parser's fallback and are read as their nearest registered cousin — usually
+they load but generate garbage, and some crash during forward when tensor
+names don't match the expected layout.
 
 ### Quantization Types
 
@@ -120,14 +130,19 @@ The WASM build exports a fixed set of GGML type IDs via
 |--------|-------|---------|
 | Float | `F32`, `F16`, `BF16` | Embedding models, scales |
 | Integer | `I32` | Positions, token IDs |
-| Legacy quant | `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1` | Legacy GGUF exports |
-| K-quant | `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K` | Modern `q4f16` / `q5f16` builds |
+| Legacy quant | `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1` | Legacy GGUF exports; wave-1 fleet pins Q4_0 for cross-family GEMV parity |
+| K-quant | `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K` | Modern `q4f16` / `q4km` / `q5km` builds; Q3_K correctness restored by patch 11 |
+| I-quant | `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ3_XXS`, `IQ3_S`, `IQ4_NL`, `IQ4_XS` | IQ3_M (`IQ3_S` tensors) and IQ4_XS are canonical fleet quants |
+| Hybrid | `Q4_K` token_embd + `F16` body | Per-binding 128 MiB cap workaround for large-vocab embedders (Qwen3-Embedding) |
 
-In practice the production path is `q4f16` (Q4_K weights with FP16 scales),
-with Q4_0 on one legacy entry and F32 on the Arctic-Embed embedding models.
-See `eval/models.ts`.
+In practice the production path is `q4f16` (Q4_K weights with FP16 scales).
+IQ3_M is a first-class `QuantFormat` (`"iq3m"` in `eval/models.ts`) with two
+canonical 8B fleet members (`llama-3.1-8b-instruct-iq3m`, `qwen3-8b-iq3m`),
+and Mistral-7B-Instruct-v0.3 ships an IQ4_XS probe. Q3_K_M is coherent
+post-patch-11 (UB shift-by-32 fix in `load_u32_at_src`). F32/F16 covers the
+encoder embedding models. See `eval/models.ts`.
 
-> **📝 Note:** Adding a new quantization type requires changes in the local
+> **Note:** Adding a new quantization type requires changes in the local
 > `llama.cpp` branch and a rebuild, not just TypeScript edits. See
 > [docs/LLAMA_CPP_PATCHES.md](LLAMA_CPP_PATCHES.md).
 
@@ -189,18 +204,72 @@ based on sampler settings and whether tokens need steering.
 Only Qwen's thinking path currently triggers `full`; everything else that
 samples with top-K takes `topk`; temperature-0 regression tests take `greedy`.
 
+### Embeddings
+
+`engine.embed(modelId, text)` returns an L2-normalized `Float32Array` and
+dispatches across three tiers in priority order. Which tier fires is decided
+by the model's architecture and registration flags, not by the caller.
+
+| Tier | Engine kind | Gate | Example models |
+|------|-------------|------|----------------|
+| 1 — Encoder | `EncoderInference` (`bert`, `nomic-bert`, `jina-bert-v2`) | `ENCODER_ARCHITECTURES` membership | Arctic-Embed S/M, BGE small/large, Nomic, Jina v2 |
+| 2 — Causal-embedder | `CausalLMEmbedder` (`qwen3-embedding`) | `CAUSAL_EMBEDDER_ARCHITECTURES` membership | Qwen3-Embedding 0.6B (hybrid quant) |
+| 3 — Chat-model tap (bucket D) | `ModelInference.embed()` | `embeddingCapable: true` in `eval/models.ts` + `ModelLoadOptions` | `qwen3-8b-iq3m` |
+
+Tier 1 runs a bidirectional BERT-style forward (no causal mask, no KV cache,
+single pass) implemented in `src/inference/encoder-inference.ts` with CLS or
+mean pooling per the model's `poolingType`. Tier 2 runs a causal-LM forward
+without a KV cache and last-token-pools, implemented in
+`src/inference/causal-embedder-inference.ts`. Tier 3 taps the
+post-`output_norm` hidden state of an already-loaded chat model
+(last-token or mean pooling via `embeddingPooling`), letting a single
+loaded model serve both chat and embedding queries — significant VRAM
+savings on the 16 GB floor at a 5-15% MTEB quality delta vs a dedicated
+embedder.
+
+Tier 3 is opt-in per model: set `embeddingCapable: true` in the
+`eval/models.ts` registration entry only after the bucket D parity gate
+passes (`cos >= 0.999` for q4f16/q0f16, `cos >= 0.995` for hybrid,
+`cos >= 0.90` for IQ3_M, each measured against a PyTorch f16 reference).
+Phi-3.5-Mini was probed and deliberately **not** enabled — its Q4_K_M
+quant noise compounds with high last-token anisotropy, producing
+semantically random vectors (see
+`eval/reports/bucket-d-phi3-parity-2026-04-30/SUMMARY.md`). The closure
+report and full parity data for the shipped tier-3 fleet live at
+`eval/reports/bucket-d-parity-2026-04-29/SUMMARY.md`.
+
+The embedding eval dimension (`eval/tasks/embedding.ts`, 8 tasks) scores
+via cosine similarity and exercises whichever tier the registered model
+dispatches to.
+
 ### Registered Models
 
-14 models ship in `eval/models.ts` and are exercised by the smoke matrix and
-full bench. Dimensions match `src/core/types.ts`.
+The canonical source of truth is `eval/models.ts` — 30 models ship today,
+exercised by the smoke matrix and full bench. Per-model rows rot quickly, so
+do not transcribe the list here. Enumerate the live set instead:
 
-| Family | Model ID | Quant |
-|--------|----------|-------|
-| Llama | `smollm2-360m-q4f16`, `smollm2-1.7b-q4f16`, `llama-3.2-1b-q4f16`, `llama-3.2-3b-q4f16`, `hermes-3-llama-3.2-3b-q4f16`, `tinyllama-1.1b-chat-q4_0` | Q4_K-F16 (one Q4_0) |
-| Qwen | `qwen3-0.6b-q4f16`, `qwen3-1.7b-q4f16`, `qwen3-4b-q4f16`, `qwen2.5-1.5b-q4f16`, `qwen2.5-3b-q4f16`, `qwen2.5-coder-1.5b-q4f16` | Q4_K-F16 |
-| Phi | `phi-3.5-mini-q4f16` | Q4_K-F16 |
-| Gemma | `gemma-2-2b-q4f16` | Q4_K-F16 |
-| Embedding (Llama) | `snowflake-arctic-embed-s-q0f32-b4`, `snowflake-arctic-embed-m-q0f32-b4` | F32 |
+```bash
+make bench-eval-models        # list id, params, VRAM, caps, license
+# or read eval/models.ts directly
+```
+
+The architecture-family breakdown (families change rarely; this table is
+stable) at the time of writing:
+
+| Family | Architecture | Registered models | Role |
+|--------|--------------|------------------|------|
+| Llama 3.x / SmolLM2 / TinyLlama / Hermes 3 | `llama` | 7 | Chat (incl. Llama-3.1-8B IQ3_M) |
+| Qwen2.5 / Qwen2.5-Coder / Qwen3 | `qwen` | 8 | Chat + tool calling (incl. Qwen3-8B IQ3 M, Qwen3-14B) |
+| Mistral | `mistral` | 5 | Chat (7B Q4_K_S canonical + Q3_K_M/Q5_K_M/IQ4_XS probes; Nemo-12B) |
+| Phi | `phi3` | 1 | Chat (Phi-3.5-Mini Q4_K_M, fused-forward) |
+| Gemma 2 / Gemma 4 | `gemma`, `gemma4` | 2 | Chat (Gemma-2-2B; Gemma-4-E2B PLE+dual-RoPE+SWA) |
+| Arctic-Embed / BGE | `bert` | 4 | Encoder embeddings (F32/F16) |
+| Jina Embeddings v2 | `jina-bert-v2` | 1 | Encoder embeddings (ALiBi) |
+| Nomic Embed Text | `nomic-bert` | 1 | Encoder embeddings |
+| Qwen3-Embedding | `qwen3-embedding` | 1 | Causal-embedder (hybrid quant) |
+
+Mistral-7B-Instruct-v0.3 (`mistral-7b-instruct-v0.3-q4ks`) is a member of
+the canonical 6-model ship-gate fleet — registered, not "declared only".
 
 ## Work Needed
 
@@ -220,11 +289,15 @@ Adding an architecture cleanly is a multi-file change. See
 
 ### New Quantization Types
 
-The WASM build only exposes the GGML types enumerated above. Anything not in
-that list — **i-quants** (`IQ2_XS`, `IQ3_XXS`, `IQ4_NL`, …), **ternary**
-(`TQ1_0`, `TQ2_0`), **MXFP4** — will fail at weight load: either the GGUF
-type ID is unknown to `ggml-webgpu`, or the WebGPU backend has no shader for
-it.
+The WASM build exposes the GGML types enumerated in `src/inference/ggml-wasm.ts`
+and `GgmlType` in `src/core/types.ts`. Most i-quants already work — `IQ3_S`
+(the tensor type behind IQ3_M) and `IQ4_XS` are canonical fleet quants with
+registered models (`llama-3.1-8b-instruct-iq3m`, `qwen3-8b-iq3m`,
+`mistral-7b-instruct-v0.3-iq4xs`). Anything genuinely absent from that list —
+**ternary** (`TQ1_0`, `TQ2_0`), **MXFP4**, or smaller i-quants not yet
+exercised (`IQ1_S`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ3_XXS`, `IQ4_NL`) —
+will fail at weight load: either the GGUF type ID is unknown to
+`ggml-webgpu`, or the WebGPU backend has no shader for it.
 
 Adding one of these requires:
 
@@ -234,7 +307,7 @@ Adding one of these requires:
 - Update `GgmlType` in `src/inference/ggml-wasm.ts` with the new type ID
 - Add a model to `eval/models.ts` that actually exercises it
 
-> **⚠️ Warning:** Dequant-on-read is cheap to add but slow. Direct
+> **Warning:** Dequant-on-read is cheap to add but slow. Direct
 > `mul_mat(quant, F32)` kernels are what makes q4f16 performant; plan on
 > writing both paths.
 
@@ -272,34 +345,6 @@ parameters (original context length, attention factor, per-frequency
 scaling table) that aren't plumbed through `ModelHyperparams`. Using one of
 those models today falls back to plain linear scaling, which works up to
 the base context but degrades sharply past it.
-
-### Encoder Forward Pass for the Embedding Track
-
-The `embedding` dimension scores by cosine similarity between two vectors
-produced by `engine.embed(modelId, text)`. The scoring primitive
-(`scoreCosineSimilarity` in `src/evaluation/scorer.ts`) and the task set
-(`eval/tasks/embedding.ts`) are in place; what's missing is the encoder
-itself. The `snowflake-arctic-embed-*` models in `eval/models.ts` declare
-`capabilities.embedding: true` but there's no BERT-style forward pass in
-`ModelInference` to actually produce the vectors.
-
-What needs to land:
-
-- **Encoder graph** — bidirectional attention (no causal mask), no KV
-  cache, single-pass over the full input. Arctic-Embed is BERT-small/medium
-  with RoPE disabled and absolute positional embeddings.
-- **Pooling** — CLS token embedding or mean pooling over the last hidden
-  state, matching the model's training.
-- **Public API** — `WebLLM.embed(modelId, text): Promise<Float32Array>`
-  that tokenizes, runs the encoder, pools, and L2-normalizes.
-- **Architecture branch** — the model loader currently maps everything to
-  the causal-LM layout; BERT-style models need their own weight layout and
-  `ModelInference` entry point.
-
-Until that lands, `--dimension embedding` is auto-skipped on every
-registered model. Explicit `--dimension embedding` raises the
-not-implemented error from whatever path was stubbed so the gap is
-visible during debugging.
 
 ### Multimodal Inputs
 

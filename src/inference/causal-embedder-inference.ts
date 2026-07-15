@@ -1,5 +1,6 @@
 import {
 	CAUSAL_EMBEDDER_ARCHITECTURES,
+	type InferencePipeline,
 	isCausalEmbedderArchitecture,
 	type ModelHyperparams,
 } from "../core/types.js";
@@ -53,7 +54,8 @@ interface CausalEmbedderWeights {
  *
  * The `embed()` method and `forwardEmbed()` helper land in Task 6.
  */
-export class CausalLMEmbedder {
+export class CausalLMEmbedder implements InferencePipeline {
+	public readonly kind = "causal-embedder" as const;
 	private wasm: GgmlWasm;
 	private hp: ModelHyperparams;
 	private weights: CausalEmbedderWeights | null = null;

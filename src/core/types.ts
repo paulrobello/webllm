@@ -8,13 +8,25 @@
  *   callbacks; everything else falls back to the CPU backend. Loads
  *   `webllm-wasm-jsep.{js,wasm}`. See
  *   `docs/superpowers/specs/2026-05-05-p2-v2-jsep-prototype-design.md`.
+ *
+ * @experimental The `"jsep"` arm is active Phase-3 R&D and ships without
+ * semver guarantees; its declaration emit is excluded from the published
+ * package types (see `scripts/build-package.ts`). The `"default"` arm is
+ * the only production-supported backend.
  */
 export type Backend = "default" | "jsep";
 
 /** Configuration for initializing a WebLLM engine instance. */
 export interface WebLLMConfig {
 	cacheDir?: string;
-	memoryBudget: number;
+	/**
+	 * Total bytes the MemoryPool budgets across all loaded models. Optional;
+	 * defaults to 8 GiB when omitted (see {@link DEFAULT_MEMORY_BUDGET_BYTES}
+	 * in `engine.ts`). Sized per CLAUDE.md's 16 GB-floor / 8B-ceiling
+	 * doctrine: on the floor tier, ~7-8 GiB is the realistic model slice
+	 * after WebGPU/Three.js/KV overhead.
+	 */
+	memoryBudget?: number;
 	frameBudgetMs?: number;
 	/** Maximum concurrent conversations per loaded model. Default: 4. */
 	maxConversations?: number;
@@ -134,6 +146,48 @@ export function isCausalEmbedderArchitecture(a: ModelArchitecture): boolean {
 	return (CAUSAL_EMBEDDER_ARCHITECTURES as readonly string[]).includes(a);
 }
 
+/**
+ * Shared contract across the three inference engine kinds:
+ * {@link ModelInference} (chat / causal-LM path), {@link EncoderInference}
+ * (bidirectional BERT family), and {@link CausalLMEmbedder} (causal-LM-
+ * derived retrieval path). Resolves ARC-006.
+ *
+ * Adding a fourth engine kind is additive: `implements InferencePipeline`,
+ * declare a new {@link InferencePipelineKind} literal, and the engine can
+ * dispatch on {@link kind} rather than `instanceof` / architecture-string
+ * guards. The engine's {@link ModelRecord} (ARC-004) keeps its three
+ * type-partitioned optional fields (`inference` / `encoder` /
+ * `causalEmbedder`) — this interface unifies the *type seam* across the
+ * three pipeline classes, not the ModelRecord containers.
+ *
+ * `embed` is declared against the narrowest common call shape so all three
+ * current implementations satisfy it; chat-model {@link ModelInference.embed}
+ * widens with an optional `opts` arg that is ignored by the encoder and
+ * causal-embedder paths. Engine method signatures that return a generic
+ * pipeline still thread the concrete
+ * `ModelInference | EncoderInference | CausalLMEmbedder` union so chat-only
+ * call sites keep their concrete types without forced casts.
+ */
+export type InferencePipelineKind = "chat" | "encoder" | "causal-embedder";
+
+export interface InferencePipeline {
+	/** Discriminant selecting which engine kind owns this pipeline. */
+	readonly kind: InferencePipelineKind;
+	/**
+	 * Release weights, GPU buffers, and (for chat) the KV cache. Invoked by
+	 * `WebLLM.unloadModel` / `WebLLM.shutdown` on every pipeline a
+	 * `ModelRecord` holds.
+	 */
+	dispose(): void | Promise<void>;
+	/**
+	 * Optional embedding capability. Present on all three current kinds
+	 * (encoder CLS/mean pool, causal-embedder last-token pool, chat-model
+	 * tap-point under `ModelLoadOptions.embeddingCapable`). Declared against
+	 * the narrowest common call shape; see the interface doc above.
+	 */
+	embed?(tokenIds: Int32Array): Promise<Float32Array>;
+}
+
 /** Metadata for a single tensor within a GGUF model file. */
 export interface TensorInfo {
 	name: string;
@@ -221,20 +275,20 @@ export interface ModelHyperparams {
 	 */
 	quantType: string;
 	/** Pooling strategy for `embed()`. CLS/MEAN for BERT-family encoders; LAST-TOKEN for causal-LM-derived embedders (e.g., Qwen3-Embedding). */
-	poolingType?: "cls" | "mean" | "last-token";
+	poolingType?: "cls" | "mean" | "last-token" | undefined;
 	/**
 	 * When false, attention is bidirectional (BERT-style encoders).
 	 * Only encoder architectures populate this field; `undefined` means causal
 	 * attention (the decoder default).
 	 */
-	causalAttention?: boolean;
+	causalAttention?: boolean | undefined;
 	/**
 	 * Only jina-bert-v2 populates this; the value is passed straight to
 	 * `opSoftMaxExt`'s `max_bias` arg, which causes ggml's softmax to apply
 	 * the standard ALiBi linear bias (slopes derived as `2^(-8/n_head * h)`).
 	 * Defaults to 8.0 when GGUF metadata omits the key (gaianet mirror).
 	 */
-	alibiMaxBias?: number;
+	alibiMaxBias?: number | undefined;
 	/**
 	 * Per-layer head dimension. When present, dispatch code MUST index
 	 * by layer (`embeddingHeadLengthPerLayer[i]`) instead of reading the
@@ -292,27 +346,27 @@ export interface ModelHyperparams {
 	 *
 	 * Absent for architectures without KV sharing (most models).
 	 */
-	kvReuseFromLayer?: (number | null)[];
+	kvReuseFromLayer?: (number | null)[] | undefined;
 	/**
 	 * Final logit softcap value (`tanh(logits / s) * s`). 0 → no softcap.
 	 * Read from GGUF `<arch>.final_logit_softcapping`. Present for
 	 * Gemma family models (Gemma 4 E2B reports 30.0).
 	 */
-	finalLogitSoftcap?: number;
+	finalLogitSoftcap?: number | undefined;
 	/**
 	 * Attention logit softcap value (`tanh(qk / s) * s` pre-softmax).
 	 * 0 → no softcap. Read from GGUF `<arch>.attn_logit_softcapping`.
 	 * Present on Gemma 2 (50.0). Gemma 4 has no attention soft-cap
 	 * (f_attention_scale = 1.0 with QK-norm instead).
 	 */
-	attnLogitSoftcap?: number;
+	attnLogitSoftcap?: number | undefined;
 	/**
 	 * Per-Layer Embedding (PLE) dimension — the short residual dimension (256
 	 * for Gemma 4 E2B) injected at each block input via the PLE lookup table.
 	 * Read from `<arch>.embedding_length_per_layer_input`. Absent for all
 	 * non-Gemma-4 architectures.
 	 */
-	pleDim?: number;
+	pleDim?: number | undefined;
 }
 
 /** GPU buffer mappings and tensor metadata for a loaded model's weights. */
@@ -335,8 +389,8 @@ export interface ModelEntry {
 	memoryAllocations: number[];
 	loaded: boolean;
 	activeSessions: number;
-	embeddingCapable?: boolean;
-	embeddingPooling?: "last-token" | "mean";
+	embeddingCapable?: boolean | undefined;
+	embeddingPooling?: "last-token" | "mean" | undefined;
 	/** SHA-256 of canonical-key-sorted tokenizerConfig JSON; computed once at load. */
 	tokenizerHash?: string;
 	/** Cached fingerprint for persistence validation; computed once at load. */

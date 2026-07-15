@@ -106,7 +106,7 @@ function syncFilterControlsToState() {
 }
 
 // ── SSE connection ────────────────────────────────────────────────
-let eventSource = null;
+let _eventSource = null;
 let lastSeq = 0;
 
 function setStatus(kind, text, meta = "") {
@@ -119,7 +119,7 @@ function setStatus(kind, text, meta = "") {
 function connect() {
 	const url = lastSeq > 0 ? `/stream?lastSeq=${lastSeq}` : "/stream";
 	const es = new EventSource(url);
-	eventSource = es;
+	_eventSource = es;
 
 	es.addEventListener("open", () => {
 		setStatus("ok", "connected");
@@ -379,9 +379,7 @@ function flashFreshBar(key) {
 	state.freshBarKeys.add(key);
 	setTimeout(() => {
 		state.freshBarKeys.delete(key);
-		const el = document.querySelector(
-			`.bar-row[data-key="${cssEscape(key)}"]`,
-		);
+		const el = document.querySelector(`.bar-row[data-key="${cssEscape(key)}"]`);
 		el?.classList.remove("fresh");
 	}, 1800);
 }
@@ -495,7 +493,8 @@ function renderRunning() {
 		progress.setAttribute("aria-valuemax", String(total));
 		progress.setAttribute("aria-valuenow", String(completed));
 		el.querySelector(".eval-progress-fill").style.width = `${pct.toFixed(2)}%`;
-		el.querySelector(".eval-progress-label").textContent = `${completed}/${total}`;
+		el.querySelector(".eval-progress-label").textContent =
+			`${completed}/${total}`;
 		el.querySelector(".eval-passing").textContent = `${passed} passing`;
 	}
 
@@ -768,7 +767,7 @@ function renderToolChart() {
 	const latestByKey = new Map();
 	for (const ev of state.evalsByEvalId.values()) {
 		const tc = ev.dimensions?.["tool-calling"];
-		if (!tc || !tc.total) continue;
+		if (!tc?.total) continue;
 		const key = ev.profile ?? ev.modelId;
 		const prev = latestByKey.get(key);
 		if (!prev || prev.timestamp < ev.timestamp) latestByKey.set(key, ev);
@@ -893,7 +892,10 @@ function renderScatterChart() {
 	for (const [key, run] of runByKey) {
 		const ev = evalByKey.get(key);
 		if (!ev) continue;
-		const avgTps = ((run.oneShot?.tokensPerSecond ?? 0) + (run.interactive?.tokensPerSecond ?? 0)) / 2;
+		const avgTps =
+			((run.oneShot?.tokensPerSecond ?? 0) +
+				(run.interactive?.tokensPerSecond ?? 0)) /
+			2;
 		if (avgTps === 0) continue;
 		const modelId = ev.modelId ?? run.model ?? key;
 		const thinking = ev.thinking === "on" ? "on" : "off";
@@ -913,7 +915,10 @@ function renderScatterChart() {
 	if (pointsByFamily.size === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
-		if (scatterChartInstance) { scatterChartInstance.destroy(); scatterChartInstance = null; }
+		if (scatterChartInstance) {
+			scatterChartInstance.destroy();
+			scatterChartInstance = null;
+		}
 		return;
 	}
 	if (host) host.hidden = false;
@@ -974,13 +979,22 @@ function renderScatterChart() {
 		animation: { duration: 400 },
 		scales: {
 			x: {
-				title: { display: true, text: "avg tokens/sec", color: CHART_COLORS.muted },
+				title: {
+					display: true,
+					text: "avg tokens/sec",
+					color: CHART_COLORS.muted,
+				},
 				ticks: { color: CHART_COLORS.muted },
 				grid: { color: CHART_COLORS.grid },
 			},
 			y: {
-				title: { display: true, text: "overall accuracy %", color: CHART_COLORS.muted },
-				min: 0, max: 100,
+				title: {
+					display: true,
+					text: "overall accuracy %",
+					color: CHART_COLORS.muted,
+				},
+				min: 0,
+				max: 100,
 				ticks: { color: CHART_COLORS.muted },
 				grid: { color: CHART_COLORS.grid },
 			},
@@ -1020,7 +1034,11 @@ function renderScatterChart() {
 	};
 
 	if (!scatterChartInstance) {
-		scatterChartInstance = new Chart(canvas.getContext("2d"), { type: "scatter", data, options });
+		scatterChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "scatter",
+			data,
+			options,
+		});
 	} else {
 		scatterChartInstance.data = data;
 		scatterChartInstance.update();
@@ -1116,7 +1134,11 @@ function renderParamSpeedChart() {
 		scales: {
 			x: {
 				type: "logarithmic",
-				title: { display: true, text: "parameters (B)", color: CHART_COLORS.muted },
+				title: {
+					display: true,
+					text: "parameters (B)",
+					color: CHART_COLORS.muted,
+				},
 				ticks: {
 					color: CHART_COLORS.muted,
 					callback: (v) => {
@@ -1130,7 +1152,11 @@ function renderParamSpeedChart() {
 			},
 			y: {
 				beginAtZero: true,
-				title: { display: true, text: "median decode tok/s", color: CHART_COLORS.muted },
+				title: {
+					display: true,
+					text: "median decode tok/s",
+					color: CHART_COLORS.muted,
+				},
 				ticks: { color: CHART_COLORS.muted },
 				grid: { color: CHART_COLORS.grid },
 			},
@@ -1163,7 +1189,11 @@ function renderParamSpeedChart() {
 	};
 
 	if (!paramSpeedChartInstance) {
-		paramSpeedChartInstance = new Chart(canvas.getContext("2d"), { type: "scatter", data, options });
+		paramSpeedChartInstance = new Chart(canvas.getContext("2d"), {
+			type: "scatter",
+			data,
+			options,
+		});
 	} else {
 		paramSpeedChartInstance.data = data;
 		paramSpeedChartInstance.update();
@@ -1208,7 +1238,10 @@ function renderDimGroupedChart() {
 	if (latestColdByKey.size === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
-		if (dimGroupedChartInstance) { dimGroupedChartInstance.destroy(); dimGroupedChartInstance = null; }
+		if (dimGroupedChartInstance) {
+			dimGroupedChartInstance.destroy();
+			dimGroupedChartInstance = null;
+		}
 		return;
 	}
 	if (host) host.hidden = false;
@@ -1229,9 +1262,7 @@ function renderDimGroupedChart() {
 	// models (Llama, TinyLlama, arctic-embed-…) read the same as before.
 	const labels = keys.map((k) => {
 		const ev = latestColdByKey.get(k);
-		return ev?.thinking === "on"
-			? `${ev.modelId} (think)`
-			: (ev?.modelId ?? k);
+		return ev?.thinking === "on" ? `${ev.modelId} (think)` : (ev?.modelId ?? k);
 	});
 
 	const datasets = dimNames.map((dim, i) => ({
@@ -1263,7 +1294,11 @@ function renderDimGroupedChart() {
 					legend: {
 						display: true,
 						position: "top",
-						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+						labels: {
+							color: CHART_COLORS.muted,
+							boxWidth: 10,
+							font: { size: 11 },
+						},
 					},
 					tooltip: {
 						backgroundColor: "#161b22",
@@ -1438,7 +1473,11 @@ function renderEmbeddingCosineChart() {
 					legend: {
 						display: true,
 						position: "top",
-						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+						labels: {
+							color: CHART_COLORS.muted,
+							boxWidth: 10,
+							font: { size: 11 },
+						},
 					},
 					tooltip: {
 						backgroundColor: "#161b22",
@@ -1515,7 +1554,11 @@ const ENCODER_COLORS = [
 // prior hand-maintained-prefix behaviour for unknown encoders.
 function inferEncoderParamCountM(id) {
 	const entry = getRegisteredModel(id);
-	if (entry && entry.architecture === "bert" && typeof entry.paramsB === "number") {
+	if (
+		entry &&
+		entry.architecture === "bert" &&
+		typeof entry.paramsB === "number"
+	) {
 		return entry.paramsB * 1000;
 	}
 	return null;
@@ -1556,10 +1599,17 @@ function renderEmbeddingScatterChart() {
 		const latencies = [];
 		for (const r of results) {
 			if (r?.dimension !== "embedding") continue;
-			if (typeof r.embeddingCosine === "number" && Number.isFinite(r.embeddingCosine)) {
+			if (
+				typeof r.embeddingCosine === "number" &&
+				Number.isFinite(r.embeddingCosine)
+			) {
 				cosines.push(r.embeddingCosine);
 			}
-			if (typeof r.latencyMs === "number" && Number.isFinite(r.latencyMs) && r.latencyMs > 0) {
+			if (
+				typeof r.latencyMs === "number" &&
+				Number.isFinite(r.latencyMs) &&
+				r.latencyMs > 0
+			) {
 				latencies.push(r.latencyMs);
 			}
 		}
@@ -1603,13 +1653,21 @@ function renderEmbeddingScatterChart() {
 		animation: { duration: 400 },
 		scales: {
 			x: {
-				title: { display: true, text: "mean cosine", color: CHART_COLORS.muted },
+				title: {
+					display: true,
+					text: "mean cosine",
+					color: CHART_COLORS.muted,
+				},
 				ticks: { color: CHART_COLORS.muted },
 				grid: { color: CHART_COLORS.grid },
 			},
 			y: {
 				beginAtZero: true,
-				title: { display: true, text: "median ms / text", color: CHART_COLORS.muted },
+				title: {
+					display: true,
+					text: "median ms / text",
+					color: CHART_COLORS.muted,
+				},
 				ticks: { color: CHART_COLORS.muted },
 				grid: { color: CHART_COLORS.grid },
 			},
@@ -1680,7 +1738,11 @@ function renderEmbeddingParamChart() {
 		const latencies = [];
 		for (const r of results) {
 			if (r?.dimension !== "embedding") continue;
-			if (typeof r.latencyMs === "number" && Number.isFinite(r.latencyMs) && r.latencyMs > 0) {
+			if (
+				typeof r.latencyMs === "number" &&
+				Number.isFinite(r.latencyMs) &&
+				r.latencyMs > 0
+			) {
 				latencies.push(r.latencyMs);
 			}
 		}
@@ -1724,13 +1786,21 @@ function renderEmbeddingParamChart() {
 		scales: {
 			x: {
 				beginAtZero: true,
-				title: { display: true, text: "parameters (M)", color: CHART_COLORS.muted },
+				title: {
+					display: true,
+					text: "parameters (M)",
+					color: CHART_COLORS.muted,
+				},
 				ticks: { color: CHART_COLORS.muted },
 				grid: { color: CHART_COLORS.grid },
 			},
 			y: {
 				beginAtZero: true,
-				title: { display: true, text: "throughput (texts / sec)", color: CHART_COLORS.muted },
+				title: {
+					display: true,
+					text: "throughput (texts / sec)",
+					color: CHART_COLORS.muted,
+				},
 				ticks: { color: CHART_COLORS.muted },
 				grid: { color: CHART_COLORS.grid },
 			},
@@ -1844,7 +1914,10 @@ function renderTempSweepChart() {
 	if (data.labels.length === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
-		if (tempSweepChartInstance) { tempSweepChartInstance.destroy(); tempSweepChartInstance = null; }
+		if (tempSweepChartInstance) {
+			tempSweepChartInstance.destroy();
+			tempSweepChartInstance = null;
+		}
 		return;
 	}
 	if (host) host.hidden = false;
@@ -1860,7 +1933,11 @@ function renderTempSweepChart() {
 					legend: {
 						display: true,
 						position: "top",
-						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+						labels: {
+							color: CHART_COLORS.muted,
+							boxWidth: 10,
+							font: { size: 11 },
+						},
 					},
 					tooltip: {
 						backgroundColor: "#161b22",
@@ -1896,13 +1973,17 @@ function renderThinkingDeltaChart() {
 		const roundedT = Math.round(t * 10) / 10;
 		const thinkKey = ev.thinking === "on" ? "on" : "off";
 		const k = `${ev.modelId}::${roundedT}`;
-		if (!pairs.has(k)) pairs.set(k, { model: ev.modelId, temp: roundedT, dims: {} });
+		if (!pairs.has(k))
+			pairs.set(k, { model: ev.modelId, temp: roundedT, dims: {} });
 		const pair = pairs.get(k);
 		for (const [dim, ds] of Object.entries(ev.dimensions ?? {})) {
 			if (!pair.dims[dim]) pair.dims[dim] = {};
 			const prev = pair.dims[dim][thinkKey];
 			if (!prev || prev.ts < ev.timestamp) {
-				pair.dims[dim][thinkKey] = { score: Math.round((ds.score ?? 0) * 100), ts: ev.timestamp };
+				pair.dims[dim][thinkKey] = {
+					score: Math.round((ds.score ?? 0) * 100),
+					ts: ev.timestamp,
+				};
 			}
 		}
 	}
@@ -1914,7 +1995,10 @@ function renderThinkingDeltaChart() {
 	if (matched.length === 0) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
-		if (thinkingDeltaChartInstance) { thinkingDeltaChartInstance.destroy(); thinkingDeltaChartInstance = null; }
+		if (thinkingDeltaChartInstance) {
+			thinkingDeltaChartInstance.destroy();
+			thinkingDeltaChartInstance = null;
+		}
 		return;
 	}
 	if (host) host.hidden = false;
@@ -1924,7 +2008,12 @@ function renderThinkingDeltaChart() {
 	const rows = [];
 	for (const p of matched) {
 		for (const [dim, d] of Object.entries(p.dims)) {
-			if (d.on && d.off) rows.push({ label: `${p.model} · t=${p.temp} · ${dim}`, off: d.off.score, on: d.on.score });
+			if (d.on && d.off)
+				rows.push({
+					label: `${p.model} · t=${p.temp} · ${dim}`,
+					off: d.off.score,
+					on: d.on.score,
+				});
 		}
 	}
 	rows.sort((a, b) => b.on - a.on);
@@ -1959,7 +2048,11 @@ function renderThinkingDeltaChart() {
 					legend: {
 						display: true,
 						position: "top",
-						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+						labels: {
+							color: CHART_COLORS.muted,
+							boxWidth: 10,
+							font: { size: 11 },
+						},
 					},
 					tooltip: {
 						backgroundColor: "#161b22",
@@ -2004,7 +2097,10 @@ function renderTtftChart() {
 	if (rows.length === 0) {
 		if (empty) empty.hidden = false;
 		canvas.hidden = true;
-		if (ttftChartInstance) { ttftChartInstance.destroy(); ttftChartInstance = null; }
+		if (ttftChartInstance) {
+			ttftChartInstance.destroy();
+			ttftChartInstance = null;
+		}
 		return;
 	}
 	if (empty) empty.hidden = true;
@@ -2019,14 +2115,16 @@ function renderTtftChart() {
 			type: "bar",
 			data: {
 				labels,
-				datasets: [{
-					label: "prefill ms",
-					data,
-					backgroundColor: CHART_COLORS.blue,
-					borderRadius: 3,
-					barPercentage: 0.45,
-					categoryPercentage: 0.95,
-				}],
+				datasets: [
+					{
+						label: "prefill ms",
+						data,
+						backgroundColor: CHART_COLORS.blue,
+						borderRadius: 3,
+						barPercentage: 0.45,
+						categoryPercentage: 0.95,
+					},
+				],
 			},
 			options: baseChartOptions({
 				xTitle: "ms",
@@ -2071,13 +2169,17 @@ function renderFinishChart() {
 		reasons[reason] = (reasons[reason] ?? 0) + 1;
 	}
 
-	const rows = Array.from(profileReasons.entries())
-		.filter(([, reasons]) => Object.keys(reasons).length > 0);
+	const rows = Array.from(profileReasons.entries()).filter(
+		([, reasons]) => Object.keys(reasons).length > 0,
+	);
 
 	if (rows.length === 0) {
 		if (empty) empty.hidden = false;
 		canvas.hidden = true;
-		if (finishChartInstance) { finishChartInstance.destroy(); finishChartInstance = null; }
+		if (finishChartInstance) {
+			finishChartInstance.destroy();
+			finishChartInstance = null;
+		}
 		return;
 	}
 	if (empty) empty.hidden = true;
@@ -2133,7 +2235,11 @@ function renderFinishChart() {
 					legend: {
 						display: true,
 						position: "top",
-						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+						labels: {
+							color: CHART_COLORS.muted,
+							boxWidth: 10,
+							font: { size: 11 },
+						},
 					},
 					tooltip: {
 						backgroundColor: "#161b22",
@@ -2188,7 +2294,10 @@ function renderSeriesChartImpl(canvas, host, empty) {
 	if (series.length < 2) {
 		if (host) host.hidden = true;
 		if (empty) empty.hidden = false;
-		if (seriesChartInstance) { seriesChartInstance.destroy(); seriesChartInstance = null; }
+		if (seriesChartInstance) {
+			seriesChartInstance.destroy();
+			seriesChartInstance = null;
+		}
 		return;
 	}
 	if (host) host.hidden = false;
@@ -2206,9 +2315,7 @@ function renderSeriesChartImpl(canvas, host, empty) {
 		byProfile.get(key).set(pt.timestamp, Math.round(pt.overall * 100));
 	}
 
-	const labels = Array.from(
-		new Set(series.map((pt) => pt.timestamp)),
-	).sort();
+	const labels = Array.from(new Set(series.map((pt) => pt.timestamp))).sort();
 	// Render compact human-readable labels (MM-DD HH:mm) for the axis but
 	// keep the full ISO string available for the tooltip via parsing.
 	const fmt = (iso) => {
@@ -2220,8 +2327,13 @@ function renderSeriesChartImpl(canvas, host, empty) {
 	const tickLabels = labels.map(fmt);
 
 	const palette = [
-		CHART_COLORS.blue, CHART_COLORS.purple, CHART_COLORS.green,
-		CHART_COLORS.yellow, "#f778ba", "#79c0ff", "#56d364",
+		CHART_COLORS.blue,
+		CHART_COLORS.purple,
+		CHART_COLORS.green,
+		CHART_COLORS.yellow,
+		"#f778ba",
+		"#79c0ff",
+		"#56d364",
 	];
 	const profiles = Array.from(byProfile.keys()).sort();
 
@@ -2253,21 +2365,34 @@ function renderSeriesChartImpl(canvas, host, empty) {
 				scales: {
 					x: {
 						type: "category",
-						ticks: { color: CHART_COLORS.muted, maxTicksLimit: 8, font: { size: 10 } },
+						ticks: {
+							color: CHART_COLORS.muted,
+							maxTicksLimit: 8,
+							font: { size: 10 },
+						},
 						grid: { color: CHART_COLORS.grid },
 					},
 					y: {
-						min: 0, max: 100,
+						min: 0,
+						max: 100,
 						ticks: { color: CHART_COLORS.muted },
 						grid: { color: CHART_COLORS.grid },
-						title: { display: true, text: "overall %", color: CHART_COLORS.muted },
+						title: {
+							display: true,
+							text: "overall %",
+							color: CHART_COLORS.muted,
+						},
 					},
 				},
 				plugins: {
 					legend: {
 						display: true,
 						position: "top",
-						labels: { color: CHART_COLORS.muted, boxWidth: 10, font: { size: 11 } },
+						labels: {
+							color: CHART_COLORS.muted,
+							boxWidth: 10,
+							font: { size: 11 },
+						},
 					},
 					tooltip: {
 						backgroundColor: "#161b22",
@@ -2342,16 +2467,26 @@ function comparator(a, b) {
 
 function valueFor(run, key) {
 	switch (key) {
-		case "timestamp": return run.timestamp;
-		case "profile": return run.profile ?? "";
-		case "model": return run.model;
-		case "thinking": return run.thinking;
-		case "oneShotTokensPerSec": return run.oneShot?.tokensPerSecond ?? 0;
-		case "oneShotPrefillMs": return run.oneShot?.prefillMs ?? 0;
-		case "oneShotTotalMs": return run.oneShot?.totalMs ?? 0;
-		case "oneShotFinishReason": return run.oneShot?.finishReason ?? "";
-		case "oneShotGenTokens": return run.oneShot?.genTokens ?? 0;
-		default: return "";
+		case "timestamp":
+			return run.timestamp;
+		case "profile":
+			return run.profile ?? "";
+		case "model":
+			return run.model;
+		case "thinking":
+			return run.thinking;
+		case "oneShotTokensPerSec":
+			return run.oneShot?.tokensPerSecond ?? 0;
+		case "oneShotPrefillMs":
+			return run.oneShot?.prefillMs ?? 0;
+		case "oneShotTotalMs":
+			return run.oneShot?.totalMs ?? 0;
+		case "oneShotFinishReason":
+			return run.oneShot?.finishReason ?? "";
+		case "oneShotGenTokens":
+			return run.oneShot?.genTokens ?? 0;
+		default:
+			return "";
 	}
 }
 
@@ -2481,7 +2616,9 @@ function renderEmbeddingTable() {
 	const priorByRunId = buildRunPriorByRunId(allRuns);
 	const runs = [...allRuns];
 	runs.sort(comparator);
-	const failed = Array.from(state.failedByRunId.values()).filter(isEmbeddingRun);
+	const failed = Array.from(state.failedByRunId.values()).filter(
+		isEmbeddingRun,
+	);
 	countEl.textContent = String(runs.length);
 
 	tbody.innerHTML = "";
@@ -2557,7 +2694,8 @@ function renderCompareButton() {
 function pickActiveSession() {
 	if (state.benchSessionsBySessionId.size === 0) return null;
 	let active = null;
-	for (const session of state.benchSessionsBySessionId.values()) active = session;
+	for (const session of state.benchSessionsBySessionId.values())
+		active = session;
 	return active;
 }
 
@@ -2695,7 +2833,8 @@ function renderEvalDimensions(evals) {
 		const dims = Object.keys(rep.dimensions ?? {});
 		if (dims.length === 1 && dims[0] === "embedding") continue;
 		const prev = latestByModel.get(rep.modelId);
-		if (!prev || prev.timestamp < rep.timestamp) latestByModel.set(rep.modelId, rep);
+		if (!prev || prev.timestamp < rep.timestamp)
+			latestByModel.set(rep.modelId, rep);
 	}
 	if (latestByModel.size === 0) {
 		host.innerHTML = `<div class="bar-empty">no completed evals yet</div>`;
@@ -2898,9 +3037,7 @@ function updateEvalSortHeaders() {
 	document.querySelectorAll("#evals-table thead th.sortable").forEach((th) => {
 		th.classList.remove("sort-asc", "sort-desc");
 		if (th.dataset.sort === state.evalSortKey) {
-			th.classList.add(
-				state.evalSortDir === "asc" ? "sort-asc" : "sort-desc",
-			);
+			th.classList.add(state.evalSortDir === "asc" ? "sort-asc" : "sort-desc");
 		}
 	});
 }
@@ -2924,7 +3061,7 @@ function renderEvalModal(rep) {
 			const pct = Math.round((r.score ?? 0) * 100);
 			const strength = overallStrength(r.score);
 			const toolCallLabel = r.toolCalls?.length
-				? `${r.toolCalls.length}× ${escapeHtml(r.toolCalls[0].name)}${r.toolCalls.length > 1 ? " +" + (r.toolCalls.length - 1) : ""}`
+				? `${r.toolCalls.length}× ${escapeHtml(r.toolCalls[0].name)}${r.toolCalls.length > 1 ? ` +${r.toolCalls.length - 1}` : ""}`
 				: "—";
 			return `
 				<tr>
@@ -3080,7 +3217,11 @@ function formatTime(iso) {
 	try {
 		const d = new Date(iso);
 		const date = d.toLocaleDateString([], { month: "2-digit", day: "2-digit" });
-		const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+		const time = d.toLocaleTimeString([], {
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+		});
 		return `${date} ${time}`;
 	} catch {
 		return iso;
@@ -3182,7 +3323,9 @@ function activateTab(name) {
 	for (const p of panes) {
 		p.hidden = p.id !== `tab-${name}`;
 	}
-	try { localStorage.setItem(TAB_STORAGE_KEY, name); } catch {}
+	try {
+		localStorage.setItem(TAB_STORAGE_KEY, name);
+	} catch {}
 	window.dispatchEvent(new Event("resize"));
 }
 document.getElementById("tab-nav").addEventListener("click", (e) => {
@@ -3211,7 +3354,9 @@ fetch("/models")
 		state.modelRegistry = reg;
 		// Re-render so charts that already painted with the prefix
 		// fallback now reflect the registry-driven filters.
-		try { render(); } catch {}
+		try {
+			render();
+		} catch {}
 	})
 	.catch(() => {
 		// Network error — keep empty registry; helpers fall back.

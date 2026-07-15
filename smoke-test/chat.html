@@ -6,8 +6,11 @@
 <title>WebLLM Chat</title>
 <link rel="stylesheet" href="./chat.css">
 <!-- UMD vendor bundles must run as classic scripts so they register
-     `marked` / `hljs` on globalThis. ES-module `import()` of UMD files
-     runs them in module scope and the exports never reach the window. -->
+     `marked` / `hljs` / `DOMPurify` on globalThis. ES-module `import()`
+     of UMD files runs them in module scope and the exports never reach
+     the window. DOMPurify must load before the chat module so
+     renderMarkdown() can sanitize marked output (SEC-004). -->
+<script src="./vendor/purify.min.js"></script>
 <script src="./vendor/marked.min.js"></script>
 <script src="./vendor/highlight.min.js"></script>
 <script src="./vendor/highlight-common.min.js"></script>

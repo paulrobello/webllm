@@ -136,20 +136,20 @@ export interface ChatTemplateToolSchema {
 		string,
 		{
 			type: JsonSchemaParameterType;
-			description?: string;
-			required?: boolean;
+			description?: string | undefined;
+			required?: boolean | undefined;
 		}
 	>;
 }
 
 export interface ChatTemplateRenderOptions {
-	enableThinking?: boolean;
+	enableThinking?: boolean | undefined;
 	/**
 	 * Tool schemas to inject into the system message for templates that
 	 * support tool calling (ChatML-family: Qwen3, Hermes, etc.). Ignored
 	 * by templates without tool support.
 	 */
-	tools?: readonly ChatTemplateToolSchema[];
+	tools?: readonly ChatTemplateToolSchema[] | undefined;
 }
 
 type ChatPromptTokenizer = Pick<Tokenizer, "bosId" | "encode" | "options">;
@@ -272,7 +272,11 @@ function buildToolsBlock(tools: readonly ChatTemplateToolSchema[]): string {
 function toJsonSchema(
 	params: Record<
 		string,
-		{ type: string; description?: string; required?: boolean }
+		{
+			type: string;
+			description?: string | undefined;
+			required?: boolean | undefined;
+		}
 	>,
 ): Record<string, unknown> {
 	const properties: Record<string, { type: string; description?: string }> = {};

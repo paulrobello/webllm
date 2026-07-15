@@ -194,7 +194,7 @@ registerCustomScorer("emb-012-light-sense-disambiguation", (output) => {
 	let correct = 0;
 	for (let i = 0; i < expectedAnswers.length; i++) {
 		const target = expectedAnswers[i];
-		if (lines[i] && lines[i].includes(target)) {
+		if (lines[i]?.includes(target)) {
 			correct++;
 		} else {
 			const allAnswers = lines.join(" ");

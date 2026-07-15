@@ -7,14 +7,28 @@
  * and back the AsyncIterableIterator they return with a per-stream queue.
  */
 
-import type { GenerationStreamChunk } from "../inference/generation.js";
+import type { CausalLMEmbedder } from "../inference/causal-embedder-inference.js";
+import type { EncoderInference } from "../inference/encoder-inference.js";
+import type {
+	GenerationConfig,
+	GenerationStreamChunk,
+} from "../inference/generation.js";
+import type { ModelInference } from "../inference/model-inference.js";
+import type {
+	ChatMessage,
+	CompletionConfig,
+	StreamConfig,
+	StreamInput,
+} from "./chat-types.js";
 import type {
 	ConversationHandle,
 	ConversationOptions,
 } from "./conversation-pool.js";
+import type { WebLLM } from "./engine.js";
 import type {
 	LoadedModelMetadata,
 	ModelHandle,
+	ModelLoadOptions,
 	WebLLMConfig,
 } from "./types.js";
 import { reconstructError } from "./webllm-error-codec.js";
@@ -27,6 +41,66 @@ import {
 	type StreamId,
 	type WorkerToProxy,
 } from "./worker-bridge.js";
+
+/**
+ * Compile-time surface contract between {@link WebLLM} and {@link WebLLMProxy}
+ * (ARC-004). Every public WebLLM method that the proxy mirrors appears here,
+ * so a method added to WebLLM without a matching proxy arm (or vice versa) is
+ * a `tsc` error — complementing the runtime `tests/webllm-proxy-surface.test.ts`
+ * sentinel. The cast in `WebLLM.init` (`as unknown as Promise<WebLLM>`) stays
+ * for now; this type narrows the surface on the proxy side.
+ *
+ * Excluded (covered by the runtime surface sentinel, not this Pick):
+ *   - `tokenize` — engine method is synchronous (`readonly number[]`); the
+ *     proxy's worker-RPC implementation is necessarily async
+ *     (`Promise<readonly number[]>`). The signatures are fundamentally
+ *     incompatible.
+ *   - `chatCompletion`, `generateStream` — engine returns
+ *     `AsyncGenerator<T, void>`; the proxy's hand-built worker-RPC iter is
+ *     `AsyncIterableIterator<GenerationStreamChunk>`. The project's TS lib
+ *     requires `[Symbol.asyncDispose]` on `AsyncGenerator<T>` but does not
+ *     expose `Symbol.asyncDispose` itself (TS2741 / TS2550 gap), so widening
+ *     the proxy's iter to `AsyncGenerator` is not satisfiable. Revisit once
+ *     the project's lib target exposes `Symbol.asyncDispose`.
+ */
+type WebLLMSurface = Pick<
+	Omit<
+		WebLLM,
+		// tokenize is sync on the engine; the proxy is inherently async.
+		| "tokenize"
+		// Streaming iters can't satisfy AsyncGenerator's asyncDispose
+		// requirement under the project's current TS lib (see docstring).
+		| "chatCompletion"
+		| "generateStream"
+	>,
+	| "loadModelFromBuffer"
+	| "loadModelFromUrl"
+	| "unloadModel"
+	| "resetModelSession"
+	| "resetConversation"
+	| "embed"
+	| "chat"
+	| "createConversation"
+	| "disposeConversation"
+	| "forkConversation"
+	| "exportConversation"
+	| "importConversation"
+	| "dispose"
+>;
+
+/**
+ * Return shape shared by `loadModelFromBuffer` / `loadModelFromUrl`. Matches
+ * the engine's signature exactly so {@link WebLLMSurface} is satisfied. The
+ * worker-host sanitizer strips the non-cloneable `inference` field before the
+ * reply crosses the postMessage boundary (the proxy never reconstructs a live
+ * pipeline object); the union type is the public contract, the runtime value
+ * for `inference` in worker mode is a stripped sentinel.
+ */
+type LoadResult = {
+	handle: ModelHandle;
+	inference: ModelInference | EncoderInference | CausalLMEmbedder;
+	metadata: LoadedModelMetadata;
+};
 
 /**
  * Drop the non-cloneable `signal: AbortSignal` field from a config arg
@@ -65,7 +139,7 @@ interface MinimalWorker {
 	terminate(): void;
 }
 
-export class WebLLMProxy {
+export class WebLLMProxy implements WebLLMSurface {
 	private worker: MinimalWorker;
 	private pending = new Map<
 		RequestId,
@@ -145,20 +219,16 @@ export class WebLLMProxy {
 	// is pure data (hyperparams + tokenizerConfig + kvCacheConfig) and
 	// survives postMessage's structured clone.
 	loadModelFromBuffer = (
-		data: ArrayBuffer,
+		data: ArrayBuffer | Uint8Array,
 		name: string,
 		wasmUrl?: string,
-		options?: unknown,
-	): Promise<{
-		handle: ModelHandle;
-		inference: unknown;
-		metadata: LoadedModelMetadata;
-	}> =>
-		this.callMethod<{
-			handle: ModelHandle;
-			inference: unknown;
-			metadata: LoadedModelMetadata;
-		}>("loadModelFromBuffer", [data, name, wasmUrl, options], [data]);
+		options?: Partial<ModelLoadOptions>,
+	): Promise<LoadResult> =>
+		this.callMethod<LoadResult>(
+			"loadModelFromBuffer",
+			[data, name, wasmUrl, options],
+			[data],
+		);
 	// `url` and `name` are cheap strings; no Transferables needed. The
 	// worker fetches + streams into its own WASM heap so >3.5 GB models
 	// don't have to land in a main-thread JS-heap ArrayBuffer first.
@@ -166,26 +236,34 @@ export class WebLLMProxy {
 		url: string,
 		name: string,
 		wasmUrl?: string,
-		options?: unknown,
-	): Promise<{
-		handle: ModelHandle;
-		inference: unknown;
-		metadata: LoadedModelMetadata;
-	}> =>
-		this.callMethod<{
-			handle: ModelHandle;
-			inference: unknown;
-			metadata: LoadedModelMetadata;
-		}>("loadModelFromUrl", [url, name, wasmUrl, options]);
+		options?: Partial<ModelLoadOptions>,
+		onProgress?: (received: number, total: number) => void,
+	): Promise<LoadResult> => {
+		void onProgress;
+		return this.callMethod<LoadResult>("loadModelFromUrl", [
+			url,
+			name,
+			wasmUrl,
+			options,
+		]);
+	};
 	unloadModel = (id: string) => this.callMethod<void>("unloadModel", [id]);
+	resetModelSession = (modelId: string) =>
+		this.callMethod<void>("resetModelSession", [modelId]);
+	/** @deprecated Use resetModelSession. */
+	resetConversation = (modelId: string) =>
+		this.callMethod<void>("resetConversation", [modelId]);
 	embed = (modelId: string, text: string) =>
 		this.callMethod<Float32Array>("embed", [modelId, text]);
-	chat = (modelId: string, prompt: string, config?: unknown) =>
-		this.callMethod<string>("chat", [modelId, prompt, stripSignal(config)]);
+	chat = (
+		modelId: string,
+		prompt: string,
+		config?: Partial<GenerationConfig>,
+	) => this.callMethod<string>("chat", [modelId, prompt, stripSignal(config)]);
 	chatCompletion = (
 		modelOrConv: string | ConversationHandle,
-		messages: unknown[],
-		config?: unknown,
+		messages: ChatMessage[],
+		config?: CompletionConfig,
 	): AsyncIterableIterator<GenerationStreamChunk> =>
 		this.startStream(
 			"chatCompletion",
@@ -194,8 +272,8 @@ export class WebLLMProxy {
 		);
 	generateStream = (
 		modelId: string,
-		input: unknown,
-		config?: unknown,
+		input: StreamInput,
+		config?: StreamConfig,
 	): AsyncIterableIterator<GenerationStreamChunk> =>
 		this.startStream(
 			"generateStream",

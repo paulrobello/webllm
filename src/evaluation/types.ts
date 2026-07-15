@@ -94,7 +94,7 @@ export interface EvalResult {
 	toolCalls: ToolCallRecord[];
 	latencyMs: number;
 	tokensPerSecond: number;
-	error?: string;
+	error?: string | undefined;
 	/** Raw cosine ∈ [-1, 1] for embedding-dimension tasks only. */
 	embeddingCosine?: number;
 }

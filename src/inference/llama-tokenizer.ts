@@ -5,6 +5,10 @@
 // LlamaTokenizer; legacy callers continue to construct Tokenizer
 // from a TokenizerConfig until P2 deletes the legacy path.
 //
+// @experimental This module is part of the Tier-3 llama-decode spike
+// and is NOT part of the published package's semver contract. Declaration
+// emit is excluded from npm types by `scripts/build-package.ts`. See ARC-007.
+//
 // The streaming detokenizer in tokenizer.ts (StreamingDecoder)
 // stays — its prevText differential decode is project-specific and
 // is not exposed by upstream. P1 only swaps the encode/decode

@@ -8,11 +8,11 @@
 //   4. On Discard: drop both stores.
 
 import {
-  clearCurrent,
-  isCompatibleMeta,
-  loadBlob,
-  loadMetadata,
-  relativeTime,
+	clearCurrent,
+	isCompatibleMeta,
+	loadBlob,
+	loadMetadata,
+	relativeTime,
 } from "./chat-persistence.js";
 
 /**
@@ -43,83 +43,102 @@ import {
  * @param {RestoreContext} ctx
  */
 export async function maybeOfferRestore(ctx) {
-  const meta = loadMetadata();
-  if (!meta) return;
-  const known = new Set(ctx.listChatModels().map((m) => m.id));
-  if (!isCompatibleMeta(meta, known)) {
-    await clearCurrent();
-    return;
-  }
-  const model = ctx.findModel(meta.modelId);
-  if (!model) {
-    await clearCurrent();
-    return;
-  }
-  ctx.restoreCard.hidden = false;
-  ctx.restoreCard.innerHTML = `
+	const meta = loadMetadata();
+	if (!meta) return;
+	const known = new Set(ctx.listChatModels().map((m) => m.id));
+	if (!isCompatibleMeta(meta, known)) {
+		await clearCurrent();
+		return;
+	}
+	const model = ctx.findModel(meta.modelId);
+	if (!model) {
+		await clearCurrent();
+		return;
+	}
+	ctx.restoreCard.hidden = false;
+	ctx.restoreCard.innerHTML = `
     Resume conversation with <strong>${escapeHtml(model.name)}</strong>
     (${meta.messages.length} turns, last active ${relativeTime(meta.savedAtMs)})?
     <button id="chat-restore-yes" type="button">Resume</button>
     <button id="chat-restore-no"  type="button">Discard</button>
   `;
-  document.getElementById("chat-restore-no").onclick = async () => {
-    await clearCurrent();
-    ctx.restoreCard.hidden = true;
-    // The page-mount auto-load was suppressed because a restore card
-    // was offered (resume would load the model itself). On Discard the
-    // user wants a fresh chat with the dropdown's preselected model —
-    // load it now so Send is enabled without an extra dropdown click.
-    if (!ctx.getEngine() && ctx.modelSelect.value) {
-      await ctx.loadModelById(ctx.modelSelect.value);
-    }
-  };
-  document.getElementById("chat-restore-yes").onclick = async () => {
-    ctx.restoreCard.hidden = true;
-    ctx.modelSelect.value = meta.modelId;
-    const result = await ctx.loadModelById(meta.modelId);
-    if (!result.success) {
-      // Load card already shows the error from loadModelById.
-      // Leave the saved data in place so the user can retry next reload.
-      return;
-    }
-    const engine = ctx.getEngine();
-    const loadedModel = ctx.getLoadedModel();
-    const loadedHandleId = ctx.getLoadedHandleId();
-    let conv;
-    const blob = await loadBlob();
-    if (blob) {
-      try {
-        const handle = await engine.importConversation(loadedHandleId, blob);
-        conv = { handle, modelId: meta.modelId, handleId: loadedHandleId, systemPrompt: meta.systemPrompt, messages: meta.messages.slice() };
-      } catch (e) {
-        console.warn("[chat-restore] importConversation failed; falling back to metadata-only restore:", e);
-        conv = await ctx.createChatConversation(engine, loadedHandleId, loadedModel, meta.systemPrompt);
-        conv.messages = meta.messages.slice();
-      }
-    } else {
-      conv = await ctx.createChatConversation(engine, loadedHandleId, loadedModel, meta.systemPrompt);
-      conv.messages = meta.messages.slice();
-    }
-    ctx.setConv(conv);
-    ctx.systemPromptEl.value = meta.systemPrompt;
-    for (const msg of meta.messages) {
-      if (msg.role === "user") ctx.appendBubble("user", msg.content);
-      else if (msg.role === "assistant") {
-        const div = document.createElement("div");
-        div.className = "chat-msg assistant";
-        ctx.transcript.appendChild(div);
-        await ctx.renderAssistantInto(div, msg.content);
-      }
-    }
-    ctx.clearBtn.disabled = false;
-    ctx.exportBtn.disabled = false;
-    ctx.refreshContext();
-  };
+	document.getElementById("chat-restore-no").onclick = async () => {
+		await clearCurrent();
+		ctx.restoreCard.hidden = true;
+		// The page-mount auto-load was suppressed because a restore card
+		// was offered (resume would load the model itself). On Discard the
+		// user wants a fresh chat with the dropdown's preselected model —
+		// load it now so Send is enabled without an extra dropdown click.
+		if (!ctx.getEngine() && ctx.modelSelect.value) {
+			await ctx.loadModelById(ctx.modelSelect.value);
+		}
+	};
+	document.getElementById("chat-restore-yes").onclick = async () => {
+		ctx.restoreCard.hidden = true;
+		ctx.modelSelect.value = meta.modelId;
+		const result = await ctx.loadModelById(meta.modelId);
+		if (!result.success) {
+			// Load card already shows the error from loadModelById.
+			// Leave the saved data in place so the user can retry next reload.
+			return;
+		}
+		const engine = ctx.getEngine();
+		const loadedModel = ctx.getLoadedModel();
+		const loadedHandleId = ctx.getLoadedHandleId();
+		let conv;
+		const blob = await loadBlob();
+		if (blob) {
+			try {
+				const handle = await engine.importConversation(loadedHandleId, blob);
+				conv = {
+					handle,
+					modelId: meta.modelId,
+					handleId: loadedHandleId,
+					systemPrompt: meta.systemPrompt,
+					messages: meta.messages.slice(),
+				};
+			} catch (e) {
+				console.warn(
+					"[chat-restore] importConversation failed; falling back to metadata-only restore:",
+					e,
+				);
+				conv = await ctx.createChatConversation(
+					engine,
+					loadedHandleId,
+					loadedModel,
+					meta.systemPrompt,
+				);
+				conv.messages = meta.messages.slice();
+			}
+		} else {
+			conv = await ctx.createChatConversation(
+				engine,
+				loadedHandleId,
+				loadedModel,
+				meta.systemPrompt,
+			);
+			conv.messages = meta.messages.slice();
+		}
+		ctx.setConv(conv);
+		ctx.systemPromptEl.value = meta.systemPrompt;
+		for (const msg of meta.messages) {
+			if (msg.role === "user") ctx.appendBubble("user", msg.content);
+			else if (msg.role === "assistant") {
+				const div = document.createElement("div");
+				div.className = "chat-msg assistant";
+				ctx.transcript.appendChild(div);
+				await ctx.renderAssistantInto(div, msg.content);
+			}
+		}
+		ctx.clearBtn.disabled = false;
+		ctx.exportBtn.disabled = false;
+		ctx.refreshContext();
+	};
 }
 
 function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+	return String(s)
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
 }

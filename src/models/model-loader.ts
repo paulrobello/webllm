@@ -83,23 +83,23 @@ export interface AltUpGlobalTensors {
 export interface Gemma3NPerBlockTensors {
 	// AltUp per-block tensors
 	/** `blk.L.altup_correct_coef.weight` — corrective coefficients [n_altup, n_altup] per layer. */
-	altupCorrectCoef?: GgufTensorInfo[];
+	altupCorrectCoef?: GgufTensorInfo[] | undefined;
 	/** `blk.L.altup_correct_scale.weight` — per-element scale applied after correction [n_embd] per layer. */
-	altupCorrectScale?: GgufTensorInfo[];
+	altupCorrectScale?: GgufTensorInfo[] | undefined;
 	/** `blk.L.altup_predict_coef.weight` — predictive coefficients [n_altup, n_altup*n_altup] per layer. */
-	altupPredictCoef?: GgufTensorInfo[];
+	altupPredictCoef?: GgufTensorInfo[] | undefined;
 	/** `blk.L.altup_router.weight` — routes active stream selection [n_embd, n_altup] per layer. */
-	altupRouter?: GgufTensorInfo[];
+	altupRouter?: GgufTensorInfo[] | undefined;
 	/** `blk.L.altup_router_norm.weight` — RMSNorm for the router [n_embd] per layer. */
-	altupRouterNorm?: GgufTensorInfo[];
+	altupRouterNorm?: GgufTensorInfo[] | undefined;
 
 	// Laurel per-block tensors
 	/** `blk.L.laurel_l.weight` — left projection (down to low rank) per layer. */
-	laurelL?: GgufTensorInfo[];
+	laurelL?: GgufTensorInfo[] | undefined;
 	/** `blk.L.laurel_r.weight` — right projection (up from low rank to hidden) per layer. */
-	laurelR?: GgufTensorInfo[];
+	laurelR?: GgufTensorInfo[] | undefined;
 	/** `blk.L.laurel_post_norm.weight` — RMSNorm after Laurel projection per layer. */
-	laurelPostNorm?: GgufTensorInfo[];
+	laurelPostNorm?: GgufTensorInfo[] | undefined;
 
 	// Gated-PLE per-block tensors
 	/** `blk.L.inp_gate.weight` — gating projection [n_embd, pleDim] per layer. */
@@ -120,13 +120,13 @@ export interface ParsedModel {
 	 * `hyperparams.architecture === "gemma4"` and all three PLE tensors exist
 	 * in the GGUF. Undefined for all other architectures.
 	 */
-	pleTensors?: PleTensors;
+	pleTensors?: PleTensors | undefined;
 	/**
 	 * Gemma 3N global AltUp tensors. Present only when `altup_proj.weight`
 	 * and `altup_unembd_proj.weight` both exist in the GGUF. This is the
 	 * canonical detection gate for Gemma 3N architecture (Gemma 4 E2B/E4B).
 	 */
-	altUpGlobal?: AltUpGlobalTensors;
+	altUpGlobal?: AltUpGlobalTensors | undefined;
 	/**
 	 * Gemma 3N per-block tensors (AltUp + Laurel + gated-PLE). Present only
 	 * when `hyperparams.architecture === "gemma4"` and the gated-PLE per-block
@@ -134,7 +134,7 @@ export interface ParsedModel {
 	 * `blk.0.post_norm.weight`) are all present. AltUp and Laurel sub-arrays
 	 * are `undefined` if those tensors are absent from the GGUF.
 	 */
-	gemma3nPerBlock?: Gemma3NPerBlockTensors;
+	gemma3nPerBlock?: Gemma3NPerBlockTensors | undefined;
 }
 
 /**
@@ -143,7 +143,7 @@ export interface ParsedModel {
  *
  * The actual GPU weight loading is deferred to the WASM bridge integration.
  */
-// biome-ignore lint/complexity/noStaticOnlyClass: instance methods planned for Phase 2
+// biome-ignore lint/complexity/noStaticOnlyClass: namespace-style grouping; exported API — module conversion tracked as enhancement.
 export class ModelLoader {
 	/** Parse a GGUF model buffer into hyperparams, tokenizer config, and KV cache config. */
 	static parseModel(data: Uint8Array): ParsedModel {

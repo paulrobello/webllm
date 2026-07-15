@@ -46,7 +46,7 @@ export function buildTempSweepChartData(evals) {
 		if (!bucket) continue;
 		const thinking = ev.thinking === "on" ? "on" : "off";
 		for (const [dim, ds] of Object.entries(ev.dimensions ?? {})) {
-			if (!ds || !ds.total) continue;
+			if (!ds?.total) continue;
 			const k = `${ev.modelId}::${thinking}::${dim}`;
 			if (!byModelDim.has(k)) {
 				byModelDim.set(k, {
@@ -76,8 +76,7 @@ export function buildTempSweepChartData(evals) {
 	// non-thinking-capable models (Llama, TinyLlama) labelled the same way
 	// they were before.
 	const labels = series.map(
-		(s) =>
-			`${s.model}${s.thinking === "on" ? " (think)" : ""} · ${s.dim}`,
+		(s) => `${s.model}${s.thinking === "on" ? " (think)" : ""} · ${s.dim}`,
 	);
 	const datasets = TEMP_SWEEP_BUCKETS.map((bucket) => ({
 		label: bucket,

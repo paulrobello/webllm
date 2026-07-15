@@ -9,7 +9,7 @@ export const SMOKE_RUN_SCHEMA_VERSION = 1;
 
 export interface SmokeRunOneShot {
 	assistantText: string;
-	finishReason?: string;
+	finishReason?: string | undefined;
 	genTokens: number;
 	prefillMs: number;
 	decodeMs: number;
@@ -20,9 +20,9 @@ export interface SmokeRunOneShot {
 export interface SmokeRunInteractive {
 	assistantText: string;
 	finishReason: string;
-	genTokens?: number;
-	totalMs?: number;
-	tokensPerSecond?: number;
+	genTokens?: number | undefined;
+	totalMs?: number | undefined;
+	tokensPerSecond?: number | undefined;
 }
 
 export interface SmokeRunParams {
@@ -40,7 +40,7 @@ export type SmokeRunMode = "main" | "worker";
 export interface SmokeRunRecord {
 	schemaVersion: typeof SMOKE_RUN_SCHEMA_VERSION;
 	timestamp: string;
-	profile?: string;
+	profile?: string | undefined;
 	model: string;
 	page: SmokeTestPage;
 	thinking: "off" | "on";

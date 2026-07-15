@@ -127,10 +127,7 @@ export async function runParityCapture() {
 		if (received !== total) {
 			throw new Error(`short read: expected ${total} bytes, got ${received}`);
 		}
-		log(
-			"pass",
-			`[2/6] GGUF streamed: ${(received / 1e6).toFixed(1)} MB`,
-		);
+		log("pass", `[2/6] GGUF streamed: ${(received / 1e6).toFixed(1)} MB`);
 	} catch (e) {
 		log("fail", `[2/6] Fetch failed: ${e.message}`);
 		if (modelPtr) wasm.free(modelPtr);
@@ -258,10 +255,7 @@ export async function runParityCapture() {
 			// full stack once for finalNormHidden + top-K logits. May OOM at
 			// long N — we tolerate that and leave the fields empty.
 			try {
-				log(
-					"running",
-					"[5/6] Final-only pass for finalNormHidden + logits...",
-				);
+				log("running", "[5/6] Final-only pass for finalNormHidden + logits...");
 				const tFin = performance.now();
 				const finalOut = await inference.forwardWithLayerTaps(tokenIdsArr, {
 					topK,
@@ -296,11 +290,7 @@ export async function runParityCapture() {
 		log(
 			"pass",
 			`[5/6] Tap forward complete in ${elapsed}s: ${perLayerResidual.length} layers (${
-				incrementalMode
-					? "incremental"
-					: skipLayerTaps
-						? "skipped"
-						: "captured"
+				incrementalMode ? "incremental" : skipLayerTaps ? "skipped" : "captured"
 			}), embDim=${finalNormHidden.length}, topK=${logitsTop16.ids.length}`,
 		);
 

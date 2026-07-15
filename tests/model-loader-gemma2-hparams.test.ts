@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { ModelLoader } from "../../src/models/model-loader.js";
+import { ModelLoader } from "../src/models/model-loader.js";
 
 const GEMMA2 = "smoke-test/models/gemma-2-2b-q4f16.gguf";
 

@@ -13,12 +13,10 @@ type EngineInternals = {
 		unregister(id: string): Promise<void>;
 		clear(): void;
 	};
-	inferenceEngines: Map<string, unknown>;
-	encoderEngines: Map<string, unknown>;
-	causalEmbedderEngines: Map<string, unknown>;
-	wasmModules: Map<string, unknown>;
+	// Post-ARC-004: per-model state is consolidated into one Map of
+	// ModelRecord rows. Tests populate the `inference` field here.
+	models: Map<string, { inference?: unknown }>;
 	conversationPool: ConversationPool;
-	sessions: Map<string, unknown>;
 	_scheduler: { clear(): void };
 	eventHandlers: Map<string, Set<unknown>>;
 };
@@ -55,25 +53,23 @@ function createFakeEngine(opts?: {
 		unregister: async () => {},
 		clear: () => {},
 	};
-	internals.inferenceEngines = new Map<string, unknown>(
+	internals.models = new Map<string, { inference?: unknown }>(
 		hasInf
 			? [
 					[
 						"tl",
 						{
-							flashAttn,
-							maxContextLength: 2048,
-							dispose: async () => {},
+							inference: {
+								flashAttn,
+								maxContextLength: 2048,
+								dispose: async () => {},
+							},
 						},
 					],
 				]
 			: [],
 	);
-	internals.encoderEngines = new Map();
-	internals.causalEmbedderEngines = new Map();
-	internals.wasmModules = new Map();
 	internals.conversationPool = new ConversationPool({ maxConversations: max });
-	internals.sessions = new Map();
 	internals._scheduler = { clear: () => {} };
 	internals.eventHandlers = new Map();
 	return engine;

@@ -26,7 +26,7 @@ import { GpuDataManager } from "./gpu-data-manager.js";
 import { dispatchMatmul, readDescriptor } from "./ops/matmul.js";
 import { dispatchRmsNorm } from "./ops/rms-norm.js";
 import { dispatchSetRows } from "./ops/set-rows.js";
-import { PipelineCache } from "./pipeline-cache.js";
+import { JsepPipelineCache } from "./pipeline-cache.js";
 
 export const STATUS_OK = 0;
 export const STATUS_NOT_IMPLEMENTED = 1;
@@ -108,7 +108,7 @@ export interface JsepRuntime {
 	device: GPUDevice;
 	dataManager: GpuDataManager;
 	encoderBatcher: CommandEncoderBatcher;
-	pipelineCache: PipelineCache;
+	pipelineCache: JsepPipelineCache;
 	// Bind-group layouts memoized per pipeline cache key. Lives on the
 	// runtime (not module scope) so each `GPUDevice` owns its own cache —
 	// reusing a layout from a destroyed device is a WebGPU validation
@@ -138,7 +138,7 @@ export function installJsepCallbacks(
 	}
 	const dataManager = new GpuDataManager(device);
 	const encoderBatcher = new CommandEncoderBatcher(device);
-	const pipelineCache = new PipelineCache(device);
+	const pipelineCache = new JsepPipelineCache(device);
 	const bindGroupLayoutCache = new Map<string, GPUBindGroupLayout>();
 	const counters: JsepCounters = {
 		alloc: 0,

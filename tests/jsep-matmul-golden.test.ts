@@ -29,7 +29,7 @@ import {
 	type JsepOpDescriptor,
 	type JsepTensorMeta,
 } from "../src/inference/jsep/ops/matmul.js";
-import { PipelineCache } from "../src/inference/jsep/pipeline-cache.js";
+import { JsepPipelineCache } from "../src/inference/jsep/pipeline-cache.js";
 
 const HAS_WEBGPU =
 	typeof navigator !== "undefined" &&
@@ -50,7 +50,7 @@ interface Ctx {
 	device: GPUDevice;
 	dataManager: GpuDataManager;
 	encoderBatcher: CommandEncoderBatcher;
-	pipelineCache: PipelineCache;
+	pipelineCache: JsepPipelineCache;
 	bindGroupLayoutCache: Map<string, GPUBindGroupLayout>;
 }
 
@@ -59,7 +59,7 @@ function makeCtx(device: GPUDevice): Ctx {
 		device,
 		dataManager: new GpuDataManager(device),
 		encoderBatcher: new CommandEncoderBatcher(device),
-		pipelineCache: new PipelineCache(device),
+		pipelineCache: new JsepPipelineCache(device),
 		bindGroupLayoutCache: new Map<string, GPUBindGroupLayout>(),
 	};
 }

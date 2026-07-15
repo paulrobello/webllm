@@ -5,9 +5,9 @@ export interface ToolParameter {
 	/** JSON Schema type of the parameter. Sourced from the canonical union. */
 	type: JsonSchemaParameterType;
 	/** Human-readable description of the parameter. */
-	description?: string;
+	description?: string | undefined;
 	/** Whether the parameter must be provided. */
-	required?: boolean;
+	required?: boolean | undefined;
 	/** Allowed values when the parameter is an enum-like string. */
 	enum?: string[];
 }

@@ -1,6 +1,13 @@
 /**
  * Bundle entry for the JSEP-style backend variant (P2-v2 prototype).
  *
+ * @experimental The JSEP backend is active Phase-3 R&D and is NOT part
+ * of the published package's semver contract. This entry point and the
+ * declarations under `src/inference/jsep/` are excluded from the npm
+ * type surface by `scripts/build-package.ts`. Consumers depending on
+ * the JSEP path do so at their own risk; the canonical backend remains
+ * `"default"` via `src/index.ts`.
+ *
  * Mirrors `src/index.ts` (the canonical bundle entry) but additionally
  * eagerly imports `src/inference/jsep/index.ts` so `bun build` does
  * not tree-shake the JSEP runtime out of the resulting

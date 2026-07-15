@@ -88,7 +88,7 @@ export async function runTask(
 				`runTask: embedding-dimension task "${task.id}" must use cosine_similarity scoring`,
 			);
 		}
-		engine.resetConversation?.(modelId);
+		engine.resetModelSession?.(modelId);
 		const start = Date.now();
 		let error: string | undefined;
 		let cosine = 0;
@@ -123,14 +123,19 @@ export async function runTask(
 	// prefix to preserve, and a stale KV cache from the previous task
 	// would either bloat the prompt or (worse) collide with the new
 	// position-0 writes and abort the WASM module.
-	engine.resetConversation?.(modelId);
+	engine.resetModelSession?.(modelId);
 
+	const maxTokens = options.maxTokens ?? task.maxTokens;
 	const config: CharacterConfig = {
 		modelId,
 		systemPrompt: task.systemPrompt,
-		maxTokens: options.maxTokens ?? task.maxTokens,
-		temperature: options.temperature,
-		enableThinking: options.enableThinking,
+		...(maxTokens !== undefined && { maxTokens }),
+		...(options.temperature !== undefined && {
+			temperature: options.temperature,
+		}),
+		...(options.enableThinking !== undefined && {
+			enableThinking: options.enableThinking,
+		}),
 		tools,
 		engine,
 	};
@@ -203,7 +208,7 @@ export interface RunTasksOptions extends RunTaskOptions {
 
 /**
  * Once the WASM module hits an `unreachable` trap or any other unrecoverable
- * error, every subsequent `engine.resetConversation()` / `character.chat()`
+ * error, every subsequent `engine.resetModelSession()` / `character.chat()`
  * throws synchronously in 2-3 ms. Without an abort threshold, `runTasks`
  * would faithfully record N zero-score rows and the dashboard would show
  * `0/N · 0% · ~3ms` — false data that pollutes Δ comparisons. Three

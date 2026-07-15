@@ -14,27 +14,27 @@ export interface SystemProfile {
 
 	// Browser
 	userAgent: string;
-	chromeVersion?: string;
-	platform?: string;
+	chromeVersion?: string | undefined;
+	platform?: string | undefined;
 
 	// Approximate hardware (browser-exposed; deliberately coarse for
 	// fingerprinting reasons in modern Chrome)
-	hardwareConcurrency?: number;
-	deviceMemoryGb?: number;
+	hardwareConcurrency?: number | undefined;
+	deviceMemoryGb?: number | undefined;
 
 	// GPU (WebGPU adapter info + relevant limits)
-	gpuVendor?: string;
-	gpuArchitecture?: string;
-	gpuDevice?: string;
-	gpuDescription?: string;
-	gpuMaxBufferSize?: number;
-	gpuMaxStorageBufferBindingSize?: number;
-	gpuFeatures?: string[];
+	gpuVendor?: string | undefined;
+	gpuArchitecture?: string | undefined;
+	gpuDevice?: string | undefined;
+	gpuDescription?: string | undefined;
+	gpuMaxBufferSize?: number | undefined;
+	gpuMaxStorageBufferBindingSize?: number | undefined;
+	gpuFeatures?: string[] | undefined;
 
 	// Display
-	screenWidth?: number;
-	screenHeight?: number;
-	devicePixelRatio?: number;
+	screenWidth?: number | undefined;
+	screenHeight?: number | undefined;
+	devicePixelRatio?: number | undefined;
 }
 
 /**

@@ -26,6 +26,18 @@ interface ConversationMetaRecord {
 const PAYLOAD_STORE = "conversations";
 const META_STORE = "conversation-meta";
 
+/**
+ * Default IndexedDB-backed store for `WLKV` conversation blobs. Optional
+ * companion to the engine's `exportConversation` / `importConversation`
+ * primitives — apps that want OPFS, server-side sync, or encrypted-at-rest
+ * implement their own store against the same `Uint8Array` contract.
+ *
+ * Backed by two IndexedDB object stores: `conversations` holds the raw
+ * bytes and `conversation-meta` holds the `{ byteLength, savedAtMs }`
+ * sidecar read by {@link list}. One database per `dbName`; pass distinct
+ * names to keep separate apps' conversations isolated in the same origin.
+ * Spec: 2026-05-03-prefix-cache-persistence-design.md.
+ */
 export class IndexedDBConversationStore {
 	private dbName: string;
 	private db: IDBDatabase | null = null;
@@ -34,6 +46,20 @@ export class IndexedDBConversationStore {
 		this.dbName = dbName;
 	}
 
+	/**
+	 * Open (or reuse) the underlying IndexedDB database, creating the
+	 * `conversations` and `conversation-meta` object stores on first run.
+	 *
+	 * Safe to call repeatedly — subsequent calls are no-ops once the
+	 * connection is held. Called implicitly by {@link put}, {@link get},
+	 * {@link delete}, {@link list}, and {@link clear}, so most callers
+	 * never invoke it directly.
+	 *
+	 * Throws {@link PersistenceUnavailableError} (with `reason`
+	 * `"indexeddb-missing"`, `"open-failed"`, or `"indexeddb-blocked"`)
+	 * when IndexedDB is absent, the open fails synchronously, or another
+	 * tab holds an upgrade lease.
+	 */
 	async open(): Promise<void> {
 		if (this.db) return;
 		if (typeof indexedDB === "undefined") {

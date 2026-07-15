@@ -1,12 +1,35 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.4.12/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
 	"vcs": {
 		"enabled": true,
 		"clientKind": "git",
 		"useIgnoreFile": true
 	},
 	"files": {
-		"includes": ["**", "!!**/dist", "!!**/src/wasm/build", "!!**/src/wasm/build-mem64", "!!**/src/wasm/build-jsep", "!!**/smoke-test"]
+		"includes": [
+			"**",
+			"!!**/dist",
+			"!!**/src/wasm/build",
+			"!!**/src/wasm/build-mem64",
+			"!!**/src/wasm/build-jsep",
+			"!!**/smoke-test/vendor",
+			"!!**/smoke-test/*.src.ts",
+			"!!**/smoke-test/*.d.ts",
+			"!!**/smoke-test/*.html",
+			"!!**/smoke-test/*.css",
+			"!!**/smoke-test/*.json",
+			"!!**/smoke-test/webllm-bundle*.js",
+			"!!**/smoke-test/webllm-wasm*.js",
+			"!!**/smoke-test/webllm-models.js",
+			"!!**/smoke-test/webllm-persistence.js",
+			"!!**/smoke-test/webllm-internal.js",
+			"!!**/smoke-test/p0-spike.js",
+			"!!**/smoke-test/p1-fixture-regen.js",
+			"!!**/smoke-test/p1-tokenizer-parity.js",
+			"!!**/smoke-test/p2-v2-ref-probe.js",
+			"!!**/smoke-test/p2-v2-spike.js",
+			"!!**/smoke-test/p2-v2-offload-probe.js"
+		]
 	},
 	"formatter": {
 		"enabled": true,

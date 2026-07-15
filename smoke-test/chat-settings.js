@@ -1,11 +1,31 @@
 // chat-settings.js — settings panel state + family-aware sampler defaults.
 
-const ENGINE_FALLBACKS = { temperature: 1.0, topK: 0, topP: 1.0, repetitionPenalty: 1.0 };
+const ENGINE_FALLBACKS = {
+	temperature: 1.0,
+	topK: 0,
+	topP: 1.0,
+	repetitionPenalty: 1.0,
+};
 
-const QWEN_THINKING = { temperature: 0.6, topK: 20, topP: 0.95, repetitionPenalty: 1.05 };
-const QWEN_NON_THINKING = { temperature: 0.7, topK: 20, topP: 0.8, repetitionPenalty: 1.1 };
+const QWEN_THINKING = {
+	temperature: 0.6,
+	topK: 20,
+	topP: 0.95,
+	repetitionPenalty: 1.05,
+};
+const QWEN_NON_THINKING = {
+	temperature: 0.7,
+	topK: 20,
+	topP: 0.8,
+	repetitionPenalty: 1.1,
+};
 const PHI3 = { temperature: 0, topK: 0, topP: 1, repetitionPenalty: 1.1 };
-const MISTRAL = { temperature: 0.7, topK: 0, topP: 0.95, repetitionPenalty: 1.0 };
+const MISTRAL = {
+	temperature: 0.7,
+	topK: 0,
+	topP: 0.95,
+	repetitionPenalty: 1.0,
+};
 
 /**
  * Compute the default settings for a given model. Mirrors the engine's
@@ -13,24 +33,27 @@ const MISTRAL = { temperature: 0.7, topK: 0, topP: 0.95, repetitionPenalty: 1.0 
  * numbers the engine will use.
  */
 export function defaultSettings(model, enableThinking) {
-  const isQwenChatml = model.architecture === "qwen2" || model.architecture === "qwen3";
-  if (isQwenChatml) {
-    return enableThinking === false ? { ...QWEN_NON_THINKING } : { ...QWEN_THINKING };
-  }
-  if (model.architecture === "phi3") {
-    return { ...PHI3 };
-  }
-  // Mistral-Instruct family — registered with `architecture: "llama"` but
-  // its chat template is `[INST]…[/INST]` without `<<SYS>>`. Distinguish
-  // by family name (registry uses "Mistral" / "Mistral Nemo" etc.).
-  if (typeof model.family === "string" && /^mistral/i.test(model.family)) {
-    return { ...MISTRAL };
-  }
-  return { ...ENGINE_FALLBACKS };
+	const isQwenChatml =
+		model.architecture === "qwen2" || model.architecture === "qwen3";
+	if (isQwenChatml) {
+		return enableThinking === false
+			? { ...QWEN_NON_THINKING }
+			: { ...QWEN_THINKING };
+	}
+	if (model.architecture === "phi3") {
+		return { ...PHI3 };
+	}
+	// Mistral-Instruct family — registered with `architecture: "llama"` but
+	// its chat template is `[INST]…[/INST]` without `<<SYS>>`. Distinguish
+	// by family name (registry uses "Mistral" / "Mistral Nemo" etc.).
+	if (typeof model.family === "string" && /^mistral/i.test(model.family)) {
+		return { ...MISTRAL };
+	}
+	return { ...ENGINE_FALLBACKS };
 }
 
 export function isThinkingCapable(model) {
-  return model.architecture === "qwen3";
+	return model.architecture === "qwen3";
 }
 
 /**
@@ -39,9 +62,9 @@ export function isThinkingCapable(model) {
  * object. Calls `onChange()` whenever a control changes.
  */
 export function renderSettingsPanel(panelEl, model, onChange) {
-  const defaults = defaultSettings(model, true);
-  const thinkingCapable = isThinkingCapable(model);
-  panelEl.innerHTML = `
+	const defaults = defaultSettings(model, true);
+	const thinkingCapable = isThinkingCapable(model);
+	panelEl.innerHTML = `
     <label for="chat-temperature">Temperature</label>
     <input id="chat-temperature" type="number" min="0" max="2" step="0.05" value="${defaults.temperature}">
     <label for="chat-topk">Top-K</label>
@@ -52,49 +75,66 @@ export function renderSettingsPanel(panelEl, model, onChange) {
     <input id="chat-maxtok" type="number" min="1" step="1" value="512">
     <label for="chat-seed">Seed (blank = random)</label>
     <input id="chat-seed" type="number" step="1" value="">
-    ${thinkingCapable ? `
+    ${
+			thinkingCapable
+				? `
       <label for="chat-thinking">Thinking mode (Qwen3)</label>
       <input id="chat-thinking" type="checkbox" checked>
-    ` : ""}
+    `
+				: ""
+		}
     <button id="chat-settings-reset" type="button" style="grid-column: 1 / -1; justify-self: start;">Reset to defaults</button>
   `;
-  panelEl.classList.add("open");
-  panelEl.setAttribute("aria-hidden", "false");
+	panelEl.classList.add("open");
+	panelEl.setAttribute("aria-hidden", "false");
 
-  const get = (id) => /** @type {HTMLInputElement} */ (panelEl.querySelector(id));
-  const numOrUndef = (el) => (el.value === "" ? undefined : Number(el.value));
+	const get = (id) =>
+		/** @type {HTMLInputElement} */ (panelEl.querySelector(id));
+	const numOrUndef = (el) => (el.value === "" ? undefined : Number(el.value));
 
-  function reset() {
-    const enableThinking = thinkingCapable ? get("#chat-thinking").checked : true;
-    const d = defaultSettings(model, enableThinking);
-    get("#chat-temperature").value = String(d.temperature);
-    get("#chat-topk").value = String(d.topK);
-    get("#chat-topp").value = String(d.topP);
-    get("#chat-maxtok").value = "512";
-    get("#chat-seed").value = "";
-  }
-  panelEl.querySelector("#chat-settings-reset").addEventListener("click", () => { reset(); onChange?.(); });
-  if (thinkingCapable) {
-    get("#chat-thinking").addEventListener("change", () => { reset(); onChange?.(); });
-  }
-  for (const inputEl of panelEl.querySelectorAll("input")) {
-    inputEl.addEventListener("input", () => onChange?.());
-  }
+	function reset() {
+		const enableThinking = thinkingCapable
+			? get("#chat-thinking").checked
+			: true;
+		const d = defaultSettings(model, enableThinking);
+		get("#chat-temperature").value = String(d.temperature);
+		get("#chat-topk").value = String(d.topK);
+		get("#chat-topp").value = String(d.topP);
+		get("#chat-maxtok").value = "512";
+		get("#chat-seed").value = "";
+	}
+	panelEl
+		.querySelector("#chat-settings-reset")
+		.addEventListener("click", () => {
+			reset();
+			onChange?.();
+		});
+	if (thinkingCapable) {
+		get("#chat-thinking").addEventListener("change", () => {
+			reset();
+			onChange?.();
+		});
+	}
+	for (const inputEl of panelEl.querySelectorAll("input")) {
+		inputEl.addEventListener("input", () => onChange?.());
+	}
 
-  return {
-    getConfig() {
-      return {
-        temperature: numOrUndef(get("#chat-temperature")),
-        topK: numOrUndef(get("#chat-topk")),
-        topP: numOrUndef(get("#chat-topp")),
-        maxTokens: numOrUndef(get("#chat-maxtok")) ?? 512,
-        seed: numOrUndef(get("#chat-seed")),
-        enableThinking: thinkingCapable ? get("#chat-thinking").checked : undefined,
-      };
-    },
-    close() {
-      panelEl.classList.remove("open");
-      panelEl.setAttribute("aria-hidden", "true");
-    },
-  };
+	return {
+		getConfig() {
+			return {
+				temperature: numOrUndef(get("#chat-temperature")),
+				topK: numOrUndef(get("#chat-topk")),
+				topP: numOrUndef(get("#chat-topp")),
+				maxTokens: numOrUndef(get("#chat-maxtok")) ?? 512,
+				seed: numOrUndef(get("#chat-seed")),
+				enableThinking: thinkingCapable
+					? get("#chat-thinking").checked
+					: undefined,
+			};
+		},
+		close() {
+			panelEl.classList.remove("open");
+			panelEl.setAttribute("aria-hidden", "true");
+		},
+	};
 }

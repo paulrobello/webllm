@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	detectChatTemplate,
 	formatGemma4,
-} from "../../src/inference/chat-template.js";
+} from "../src/inference/chat-template.js";
 
 describe("formatGemma4", () => {
 	it("emits <start_of_turn>user...<end_of_turn>", () => {

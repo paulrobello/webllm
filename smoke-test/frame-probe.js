@@ -12,9 +12,9 @@
 // captured rAF timestamps into the four windows post-hoc.
 
 const VERTS = new Float32Array([
-	-1, -1, -1, 1, 0, 0, 1, -1, -1, 0, 1, 0, 1, 1, -1, 0, 0, 1, -1, 1, -1, 1, 1, 0,
-	-1, -1, 1, 1, 0, 1, 1, -1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, -1, 1, 1, 0.4, 0.4,
-	0.4,
+	-1, -1, -1, 1, 0, 0, 1, -1, -1, 0, 1, 0, 1, 1, -1, 0, 0, 1, -1, 1, -1, 1, 1,
+	0, -1, -1, 1, 1, 0, 1, 1, -1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, -1, 1, 1, 0.4,
+	0.4, 0.4,
 ]);
 const IDX = new Uint16Array([
 	0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 2, 6, 3, 6, 7, 0, 3,
@@ -43,16 +43,32 @@ function mat4Mul(a, b) {
 function persp(fov, aspect, n, f) {
 	const t = Math.tan(fov / 2);
 	return new Float32Array([
-		1 / (aspect * t), 0, 0, 0, 0, 1 / t, 0, 0, 0, 0, (n + f) / (n - f), -1, 0,
-		0, (2 * n * f) / (n - f), 0,
+		1 / (aspect * t),
+		0,
+		0,
+		0,
+		0,
+		1 / t,
+		0,
+		0,
+		0,
+		0,
+		(n + f) / (n - f),
+		-1,
+		0,
+		0,
+		(2 * n * f) / (n - f),
+		0,
 	]);
 }
 function rotY(a) {
-	const c = Math.cos(a), s = Math.sin(a);
+	const c = Math.cos(a),
+		s = Math.sin(a);
 	return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]);
 }
 function rotX(a) {
-	const c = Math.cos(a), s = Math.sin(a);
+	const c = Math.cos(a),
+		s = Math.sin(a);
 	return new Float32Array([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]);
 }
 function trans(x, y, z) {
@@ -209,7 +225,8 @@ async function runSceneProbe({ root, canvas, label }, sceneUrl) {
 		if (!obj.isMesh) return;
 		const g = obj.geometry;
 		if (g.index) triangles += g.index.count / 3;
-		else if (g.attributes.position) triangles += g.attributes.position.count / 3;
+		else if (g.attributes.position)
+			triangles += g.attributes.position.count / 3;
 	});
 
 	const box = new THREE.Box3().setFromObject(gltf.scene);
@@ -358,11 +375,7 @@ export function summarizeFrameProbe({ samples, tStart, prefillMs, tEnd }) {
  * `tBaselineStart` defines the start of the baseline window. Samples
  * before it are discarded as warmup.
  */
-export function summarizeFrameProbeMulti({
-	samples,
-	tBaselineStart,
-	calls,
-}) {
+export function summarizeFrameProbeMulti({ samples, tBaselineStart, calls }) {
 	const baseline = [];
 	const perCall = calls.map(() => ({ prefill: [], decode: [] }));
 	const post = [];
@@ -456,9 +469,13 @@ export function formatFrameProbeMultiReport(summary) {
 		const allHitched = sortMax.every((x) => x >= 30);
 		const tightSpread = max - min < 25;
 		let pattern;
-		if (allHitched && tightSpread) pattern = "DETERMINISTIC (every call hitches in a narrow band)";
-		else if (totalDrops50 === 0) pattern = "NO HITCH (no >50ms drops across any call)";
-		else pattern = "STOCHASTIC (drops scattered, not every call hitches the same way)";
+		if (allHitched && tightSpread)
+			pattern = "DETERMINISTIC (every call hitches in a narrow band)";
+		else if (totalDrops50 === 0)
+			pattern = "NO HITCH (no >50ms drops across any call)";
+		else
+			pattern =
+				"STOCHASTIC (drops scattered, not every call hitches the same way)";
 		lines.push(`  pattern: ${pattern}`);
 	}
 	return lines;
