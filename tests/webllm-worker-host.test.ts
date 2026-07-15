@@ -131,13 +131,28 @@ describe("webllm-worker-host", () => {
 		});
 		// drain microtasks
 		for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
-		// 3 chunks yielded back-to-back fit in one coalesced batch; the host
-		// then posts stream-done.
-		const types = channel.proxyInbox.map((m) => m.type);
-		expect(types).toEqual(["stream-chunks", "stream-done"]);
-		const batch = channel.proxyInbox[0];
-		if (batch.type !== "stream-chunks") throw new Error("expected batch");
-		expect(batch.chunks).toHaveLength(3);
+		// 3 back-to-back chunks coalesce and the stream terminates with
+		// stream-done. Assert the timing-robust invariants (all chunks
+		// delivered in order, clean termination, no legacy singular posts)
+		// rather than the exact batch count: under event-loop contention the
+		// host's 16 ms time-cap (BATCH_MAX_MS in webllm-worker-host.ts)
+		// legitimately splits even back-to-back yields into multiple
+		// stream-chunks batches — chunks still arrive in order, so it is
+		// correct behavior. Pinning exactly one batch made this test ~22%
+		// flaky on loaded runners.
+		const batches = channel.proxyInbox.filter(
+			(m) => m.type === "stream-chunks",
+		) as Array<Extract<WorkerToProxy, { type: "stream-chunks" }>>;
+		const allChunks = batches.flatMap((b) => b.chunks);
+		expect(allChunks).toHaveLength(3);
+		expect(allChunks.map((c) => c.text)).toEqual(["hi", " there", ""]);
+		expect(channel.proxyInbox[channel.proxyInbox.length - 1]?.type).toBe(
+			"stream-done",
+		);
+		// No legacy singular stream-chunk posts.
+		expect(
+			channel.proxyInbox.filter((m) => m.type === "stream-chunk"),
+		).toHaveLength(0);
 	});
 
 	test("stream-cancel posted immediately after stream-start aborts the stream (no race)", async () => {
@@ -236,10 +251,15 @@ describe("webllm-worker-host", () => {
 		const batches = channel.proxyInbox.filter(
 			(m) => m.type === "stream-chunks",
 		) as Array<Extract<WorkerToProxy, { type: "stream-chunks" }>>;
-		// 16 chunks at cap=8 → at most 2 size-driven flushes (no extra final
-		// flush needed because the buffer is empty after the second flush).
+		// Coalescing should at least halve the message count: 16 chunks at
+		// cap=8 → ≥2 size-driven batches, and far fewer than 16 under any
+		// realistic timing. The upper bound tolerates event-loop stalls (the
+		// 16 ms time-cap can split back-to-back yields into a few extra
+		// batches) while still catching a flush-every-chunk regression (which
+		// would produce 16 singleton batches). See the sibling "drains async
+		// iterator" test for why exact batch counts are not robust here.
 		expect(batches.length).toBeGreaterThanOrEqual(1);
-		expect(batches.length).toBeLessThanOrEqual(3);
+		expect(batches.length).toBeLessThanOrEqual(8);
 		// Total chunks across all batches must equal 16 in order.
 		const allChunks = batches.flatMap((b) => b.chunks);
 		expect(allChunks).toHaveLength(16);
@@ -343,8 +363,15 @@ describe("webllm-worker-host", () => {
 		const batches = channel.proxyInbox.filter(
 			(m) => m.type === "stream-chunks",
 		) as Array<Extract<WorkerToProxy, { type: "stream-chunks" }>>;
-		expect(batches).toHaveLength(1);
-		expect(batches[0].chunks).toHaveLength(5);
+		// The trailing flush before stream-done must deliver all 5 chunks
+		// (the regression it guards is "no trailing flush → chunks dropped").
+		// Assert all 5 arrive in order rather than exactly one batch — under
+		// event-loop stalls the 16 ms time-cap can split the back-to-back
+		// yields into multiple batches, but the total is invariant. See the
+		// sibling "drains async iterator" test.
+		const allChunks = batches.flatMap((b) => b.chunks);
+		expect(allChunks).toHaveLength(5);
+		expect(allChunks.map((c) => c.tokenId)).toEqual([0, 1, 2, 3, 4]);
 		expect(channel.proxyInbox[channel.proxyInbox.length - 1]?.type).toBe(
 			"stream-done",
 		);
