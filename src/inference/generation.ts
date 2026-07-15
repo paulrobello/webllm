@@ -126,7 +126,13 @@ export type GenerationFinishReason =
 export interface GenerationResult {
 	/** All tokens produced during generation (excluding prompt). */
 	tokens: number[];
-	/** Decoded output text (requires tokenizer integration). */
+	/**
+	 * Decoded visible output text (requires tokenizer integration). Excludes
+	 * `<think>` block reasoning — only the visible answer is accumulated.
+	 * Concatenating every `onToken` delta reproduces this exactly. Behavior
+	 * change (ENH-002): previously could include `<think>` content; now
+	 * visible-only.
+	 */
 	text: string;
 	/** Number of generated tokens. */
 	tokenCount: number;

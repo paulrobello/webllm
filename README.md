@@ -132,6 +132,47 @@ await engine.shutdown();
 > `engine.adoptPreloadedModel(name, pipeline)` instead. For a worker-mode
 > setup, call `WebLLM.init({ worker: true })` and use the returned proxy.
 
+### Streaming tokens
+
+Both streaming surfaces — `engine.chatCompletion(...)` and
+`engine.generateStream(...)` — emit visible answer text as it decodes.
+Reasoning emitted inside a `<think>` block (Qwen3 thinking mode and similar) is
+routed to a separate stream so it never flashes into the visible answer.
+Choose whichever consumption style fits your UI:
+
+```typescript
+// Callback style — deltas pushed to your UI as they decode:
+await engine.chatCompletion(handle.id, [
+  { role: "user", content: "What do you sell?" },
+], {
+  maxTokens: 256,
+  onToken: (delta) => dialogueBox.append(delta),
+  onThinking: (delta) => reasoningPanel.append(delta), // only fires for think blocks
+});
+
+// Iterator style — pull visible + reasoning from one for-await loop:
+for await (const chunk of engine.chatCompletion(handle.id, messages, { maxTokens: 256 })) {
+  if (chunk.text) dialogueBox.append(chunk.text);
+  if (chunk.thinkingText) reasoningPanel.append(chunk.thinkingText);
+  if (chunk.done) console.log("stats:", chunk.stats);
+}
+```
+
+`onToken` fires once per visible-text delta; `onThinking` fires once per
+reasoning delta (inner text only, no `<think>` / `</think>` wrappers) and only
+when the model emits a think block. `chunk.thinkingText` carries the same
+reasoning delta for iterator consumers who want both streams from one loop.
+
+**Invariant:** concatenating every `onToken` delta (equivalently every
+`chunk.text`) reproduces the final `result.text` / `chunk.stats.text` exactly —
+visible answer text only. Both consumption styles work identically in worker
+mode (`WebLLM.init({ worker: true })`): callbacks are stripped before
+`postMessage` and re-invoked per arriving chunk on the main side.
+
+> **Behavior change (ENH-002).** The result `text` field is now visible-only
+> (previously it could include `<think>` reasoning). Use `onThinking` or
+> `chunk.thinkingText` if you want the reasoning alongside the answer.
+
 ## Architecture
 
 The TypeScript orchestration layer sits on top of two interchangeable

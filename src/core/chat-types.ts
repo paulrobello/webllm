@@ -161,7 +161,14 @@ export interface StreamStats {
 	readonly timeToFirstTokenMs: number;
 	/** Total wall-clock time in ms. */
 	readonly totalMs: number;
-	/** Full response text. */
+	/**
+	 * Full visible response text (excludes `<think>` reasoning). Concatenating
+	 * every {@link CompletionConfig.onToken} delta (equivalently every
+	 * {@link StreamChunk.text}) reproduces this exactly. Behavior change
+	 * (ENH-002): previously could include `<think>` content; now visible-only.
+	 * Use {@link CompletionConfig.onThinking} / {@link StreamChunk.thinkingText}
+	 * for the reasoning.
+	 */
 	readonly text: string;
 	/** Why generation stopped. */
 	readonly finishReason: GenerationFinishReason;
