@@ -205,6 +205,20 @@ before a change is "done". `make help` lists every target.
 4. Check **both** the page `#log` text and the browser console.
 5. The smoke test passes only when visible steps succeed AND no relevant runtime console errors are emitted. `adapter_info:` from the WebGPU backend is benign informational output and is not a failure.
 
+**Two lanes, distinct purposes:**
+
+- **agentchrome** (the workflow above) = **interactive** debugging — reuse the
+  session/tab, watch the console live, iterate.
+- **`make test-browser`** = **scripted** regression gate. Runs Playwright +
+  Chrome against `smoke-test/real-model.html` with the smallest registered chat
+  model (`smollm2-360m-q4f16`), asserts generation succeeded (`[7/8] … tok/s,
+  finish=…`), and fails on uncaught page errors or unexpected `console.error`
+  messages. Local-only (needs a real GPU + `make smoke-test` artifacts first);
+  headed by default (probed 2026-07-14: headless yields only a SwiftShader
+  software adapter, so the real Metal GPU requires headed mode). **Not in
+  `checkall` or CI.** Config in `playwright.config.ts`; spec in
+  `tests-browser/smoke.spec.ts`.
+
 **Live dashboard:** `make dashboard-serve` on port 8033. Two ingest paths:
 
 - **Browser smoke runs** (`smoke-test/real-model.html`) auto-post `run_complete`
@@ -236,8 +250,9 @@ the dashboard comes back online.
 
 - **8031** — smoke-test static site (`make smoke-serve`; override `SMOKE_PORT`).
 - **8033** — live dashboard + SSE backend (`make dashboard-serve`; override `DASHBOARD_PORT`).
+- **8034** — Playwright browser-regression lane webServer (`make test-browser`; separate from 8031 so a dev smoke server can stay up).
 
-Both are reserved in `~/.claude/used_ports.md`.
+All three are reserved in `~/.claude/used_ports.md`.
 
 ## agentchrome usage
 

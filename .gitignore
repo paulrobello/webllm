@@ -98,3 +98,9 @@ docs/playgrounds/
 # Build caches
 .cache/
 .turbo/
+
+# Playwright (make test-browser) — local-only browser gate
+/test-results/
+/playwright-report/
+/playwright/.cache/
+/blob-report/

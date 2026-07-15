@@ -1,4 +1,4 @@
-.PHONY: build test check-skip-count check-jspi lint lint-fix fmt typecheck checkall clean install deps \
+.PHONY: build test test-browser check-skip-count check-jspi lint lint-fix fmt typecheck checkall clean install deps \
         wasm-build wasm-build-wasm32 wasm-build-mem64 wasm-build-jsep wasm-clean \
         bench bench-perf bench-eval-list \
         bench-eval-models bench-inference bench-inference-save embed-perf embed-perf-baseline bench-chat-smoke bench-chat-smoke-matrix bench-chat-smoke-matrix-full bench-profile bench-browser-eval bench-full \
@@ -71,6 +71,9 @@ typecheck: ## Run TypeScript type checking (production: src/**)
 
 typecheck-tests: ## Run TypeScript type checking against tests/** under tsconfig.test.json
 	bun run typecheck:tests
+
+test-browser: ## Run the Playwright browser regression lane (requires `make smoke-test` artifacts + local GPU + model weights; NOT part of checkall/CI)
+	bun run test:browser
 
 checkall: fmt lint typecheck typecheck-tests test check-skip-count check-jspi ## Format, lint, typecheck (src + tests), test, enforce the skip-count ratchet, and enforce JSPI/ABI invariants
 
