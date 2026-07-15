@@ -146,6 +146,48 @@ export function isCausalEmbedderArchitecture(a: ModelArchitecture): boolean {
 	return (CAUSAL_EMBEDDER_ARCHITECTURES as readonly string[]).includes(a);
 }
 
+/**
+ * Shared contract across the three inference engine kinds:
+ * {@link ModelInference} (chat / causal-LM path), {@link EncoderInference}
+ * (bidirectional BERT family), and {@link CausalLMEmbedder} (causal-LM-
+ * derived retrieval path). Resolves ARC-006.
+ *
+ * Adding a fourth engine kind is additive: `implements InferencePipeline`,
+ * declare a new {@link InferencePipelineKind} literal, and the engine can
+ * dispatch on {@link kind} rather than `instanceof` / architecture-string
+ * guards. The engine's {@link ModelRecord} (ARC-004) keeps its three
+ * type-partitioned optional fields (`inference` / `encoder` /
+ * `causalEmbedder`) — this interface unifies the *type seam* across the
+ * three pipeline classes, not the ModelRecord containers.
+ *
+ * `embed` is declared against the narrowest common call shape so all three
+ * current implementations satisfy it; chat-model {@link ModelInference.embed}
+ * widens with an optional `opts` arg that is ignored by the encoder and
+ * causal-embedder paths. Engine method signatures that return a generic
+ * pipeline still thread the concrete
+ * `ModelInference | EncoderInference | CausalLMEmbedder` union so chat-only
+ * call sites keep their concrete types without forced casts.
+ */
+export type InferencePipelineKind = "chat" | "encoder" | "causal-embedder";
+
+export interface InferencePipeline {
+	/** Discriminant selecting which engine kind owns this pipeline. */
+	readonly kind: InferencePipelineKind;
+	/**
+	 * Release weights, GPU buffers, and (for chat) the KV cache. Invoked by
+	 * `WebLLM.unloadModel` / `WebLLM.shutdown` on every pipeline a
+	 * `ModelRecord` holds.
+	 */
+	dispose(): void | Promise<void>;
+	/**
+	 * Optional embedding capability. Present on all three current kinds
+	 * (encoder CLS/mean pool, causal-embedder last-token pool, chat-model
+	 * tap-point under `ModelLoadOptions.embeddingCapable`). Declared against
+	 * the narrowest common call shape; see the interface doc above.
+	 */
+	embed?(tokenIds: Int32Array): Promise<Float32Array>;
+}
+
 /** Metadata for a single tensor within a GGUF model file. */
 export interface TensorInfo {
 	name: string;

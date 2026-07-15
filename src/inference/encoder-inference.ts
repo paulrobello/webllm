@@ -1,5 +1,6 @@
 import {
 	ENCODER_ARCHITECTURES,
+	type InferencePipeline,
 	isEncoderArchitecture,
 	type ModelHyperparams,
 } from "../core/types.js";
@@ -53,7 +54,8 @@ interface EncoderWeights {
  * BERT-style bidirectional encoder. Produces a single L2-normalized
  * sentence embedding via forward + pool + normalize. No KV cache.
  */
-export class EncoderInference {
+export class EncoderInference implements InferencePipeline {
+	public readonly kind = "encoder" as const;
 	private wasm: GgmlWasm;
 	private hp: ModelHyperparams;
 	private weights: EncoderWeights | null = null;

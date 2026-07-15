@@ -1,4 +1,4 @@
-import type { ModelHyperparams } from "../core/types.js";
+import type { InferencePipeline, ModelHyperparams } from "../core/types.js";
 import type { GgufContext, GgufTensorInfo } from "../models/gguf-types.js";
 import {
 	type BufferPtr,
@@ -578,7 +578,8 @@ interface BuiltForwardGraph {
  * V cache is stored as [maxCtx, headDim, nKvHeads] so that mul_mat(V, attn)
  * produces [headDim, nTokens, nHeads] with built-in GQA broadcast.
  */
-export class ModelInference {
+export class ModelInference implements InferencePipeline {
+	public readonly kind = "chat" as const;
 	private wasm: GgmlWasm;
 	private hp: ModelHyperparams;
 	private weights: WeightTensors | null = null;
