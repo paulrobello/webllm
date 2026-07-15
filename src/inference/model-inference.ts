@@ -443,6 +443,80 @@ function computeGraphSizing(
 }
 
 /**
+ * Terminal output kind for {@link ModelInference.buildForwardGraph}.
+ *
+ * - `"logits"`: full lm_head output (forwardSingle / forwardAllPositions).
+ * - `"decode"`: logits followed by argmax or topk reduction (forwardDecode).
+ * - `"embedding"`: post-`output_norm` hidden state, no lm_head (forwardForEmbedding).
+ * - `"taps"`: logits + per-layer hidden taps (forwardWithLayerTaps).
+ *
+ * B1 implements only `"logits"`; B2-B5 extend to the other kinds.
+ */
+type ForwardOutputKind = "logits" | "decode" | "embedding" | "taps";
+
+/**
+ * Options for {@link ModelInference.buildForwardGraph}.
+ *
+ * Encodes the inputs and sizing/output discriminators for a forward-pass
+ * graph. Designed to generalize across the 5 forward variants
+ * (forwardSingle / forwardAllPositions / forwardDecode / forwardForEmbedding /
+ * forwardWithLayerTaps); B1 implements only `mode: "standard"` +
+ * `output: "logits"`.
+ */
+interface BuildForwardGraphOpts {
+	/** Sizing mode — drives {@link computeGraphSizing} (ctx bytes + node count). */
+	mode: ForwardGraphMode;
+	/** Terminal output kind — determines the graph's final tensor(s). */
+	output: ForwardOutputKind;
+	/** Input token IDs (length {@link nTokens}). */
+	tokenIds: Int32Array;
+	/** Input positions (length {@link nTokens}). */
+	positions: Int32Array;
+	/** Number of tokens in this forward call. */
+	nTokens: number;
+	/** Number of cached KV positions before this call. */
+	pastLen: number;
+	/** `pastLen + nTokens` — total sequence length after this call. */
+	totalLen: number;
+	/** RoPE mode for the architecture (from `getRopeModeForArchitecture`). */
+	ropeMode: number;
+	/** Whether a causal attention mask tensor is needed (`nTokens > 1`). */
+	needsMask: boolean;
+	/** Mask column count padded to the 32-wide FA requirement. */
+	maskPaddedCols: number;
+	/** Sliding-window size (`hp.slidingWindowSize ?? 0`); 0 = no SWA. */
+	swaWindow: number;
+	/** Whether an SWA mask tensor is needed. */
+	needsSwaMask: boolean;
+	/** When true, capture `t1`/`t2` trace timestamps. */
+	trace: boolean;
+}
+
+/**
+ * Result of {@link ModelInference.buildForwardGraph}: the built graph handle,
+ * the terminal output tensor, and the leaf input tensors that the caller must
+ * upload data into (via {@link ModelInference.uploadLeaves}) before compute.
+ */
+interface BuiltForwardGraph {
+	/** Graph handle (for `graphCompute` / `backendAllocCtxTensors`). */
+	graph: number;
+	/** Terminal output tensor — `logits` for `output: "logits"`. */
+	outputTensor: TensorPtr;
+	/** Position leaf tensor. */
+	posTensor: TensorPtr;
+	/** Token-ID leaf tensor. */
+	tokenIdsTensor: TensorPtr;
+	/** Causal mask leaf tensor (0 if not created). */
+	maskTensor: TensorPtr;
+	/** SWA mask leaf tensor (0 if not created). */
+	swaMaskTensor: TensorPtr;
+	/** Trace: timestamp after `ctxCreate`; 0 when `!trace`. */
+	t1: number;
+	/** Trace: timestamp after `graphBuildForwardExpand`; 0 when `!trace`. */
+	t2: number;
+}
+
+/**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
@@ -1498,41 +1572,48 @@ export class ModelInference {
 	}
 
 	/**
-	 * Single-call forward pass: one ctxCreate → graph build → graph compute →
-	 * ctxFree cycle for the given tokens. **Do not call directly** — public
-	 * callers go through `forward()`, which dispatches to either this or the
-	 * tiled loop based on `prefillTileSize`.
+	 * Build the forward-pass computation graph (ctxCreate → op sequence →
+	 * `graphBuildForwardExpand`) without executing it. The caller is
+	 * responsible for `backendAllocCtxTensors`, `uploadLeaves`,
+	 * `graphCompute`, readback, and teardown.
 	 *
-	 * The graph build invariants documented inline below are load-bearing —
-	 * see comments around `no_alloc=true` rationale, V-cache permute axes,
-	 * and last-position-only readback. Do not refactor the body.
+	 * This is the shared graph-construction entry point for the forward-pass
+	 * variants. B1 implements the `mode: "standard"` + `output: "logits"`
+	 * path (forwardSingle); B2-B5 will extend it to allPositions / decode /
+	 * embedding / taps.
+	 *
+	 * The op sequence is byte-identical to the pre-B1 `forwardSingle` body —
+	 * a mechanical extraction. Do not reorder, fuse, or "optimize" ops; the
+	 * graph structure is a load-bearing parity invariant.
 	 */
-	private async forwardSingle(
-		tokenIds: Int32Array,
-		positions: Int32Array,
-	): Promise<Float32Array> {
+	private async buildForwardGraph(
+		opts: BuildForwardGraphOpts,
+	): Promise<BuiltForwardGraph> {
 		if (!this.weights) throw new Error("Weights not loaded");
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
 		const { hp, wasm, weights } = this;
-		const nTokens = tokenIds.length;
-		const pastLen = this.nCached;
-		const totalLen = pastLen + nTokens;
-
-		const trace = this.traceEnabled;
-		const t0 = trace ? performance.now() : 0;
+		const {
+			mode,
+			nTokens,
+			pastLen,
+			totalLen,
+			ropeMode,
+			needsMask,
+			maskPaddedCols,
+			needsSwaMask,
+			trace,
+		} = opts;
 
 		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
 		// too tight at seq=512 on Mistral 7B).
 		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(
 			hp,
 			totalLen,
-			"standard",
+			mode,
 		);
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
-
-		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
 		// Leaf input tensors — data is uploaded below, AFTER backendAllocCtxTensors
 		// assigns real GPU buffers. ctxCreate uses no_alloc=true so tensor->data
@@ -1554,22 +1635,12 @@ export class ModelInference {
 		// of the same shape that holds a banded windowed-causal mask. Per-layer
 		// dispatch picks `swaMaskTensor` for layers with
 		// `hp.slidingWindowPattern[il] === true`, otherwise `maskTensor`.
-		const needsMask = nTokens > 1;
-		const maskPaddedCols = padTo(nTokens, 32);
 		// FA requires F16 mask (ggml.c:5330); opSoftMaxExt accepts F16 too,
 		// so this works for both attention paths. Causal mask values are
 		// written as F16 bit patterns: 0x0000 = 0.0, 0xFC00 = -Inf.
 		const maskTensor = needsMask
 			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
-		const swaWindow = hp.slidingWindowSize ?? 0;
-		const hasSwaLayers =
-			(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
-		// SWA mask is needed whenever prefill runs (nTokens > 1) OR a decode
-		// step at past-context wider than the window (the latter is the long-
-		// context fix Stage 4 targets).
-		const needsSwaMask =
-			hasSwaLayers && (nTokens > 1 || pastLen + nTokens > swaWindow);
 		const swaMaskTensor = needsSwaMask
 			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
 			: 0;
@@ -1892,13 +1963,88 @@ export class ModelInference {
 
 		const t2 = trace ? performance.now() : 0;
 
+		return {
+			graph,
+			outputTensor: logits,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+			swaMaskTensor,
+			t1,
+			t2,
+		};
+	}
+
+	/**
+	 * Single-call forward pass: one ctxCreate → graph build → graph compute →
+	 * ctxFree cycle for the given tokens. **Do not call directly** — public
+	 * callers go through `forward()`, which dispatches to either this or the
+	 * tiled loop based on `prefillTileSize`.
+	 *
+	 * Graph construction is delegated to {@link buildForwardGraph}; this method
+	 * handles input marshalling, graph compute, readback, and teardown. The
+	 * graph build invariants documented in {@link buildForwardGraph} are
+	 * load-bearing — see comments around `no_alloc=true` rationale, V-cache
+	 * permute axes, and last-position-only readback.
+	 */
+	private async forwardSingle(
+		tokenIds: Int32Array,
+		positions: Int32Array,
+	): Promise<Float32Array> {
+		if (!this.weights) throw new Error("Weights not loaded");
+		if (!this.kvLayers) throw new Error("KV cache not initialized");
+		const { hp, wasm } = this;
+		const nTokens = tokenIds.length;
+		const pastLen = this.nCached;
+		const totalLen = pastLen + nTokens;
+
+		const trace = this.traceEnabled;
+		const t0 = trace ? performance.now() : 0;
+
+		// Mask bits and ropeMode — pure computations passed to buildForwardGraph
+		// via opts. buildForwardGraph creates the mask tensors after ctxCreate
+		// (tensorNew needs the ctx; the bits are ctx-independent).
+		const needsMask = nTokens > 1;
+		const maskPaddedCols = padTo(nTokens, 32);
+		const swaWindow = hp.slidingWindowSize ?? 0;
+		const hasSwaLayers =
+			(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
+		const needsSwaMask =
+			hasSwaLayers && (nTokens > 1 || pastLen + nTokens > swaWindow);
+		const ropeMode = getRopeModeForArchitecture(hp.architecture);
+
+		const {
+			graph,
+			outputTensor: logits,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+			swaMaskTensor,
+			t1,
+			t2,
+		} = await this.buildForwardGraph({
+			mode: "standard",
+			output: "logits",
+			tokenIds,
+			positions,
+			nTokens,
+			pastLen,
+			totalLen,
+			ropeMode,
+			needsMask,
+			maskPaddedCols,
+			swaWindow,
+			needsSwaMask,
+			trace,
+		});
+
 		const graphBuf = wasm.backendAllocCtxTensors();
 
 		const t3 = trace ? performance.now() : 0;
 
 		// Upload leaf input data AFTER backend buffers are assigned. The helper
 		// packs pos / tokenIds / mask into a single backendTensorSet3 call to
-		// avoid 2–3 separate FFI hops per forward; when SWA layers are active a
+		// avoid 2-3 separate FFI hops per forward; when SWA layers are active a
 		// follow-on backendTensorSet uploads `swaMaskTensor` from the same heap.
 		this.uploadLeaves(
 			wasm,
