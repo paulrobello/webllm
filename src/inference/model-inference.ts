@@ -417,6 +417,32 @@ function padTo(v: number, mult: number): number {
 }
 
 /**
+ * Per-mode graph sizing (ctx bytes + node count) for the forward-pass builders.
+ * Each mode maps to the EXACT expression the inline code used before ARC-001 —
+ * encoded as parameters, never collapsed to one: embedding uses a smaller
+ * per-element ctx multiplier (128) and fewer nodes; taps adds per-layer +
+ * embedding-output tap nodes; standard (single/allPositions/decode) carries the
+ * PLE-adjusted node count (buildPreLoopPle + injectPerBlockPle).
+ */
+type ForwardGraphMode = "standard" | "embedding" | "taps";
+function computeGraphSizing(
+	hp: ModelHyperparams,
+	totalLen: number,
+	mode: ForwardGraphMode,
+): { ctxBytes: number; nodeCount: number } {
+	const perElemBytes = mode === "embedding" ? 128 : 256;
+	const ctxBytes =
+		hp.layerCount * 32768 + totalLen * hp.embeddingLength * perElemBytes;
+	const nodeCount =
+		mode === "embedding"
+			? hp.layerCount * 32 + 128
+			: mode === "taps"
+				? hp.layerCount * 80 + 200
+				: hp.layerCount * 72 + 160; // standard (PLE-adjusted)
+	return { ctxBytes, nodeCount };
+}
+
+/**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
  * Loads GGUF weight data into ggml tensors allocated on the WebGPU backend,
@@ -1497,8 +1523,11 @@ export class ModelInference {
 
 		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
 		// too tight at seq=512 on Mistral 7B).
-		const graphMem =
-			hp.layerCount * 32768 + totalLen * hp.embeddingLength * 256;
+		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(
+			hp,
+			totalLen,
+			"standard",
+		);
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
@@ -1560,7 +1589,7 @@ export class ModelInference {
 		// edge, so attention reads stale data (zeros).
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
-		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
+		const graph = wasm.graphNew(nodeCount);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
 		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
@@ -1975,7 +2004,11 @@ export class ModelInference {
 		const nHeads = hp.headCount;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
-		const graphMem = hp.layerCount * 32768 + N * E * 128;
+		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(
+			hp,
+			N,
+			"embedding",
+		);
 		wasm.ctxCreate(graphMem);
 
 		try {
@@ -1991,7 +2024,7 @@ export class ModelInference {
 			if (isGemmaFamily(hp.architecture)) {
 				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
 			}
-			const graph = wasm.graphNew(hp.layerCount * 32 + 128);
+			const graph = wasm.graphNew(nodeCount);
 
 			let cur = x;
 			for (let il = 0; il < hp.layerCount; il++) {
@@ -2251,7 +2284,7 @@ export class ModelInference {
 		// post-norm overhead for Gemma 4 at long prefill). Per-layer tap
 		// adds no nodes beyond the existing `cur` chain. Gemma 4 PLE
 		// materialization pushed this to 256.
-		const graphMem = hp.layerCount * 32768 + N * E * 256;
+		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(hp, N, "taps");
 		wasm.ctxCreate(graphMem);
 
 		try {
@@ -2292,10 +2325,10 @@ export class ModelInference {
 			const embeddingTap = x;
 			const captureEmbeddingTap = !lastTokenLogitsOnly;
 
-			// graphNew capacity: forwardSingle uses layerCount * 72 + 160.
-			// We add one explicit per-layer tap expand → +1/layer + the
-			// embedding-output tap → +1.
-			const graph = wasm.graphNew(hp.layerCount * 80 + 200);
+			// graphNew capacity: standard mode uses layerCount * 72 + 160
+			// (computeGraphSizing); taps adds one per-layer tap expand
+			// (+1/layer) + the embedding-output tap (+1) → 80 + 200.
+			const graph = wasm.graphNew(nodeCount);
 			if (captureEmbeddingTap) {
 				wasm.graphBuildForwardExpand(graph, embeddingTap);
 			}
@@ -2873,8 +2906,11 @@ export class ModelInference {
 
 		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
 		// too tight at seq=512 on Mistral 7B).
-		const graphMem =
-			hp.layerCount * 32768 + totalLen * hp.embeddingLength * 256;
+		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(
+			hp,
+			totalLen,
+			"standard",
+		);
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
@@ -2908,7 +2944,7 @@ export class ModelInference {
 
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
-		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
+		const graph = wasm.graphNew(nodeCount);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
 		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
@@ -3253,8 +3289,11 @@ export class ModelInference {
 
 		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
 		// too tight at seq=512 on Mistral 7B).
-		const graphMem =
-			hp.layerCount * 32768 + totalLen * hp.embeddingLength * 256;
+		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(
+			hp,
+			totalLen,
+			"standard",
+		);
 		wasm.ctxCreate(graphMem);
 
 		const t1 = trace ? performance.now() : 0;
@@ -3287,7 +3326,7 @@ export class ModelInference {
 		}
 		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
 		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
-		const graph = wasm.graphNew(hp.layerCount * 72 + 160);
+		const graph = wasm.graphNew(nodeCount);
 
 		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
 		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
