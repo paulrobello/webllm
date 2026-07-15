@@ -171,6 +171,14 @@ export interface StreamStats {
 export interface StreamChunk {
 	/** Incremental text fragment (empty string on final done=true chunk). */
 	readonly text: string;
+	/**
+	 * Incremental think-block reasoning delta (inner reasoning, NO
+	 * `<think>` / `</think>` wrappers). Absent when the model emits no
+	 * think block or this step produced no reasoning delta. Mirrors
+	 * {@link CompletionConfig.onThinking}: concatenating every
+	 * `thinkingText` delta reconstructs the full reasoning block.
+	 */
+	readonly thinkingText?: string;
 	/** Generated token ID for incremental chunks; omitted on the final chunk. */
 	readonly tokenId?: number;
 	/** True only on the final yield, which carries stats. */

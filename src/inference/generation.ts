@@ -141,6 +141,13 @@ export interface GenerationResult {
 export interface GenerationStreamChunk {
 	/** Incremental decoded text for a generated token. */
 	text: string;
+	/**
+	 * Incremental think-block reasoning delta (inner reasoning, NO
+	 * `<think>` / `</think>` wrappers). Populated by `generateTextStream`
+	 * from the Generator's thinking accumulator; absent when the model
+	 * emits no think block or this step produced no reasoning delta.
+	 */
+	thinkingText?: string;
 	/** Token ID for incremental chunks; omitted on the final chunk. */
 	tokenId?: number;
 	/** True only on the final yield carrying completion metadata. */
@@ -759,13 +766,16 @@ export async function* generateTextStream({
 	const startTime = performance.now();
 	// The Generator owns the authoritative visible/thinking accumulators
 	// and fires onToken / onThinking as they grow. To put each growth in
-	// the matching StreamChunk.text we wrap onToken to capture the latest
-	// visible delta per step (the Generator fires it synchronously inside
+	// the matching StreamChunk field we wrap both callbacks to capture the
+	// latest delta per step (the Generator fires them synchronously inside
 	// gen.next(), before next resolves). This preserves the invariant
 	// `deltas.join("") === result.text`: both come from the Generator's
-	// single visibleDecoder.
+	// single visibleDecoder; the same holds for thinkingText vs the
+	// thinking accumulator.
 	let lastVisibleDelta = "";
+	let lastThinkingDelta = "";
 	const userOnToken = config.onToken;
+	const userOnThinking = config.onThinking;
 	const internalConfig: InternalGenerationOptions = {
 		...config,
 		// GenerationStreamOptions always carries the authoritative
@@ -775,6 +785,10 @@ export async function* generateTextStream({
 		onToken: (delta: string) => {
 			lastVisibleDelta = delta;
 			userOnToken?.(delta);
+		},
+		onThinking: (delta: string) => {
+			lastThinkingDelta = delta;
+			userOnThinking?.(delta);
 		},
 	};
 	const gen = Generator.generate(
@@ -789,6 +803,7 @@ export async function* generateTextStream({
 
 	while (true) {
 		lastVisibleDelta = "";
+		lastThinkingDelta = "";
 		const next = await gen.next();
 		if (next.done) {
 			const stats: GenerationStreamResult = {
@@ -803,6 +818,9 @@ export async function* generateTextStream({
 		const tokenId = next.value;
 		yield {
 			text: lastVisibleDelta,
+			// Conditional spread keeps `thinkingText` absent (not `undefined`)
+			// on non-thinking steps — required under `exactOptionalPropertyTypes`.
+			...(lastThinkingDelta ? { thinkingText: lastThinkingDelta } : {}),
 			tokenId,
 			done: false,
 		};

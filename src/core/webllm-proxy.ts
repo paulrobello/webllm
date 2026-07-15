@@ -130,6 +130,51 @@ function extractSignal(config: unknown): AbortSignal | undefined {
 	return sig instanceof AbortSignal ? sig : undefined;
 }
 
+/**
+ * Pull the non-cloneable streaming callbacks (`onToken` / `onThinking`) off a
+ * config arg so the proxy can re-invoke them per arriving chunk on the main
+ * side. Functions do not survive `postMessage` (structured clone drops them),
+ * so without this capture-and-strip the callbacks would silently vanish.
+ * Mirrors {@link extractSignal}. Returns only the callbacks that are actually
+ * functions.
+ */
+function extractCallbacks(config: unknown): {
+	onToken?: (delta: string) => void;
+	onThinking?: (delta: string) => void;
+} {
+	if (!config || typeof config !== "object" || Array.isArray(config)) {
+		return {};
+	}
+	const obj = config as Record<string, unknown>;
+	const out: {
+		onToken?: (delta: string) => void;
+		onThinking?: (delta: string) => void;
+	} = {};
+	if (typeof obj.onToken === "function") {
+		out.onToken = obj.onToken as (delta: string) => void;
+	}
+	if (typeof obj.onThinking === "function") {
+		out.onThinking = obj.onThinking as (delta: string) => void;
+	}
+	return out;
+}
+
+/**
+ * Drop the non-cloneable streaming callbacks from a config arg before it
+ * crosses `postMessage`. Companion to {@link extractCallbacks}; mirrors
+ * {@link stripSignal}. Returns the input unchanged when there is nothing to
+ * strip.
+ */
+function stripCallbacks(config: unknown): unknown {
+	if (!config || typeof config !== "object" || Array.isArray(config)) {
+		return config;
+	}
+	const obj = config as Record<string, unknown>;
+	if (!("onToken" in obj) && !("onThinking" in obj)) return config;
+	const { onToken: _t, onThinking: _th, ...rest } = obj;
+	return rest;
+}
+
 interface MinimalWorker {
 	postMessage(m: ProxyToWorker, transfer?: Transferable[]): void;
 	addEventListener(
@@ -155,6 +200,20 @@ export class WebLLMProxy implements WebLLMSurface {
 			}>;
 			errored: unknown | null;
 			done: boolean;
+			/**
+			 * Streaming callbacks captured off the config before posting
+			 * (functions don't cross `postMessage`). Re-invoked per arriving
+			 * chunk by {@link WebLLMProxy.invokeStreamCallbacks}.
+			 */
+			onToken?: (delta: string) => void;
+			onThinking?: (delta: string) => void;
+			/**
+			 * True once the stream has reached a terminal state
+			 * (done / error / cancel). Checked before invoking callbacks so
+			 * no onToken/onThinking fires after terminal resolution — the
+			 * abort-ordering invariant (ENH-002 Task 2 §4).
+			 */
+			callbacksReleased: boolean;
 		}
 	>();
 	private disposed = false;
@@ -267,8 +326,9 @@ export class WebLLMProxy implements WebLLMSurface {
 	): AsyncIterableIterator<GenerationStreamChunk> =>
 		this.startStream(
 			"chatCompletion",
-			[modelOrConv, messages, stripSignal(config)],
+			[modelOrConv, messages, stripCallbacks(stripSignal(config))],
 			extractSignal(config),
+			extractCallbacks(config),
 		);
 	generateStream = (
 		modelId: string,
@@ -277,8 +337,9 @@ export class WebLLMProxy implements WebLLMSurface {
 	): AsyncIterableIterator<GenerationStreamChunk> =>
 		this.startStream(
 			"generateStream",
-			[modelId, input, stripSignal(config)],
+			[modelId, input, stripCallbacks(stripSignal(config))],
 			extractSignal(config),
+			extractCallbacks(config),
 		);
 	tokenize = (
 		modelHandleId: string,
@@ -396,6 +457,7 @@ export class WebLLMProxy implements WebLLMSurface {
 			case "stream-chunk": {
 				const s = this.streams.get(m.streamId);
 				if (!s) return;
+				this.invokeStreamCallbacks(s, m.chunk);
 				if (s.waiters.length > 0) {
 					const w = s.waiters.shift();
 					w?.resolve({ value: m.chunk, done: false });
@@ -412,6 +474,7 @@ export class WebLLMProxy implements WebLLMSurface {
 				const s = this.streams.get(m.streamId);
 				if (!s) return;
 				for (const chunk of m.chunks) {
+					this.invokeStreamCallbacks(s, chunk);
 					if (s.waiters.length > 0) {
 						const w = s.waiters.shift();
 						w?.resolve({ value: chunk, done: false });
@@ -425,6 +488,7 @@ export class WebLLMProxy implements WebLLMSurface {
 				const s = this.streams.get(m.streamId);
 				if (!s) return;
 				s.done = true;
+				this.releaseStreamCallbacks(s);
 				const waiters = s.waiters;
 				s.waiters = [];
 				for (const w of waiters) w.resolve({ value: undefined, done: true });
@@ -438,6 +502,7 @@ export class WebLLMProxy implements WebLLMSurface {
 				if (!s) return;
 				const err = reconstructError(m.error);
 				s.errored = err;
+				this.releaseStreamCallbacks(s);
 				// Reject any pending waiters directly — otherwise the for-await
 				// loop terminates on a stale done=true and never re-enters next().
 				const waiters = s.waiters;
@@ -479,10 +544,62 @@ export class WebLLMProxy implements WebLLMSurface {
 		}
 	}
 
+	/**
+	 * Re-invoke the captured `onToken` / `onThinking` for one arriving chunk.
+	 * Called from the `stream-chunk` / `stream-chunks` handlers BEFORE the
+	 * chunk is enqueued / handed to a waiter, so callbacks fire at arrival
+	 * time (mirroring the inline contract where the Generator fires them
+	 * synchronously inside `gen.next()`, independent of consumer pull rate).
+	 *
+	 * Guards:
+	 * - Skips entirely once the stream is terminal
+	 *   ({@link StreamEntry.callbacksReleased}) — abort ordering.
+	 * - Fires `onToken` only when `chunk.text` is non-empty (the terminal
+	 *   done chunk carries `text: ""` and must not spuriously fire).
+	 * - Fires `onThinking` only when `chunk.thinkingText` is present.
+	 */
+	private invokeStreamCallbacks(
+		s: {
+			callbacksReleased: boolean;
+			onToken?: (delta: string) => void;
+			onThinking?: (delta: string) => void;
+		},
+		chunk: GenerationStreamChunk,
+	): void {
+		if (s.callbacksReleased) return;
+		if (chunk.text && s.onToken) s.onToken(chunk.text);
+		if (chunk.thinkingText && s.onThinking) s.onThinking(chunk.thinkingText);
+	}
+
+	/**
+	 * Mark a stream's callbacks as released and drop the stored references so
+	 * no later-arriving chunk can invoke them and the closures don't leak.
+	 * Called on every terminal path: `stream-done`, `stream-error`, and
+	 * `cancel()` (user abort). Idempotent — the `callbacksReleased` guard
+	 * makes a second call a no-op.
+	 *
+	 * `exactOptionalPropertyTypes`: assigning `undefined` to an optional
+	 * property is an error, so the references are cleared via `delete`.
+	 */
+	private releaseStreamCallbacks(s: {
+		callbacksReleased: boolean;
+		onToken?: (delta: string) => void;
+		onThinking?: (delta: string) => void;
+	}): void {
+		if (s.callbacksReleased) return;
+		s.callbacksReleased = true;
+		delete s.onToken;
+		delete s.onThinking;
+	}
+
 	private startStream(
 		name: "chatCompletion" | "generateStream",
 		args: unknown[],
 		signal?: AbortSignal,
+		callbacks?: {
+			onToken?: (delta: string) => void;
+			onThinking?: (delta: string) => void;
+		},
 	): AsyncIterableIterator<GenerationStreamChunk> {
 		if (this.disposed) {
 			const err = new Error("WebLLM proxy disposed");
@@ -497,6 +614,11 @@ export class WebLLMProxy implements WebLLMSurface {
 			waiters: [],
 			errored: null,
 			done: false,
+			callbacksReleased: false,
+			// Conditional spread keeps the optional fields absent (not
+			// `undefined`) under `exactOptionalPropertyTypes`.
+			...(callbacks?.onToken ? { onToken: callbacks.onToken } : {}),
+			...(callbacks?.onThinking ? { onThinking: callbacks.onThinking } : {}),
 		});
 		this.worker.postMessage({ type: "stream-start", streamId, name, args });
 		const self = this;
@@ -514,6 +636,11 @@ export class WebLLMProxy implements WebLLMSurface {
 			// host's `stream-done` ack catches up.
 			const s = self.streams.get(streamId);
 			if (s) {
+				// Release callbacks BEFORE rejecting waiters so chunks that
+				// arrive after this point (in-flight `stream-chunks` posts)
+				// do not fire onToken/onThinking — the abort-ordering
+				// invariant (ENH-002 Task 2 §4).
+				self.releaseStreamCallbacks(s);
 				const err = new DOMException("chatCompletion aborted", "AbortError");
 				s.errored = err;
 				const waiters = s.waiters;

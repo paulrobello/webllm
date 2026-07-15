@@ -343,6 +343,268 @@ describe("WebLLMProxy — streaming", () => {
 	});
 });
 
+// ENH-002 Task 2: worker-mode onToken / onThinking. Functions do not cross
+// `postMessage` (structured clone drops them), so the proxy must capture the
+// callbacks off the config before posting, strip them so no non-cloneable
+// value crosses the boundary, and re-invoke them per arriving chunk —
+// mirroring the inline contract (Task 1) where the Generator fires onToken /
+// onThinking synchronously inside gen.next().
+describe("WebLLMProxy — streaming callbacks (onToken / onThinking)", () => {
+	// Manual-dispatch channel: gives precise control over which chunks the
+	// proxy sees and when, for abort-ordering assertions. Mirrors the
+	// stream-chunks round-trip test's harness above.
+	function makeCallbackChannel(): {
+		worker: {
+			postMessage: (m: ProxyToWorker) => void;
+			addEventListener: (
+				event: "message" | "error" | "messageerror",
+				h: (e: { data: WorkerToProxy } | Event) => void,
+			) => void;
+			terminate: () => void;
+		};
+		dispatch: (m: WorkerToProxy) => void;
+		capturedStreamId: () => number | null;
+	} {
+		const handlers: { toProxy?: (e: { data: WorkerToProxy }) => void } = {};
+		let sid: number | null = null;
+		const worker = {
+			postMessage(m: ProxyToWorker) {
+				if (m.type === "stream-start") sid = m.streamId;
+			},
+			addEventListener(
+				event: "message" | "error" | "messageerror",
+				h: (e: { data: WorkerToProxy } | Event) => void,
+			) {
+				if (event === "message") {
+					handlers.toProxy = h as (e: { data: WorkerToProxy }) => void;
+				}
+			},
+			terminate() {},
+		};
+		const dispatch = (m: WorkerToProxy): void => {
+			handlers.toProxy?.({ data: m });
+		};
+		return { worker, dispatch, capturedStreamId: () => sid };
+	}
+
+	test("onToken: concatenated deltas === result.text; dual delivery to iterator", async () => {
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({
+			engine: {
+				async *chatCompletion() {
+					yield { text: "Hello", tokenId: 1, done: false };
+					yield { text: " world", tokenId: 2, done: false };
+					yield { text: "!", tokenId: 3, done: false };
+					yield { text: "", done: true, stats: { decodeTokensPerSec: 100 } };
+				},
+				async dispose() {},
+			},
+			postMessage: hostPost,
+			receive: hostReceive,
+		});
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const tokens: string[] = [];
+		const iterChunks: string[] = [];
+		for await (const chunk of proxy.chatCompletion(
+			"m1",
+			[{ role: "user", content: "hi" }],
+			{ onToken: (d) => tokens.push(d) },
+		)) {
+			if (chunk.text) iterChunks.push(chunk.text);
+		}
+		// Join invariant: onToken deltas reconstruct the visible text.
+		expect(tokens).toEqual(["Hello", " world", "!"]);
+		expect(tokens.join("")).toBe("Hello world!");
+		// Dual delivery: the iterator consumer sees the same visible deltas.
+		expect(iterChunks).toEqual(["Hello", " world", "!"]);
+		// No think-tag leakage into visible deltas.
+		expect(
+			tokens.every((d) => !d.includes("<think>") && !d.includes("</think>")),
+		).toBe(true);
+		expect(streamEntryCount(proxy)).toBe(0);
+	});
+
+	test("onThinking: fires for reasoning deltas without tag wrappers; onToken stays silent", async () => {
+		const { worker, hostPost, hostReceive } = makeInProcessChannel();
+		startWorkerHost({
+			engine: {
+				async *chatCompletion() {
+					yield {
+						text: "",
+						thinkingText: "Plan A.",
+						tokenId: 10,
+						done: false,
+					};
+					yield {
+						text: "",
+						thinkingText: " Plan B.",
+						tokenId: 11,
+						done: false,
+					};
+					yield { text: "Answer.", tokenId: 12, done: false };
+					yield { text: "", done: true, stats: { decodeTokensPerSec: 100 } };
+				},
+				async dispose() {},
+			},
+			postMessage: hostPost,
+			receive: hostReceive,
+		});
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const thinking: string[] = [];
+		const tokens: string[] = [];
+		for await (const _c of proxy.chatCompletion(
+			"m1",
+			[{ role: "user", content: "hi" }],
+			{
+				onToken: (d) => tokens.push(d),
+				onThinking: (d) => thinking.push(d),
+			},
+		)) {
+			/* drain */
+		}
+		// onThinking received the inner reasoning, no tag wrappers.
+		expect(thinking).toEqual(["Plan A.", " Plan B."]);
+		expect(thinking.join("")).toBe("Plan A. Plan B.");
+		expect(
+			thinking.every((d) => !d.includes("<think>") && !d.includes("</think>")),
+		).toBe(true);
+		// The visible answer went to onToken; reasoning did not.
+		expect(tokens).toEqual(["Answer."]);
+		expect(streamEntryCount(proxy)).toBe(0);
+	});
+
+	test("abort: no onToken/onThinking fires after signal.abort()", async () => {
+		const { worker, dispatch, capturedStreamId } = makeCallbackChannel();
+		const proxy = await WebLLMProxy.fromWorker(worker);
+		const ac = new AbortController();
+		const tokens: string[] = [];
+		const iter = proxy.chatCompletion("m1", [{ role: "user", content: "hi" }], {
+			signal: ac.signal,
+			onToken: (d) => tokens.push(d),
+		});
+		// Settle the microtask that posts stream-start.
+		await new Promise((r) => setTimeout(r, 0));
+		const sid = capturedStreamId();
+		expect(sid).not.toBeNull();
+		const s = sid as number;
+
+		// Pre-abort chunk: onToken fires.
+		dispatch({
+			type: "stream-chunks",
+			streamId: s,
+			chunks: [{ text: "a", tokenId: 1, done: false }],
+		});
+		await new Promise((r) => setTimeout(r, 0));
+		expect(tokens).toEqual(["a"]);
+
+		// Abort synchronously tears down callbacks for this stream.
+		ac.abort();
+
+		// Post-abort chunk must NOT fire onToken.
+		dispatch({
+			type: "stream-chunks",
+			streamId: s,
+			chunks: [{ text: "b", tokenId: 2, done: false }],
+		});
+		await new Promise((r) => setTimeout(r, 0));
+		expect(tokens).toEqual(["a"]);
+
+		// Release the stream entry.
+		await iter.return?.();
+	});
+
+	test("cleanup: callbacks released on done, error, and abort", async () => {
+		// (a) Normal completion: stream entry is gone after the drain, so the
+		// stored callbacks are unreachable. A subsequent dispatch on the same
+		// streamId is a no-op (entry missing).
+		{
+			const { worker, dispatch, capturedStreamId } = makeCallbackChannel();
+			const proxy = await WebLLMProxy.fromWorker(worker);
+			const tokens: string[] = [];
+			const iter = proxy.chatCompletion(
+				"m1",
+				[{ role: "user", content: "hi" }],
+				{ onToken: (d) => tokens.push(d) },
+			);
+			await new Promise((r) => setTimeout(r, 0));
+			const s = capturedStreamId() as number;
+			dispatch({
+				type: "stream-chunks",
+				streamId: s,
+				chunks: [{ text: "x", tokenId: 1, done: false }],
+			});
+			dispatch({ type: "stream-done", streamId: s });
+			for await (const _c of iter) {
+				/* drain */
+			}
+			expect(tokens).toEqual(["x"]);
+			expect(streamEntryCount(proxy)).toBe(0);
+			// Post-done dispatch: entry is gone, so no callback invocation.
+			dispatch({
+				type: "stream-chunks",
+				streamId: s,
+				chunks: [{ text: "leak", tokenId: 2, done: false }],
+			});
+			expect(tokens).toEqual(["x"]);
+		}
+		// (b) Error: stream entry is gone after the error surfaces.
+		{
+			const { worker, hostPost, hostReceive } = makeInProcessChannel();
+			const { ModelNotFoundError } = await import("../src/core/errors.js");
+			startWorkerHost({
+				engine: {
+					// biome-ignore lint/correctness/useYield: intentional throw
+					async *chatCompletion() {
+						throw new ModelNotFoundError("m1");
+					},
+					async dispose() {},
+				},
+				postMessage: hostPost,
+				receive: hostReceive,
+			});
+			const proxy = await WebLLMProxy.fromWorker(worker);
+			const tokens: string[] = [];
+			const drain = async () => {
+				for await (const _c of proxy.chatCompletion(
+					"m1",
+					[{ role: "user", content: "hi" }],
+					{ onToken: (d) => tokens.push(d) },
+				)) {
+					/* drain */
+				}
+			};
+			await expect(drain()).rejects.toBeInstanceOf(ModelNotFoundError);
+			expect(tokens).toEqual([]);
+			expect(streamEntryCount(proxy)).toBe(0);
+		}
+		// (c) Abort: entry cleaned up via iter.return(); no callback fire
+		// after abort.
+		{
+			const { worker, dispatch, capturedStreamId } = makeCallbackChannel();
+			const proxy = await WebLLMProxy.fromWorker(worker);
+			const ac = new AbortController();
+			const tokens: string[] = [];
+			const iter = proxy.chatCompletion(
+				"m1",
+				[{ role: "user", content: "hi" }],
+				{ signal: ac.signal, onToken: (d) => tokens.push(d) },
+			);
+			await new Promise((r) => setTimeout(r, 0));
+			const s = capturedStreamId() as number;
+			ac.abort();
+			dispatch({
+				type: "stream-chunks",
+				streamId: s,
+				chunks: [{ text: "nope", tokenId: 1, done: false }],
+			});
+			await new Promise((r) => setTimeout(r, 0));
+			expect(tokens).toEqual([]);
+			await iter.return?.();
+			expect(streamEntryCount(proxy)).toBe(0);
+		}
+	});
+});
+
 // Probe #6 (worker-mode + ConversationPool integration): the surface
 // sentinel proves the proxy mirrors all four conversation methods, but
 // no test previously round-tripped a `ConversationHandle` through
