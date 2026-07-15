@@ -387,7 +387,7 @@ describe("webllm-worker-host", () => {
 	test("exportConversation result is transferred (envelope.transfer populated)", async () => {
 		const sentMessages: Array<{
 			msg: WorkerToProxy;
-			transfer?: Transferable[];
+			transfer?: Transferable[] | undefined;
 		}> = [];
 		const handlers = { receive: null as ((m: ProxyToWorker) => void) | null };
 		const engine = {
@@ -419,7 +419,7 @@ describe("webllm-worker-host", () => {
 	test("non-allowlisted method does NOT populate transfer list", async () => {
 		const sentMessages: Array<{
 			msg: WorkerToProxy;
-			transfer?: Transferable[];
+			transfer?: Transferable[] | undefined;
 		}> = [];
 		const handlers = { receive: null as ((m: ProxyToWorker) => void) | null };
 		const engine = {

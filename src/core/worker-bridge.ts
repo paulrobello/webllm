@@ -15,7 +15,7 @@ export type StreamId = number;
 export interface SerializedError {
 	code: WebLLMErrorCode | "GENERIC" | "DISPOSED";
 	message: string;
-	stack?: string;
+	stack?: string | undefined;
 	modelId?: string;
 	architecture?: string;
 	conversationId?: string;
@@ -25,7 +25,7 @@ export interface SerializedError {
 	reason?: string;
 	details?: Record<string, unknown>;
 	attemptedBytes?: number;
-	cause?: { message: string; name?: string };
+	cause?: { message: string; name?: string } | undefined;
 }
 
 export type ProxyToWorker =
@@ -50,7 +50,7 @@ export type WorkerToProxy =
 			// to `postMessage`. Listed here so the host can ferry the array
 			// alongside the message (e.g. for tests that buffer messages
 			// before forwarding) without losing transfer semantics.
-			transfer?: Transferable[];
+			transfer?: Transferable[] | undefined;
 	  }
 	| { type: "method-error"; id: RequestId; error: SerializedError }
 	| {

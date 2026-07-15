@@ -856,7 +856,7 @@ describe("Generator", () => {
 			return logits;
 		}
 
-		const decodeCalls: Array<{ mode: string; topK?: number }> = [];
+		const decodeCalls: Array<{ mode: string; topK?: number | undefined }> = [];
 		const masked = 8; // configured in maskedTokensWhileThinking
 		const winner = 7; // next-highest unmasked candidate
 		async function decodeStep(

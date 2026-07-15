@@ -53,7 +53,7 @@ export interface CharacterConfig {
 	/** Custom stop token strings that halt generation. */
 	stopTokens?: string[];
 	/** Tools the character can invoke from its output. */
-	tools?: ToolDefinition[];
+	tools?: ToolDefinition[] | undefined;
 	/** Qwen3-style thinking mode; ignored by templates that don't support it. */
 	enableThinking?: boolean;
 	/**

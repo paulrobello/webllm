@@ -34,8 +34,8 @@ export interface ChatToolSchema {
 		string,
 		{
 			type: JsonSchemaParameterType;
-			description?: string;
-			required?: boolean;
+			description?: string | undefined;
+			required?: boolean | undefined;
 		}
 	>;
 }
@@ -88,7 +88,7 @@ export interface CompletionConfig {
 	 */
 	seed?: number;
 	/** AbortSignal to cancel generation mid-stream. */
-	signal?: AbortSignal;
+	signal?: AbortSignal | undefined;
 	/** Custom stop token IDs that halt generation. */
 	stopTokenIds?: readonly number[];
 	/**
@@ -97,7 +97,7 @@ export interface CompletionConfig {
 	 * and tool-call instructions before the user's system message.
 	 * Templates that don't support tool blocks ignore this.
 	 */
-	tools?: readonly ChatToolSchema[];
+	tools?: readonly ChatToolSchema[] | undefined;
 	/**
 	 * Reserved in v1. Setting this throws — measurement on 2026-04-26
 	 * (qwen3-8b-iq3m via qwen3-0.6b-q4f16, K=4) produced 3.0 vs 15.3 tok/s

@@ -55,17 +55,17 @@ export interface TokenizerConfig {
 	/** Raw chat template string from GGUF metadata (tokenizer.chat_template). */
 	chatTemplate?: string;
 	/** GGUF pre-tokenizer identifier such as qwen2 or llama-bpe. */
-	preTokenizer?: string;
+	preTokenizer?: string | undefined;
 	/** Whether the model requests automatic BOS insertion. */
-	addBosToken?: boolean;
+	addBosToken?: boolean | undefined;
 	/** BERT WordPiece: id of [CLS]. */
-	clsTokenId?: number;
+	clsTokenId?: number | undefined;
 	/** BERT WordPiece: id of [SEP]. */
-	sepTokenId?: number;
+	sepTokenId?: number | undefined;
 	/** BERT WordPiece: id of [UNK]. */
-	unkTokenId?: number;
+	unkTokenId?: number | undefined;
 	/** BERT WordPiece: id of [MASK] (kept for future; not used in encode/decode). */
-	maskTokenId?: number;
+	maskTokenId?: number | undefined;
 	/** Maximum token count for encode truncation (BERT-style). */
 	contextLength?: number;
 }

@@ -125,12 +125,17 @@ export async function runTask(
 	// position-0 writes and abort the WASM module.
 	engine.resetModelSession?.(modelId);
 
+	const maxTokens = options.maxTokens ?? task.maxTokens;
 	const config: CharacterConfig = {
 		modelId,
 		systemPrompt: task.systemPrompt,
-		maxTokens: options.maxTokens ?? task.maxTokens,
-		temperature: options.temperature,
-		enableThinking: options.enableThinking,
+		...(maxTokens !== undefined && { maxTokens }),
+		...(options.temperature !== undefined && {
+			temperature: options.temperature,
+		}),
+		...(options.enableThinking !== undefined && {
+			enableThinking: options.enableThinking,
+		}),
 		tools,
 		engine,
 	};

@@ -233,20 +233,20 @@ export interface ModelHyperparams {
 	 */
 	quantType: string;
 	/** Pooling strategy for `embed()`. CLS/MEAN for BERT-family encoders; LAST-TOKEN for causal-LM-derived embedders (e.g., Qwen3-Embedding). */
-	poolingType?: "cls" | "mean" | "last-token";
+	poolingType?: "cls" | "mean" | "last-token" | undefined;
 	/**
 	 * When false, attention is bidirectional (BERT-style encoders).
 	 * Only encoder architectures populate this field; `undefined` means causal
 	 * attention (the decoder default).
 	 */
-	causalAttention?: boolean;
+	causalAttention?: boolean | undefined;
 	/**
 	 * Only jina-bert-v2 populates this; the value is passed straight to
 	 * `opSoftMaxExt`'s `max_bias` arg, which causes ggml's softmax to apply
 	 * the standard ALiBi linear bias (slopes derived as `2^(-8/n_head * h)`).
 	 * Defaults to 8.0 when GGUF metadata omits the key (gaianet mirror).
 	 */
-	alibiMaxBias?: number;
+	alibiMaxBias?: number | undefined;
 	/**
 	 * Per-layer head dimension. When present, dispatch code MUST index
 	 * by layer (`embeddingHeadLengthPerLayer[i]`) instead of reading the
@@ -304,27 +304,27 @@ export interface ModelHyperparams {
 	 *
 	 * Absent for architectures without KV sharing (most models).
 	 */
-	kvReuseFromLayer?: (number | null)[];
+	kvReuseFromLayer?: (number | null)[] | undefined;
 	/**
 	 * Final logit softcap value (`tanh(logits / s) * s`). 0 → no softcap.
 	 * Read from GGUF `<arch>.final_logit_softcapping`. Present for
 	 * Gemma family models (Gemma 4 E2B reports 30.0).
 	 */
-	finalLogitSoftcap?: number;
+	finalLogitSoftcap?: number | undefined;
 	/**
 	 * Attention logit softcap value (`tanh(qk / s) * s` pre-softmax).
 	 * 0 → no softcap. Read from GGUF `<arch>.attn_logit_softcapping`.
 	 * Present on Gemma 2 (50.0). Gemma 4 has no attention soft-cap
 	 * (f_attention_scale = 1.0 with QK-norm instead).
 	 */
-	attnLogitSoftcap?: number;
+	attnLogitSoftcap?: number | undefined;
 	/**
 	 * Per-Layer Embedding (PLE) dimension — the short residual dimension (256
 	 * for Gemma 4 E2B) injected at each block input via the PLE lookup table.
 	 * Read from `<arch>.embedding_length_per_layer_input`. Absent for all
 	 * non-Gemma-4 architectures.
 	 */
-	pleDim?: number;
+	pleDim?: number | undefined;
 }
 
 /** GPU buffer mappings and tensor metadata for a loaded model's weights. */
@@ -347,8 +347,8 @@ export interface ModelEntry {
 	memoryAllocations: number[];
 	loaded: boolean;
 	activeSessions: number;
-	embeddingCapable?: boolean;
-	embeddingPooling?: "last-token" | "mean";
+	embeddingCapable?: boolean | undefined;
+	embeddingPooling?: "last-token" | "mean" | undefined;
 	/** SHA-256 of canonical-key-sorted tokenizerConfig JSON; computed once at load. */
 	tokenizerHash?: string;
 	/** Cached fingerprint for persistence validation; computed once at load. */

@@ -119,12 +119,12 @@ export interface ForwardTrace {
 	downloadResultMs: number;
 	teardownMs: number;
 	totalMs: number;
-	backendProfileTotalMs?: number;
-	backendMatmulMs?: number | null;
-	backendAttentionMs?: number | null;
-	backendEncodeOverheadMs?: number;
-	backendDispatchCount?: number;
-	backendBreakdownAvailable?: boolean;
+	backendProfileTotalMs?: number | undefined;
+	backendMatmulMs?: number | null | undefined;
+	backendAttentionMs?: number | null | undefined;
+	backendEncodeOverheadMs?: number | undefined;
+	backendDispatchCount?: number | undefined;
+	backendBreakdownAvailable?: boolean | undefined;
 }
 
 /**

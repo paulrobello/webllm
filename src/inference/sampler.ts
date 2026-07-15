@@ -9,7 +9,7 @@ export interface SamplerConfig {
 	/** Repetition penalty multiplier applied to recently seen tokens. 1.0 = disabled. */
 	repetitionPenalty?: number;
 	/** PRNG seed for deterministic sampling. Omit for Math.random. */
-	seed?: number;
+	seed?: number | undefined;
 }
 
 /**

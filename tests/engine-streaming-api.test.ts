@@ -167,7 +167,7 @@ describe("WebLLM.generateStream", () => {
 
 		const chunks = [] as Array<{
 			text: string;
-			tokenId?: number;
+			tokenId?: number | undefined;
 			done: boolean;
 		}>;
 		let finalStats: Record<string, unknown> | undefined;
@@ -254,7 +254,7 @@ describe("WebLLM.generateStream", () => {
 
 		const chunks = [] as Array<{
 			text: string;
-			tokenId?: number;
+			tokenId?: number | undefined;
 			done: boolean;
 		}>;
 		let finalStats: Record<string, unknown> | undefined;
@@ -720,7 +720,11 @@ describe("WebLLM.generateStream", () => {
 			[5, 6, 7, 8, 2],
 			"qwen3",
 		);
-		const chunks: Array<{ text: string; tokenId?: number; done: boolean }> = [];
+		const chunks: Array<{
+			text: string;
+			tokenId?: number | undefined;
+			done: boolean;
+		}> = [];
 		let finalStats: Record<string, unknown> | undefined;
 
 		for await (const chunk of engine.chatCompletion(

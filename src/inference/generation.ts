@@ -20,9 +20,9 @@ export interface GenerationConfig {
 	/** Repetition penalty multiplier. 1.0 = disabled. */
 	repetitionPenalty: number;
 	/** Optional custom stop token IDs that halt generation. */
-	stopTokens?: number[];
+	stopTokens?: number[] | undefined;
 	/** Optional AbortSignal to cancel generation mid-stream. */
-	signal?: AbortSignal;
+	signal?: AbortSignal | undefined;
 }
 
 /**
@@ -151,12 +151,14 @@ export interface GenerationStreamOptions {
 		positions: number[],
 	) => Float32Array | Promise<Float32Array>;
 	config: InternalGenerationOptions;
-	forwardDecode?: (
-		tokenIds: number[],
-		positions: number[],
-		mode: DecodeMode,
-		topK?: number,
-	) => Promise<DecodeResult>;
+	forwardDecode?:
+		| ((
+				tokenIds: number[],
+				positions: number[],
+				mode: DecodeMode,
+				topK?: number,
+		  ) => Promise<DecodeResult>)
+		| undefined;
 }
 
 /**

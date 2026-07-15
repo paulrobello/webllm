@@ -37,7 +37,7 @@ export interface LiveEventBase {
 
 export interface RunStartedPayload {
 	runId: string;
-	profile?: string;
+	profile?: string | undefined;
 	model: string;
 	page: "smoke" | "debug";
 	thinking: "off" | "on";
@@ -46,7 +46,7 @@ export interface RunStartedPayload {
 
 export interface RunFailedPayload {
 	runId: string;
-	profile?: string;
+	profile?: string | undefined;
 	model: string;
 	error: string;
 }
@@ -68,7 +68,7 @@ export interface LiveRunFailedEvent extends LiveEventBase {
 
 export interface LiveResetEvent extends LiveEventBase {
 	kind: "reset";
-	payload: { reason?: string };
+	payload: { reason?: string | undefined };
 }
 
 export interface EvalStartedPayload {
@@ -76,13 +76,13 @@ export interface EvalStartedPayload {
 	modelId: string;
 	totalTasks: number;
 	dimensions: string[];
-	label?: string;
+	label?: string | undefined;
 	/**
 	 * Set when this eval is part of a multi-model bench session driven by
 	 * `eval/bench.ts`. Lets the dashboard aggregate per-model `eval_*`
 	 * events into an overall progress view across the whole session.
 	 */
-	sessionId?: string;
+	sessionId?: string | undefined;
 }
 
 /**
@@ -104,16 +104,16 @@ export interface BenchSessionStartedPayload {
 	 * filtering), so leave undefined when uncertain — the dashboard then
 	 * falls back to summing `totalTasks` from each `eval_started`.
 	 */
-	totalTasks?: number;
+	totalTasks?: number | undefined;
 	modelIds: string[];
-	profileNames?: string[];
+	profileNames?: string[] | undefined;
 	/**
 	 * Sampling temperature pinned for the accuracy pass. `0` denotes
 	 * greedy. Surfaced so the dashboard can tag the session and prevent
 	 * accidental cross-temperature comparisons in score-over-time charts.
 	 */
-	evalTemperature?: number;
-	label?: string;
+	evalTemperature?: number | undefined;
+	label?: string | undefined;
 }
 
 export interface BenchSessionCompletePayload {
@@ -123,7 +123,7 @@ export interface BenchSessionCompletePayload {
 	completedModels: number;
 	failedModels: number;
 	/** Optional aggregate summary; dashboard treats absence as "not reported". */
-	overall?: number;
+	overall?: number | undefined;
 }
 
 export interface EvalTaskCompletePayload {
@@ -135,7 +135,7 @@ export interface EvalTaskCompletePayload {
 	latencyMs: number;
 	tokensPerSecond: number;
 	toolCallsCount: number;
-	error?: string;
+	error?: string | undefined;
 }
 
 export interface EvalFailedPayload {
