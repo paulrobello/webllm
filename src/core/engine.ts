@@ -244,6 +244,22 @@ function buildModelFingerprint(
 	};
 }
 
+/**
+ * Main WebLLM engine: browser-side LLM inference over WebGPU.
+ *
+ * Hosts one or more GGUF models (chat, encoder, causal-embedder) and
+ * drives streaming chat completion, multi-turn conversation KV-cache
+ * reuse, sentence embeddings, and character personas with tool calling.
+ * The WASM `ggml-webgpu` backend does the heavy lifting; this class is
+ * the TypeScript orchestration layer above it. See the
+ * [README](../../README.md) for the load → chat / embed / character
+ * workflow and the architecture diagram.
+ *
+ * **Worker vs inline.** Pass `worker: true` in the config to run inference
+ * off the main thread; {@link WebLLM.init} returns a proxy with the same
+ * public surface that forwards every call over `postMessage`. Inline mode
+ * (the default) runs everything on the main thread.
+ */
 export class WebLLM {
 	private _config: WebLLMConfig;
 	private _memoryPool: MemoryPool;
@@ -306,6 +322,23 @@ export class WebLLM {
 		});
 	}
 
+	/**
+	 * Initialize a WebLLM engine and return a ready-to-use instance.
+	 *
+	 * Factory entry point for the library. In inline mode (the default)
+	 * constructs the engine directly; in worker mode (`config.worker: true`)
+	 * returns a proxy that forwards every public method to a
+	 * `DedicatedWorker` over `postMessage`. The proxy is structurally
+	 * compatible with `WebLLM`, so callers can treat both paths identically.
+	 *
+	 * @example
+	 * ```ts
+	 * const engine = await WebLLM.init({
+	 *   memoryBudget: 8 * 1024 ** 3, // optional; defaults to 8 GiB
+	 *   worker: true,                 // off-main-thread inference
+	 * });
+	 * ```
+	 */
 	static async init(config: WebLLMConfig): Promise<WebLLM> {
 		if (config.worker && !isWorkerContext()) {
 			const { WebLLMProxy } = await import("./webllm-proxy.js");
@@ -766,6 +799,27 @@ export class WebLLM {
 		return this.conversationPool.fork(src);
 	}
 
+	/**
+	 * Serialize a conversation's KV cache and token prefix into a portable
+	 * `Uint8Array` blob (the `WLKV` wire format).
+	 *
+	 * The blob is self-describing: it carries a `ModelFingerprint` so
+	 * {@link importConversation} can refuse a mismatched model. Pair with
+	 * `IndexedDBConversationStore` (or any custom store against the same
+	 * `Uint8Array` contract) for cross-session persistence.
+	 *
+	 * Throws {@link ConversationBusyError} if another call is in flight on
+	 * this handle; {@link ConversationNotPopulatedError} if the conversation
+	 * has no saved snapshot yet (drive at least one `chatCompletion` first);
+	 * {@link ModelNotFoundError} or {@link InferenceEngineMissingError} if
+	 * the underlying model was unloaded.
+	 *
+	 * @example
+	 * ```ts
+	 * const blob = await engine.exportConversation(conv);
+	 * await store.put("user-42-session", blob);
+	 * ```
+	 */
 	async exportConversation(conv: ConversationHandle): Promise<Uint8Array> {
 		this.conversationPool.assertExists(conv);
 		const release = this.conversationPool.tryAcquireLock(conv);
@@ -792,6 +846,30 @@ export class WebLLM {
 		}
 	}
 
+	/**
+	 * Rehydrate a conversation from a `WLKV` blob produced by
+	 * {@link exportConversation}.
+	 *
+	 * Validates the blob's `ModelFingerprint` against the currently-loaded
+	 * model and restores the KV cache and token prefix into a fresh
+	 * conversation handle. Requires Flash-Attention mode
+	 * (`ModelLoadOptions.flashAttn: true` at load time).
+	 *
+	 * Throws {@link ModelNotFoundError}, {@link ModelNotLoadedError}, or
+	 * {@link InferenceEngineMissingError} for model lifecycle failures;
+	 * {@link IncompatibleConversationError} (from the persistence decoder)
+	 * when the fingerprint doesn't match; {@link CorruptBlobError} on
+	 * malformed bytes. Also throws a generic `Error` if the model is not
+	 * in FA mode.
+	 *
+	 * @example
+	 * ```ts
+	 * const blob = await store.get("user-42-session");
+	 * const conv = blob
+	 *   ? await engine.importConversation(model.id, blob)
+	 *   : await engine.createConversation(model.id);
+	 * ```
+	 */
 	async importConversation(
 		modelHandleId: string,
 		blob: Uint8Array,
@@ -1909,6 +1987,26 @@ export class WebLLM {
 		return this._modelManager;
 	}
 
+	/**
+	 * Build a {@link Character} persona bound to this engine.
+	 *
+	 * Characters carry a persistent system prompt, sampling config, and an
+	 * optional tool surface; their `.chat()` method drives streaming
+	 * completion through this engine's chat path. The character is
+	 * registered with the engine's `CharacterManager` and can be removed
+	 * via {@link removeCharacter}.
+	 *
+	 * @example
+	 * ```ts
+	 * const npc = engine.createCharacter({
+	 *   modelId: handle.id,
+	 *   systemPrompt: "You are a friendly shopkeeper.",
+	 *   temperature: 0.7,
+	 *   maxTokens: 256,
+	 * });
+	 * for await (const t of npc.chat("What do you sell?")) dialogueBox.addText(t);
+	 * ```
+	 */
 	createCharacter(config: CharacterConfig): Character {
 		// Inject ourselves as the engine unless the caller passed one
 		// explicitly (e.g. a mock for testing).
@@ -1919,6 +2017,12 @@ export class WebLLM {
 		return this.characterManager.get(id);
 	}
 
+	/**
+	 * Unregister and tear down a character previously created via
+	 * {@link createCharacter}. Resolves once the character's resources are
+	 * released; no-op (resolves without rejection) when `id` does not
+	 * designate a live character.
+	 */
 	async removeCharacter(id: string): Promise<void> {
 		await this.characterManager.remove(id);
 	}
@@ -1937,6 +2041,15 @@ export class WebLLM {
 		this.eventHandlers.get(event)?.delete(handler);
 	}
 
+	/**
+	 * Release every resource held by this engine: dispose all loaded models
+	 * (chat inference, encoders, causal-embedders, WASM modules), then clear
+	 * the conversation pool, model manager, scheduler, and event handlers.
+	 *
+	 * After shutdown resolves the engine is unusable. Worker-mode callers
+	 * additionally see `worker.terminate()` via the proxy's shutdown path.
+	 * Safe to call from a `beforeunload` handler.
+	 */
 	async shutdown(): Promise<void> {
 		this.conversationPool.clear();
 		for (const record of this.models.values()) {
