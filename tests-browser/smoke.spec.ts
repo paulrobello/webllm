@@ -40,7 +40,7 @@ const BENIGN_ERROR_SUBSTRINGS = ["adapter_info:"];
 
 // Markers that indicate a fetch/load failure in the early [1/8]/[2/8] steps —
 // if any appear in #log during the model-present guard, the lane fast-fails
-// with an actionable message instead of waiting the full 180s timeout.
+// with an actionable message instead of waiting the full 220s timeout.
 //   - "[2/8] Fetch failed:" — the page's explicit fetch-fail log line.
 //   - "Failed to fetch" — the browser's network-error text; covers a [1/8] WASM
 //     or model fetch that fails before the page can prefix it with [2/8].
@@ -74,10 +74,10 @@ test("smoke page generates text end-to-end", async ({ page }) => {
 		timeout: 30_000,
 	});
 
-	// Model-present guard: scan #log for ~20s. If the [2/8] fetch step failed
-	// (missing weights / 404), throw an actionable message instead of waiting
-	// the full 180s for a success marker that will never arrive. The page logs
-	// failures via log("fail", ...) -> `<div class="step fail">`.
+	// Model-present guard: scan #log for ~20s. Fast-fail with an actionable
+	// message if any early step failed (missing weights / 404 / WebGPU init)
+	// instead of waiting the full 220s for a success marker that will never
+	// arrive. The page logs failures via log("fail", ...) -> `<div class="step fail">`.
 	const guardDeadline = Date.now() + 20_000;
 	while (Date.now() < guardDeadline) {
 		const logText =
@@ -93,6 +93,25 @@ test("smoke page generates text end-to-end", async ({ page }) => {
 		}
 		if (logText.includes(" tok/s, finish=")) {
 			break; // generation already succeeded; skip to final assertions
+		}
+		// Fast-fail on ANY early step failure, not just fetches — e.g. a
+		// WebGPU-init regression logs `[1/8] WebGPU init failed:` (class
+		// `fail`) and would otherwise only surface at the final #log .fail
+		// assertion after ~220s.
+		const earlyFailCount = await page
+			.locator("#log .fail")
+			.count()
+			.catch(() => 0);
+		if (earlyFailCount > 0) {
+			const failText =
+				(await page
+					.locator("#log .fail")
+					.first()
+					.textContent({ timeout: 500 })
+					.catch(() => "(text unavailable)")) ?? "(text unavailable)";
+			throw new Error(
+				`Smoke step failed early: ${failText}. Run 'make smoke-serve' and open real-model.html in agentchrome to debug, or check the browser console.`,
+			);
 		}
 		await page.waitForTimeout(500);
 	}

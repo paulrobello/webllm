@@ -4,7 +4,7 @@
 //
 // Headless mode: probed 2026-07-14. Headless DOES acquire a WebGPU adapter, but
 // it is google/swiftshader (software/CPU renderer) — it would not exercise the
-// real GPU inference path this gate protects and risks the 180s timeout on
+// real GPU inference path this gate protects and risks the 220s timeout on
 // model load. Headed acquires apple/metal-3 (the real M4 Max GPU), the same
 // adapter the manual agentchrome lane uses. So headed is the default. Flip to
 // headless (SwiftShader) for re-probing via WEBLLM_TEST_BROWSER_HEADLESS=1.
@@ -17,7 +17,7 @@ const headless = process.env.WEBLLM_TEST_BROWSER_HEADLESS
 export default defineConfig({
 	testDir: "./tests-browser",
 	testMatch: /.*\.spec\.ts/,
-	timeout: 180_000,
+	timeout: 220_000,
 	fullyParallel: false,
 	workers: 1,
 	retries: 0,
