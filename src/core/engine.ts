@@ -9,6 +9,7 @@ import {
 import { EncoderInference } from "../inference/encoder-inference.js";
 import {
 	type GenerationConfig,
+	type GenerationResult,
 	Generator,
 	generateTextStream,
 	type InternalGenerationOptions,
@@ -464,6 +465,11 @@ export class WebLLM {
 			topK: config?.topK ?? 0,
 			topP: config?.topP ?? 1.0,
 			repetitionPenalty: config?.repetitionPenalty ?? 1.0,
+			// Hand the tokenizer to the Generator so it can build its
+			// visible-text accumulator. result.text is then visible-only
+			// (consistent with the streaming path) instead of a raw decode
+			// of every sampled token including post-steering scaffolding.
+			tokenizer,
 		};
 
 		const gen = Generator.generate(
@@ -474,12 +480,15 @@ export class WebLLM {
 			forwardPass,
 			genConfig,
 		);
-		const genTokens: number[] = [];
-		for await (const token of gen) {
-			genTokens.push(token);
+		let genResult: GenerationResult | undefined;
+		while (true) {
+			const next = await gen.next();
+			if (next.done) {
+				genResult = next.value;
+				break;
+			}
 		}
-
-		return tokenizer.decode(genTokens);
+		return genResult?.text ?? "";
 	}
 
 	/**
@@ -553,6 +562,10 @@ export class WebLLM {
 			stopTokens: config?.stopTokenIds ? [...config.stopTokenIds] : undefined,
 			signal: config?.signal,
 		};
+		// Forward optional streaming callbacks. Conditional assignment keeps
+		// exactOptionalPropertyTypes happy (can't assign `undefined`).
+		if (config?.onToken) genConfig.onToken = config.onToken;
+		if (config?.onThinking) genConfig.onThinking = config.onThinking;
 
 		// Speculative-decode is reserved in v1: measurement on 2026-04-26
 		// against qwen3-8b-iq3m / qwen3-0.6b-q4f16 at K=4 produced 3.0 tok/s
@@ -1087,6 +1100,9 @@ export class WebLLM {
 				stopTokens: config?.stopTokenIds ? [...config.stopTokenIds] : undefined,
 				signal: config?.signal,
 			};
+			// Forward optional streaming callbacks (mirrors generateStream).
+			if (config?.onToken) genConfig.onToken = config.onToken;
+			if (config?.onThinking) genConfig.onThinking = config.onThinking;
 
 			// 9b. Qwen3 chat-ML special handling — mirrors the block in
 			// generateStream (engine.ts qwen-chatml block). Without this the

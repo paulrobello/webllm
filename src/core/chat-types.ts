@@ -124,6 +124,25 @@ export interface CompletionConfig {
 	 * before. Ignored on the legacy `chatCompletion(modelId, ...)` path.
 	 */
 	skipSave?: boolean;
+	/**
+	 * Streaming callback fired once per visible-text delta. The delta is
+	 * exactly the same fragment that appears in {@link StreamChunk.text} —
+	 * i.e. post-steering visible answer text only. Reasoning emitted inside
+	 * a `<think>` block is routed to {@link onThinking} instead. Optional;
+	 * when omitted, behavior is unchanged.
+	 *
+	 * Invariant: the concatenation of every `onToken` delta equals the
+	 * final `StreamStats.text` / `result.text`.
+	 */
+	onToken?: (delta: string) => void;
+	/**
+	 * Streaming callback fired once per reasoning delta inside a
+	 * `<think>` block, only when the model emits one. Receives the inner
+	 * reasoning text WITHOUT the `<think>` / `</think>` tag wrappers.
+	 * Optional; when omitted, behavior is unchanged. Never fires for
+	 * models/sequences that produce no think block.
+	 */
+	onThinking?: (delta: string) => void;
 }
 
 /** Input accepted by the public streaming API. */

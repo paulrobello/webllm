@@ -96,6 +96,20 @@ export interface InternalGenerationOptions extends GenerationConfig {
 	 * run-on output like `</think>The answer ...`.
 	 */
 	requireLeadingWhitespaceAfterThinking?: boolean;
+	/**
+	 * Optional streaming callback invoked once per visible-text delta.
+	 * Threaded end-to-end from the public {@link CompletionConfig.onToken}.
+	 * The Generator owns the authoritative visible-text accumulator; this
+	 * callback fires whenever that accumulator grows.
+	 */
+	onToken?: (delta: string) => void;
+	/**
+	 * Optional streaming callback invoked once per reasoning delta inside a
+	 * `<think>` block. Threaded end-to-end from
+	 * {@link CompletionConfig.onThinking}. Fires only when the model emits
+	 * a think block and only with the inner reasoning text (no tag wrappers).
+	 */
+	onThinking?: (delta: string) => void;
 }
 
 export type GenerationFinishReason =
@@ -226,11 +240,59 @@ export class Generator {
 		let waitingForVisibleAnswer = requireVisibleAnswerBeforeStop;
 		let requireLeadingWhitespaceForNextStep = false;
 
+		// Visible-text and thinking-text accumulators. The Generator owns
+		// the authoritative think/visible steering state (thinkDepth,
+		// waitingForVisibleAnswer, hasVisibleAnswerText, tag-token IDs) so
+		// it is the natural place to route sampled tokens into one of two
+		// StreamingDecoders. The decoders only re-decode + diff accumulated
+		// tokens; the Generator decides which decoder a token belongs to.
+		// Tag tokens (`<think>` / `</think>`) contribute to neither - they
+		// are filtered out before the routing decision, so neither
+		// decoder's internal thinkDepth is ever touched.
+		const steeringTokenizer = config.tokenizer;
+		const visibleDecoder =
+			steeringTokenizer !== undefined
+				? new StreamingDecoder(steeringTokenizer)
+				: undefined;
+		const thinkingDecoder =
+			steeringTokenizer !== undefined
+				? new StreamingDecoder(steeringTokenizer)
+				: undefined;
+		let prevVisibleLen = 0;
+		let prevThinkingLen = 0;
+
+		// Route a sampled token into the appropriate decoder and fire the
+		// matching callback (onToken / onThinking) iff that decoder's text
+		// grew. `currentThinkDepth` is the post-update thinkDepth for this
+		// token.
+		const emitDeltas = (tokenId: number, currentThinkDepth: number) => {
+			if (visibleDecoder === undefined || thinkingDecoder === undefined) return;
+			// Tag tokens contribute no text to either side.
+			if (tokenId === thinkOpenTokenId || tokenId === thinkCloseTokenId) return;
+			if (currentThinkDepth > 0) {
+				thinkingDecoder.push(tokenId);
+				const t = thinkingDecoder.text;
+				if (t.length > prevThinkingLen) {
+					const delta = t.slice(prevThinkingLen);
+					prevThinkingLen = t.length;
+					config.onThinking?.(delta);
+				}
+			} else {
+				visibleDecoder.push(tokenId);
+				const t = visibleDecoder.text;
+				if (t.length > prevVisibleLen) {
+					const delta = t.slice(prevVisibleLen);
+					prevVisibleLen = t.length;
+					config.onToken?.(delta);
+				}
+			}
+		};
+
 		if (config.signal?.aborted) {
 			const elapsed = performance.now() - startTime;
 			return {
 				tokens: [...session.tokens],
-				text: "",
+				text: visibleDecoder?.text ?? "",
 				tokenCount: 0,
 				tokensPerSecond: 0,
 				timeToFirstTokenMs: elapsed,
@@ -250,7 +312,7 @@ export class Generator {
 			const elapsed = performance.now() - startTime;
 			return {
 				tokens: [...session.tokens],
-				text: "",
+				text: visibleDecoder?.text ?? "",
 				tokenCount: 0,
 				tokensPerSecond: 0,
 				timeToFirstTokenMs: elapsed,
@@ -281,7 +343,7 @@ export class Generator {
 		) {
 			return {
 				tokens: [...session.tokens],
-				text: "",
+				text: visibleDecoder?.text ?? "",
 				tokenCount: 0,
 				tokensPerSecond: 0,
 				timeToFirstTokenMs: firstTokenTime - startTime,
@@ -295,6 +357,9 @@ export class Generator {
 			hasVisibleAnswerText = true;
 			waitingForVisibleAnswer = false;
 		}
+		// Route the first sampled token (post steering-state update) into
+		// the visible/thinking accumulators and fire onToken / onThinking.
+		emitDeltas(sampledId, thinkDepth);
 		yield sampledId;
 		session.pushToken(sampledId);
 		recentTokens.push(sampledId);
@@ -541,6 +606,12 @@ export class Generator {
 				finishReason = "eos";
 				break;
 			}
+			// Route this iteration's sampled token (post steering-state
+			// update) into the visible/thinking accumulators. Tokens that
+			// broke the loop above (stop / eos) are NOT routed here — but
+			// they are CONTROL/USER_DEFINED, so decode() skips them and
+			// they would contribute no text either way.
+			emitDeltas(sampledId, thinkDepth);
 			yield sampledId;
 			session.pushToken(sampledId);
 		}
@@ -558,7 +629,7 @@ export class Generator {
 		const totalGenerated = session.tokens.length - promptTokenIds.length;
 		return {
 			tokens: [...session.tokens],
-			text: "",
+			text: visibleDecoder?.text ?? "",
 			tokenCount: totalGenerated,
 			tokensPerSecond: totalGenerated / (elapsed / 1000),
 			timeToFirstTokenMs: firstTokenTime - startTime,
@@ -686,23 +757,43 @@ export async function* generateTextStream({
 	GenerationStreamResult
 > {
 	const startTime = performance.now();
-	const decoder = new StreamingDecoder(tokenizer);
+	// The Generator owns the authoritative visible/thinking accumulators
+	// and fires onToken / onThinking as they grow. To put each growth in
+	// the matching StreamChunk.text we wrap onToken to capture the latest
+	// visible delta per step (the Generator fires it synchronously inside
+	// gen.next(), before next resolves). This preserves the invariant
+	// `deltas.join("") === result.text`: both come from the Generator's
+	// single visibleDecoder.
+	let lastVisibleDelta = "";
+	const userOnToken = config.onToken;
+	const internalConfig: InternalGenerationOptions = {
+		...config,
+		// GenerationStreamOptions always carries the authoritative
+		// tokenizer; ensure the Generator sees it so it can build its
+		// decoders even when the caller left config.tokenizer unset.
+		tokenizer,
+		onToken: (delta: string) => {
+			lastVisibleDelta = delta;
+			userOnToken?.(delta);
+		},
+	};
 	const gen = Generator.generate(
 		promptTokenIds,
 		sampler,
 		session,
 		eosTokenId,
 		forwardPass,
-		config,
+		internalConfig,
 		forwardDecode,
 	);
 
 	while (true) {
+		lastVisibleDelta = "";
 		const next = await gen.next();
 		if (next.done) {
 			const stats: GenerationStreamResult = {
 				...next.value,
-				text: decoder.text,
+				text: next.value.text,
 				totalMs: performance.now() - startTime,
 			};
 			yield { text: "", done: true, stats };
@@ -711,7 +802,7 @@ export async function* generateTextStream({
 
 		const tokenId = next.value;
 		yield {
-			text: decoder.push(tokenId),
+			text: lastVisibleDelta,
 			tokenId,
 			done: false,
 		};
