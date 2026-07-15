@@ -1,0 +1,6 @@
+# `root` scopes Bun's test discovery to `tests/` so `tests-browser/` (Playwright
+# specs, which import `@playwright/test`) is excluded from `make checkall`'s
+# `bun test` invocation. Without this, Bun matches `*.spec.ts` repo-wide and
+# the Playwright spec breaks `make checkall`.
+[test]
+root = "./tests"

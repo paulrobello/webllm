@@ -24,7 +24,7 @@
     "build": "bun run scripts/build-package.ts",
     "build:jsep": "bun build src/index-jsep.ts --outfile smoke-test/webllm-bundle-jsep.js --target browser",
     "dev": "bun build src/index.ts src/persistence/indexeddb-store.ts --outdir dist --target browser --watch --root src",
-    "test": "bun test tests/",
+    "test": "bun test",
     "test:browser": "playwright test",
     "lint": "biome check src tests tests-browser smoke-test",
     "lint:fix": "biome check --fix src tests tests-browser smoke-test",

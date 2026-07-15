@@ -17,32 +17,34 @@ const BASE_URL = "http://127.0.0.1:8034/real-model.html";
 // DEFAULT_CONTEXT_LENGTH when the query param is absent (verified in the page
 // source). `ingest=off` prevents the page from posting run_complete to the
 // dashboard at :8033 (per CLAUDE.md). `v` cache-busts the page + its imports.
-const buildUrl = (modelId = MODEL_ID): string =>
-	`${BASE_URL}?model=${modelId}&ingest=off&v=${Date.now()}`;
+const buildUrl = (): string =>
+	`${BASE_URL}?model=${MODEL_ID}&ingest=off&v=${Date.now()}`;
 
 // Benign console-error allowlist: error-type console messages that do NOT fail
 // the lane. Derived from `grep -rh "console.error(" src smoke-test/webllm-bundle.js`
 // — every console.error in the codebase is an internal-dispatch invariant check
 // (dispatchMatmul / dispatchRmsNorm / dispatchSetRows) that must NEVER fire in a
-// healthy run, so none belong here. Two allowlisted substrings:
+// healthy run, so none belong here. One allowlisted substring:
 //   - "adapter_info:" — WASM backend informational line. Actually emitted via
 //     console.info (src/inference/ggml-wasm.ts:243), so it never reaches the
 //     error-type filter; allowlisted defensively. CLAUDE.md calls adapter_info
 //     benign informational output.
-//   - "Failed to load resource: the server responded with a status of 404" —
-//     Chrome auto-requests /favicon.ico for real-model.html (which declares no
-//     <link rel="icon">); smoke-serve returns 404 and Chrome logs this generic
-//     message. The request is browser-initiated, so Playwright's response/
-//     requestfailed listeners never see it (only the console surfaces it). It
-//     is presentational only. SAFE to allowlist here because the lane reaches
-//     this assertion only AFTER (a) the model-present guard caught any weight/
-//     WASM 404 with an actionable message, and (b) the "tok/s, finish=" marker
-//     proved every load-bearing resource resolved — so a 404 at this point is,
-//     by elimination, the favicon.
-const BENIGN_ERROR_SUBSTRINGS = [
-	"adapter_info:",
-	"Failed to load resource: the server responded with a status of 404",
-];
+//
+// NOTE: the favicon 404 ("Failed to load resource: the server responded with a
+// status of 404") is NOT allowlisted here. Chrome auto-requests /favicon.ico for
+// real-model.html (which declares no <link rel="icon">); rather than allowlist
+// Chrome's generic 404 text (which would mask ANY future post-success 404), we
+// intercept the request below with a 204 route handler so no 404 reaches the
+// console. This keeps the allowlist strict — any 404 that does surface is real.
+const BENIGN_ERROR_SUBSTRINGS = ["adapter_info:"];
+
+// Markers that indicate a fetch/load failure in the early [1/8]/[2/8] steps —
+// if any appear in #log during the model-present guard, the lane fast-fails
+// with an actionable message instead of waiting the full 180s timeout.
+//   - "[2/8] Fetch failed:" — the page's explicit fetch-fail log line.
+//   - "Failed to fetch" — the browser's network-error text; covers a [1/8] WASM
+//     or model fetch that fails before the page can prefix it with [2/8].
+const FETCH_FAIL_MARKERS = ["[2/8] Fetch failed:", "Failed to fetch"];
 
 test("smoke page generates text end-to-end", async ({ page }) => {
 	test.info().annotations.push({
@@ -56,8 +58,16 @@ test("smoke page generates text end-to-end", async ({ page }) => {
 		consoleMessages.push({ type: msg.type(), text: msg.text() });
 	});
 	page.on("pageerror", (err) => {
-		pageErrors.push(`${err.name}: ${err.message}`);
+		// Include the stack (not just name+message) so future failures are diagnosable.
+		pageErrors.push(err.stack ?? `${err.name}: ${err.message}`);
 	});
+
+	// Intercept the browser's automatic /favicon.ico request (real-model.html
+	// declares no <link rel="icon">) so it never 404s into the console — see
+	// BENIGN_ERROR_SUBSTRINGS note above. Must be set before navigation.
+	await page.route("**/favicon.ico", (route) =>
+		route.fulfill({ status: 204, body: "" }),
+	);
 
 	await page.goto(buildUrl(), {
 		waitUntil: "domcontentloaded",
@@ -68,7 +78,6 @@ test("smoke page generates text end-to-end", async ({ page }) => {
 	// (missing weights / 404), throw an actionable message instead of waiting
 	// the full 180s for a success marker that will never arrive. The page logs
 	// failures via log("fail", ...) -> `<div class="step fail">`.
-	const fetchFailMarker = "[2/8] Fetch failed:";
 	const guardDeadline = Date.now() + 20_000;
 	while (Date.now() < guardDeadline) {
 		const logText =
@@ -76,7 +85,7 @@ test("smoke page generates text end-to-end", async ({ page }) => {
 				.locator("#log")
 				.textContent({ timeout: 500 })
 				.catch(() => "")) ?? "";
-		if (logText.includes(fetchFailMarker)) {
+		if (FETCH_FAIL_MARKERS.some((m) => logText.includes(m))) {
 			throw new Error(
 				"Model weights missing — run 'make smoke-test' (and ensure " +
 					`smoke-test/models/${MODEL_ID}.gguf is present) before 'make test-browser'.`,
