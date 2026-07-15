@@ -503,6 +503,20 @@ interface BuildForwardGraphOpts {
 	needsSwaMask: boolean;
 	/** When true, capture `t1`/`t2` trace timestamps. */
 	trace: boolean;
+	/**
+	 * Taps-output controls — required when `output === "taps"`, ignored
+	 * otherwise. Mirrors the {@link forwardWithLayerTaps} opts of the same
+	 * names; see that method for the per-field rationale (128 MiB per-binding
+	 * cap management, incremental long-context parity probe support).
+	 */
+	taps?: {
+		/** Skip all per-layer residual taps (long-context probe). */
+		skipLayerTaps: boolean;
+		/** Pin only this layer's residual tap; undefined = capture every layer. */
+		captureLayer: number | undefined;
+		/** Slice lm_head input to the last-token column (parity probe). */
+		lastTokenLogitsOnly: boolean;
+	};
 }
 
 /**
@@ -515,7 +529,9 @@ interface BuiltForwardGraph {
 	graph: number;
 	/**
 	 * Terminal output tensor — `logits` for `output: "logits"`; argmax result
-	 * / top-K values / logits depending on `decodeMode` for `output: "decode"`.
+	 * / top-K values / logits depending on `decodeMode` for `output: "decode"`;
+	 * final hidden state for `output: "embedding"`; last-token logits for
+	 * `output: "taps"`.
 	 */
 	outputTensor: TensorPtr;
 	/**
@@ -535,6 +551,17 @@ interface BuiltForwardGraph {
 	t1: number;
 	/** Trace: timestamp after `graphBuildForwardExpand`; 0 when `!trace`. */
 	t2: number;
+	/**
+	 * Taps-output (B5) fields — populated only for `output: "taps"`;
+	 * 0 / empty for all other output kinds.
+	 * `embeddingTapTensor` is the pre-block-0 hidden (HF `hidden_states[0]`
+	 * equivalent); `layerTapsTensors` is the per-layer residual-tap array
+	 * (sparse in single-layer-capture mode); `finalHiddenTensor` is the
+	 * post-`output_norm` hidden (last-token slice when `lastTokenLogitsOnly`).
+	 */
+	embeddingTapTensor: TensorPtr;
+	layerTapsTensors: TensorPtr[];
+	finalHiddenTensor: TensorPtr;
 }
 
 /**
@@ -1839,6 +1866,331 @@ export class ModelInference {
 				swaMaskTensor,
 				t1,
 				t2,
+				embeddingTapTensor: 0,
+				layerTapsTensors: [],
+				finalHiddenTensor: 0,
+			};
+		}
+		if (mode === "taps") {
+			// B5: taps layer loop + tail — byte-identical to the pre-B5
+			// forwardWithLayerTaps graph construction (mechanical move +
+			// N→nTokens rename). Stateless manual attention (no KV cache
+			// writes, no FA) to match the HF transformers reference numerical
+			// path. Shared-KV layers (Gemma 4 E2B) reuse earlier-layer K/V via
+			// per-layer arrays (no persistent cache). Per-layer tap capture
+			// (skip / single-layer / full modes) + embedding-output tap +
+			// final-norm tap + lm_head. lastTokenLogitsOnly slices the lm_head
+			// input to the last-token column (128 MiB per-binding cap management).
+			//
+			// Diverges from the standard loop at: (1) K/V source — per-layer
+			// arrays instead of persistent cache writes; (2) attention — manual
+			// only (no FA branch); (3) per-layer tap capture. The divergence is
+			// structural, not cosmetic — kept as a separate branch so both paths
+			// preserve their exact pre-B5 op sequence. See forwardWithLayerTaps
+			// for the full contract.
+			const E = hp.embeddingLength;
+			const skipLayerTaps = opts.taps?.skipLayerTaps === true;
+			const captureLayer = opts.taps?.captureLayer;
+			const singleLayerCapture =
+				typeof captureLayer === "number" &&
+				captureLayer >= 0 &&
+				captureLayer < hp.layerCount;
+			const lastTokenLogitsOnly = opts.taps?.lastTokenLogitsOnly === true;
+			const captureEmbeddingTap = !lastTokenLogitsOnly;
+
+			// Embedding-output tap (HF `hidden_states[0]` equivalent).
+			// Read back here to compare against the reference's pre-block-0
+			// state; pins down whether drift starts at embedding lookup +
+			// scale or only inside the per-block forward path. Skipped in
+			// `lastTokenLogitsOnly` (long-context parity) mode — saves
+			// nTokens*E*F32 of pinned buffer that the allocator can otherwise
+			// reclaim after block 0 consumes the embedding output.
+			const embeddingTap = x;
+			if (captureEmbeddingTap) {
+				wasm.graphBuildForwardExpand(graph, embeddingTap);
+			}
+
+			const layerTaps: TensorPtr[] = [];
+			// Shared-KV layers (Gemma 4 E2B layers 15-34) reuse the K/V
+			// computed by an earlier layer in the SAME forward pass (this
+			// path has no persistent cache). Save each owning layer's
+			// post-RoPE kRope and v3 so shared layers can reference them.
+			const kRopePerLayer: TensorPtr[] = new Array(hp.layerCount).fill(0);
+			const v3PerLayer: TensorPtr[] = new Array(hp.layerCount).fill(0);
+			for (let il = 0; il < hp.layerCount; il++) {
+				const lw = weights.layers[il];
+
+				const headDim = hp.embeddingHeadLengthPerLayer
+					? hp.embeddingHeadLengthPerLayer[il]
+					: hp.embeddingHeadLength;
+				const nHeads = hp.headCountPerLayer
+					? hp.headCountPerLayer[il]
+					: hp.headCount;
+				const nHeadsKv = hp.headCountKvPerLayer
+					? hp.headCountKvPerLayer[il]
+					: hp.headCountKv;
+				const ropeFreqBase = hp.ropeFreqBasePerLayer
+					? hp.ropeFreqBasePerLayer[il]
+					: hp.ropeFreqBase;
+				const ropeDimCount = hp.ropeDimensionCountPerLayer
+					? hp.ropeDimensionCountPerLayer[il]
+					: headDim;
+				const ffnDim = hp.feedForwardLengthPerLayer
+					? hp.feedForwardLengthPerLayer[il]
+					: undefined;
+				const kvReuse = hp.kvReuseFromLayer?.[il] ?? null;
+				const isShared = kvReuse !== null;
+
+				// Per-layer mask: SWA layers use the windowed mask, non-SWA use
+				// the full-causal mask. Falls through to 0 when neither mask
+				// was materialized (single-token paths; not reachable here at nTokens>1).
+				const isSwaLayer = hp.slidingWindowPattern?.[il] === true;
+				const layerMask =
+					isSwaLayer && swaMaskTensor !== 0
+						? swaMaskTensor
+						: needsMask
+							? maskTensor
+							: 0;
+
+				let normed = wasm.opMul(
+					wasm.opRmsNorm(cur, hp.normEpsilon),
+					lw.attnNorm,
+				);
+				if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
+
+				let qReady: TensorPtr;
+				let kRope: TensorPtr;
+				let v3: TensorPtr;
+				if (isShared) {
+					qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
+					// Reuse the source layer's post-RoPE K and pre-permute V.
+					// Source layer ran earlier in this loop; tensors are still
+					// graph nodes that will be evaluated together at compute.
+					kRope = kRopePerLayer[kvReuse];
+					v3 = v3PerLayer[kvReuse];
+					if (!kRope || !v3) {
+						throw new Error(
+							`forwardWithLayerTaps: layer ${il} reuses layer ${kvReuse} but source K/V not yet materialized`,
+						);
+					}
+				} else {
+					const qkv = this.buildQKV(
+						lw,
+						normed,
+						nTokens,
+						headDim,
+						nHeads,
+						nHeadsKv,
+					);
+					qReady = qkv.qReady;
+					v3 = qkv.v3;
+					kRope = this.applyRope(
+						qkv.kReady,
+						posTensor,
+						lw,
+						ropeDimCount,
+						ropeMode,
+						ropeFreqBase,
+					);
+					kRopePerLayer[il] = kRope;
+					v3PerLayer[il] = v3;
+				}
+
+				const qRope = this.applyRope(
+					qReady,
+					posTensor,
+					lw,
+					ropeDimCount,
+					ropeMode,
+					ropeFreqBase,
+				);
+
+				// Manual attention chain (no KV cache, no FA) — matches HF
+				// transformers reference's numerical path for clean diff.
+				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
+				const kp = wasm.opPermute(kRope, 0, 2, 1, 3);
+				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
+
+				const qk = wasm.opMulMat(kp, qp);
+				// Gemma 2 attention logit soft-cap: scale-first ordering
+				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
+				// forwardSingle for the longer rationale.
+				let qkProcessed = qk;
+				let softmaxScale = attnSoftmaxScale(hp, headDim);
+				if (hp.attnLogitSoftcap) {
+					qkProcessed = this.softCap(
+						wasm.opScale(qk, softmaxScale),
+						hp.attnLogitSoftcap,
+					);
+					softmaxScale = 1.0;
+				}
+				const attnW = wasm.opSoftMaxExt(
+					qkProcessed,
+					layerMask,
+					softmaxScale,
+					0.0,
+				);
+				const attnOut = wasm.opMulMat(vp, attnW);
+				const merged = wasm.opReshape2d(
+					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
+					nHeads * headDim,
+					nTokens,
+				);
+
+				const oProjRaw = wasm.opMulMat(lw.oProj, merged);
+				const oProj = lw.postAttentionNorm
+					? wasm.opMul(
+							wasm.opRmsNorm(oProjRaw, hp.normEpsilon),
+							lw.postAttentionNorm,
+						)
+					: oProjRaw;
+				const attnResidual = wasm.opAdd(oProj, cur);
+
+				let ffnNormed = wasm.opMul(
+					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
+					lw.ffnNorm,
+				);
+				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
+				const { gate, up } = this.buildFFNGateUp(
+					lw,
+					ffnNormed,
+					nTokens,
+					ffnDim,
+				);
+				// Gemma family: gelu(gate) * up instead of silu(gate) * up
+				// (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
+				const ffnHidden = isGemmaFamily(hp.architecture)
+					? wasm.opMul(wasm.opGelu(gate), up)
+					: wasm.opSwigluSplit(gate, up);
+				const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
+				const ffnOut = lw.postFfwNorm
+					? wasm.opMul(
+							wasm.opRmsNorm(ffnOutRaw, hp.normEpsilon),
+							lw.postFfwNorm,
+						)
+					: ffnOutRaw;
+
+				cur = wasm.opAdd(ffnOut, attnResidual);
+				if (
+					inpPerLayer !== null &&
+					lw.pleInpGate &&
+					lw.plePerBlockProj &&
+					lw.plePostNorm
+				) {
+					cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
+				}
+				if (lw.layerOutputScale) {
+					cur = wasm.opMul(cur, lw.layerOutputScale);
+				}
+
+				// Tap point: ensure this tensor survives buffer alloc + compute
+				// so we can read back its contents below. Skipped when
+				// `skipLayerTaps` is set — used for long-context probes where
+				// the 35 simultaneously-live tap buffers exceed the WebGPU
+				// per-binding 128 MiB cap (each tap is nTokens*E*F32 bytes; at
+				// nTokens=560 / E=1536 / L=35 that's 120 MB just for tap retention).
+				// Final hidden + logits are still captured.
+				//
+				// `captureLayer` narrows this even further: pin ONLY one
+				// specific layer's `cur`. Used by the incremental long-context
+				// parity harness — call this function once per layer index
+				// and the readback below returns a sparse `perLayerResidual`
+				// with only that index populated. Other layers' `cur` tensors
+				// stay intermediates and the allocator can pack them tightly.
+				if (skipLayerTaps) {
+					// no taps at all
+				} else if (singleLayerCapture) {
+					if (il === captureLayer) {
+						// Slice last-token column of `cur` into a fresh tensor.
+						// Pinning only the 1*E sliced copy lets the allocator
+						// reuse the full nTokens*E*F32 `cur` (3.4 MB at nTokens=560) after
+						// the next block consumes it. The opCont copies the
+						// view's bytes into a fresh storage so the parent can
+						// be lifetime-packed independently.
+						const lastTokenView = wasm.opView2d(
+							cur,
+							E,
+							1,
+							E * F32_BYTES,
+							(nTokens - 1) * E * F32_BYTES,
+						);
+						const lastTokenCur = wasm.opCont(lastTokenView);
+						wasm.graphBuildForwardExpand(graph, lastTokenCur);
+						layerTaps[il] = lastTokenCur;
+					} else {
+						layerTaps[il] = 0;
+					}
+				} else {
+					wasm.graphBuildForwardExpand(graph, cur);
+					layerTaps.push(cur);
+				}
+			}
+			// Early termination was attempted but caused the GPU buffer to
+			// be under-sized by the graph allocator. Disabled — single-
+			// layer capture runs the full stack and pins only the target
+			// layer's tap. The per-binding cap is managed via the other
+			// shavings (sliced lm_head input, skipped embedding tap, etc.).
+			const earlyBreak = false;
+
+			// Final-norm + lm_head pinned only when we ran the full stack.
+			// In `singleLayerCapture` we break out early after the target
+			// layer's tap, so `cur` reflects that layer's output (not the
+			// final block) and finalHidden/logits would be garbage. Set
+			// them to 0 here and skip the readbacks below.
+			let finalHidden: TensorPtr = 0;
+			let logits: TensorPtr = 0;
+			if (!earlyBreak) {
+				let finalHiddenFull = wasm.opMul(
+					wasm.opRmsNorm(cur, hp.normEpsilon),
+					weights.norm,
+				);
+				if (weights.normBias)
+					finalHiddenFull = wasm.opAdd(finalHiddenFull, weights.normBias);
+
+				// When the caller only needs the last-token row of the
+				// final-norm hidden + logits (the parity probe), slice once
+				// and feed both lm_head AND the readback pin from that slice.
+				// Saves (nTokens-1)*E*F32 on the finalHidden pin AND (nTokens-1)*V*F32
+				// on the logits pin (575 MB at nTokens=560/V=262144). The math is
+				// unchanged: lm_head is a pointwise matmul over the residual
+				// dim.
+				const lmHeadInput = lastTokenLogitsOnly
+					? wasm.opView2d(
+							finalHiddenFull,
+							E,
+							1,
+							E * F32_BYTES,
+							(nTokens - 1) * E * F32_BYTES,
+						)
+					: finalHiddenFull;
+				finalHidden = lastTokenLogitsOnly ? lmHeadInput : finalHiddenFull;
+				logits = weights.output
+					? wasm.opMulMat(weights.output, lmHeadInput)
+					: wasm.opMulMat(weights.tokEmb, lmHeadInput);
+				if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
+				// Gemma 2 / Gemma 4 post-lm_head soft-cap.
+				if (hp.finalLogitSoftcap)
+					logits = this.softCap(logits, hp.finalLogitSoftcap);
+
+				wasm.graphBuildForwardExpand(graph, finalHidden);
+				wasm.graphBuildForwardExpand(graph, logits);
+			}
+
+			const t2 = trace ? performance.now() : 0;
+
+			return {
+				graph,
+				outputTensor: logits,
+				secondaryTensor: 0,
+				posTensor,
+				tokenIdsTensor,
+				maskTensor,
+				swaMaskTensor,
+				t1,
+				t2,
+				embeddingTapTensor: captureEmbeddingTap ? embeddingTap : 0,
+				layerTapsTensors: layerTaps,
+				finalHiddenTensor: finalHidden,
 			};
 		}
 		for (let il = 0; il < hp.layerCount; il++) {
@@ -2181,6 +2533,9 @@ export class ModelInference {
 			swaMaskTensor,
 			t1,
 			t2,
+			embeddingTapTensor: 0,
+			layerTapsTensors: [],
+			finalHiddenTensor: 0,
 		};
 	}
 
@@ -2473,545 +2828,238 @@ export class ModelInference {
 		logitsTop16: { ids: Int32Array; values: Float32Array };
 	}> {
 		if (!this.weights) throw new Error("Weights not loaded");
-		const { hp, wasm, weights } = this;
+		const { hp, wasm } = this;
 		const N = tokenIds.length;
 		const E = hp.embeddingLength;
 		const V = hp.vocabularySize;
 		const K = Math.max(1, opts?.topK ?? 16);
-		// captureLayer: pin only the named layer's `cur` tap. Other layers get
-		// no explicit graphBuildForwardExpand, so the allocator lifetime-packs
-		// their `cur` slots. At long context this is the difference between
-		// 35 simultaneously-live N*E*F32 tap buffers (120 MB at N=560/E=1536)
-		// and a single one (3.4 MB) — load-bearing for staying under the
-		// WebGPU 128 MiB per-binding cap on the long-context parity probe.
 		const captureLayer = opts?.captureLayer;
 		const singleLayerCapture =
 			typeof captureLayer === "number" &&
 			captureLayer >= 0 &&
 			captureLayer < hp.layerCount;
-		// skipLayerTaps wins over captureLayer when both are set (no taps at all).
 		const skipLayerTaps = opts?.skipLayerTaps === true;
-		// Slice the last token's column from finalHidden BEFORE lm_head matmul
-		// so logits is 1*V instead of N*V. The math is unchanged (lm_head is a
-		// pointwise matmul over the residual dim). At N=560/V=262144 this is
-		// 1 MB vs 575 MB — also load-bearing for the 128 MiB cap.
 		const lastTokenLogitsOnly = opts?.lastTokenLogitsOnly === true;
 		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
-		// Same seasoning as forwardSingle (64 bytes/elem covers PLE +
-		// post-norm overhead for Gemma 4 at long prefill). Per-layer tap
-		// adds no nodes beyond the existing `cur` chain. Gemma 4 PLE
-		// materialization pushed this to 256.
-		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(hp, N, "taps");
-		wasm.ctxCreate(graphMem);
+		// Mask bits and ropeMode — pure computations passed to buildForwardGraph
+		// via opts. buildForwardGraph creates the mask tensors after ctxCreate.
+		const needsMask = N > 1;
+		const maskPaddedCols = padTo(N, 32);
+		const swaWindow = hp.slidingWindowSize ?? 0;
+		const hasSwaLayers =
+			(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
+		const needsSwaMask = hasSwaLayers && (N > 1 || N > swaWindow);
+
+		// Positions always start at 0 — this is a stateless diagnostic forward
+		// (no KV history); applying an offset would shift RoPE relative to the
+		// training distribution.
+		const positions = new Int32Array(N);
+		for (let i = 0; i < N; i++) positions[i] = i;
+
+		// Graph construction is delegated to buildForwardGraph (B5: mode "taps"
+		// + output "taps"); this method handles input marshalling, graph compute,
+		// multi-tensor readback, and teardown. The pre-B5 op sequence (stateless
+		// manual attention, per-layer tap capture, embedding tap, lastTokenLogitsOnly
+		// slicing) is preserved byte-identical inside buildForwardGraph's taps
+		// branch. Trace stays off to match the pre-B5 behavior (the taps path
+		// never recorded a trace).
+		const {
+			graph,
+			outputTensor: logits,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+			swaMaskTensor,
+			embeddingTapTensor: embeddingTap,
+			layerTapsTensors: layerTaps,
+			finalHiddenTensor: finalHidden,
+		} = await this.buildForwardGraph({
+			mode: "taps",
+			output: "taps",
+			tokenIds,
+			positions,
+			nTokens: N,
+			pastLen: 0,
+			totalLen: N,
+			ropeMode,
+			needsMask,
+			maskPaddedCols,
+			swaWindow,
+			needsSwaMask,
+			trace: false,
+			taps: {
+				skipLayerTaps,
+				captureLayer,
+				lastTokenLogitsOnly,
+			},
+		});
+
+		// earlyBreak mirrors the (disabled) early-termination guard inside
+		// buildForwardGraph's taps branch. Always false — preserved for parity
+		// with the pre-B5 readback contract.
+		const earlyBreak = false;
+		const captureEmbeddingTap = !lastTokenLogitsOnly;
+
+		const graphBuf = wasm.backendAllocCtxTensors();
 
 		try {
-			const posTensor = wasm.tensorNew1d(GgmlType.I32, N);
-			const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, N);
+			this.uploadLeaves(
+				wasm,
+				tokenIds,
+				positions,
+				N,
+				0, // pastLen — taps is stateless
+				N, // totalLen
+				needsMask,
+				maskPaddedCols,
+				posTensor,
+				tokenIdsTensor,
+				maskTensor,
+				swaMaskTensor,
+				swaWindow,
+			);
 
-			const needsMask = N > 1;
-			const maskPaddedCols = padTo(N, 32);
-			const maskTensor = needsMask
-				? wasm.tensorNew2d(GgmlType.F16, N, maskPaddedCols)
-				: 0;
-			// SWA mask for Gemma 2/3/4 sliding-window layers. Single-shot
-			// forward pass with pastLen=0 → mask is needed iff N > 1 OR
-			// N > swaWindow (the latter is unreachable here since N is
-			// the entire prefill, but kept for parity with forwardSingle).
-			const swaWindow = hp.slidingWindowSize ?? 0;
-			const hasSwaLayers =
-				(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
-			const needsSwaMask = hasSwaLayers && (N > 1 || N > swaWindow);
-			const swaMaskTensor = needsSwaMask
-				? wasm.tensorNew2d(GgmlType.F16, N, maskPaddedCols)
-				: 0;
+			await wasm.graphCompute(graph);
 
-			let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
-			// Gemma family: scale residual stream by sqrt(embedding_length)
-			// after embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
-			if (isGemmaFamily(hp.architecture)) {
-				x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
-			}
-			// Embedding-output tap (HF `hidden_states[0]` equivalent).
-			// Read back here to compare against the reference's pre-block-0
-			// state; pins down whether drift starts at embedding lookup +
-			// scale or only inside the per-block forward path. Skipped in
-			// `lastTokenLogitsOnly` (long-context parity) mode — saves
-			// N*E*F32 (3.4 MB at N=560/E=1536) of pinned buffer that the
-			// allocator can otherwise reclaim after block 0 consumes the
-			// embedding output.
-			const embeddingTap = x;
-			const captureEmbeddingTap = !lastTokenLogitsOnly;
-
-			// graphNew capacity: standard mode uses layerCount * 72 + 160
-			// (computeGraphSizing); taps adds one per-layer tap expand
-			// (+1/layer) + the embedding-output tap (+1) → 80 + 200.
-			const graph = wasm.graphNew(nodeCount);
+			// Read back: embedding output (pre-block-0), every layer's
+			// last-token row, then final-norm last row, then last-token
+			// full-vocab logits -> top-K in JS.
+			const rowBytes = E * 4;
+			const lastTokenOffset = (N - 1) * rowBytes;
+			let embeddingOutput: Float32Array;
 			if (captureEmbeddingTap) {
-				wasm.graphBuildForwardExpand(graph, embeddingTap);
+				const embedBuf = await wasm.downloadFromTensor(
+					embeddingTap,
+					rowBytes,
+					lastTokenOffset,
+				);
+				embeddingOutput = new Float32Array(
+					embedBuf.buffer,
+					embedBuf.byteOffset,
+					E,
+				).slice();
+			} else {
+				// embedding tap was not pinned (lastTokenLogitsOnly mode);
+				// return an empty array. Callers in that mode don't compare
+				// embedding output (per-layer SWA parity check is the focus).
+				embeddingOutput = new Float32Array(0);
 			}
 
-			const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, N);
-			if (inpPerLayer !== null) {
-				wasm.graphBuildForwardExpand(graph, inpPerLayer);
-			}
-
-			const layerTaps: TensorPtr[] = [];
-			// Shared-KV layers (Gemma 4 E2B layers 15-34) reuse the K/V
-			// computed by an earlier layer in the SAME forward pass (this
-			// path has no persistent cache). Save each owning layer's
-			// post-RoPE kRope and v3 so shared layers can reference them.
-			const kRopePerLayer: TensorPtr[] = new Array(hp.layerCount).fill(0);
-			const v3PerLayer: TensorPtr[] = new Array(hp.layerCount).fill(0);
-			let cur = x;
-			for (let il = 0; il < hp.layerCount; il++) {
-				const lw = weights.layers[il];
-
-				const headDim = hp.embeddingHeadLengthPerLayer
-					? hp.embeddingHeadLengthPerLayer[il]
-					: hp.embeddingHeadLength;
-				const nHeads = hp.headCountPerLayer
-					? hp.headCountPerLayer[il]
-					: hp.headCount;
-				const nHeadsKv = hp.headCountKvPerLayer
-					? hp.headCountKvPerLayer[il]
-					: hp.headCountKv;
-				const ropeFreqBase = hp.ropeFreqBasePerLayer
-					? hp.ropeFreqBasePerLayer[il]
-					: hp.ropeFreqBase;
-				const ropeDimCount = hp.ropeDimensionCountPerLayer
-					? hp.ropeDimensionCountPerLayer[il]
-					: headDim;
-				const ffnDim = hp.feedForwardLengthPerLayer
-					? hp.feedForwardLengthPerLayer[il]
-					: undefined;
-				const kvReuse = hp.kvReuseFromLayer?.[il] ?? null;
-				const isShared = kvReuse !== null;
-
-				// Per-layer mask: SWA layers use the windowed mask, non-SWA use
-				// the full-causal mask. Falls through to 0 when neither mask
-				// was materialized (single-token paths; not reachable here at N>1).
-				const isSwaLayer = hp.slidingWindowPattern?.[il] === true;
-				const layerMask =
-					isSwaLayer && swaMaskTensor !== 0
-						? swaMaskTensor
-						: needsMask
-							? maskTensor
-							: 0;
-
-				let normed = wasm.opMul(
-					wasm.opRmsNorm(cur, hp.normEpsilon),
-					lw.attnNorm,
-				);
-				if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
-
-				let qReady: TensorPtr;
-				let kRope: TensorPtr;
-				let v3: TensorPtr;
-				if (isShared) {
-					qReady = this.buildQOnly(lw, normed, N, headDim, nHeads);
-					// Reuse the source layer's post-RoPE K and pre-permute V.
-					// Source layer ran earlier in this loop; tensors are still
-					// graph nodes that will be evaluated together at compute.
-					kRope = kRopePerLayer[kvReuse];
-					v3 = v3PerLayer[kvReuse];
-					if (!kRope || !v3) {
-						throw new Error(
-							`forwardWithLayerTaps: layer ${il} reuses layer ${kvReuse} but source K/V not yet materialized`,
-						);
-					}
-				} else {
-					const qkv = this.buildQKV(lw, normed, N, headDim, nHeads, nHeadsKv);
-					qReady = qkv.qReady;
-					v3 = qkv.v3;
-					kRope = this.applyRope(
-						qkv.kReady,
-						posTensor,
-						lw,
-						ropeDimCount,
-						ropeMode,
-						ropeFreqBase,
-					);
-					kRopePerLayer[il] = kRope;
-					v3PerLayer[il] = v3;
-				}
-
-				const qRope = this.applyRope(
-					qReady,
-					posTensor,
-					lw,
-					ropeDimCount,
-					ropeMode,
-					ropeFreqBase,
-				);
-
-				// Manual attention chain (no KV cache, no FA) — matches HF
-				// transformers reference's numerical path for clean diff.
-				const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-				const kp = wasm.opPermute(kRope, 0, 2, 1, 3);
-				const vp = wasm.opCont(wasm.opPermute(v3, 1, 2, 0, 3));
-
-				const qk = wasm.opMulMat(kp, qp);
-				// Gemma 2 attention logit soft-cap: scale-first ordering
-				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
-				// forwardSingle for the longer rationale.
-				let qkProcessed = qk;
-				let softmaxScale = attnSoftmaxScale(hp, headDim);
-				if (hp.attnLogitSoftcap) {
-					qkProcessed = this.softCap(
-						wasm.opScale(qk, softmaxScale),
-						hp.attnLogitSoftcap,
-					);
-					softmaxScale = 1.0;
-				}
-				const attnW = wasm.opSoftMaxExt(
-					qkProcessed,
-					layerMask,
-					softmaxScale,
-					0.0,
-				);
-				const attnOut = wasm.opMulMat(vp, attnW);
-				const merged = wasm.opReshape2d(
-					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-					nHeads * headDim,
-					N,
-				);
-
-				const oProjRaw = wasm.opMulMat(lw.oProj, merged);
-				const oProj = lw.postAttentionNorm
-					? wasm.opMul(
-							wasm.opRmsNorm(oProjRaw, hp.normEpsilon),
-							lw.postAttentionNorm,
-						)
-					: oProjRaw;
-				const attnResidual = wasm.opAdd(oProj, cur);
-
-				let ffnNormed = wasm.opMul(
-					wasm.opRmsNorm(attnResidual, hp.normEpsilon),
-					lw.ffnNorm,
-				);
-				if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
-				const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, N, ffnDim);
-				// Gemma family: gelu(gate) * up instead of silu(gate) * up
-				// (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
-				const ffnHidden = isGemmaFamily(hp.architecture)
-					? wasm.opMul(wasm.opGelu(gate), up)
-					: wasm.opSwigluSplit(gate, up);
-				const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
-				const ffnOut = lw.postFfwNorm
-					? wasm.opMul(
-							wasm.opRmsNorm(ffnOutRaw, hp.normEpsilon),
-							lw.postFfwNorm,
-						)
-					: ffnOutRaw;
-
-				cur = wasm.opAdd(ffnOut, attnResidual);
-				if (
-					inpPerLayer !== null &&
-					lw.pleInpGate &&
-					lw.plePerBlockProj &&
-					lw.plePostNorm
-				) {
-					cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, N);
-				}
-				if (lw.layerOutputScale) {
-					cur = wasm.opMul(cur, lw.layerOutputScale);
-				}
-
-				// Tap point: ensure this tensor survives buffer alloc + compute
-				// so we can read back its contents below. Skipped when
-				// `skipLayerTaps` is set — used for long-context probes where
-				// the 35 simultaneously-live tap buffers exceed the WebGPU
-				// per-binding 128 MiB cap (each tap is N*E*F32 bytes; at
-				// N=560 / E=1536 / L=35 that's 120 MB just for tap retention).
-				// Final hidden + logits are still captured.
-				//
-				// `captureLayer` narrows this even further: pin ONLY one
-				// specific layer's `cur`. Used by the incremental long-context
-				// parity harness — call this function once per layer index
-				// and the readback below returns a sparse `perLayerResidual`
-				// with only that index populated. Other layers' `cur` tensors
-				// stay intermediates and the allocator can pack them tightly.
-				if (skipLayerTaps) {
-					// no taps at all
-				} else if (singleLayerCapture) {
-					if (il === captureLayer) {
-						// Slice last-token column of `cur` into a fresh tensor.
-						// Pinning only the 1*E sliced copy lets the allocator
-						// reuse the full N*E*F32 `cur` (3.4 MB at N=560) after
-						// the next block consumes it. The opCont copies the
-						// view's bytes into a fresh storage so the parent can
-						// be lifetime-packed independently.
-						const lastTokenView = wasm.opView2d(
-							cur,
-							E,
-							1,
-							E * F32_BYTES,
-							(N - 1) * E * F32_BYTES,
-						);
-						const lastTokenCur = wasm.opCont(lastTokenView);
-						wasm.graphBuildForwardExpand(graph, lastTokenCur);
-						layerTaps[il] = lastTokenCur;
-					} else {
-						layerTaps[il] = 0;
-					}
-				} else {
-					wasm.graphBuildForwardExpand(graph, cur);
-					layerTaps.push(cur);
-				}
-			}
-			// Early termination was attempted but caused the GPU buffer to
-			// be under-sized by the graph allocator. Disabled — single-
-			// layer capture runs the full stack and pins only the target
-			// layer's tap. The per-binding cap is managed via the other
-			// shavings (sliced lm_head input, skipped embedding tap, etc.).
-			const earlyBreak = false;
-
-			// Final-norm + lm_head pinned only when we ran the full stack.
-			// In `singleLayerCapture` we break out early after the target
-			// layer's tap, so `cur` reflects that layer's output (not the
-			// final block) and finalHidden/logits would be garbage. Set
-			// them to 0 here and skip the readbacks below.
-			let finalHidden: TensorPtr = 0;
-			let logits: TensorPtr = 0;
-			if (!earlyBreak) {
-				let finalHiddenFull = wasm.opMul(
-					wasm.opRmsNorm(cur, hp.normEpsilon),
-					weights.norm,
-				);
-				if (weights.normBias)
-					finalHiddenFull = wasm.opAdd(finalHiddenFull, weights.normBias);
-
-				// When the caller only needs the last-token row of the
-				// final-norm hidden + logits (the parity probe), slice once
-				// and feed both lm_head AND the readback pin from that slice.
-				// Saves (N-1)*E*F32 on the finalHidden pin AND (N-1)*V*F32
-				// on the logits pin (575 MB at N=560/V=262144). The math is
-				// unchanged: lm_head is a pointwise matmul over the residual
-				// dim.
-				const lmHeadInput = lastTokenLogitsOnly
-					? wasm.opView2d(
-							finalHiddenFull,
-							E,
-							1,
-							E * F32_BYTES,
-							(N - 1) * E * F32_BYTES,
-						)
-					: finalHiddenFull;
-				finalHidden = lastTokenLogitsOnly ? lmHeadInput : finalHiddenFull;
-				logits = weights.output
-					? wasm.opMulMat(weights.output, lmHeadInput)
-					: wasm.opMulMat(weights.tokEmb, lmHeadInput);
-				if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
-				// Gemma 2 / Gemma 4 post-lm_head soft-cap.
-				if (hp.finalLogitSoftcap)
-					logits = this.softCap(logits, hp.finalLogitSoftcap);
-
-				wasm.graphBuildForwardExpand(graph, finalHidden);
-				wasm.graphBuildForwardExpand(graph, logits);
-			}
-
-			const graphBuf = wasm.backendAllocCtxTensors();
-			try {
-				// Upload inputs: positions = 0..N-1, causal mask. SWA models
-				// additionally upload a banded windowed mask consumed by
-				// sliding-window layers.
-				const idsBytes = N * 4;
-				const posBytes = N * 4;
-				const maskBytes = needsMask ? N * maskPaddedCols * 2 : 0;
-				const swaMaskBytes = swaMaskTensor !== 0 ? N * maskPaddedCols * 2 : 0;
-				const totalBytes = idsBytes + posBytes + maskBytes + swaMaskBytes;
-				const heap = wasm.malloc(totalBytes);
-				try {
-					const idsPtr = heap;
-					const posPtr = heap + idsBytes;
-					const maskPtr = heap + idsBytes + posBytes;
-					const swaMaskPtr = maskPtr + maskBytes;
-
-					const idsView = new Int32Array(wasm.heapU8.buffer, idsPtr, N);
-					const posView = new Int32Array(wasm.heapU8.buffer, posPtr, N);
-					for (let i = 0; i < N; i++) {
-						idsView[i] = tokenIds[i];
-						posView[i] = i;
-					}
-
-					if (needsMask) {
-						const mask = new Uint16Array(
-							wasm.heapU8.buffer,
-							maskPtr,
-							N * maskPaddedCols,
-						);
-						writeCausalMaskF16(mask, N, N, 0, maskPaddedCols);
-					}
-					if (swaMaskTensor !== 0) {
-						const swaMask = new Uint16Array(
-							wasm.heapU8.buffer,
-							swaMaskPtr,
-							N * maskPaddedCols,
-						);
-						writeCausalMaskF16(swaMask, N, N, 0, maskPaddedCols, swaWindow);
-					}
-
-					wasm.backendTensorSet3(
-						tokenIdsTensor,
-						idsPtr,
-						idsBytes,
-						posTensor,
-						posPtr,
-						posBytes,
-						needsMask ? maskTensor : 0,
-						maskPtr,
-						maskBytes,
-					);
-					if (swaMaskTensor !== 0) {
-						wasm.backendTensorSet(swaMaskTensor, swaMaskPtr, 0, swaMaskBytes);
-					}
-				} finally {
-					wasm.free(heap);
-				}
-
-				await wasm.graphCompute(graph);
-
-				// Read back: embedding output (pre-block-0), every layer's
-				// last-token row, then final-norm last row, then last-token
-				// full-vocab logits → top-K in JS.
-				const rowBytes = E * 4;
-				const lastTokenOffset = (N - 1) * rowBytes;
-				let embeddingOutput: Float32Array;
-				if (captureEmbeddingTap) {
-					const embedBuf = await wasm.downloadFromTensor(
-						embeddingTap,
-						rowBytes,
-						lastTokenOffset,
-					);
-					embeddingOutput = new Float32Array(
-						embedBuf.buffer,
-						embedBuf.byteOffset,
-						E,
-					).slice();
-				} else {
-					// embedding tap was not pinned (lastTokenLogitsOnly mode);
-					// return an empty array. Callers in that mode don't compare
-					// embedding output (per-layer SWA parity check is the focus).
-					embeddingOutput = new Float32Array(0);
-				}
-
-				// In single-layer-capture mode the `layerTaps` array is sparse
-				// (length=layerCount, only `captureLayer` populated). In
-				// skipLayerTaps mode it's empty. Readback only the entries
-				// the caller pinned; leave the rest as empty Float32Arrays.
-				const perLayerResidual: Float32Array[] = [];
-				if (skipLayerTaps) {
-					// emit empty array; caller asked for no per-layer taps.
-				} else if (singleLayerCapture) {
-					// The pinned tap is the [E,1] last-token slice; readback
-					// offset is 0 (no row stride). Size is one row.
-					for (let il = 0; il < hp.layerCount; il++) {
-						if (il === captureLayer && layerTaps[il]) {
-							const buf = await wasm.downloadFromTensor(
-								layerTaps[il],
-								rowBytes,
-								0,
-							);
-							perLayerResidual.push(
-								new Float32Array(buf.buffer, buf.byteOffset, E).slice(),
-							);
-						} else {
-							perLayerResidual.push(new Float32Array(0));
-						}
-					}
-				} else {
-					for (let il = 0; il < hp.layerCount; il++) {
+			// In single-layer-capture mode the `layerTaps` array is sparse
+			// (length=layerCount, only `captureLayer` populated). In
+			// skipLayerTaps mode it's empty. Readback only the entries
+			// the caller pinned; leave the rest as empty Float32Arrays.
+			const perLayerResidual: Float32Array[] = [];
+			if (skipLayerTaps) {
+				// emit empty array; caller asked for no per-layer taps.
+			} else if (singleLayerCapture) {
+				// The pinned tap is the [E,1] last-token slice; readback
+				// offset is 0 (no row stride). Size is one row.
+				for (let il = 0; il < hp.layerCount; il++) {
+					if (il === captureLayer && layerTaps[il]) {
 						const buf = await wasm.downloadFromTensor(
 							layerTaps[il],
 							rowBytes,
-							lastTokenOffset,
+							0,
 						);
 						perLayerResidual.push(
 							new Float32Array(buf.buffer, buf.byteOffset, E).slice(),
 						);
+					} else {
+						perLayerResidual.push(new Float32Array(0));
 					}
 				}
-
-				// In single-layer-capture mode we broke out of the per-layer
-				// loop early — finalHidden + logits weren't built, so skip
-				// their readbacks and return empty placeholders.
-				let finalNormHidden = new Float32Array(0);
-				let sortedIds = new Int32Array(0);
-				let sortedVals = new Float32Array(0);
-				if (!earlyBreak) {
-					// When lastTokenLogitsOnly is set finalHidden is shape [E, 1]
-					// (the last-token slice), so the readback offset is 0.
-					const fnBuf = await wasm.downloadFromTensor(
-						finalHidden,
+			} else {
+				for (let il = 0; il < hp.layerCount; il++) {
+					const buf = await wasm.downloadFromTensor(
+						layerTaps[il],
 						rowBytes,
-						lastTokenLogitsOnly ? 0 : lastTokenOffset,
+						lastTokenOffset,
 					);
-					finalNormHidden = new Float32Array(
-						fnBuf.buffer,
-						fnBuf.byteOffset,
-						E,
-					).slice();
+					perLayerResidual.push(
+						new Float32Array(buf.buffer, buf.byteOffset, E).slice(),
+					);
+				}
+			}
 
-					// When lastTokenLogitsOnly is set the logits tensor is shape
-					// [V, 1] (last-token sliced before lm_head), so the readback
-					// offset is 0 instead of (N-1)*V*4.
-					const logitsBytes = V * 4;
-					const logitsOffset = lastTokenLogitsOnly ? 0 : (N - 1) * logitsBytes;
-					const logitsBuf = await wasm.downloadFromTensor(
-						logits,
-						logitsBytes,
-						logitsOffset,
-					);
-					const logitsFlat = new Float32Array(
-						logitsBuf.buffer,
-						logitsBuf.byteOffset,
-						V,
-					);
+			// In single-layer-capture mode we broke out of the per-layer
+			// loop early - finalHidden + logits weren't built, so skip
+			// their readbacks and return empty placeholders.
+			let finalNormHidden = new Float32Array(0);
+			let sortedIds = new Int32Array(0);
+			let sortedVals = new Float32Array(0);
+			if (!earlyBreak) {
+				// When lastTokenLogitsOnly is set finalHidden is shape [E, 1]
+				// (the last-token slice), so the readback offset is 0.
+				const fnBuf = await wasm.downloadFromTensor(
+					finalHidden,
+					rowBytes,
+					lastTokenLogitsOnly ? 0 : lastTokenOffset,
+				);
+				finalNormHidden = new Float32Array(
+					fnBuf.buffer,
+					fnBuf.byteOffset,
+					E,
+				).slice();
 
-					// Top-K via maintained min-of-K. K is small (16); ~V*K compares.
-					const topIds = new Int32Array(K).fill(-1);
-					const topVals = new Float32Array(K).fill(-Infinity);
-					let minIdx = 0;
-					let minVal = -Infinity;
-					for (let i = 0; i < V; i++) {
-						const v = logitsFlat[i];
-						if (v > minVal) {
-							topIds[minIdx] = i;
-							topVals[minIdx] = v;
-							// Recompute min-of-K.
-							minVal = topVals[0];
-							minIdx = 0;
-							for (let j = 1; j < K; j++) {
-								if (topVals[j] < minVal) {
-									minVal = topVals[j];
-									minIdx = j;
-								}
+				// When lastTokenLogitsOnly is set the logits tensor is shape
+				// [V, 1] (last-token sliced before lm_head), so the readback
+				// offset is 0 instead of (N-1)*V*4.
+				const logitsBytes = V * 4;
+				const logitsOffset = lastTokenLogitsOnly ? 0 : (N - 1) * logitsBytes;
+				const logitsBuf = await wasm.downloadFromTensor(
+					logits,
+					logitsBytes,
+					logitsOffset,
+				);
+				const logitsFlat = new Float32Array(
+					logitsBuf.buffer,
+					logitsBuf.byteOffset,
+					V,
+				);
+
+				// Top-K via maintained min-of-K. K is small (16); ~V*K compares.
+				const topIds = new Int32Array(K).fill(-1);
+				const topVals = new Float32Array(K).fill(-Infinity);
+				let minIdx = 0;
+				let minVal = -Infinity;
+				for (let i = 0; i < V; i++) {
+					const v = logitsFlat[i];
+					if (v > minVal) {
+						topIds[minIdx] = i;
+						topVals[minIdx] = v;
+						// Recompute min-of-K.
+						minVal = topVals[0];
+						minIdx = 0;
+						for (let j = 1; j < K; j++) {
+							if (topVals[j] < minVal) {
+								minVal = topVals[j];
+								minIdx = j;
 							}
 						}
 					}
-					// Sort top-K descending by value.
-					const order: number[] = [];
-					for (let i = 0; i < K; i++) order.push(i);
-					order.sort((a, b) => topVals[b] - topVals[a]);
-					sortedIds = new Int32Array(K);
-					sortedVals = new Float32Array(K);
-					for (let i = 0; i < K; i++) {
-						sortedIds[i] = topIds[order[i]];
-						sortedVals[i] = topVals[order[i]];
-					}
 				}
-
-				return {
-					embeddingOutput,
-					perLayerResidual,
-					finalNormHidden,
-					logitsTop16: { ids: sortedIds, values: sortedVals },
-				};
-			} finally {
-				wasm.backendBufferFree(graphBuf);
+				// Sort top-K descending by value.
+				const order: number[] = [];
+				for (let i = 0; i < K; i++) order.push(i);
+				order.sort((a, b) => topVals[b] - topVals[a]);
+				sortedIds = new Int32Array(K);
+				sortedVals = new Float32Array(K);
+				for (let i = 0; i < K; i++) {
+					sortedIds[i] = topIds[order[i]];
+					sortedVals[i] = topVals[order[i]];
+				}
 			}
+
+			return {
+				embeddingOutput,
+				perLayerResidual,
+				finalNormHidden,
+				logitsTop16: { ids: sortedIds, values: sortedVals },
+			};
 		} finally {
+			wasm.backendBufferFree(graphBuf);
 			wasm.ctxFree();
 		}
 	}
