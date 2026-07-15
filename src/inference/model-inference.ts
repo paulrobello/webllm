@@ -450,7 +450,8 @@ function computeGraphSizing(
  * - `"embedding"`: post-`output_norm` hidden state, no lm_head (forwardForEmbedding).
  * - `"taps"`: logits + per-layer hidden taps (forwardWithLayerTaps).
  *
- * B1 implements only `"logits"`; B2-B5 extend to the other kinds.
+ * B1 implements `"logits"`; B2 adds `"decode"`; B3-B5 extend to the other
+ * kinds.
  */
 type ForwardOutputKind = "logits" | "decode" | "embedding" | "taps";
 
@@ -460,14 +461,24 @@ type ForwardOutputKind = "logits" | "decode" | "embedding" | "taps";
  * Encodes the inputs and sizing/output discriminators for a forward-pass
  * graph. Designed to generalize across the 5 forward variants
  * (forwardSingle / forwardAllPositions / forwardDecode / forwardForEmbedding /
- * forwardWithLayerTaps); B1 implements only `mode: "standard"` +
- * `output: "logits"`.
+ * forwardWithLayerTaps); B1 implemented `mode: "standard"` +
+ * `output: "logits"`; B2 adds `output: "decode"`.
  */
 interface BuildForwardGraphOpts {
 	/** Sizing mode — drives {@link computeGraphSizing} (ctx bytes + node count). */
 	mode: ForwardGraphMode;
 	/** Terminal output kind — determines the graph's final tensor(s). */
 	output: ForwardOutputKind;
+	/**
+	 * Decode mode — required when `output === "decode"`. Selects the
+	 * argmax/topk/full tail that {@link buildForwardGraph} appends after the
+	 * shared logits body.
+	 */
+	decodeMode?: DecodeMode;
+	/**
+	 * Top-K value — required when `output === "decode" && decodeMode === "topk"`.
+	 */
+	topK?: number;
 	/** Input token IDs (length {@link nTokens}). */
 	tokenIds: Int32Array;
 	/** Input positions (length {@link nTokens}). */
@@ -500,8 +511,16 @@ interface BuildForwardGraphOpts {
 interface BuiltForwardGraph {
 	/** Graph handle (for `graphCompute` / `backendAllocCtxTensors`). */
 	graph: number;
-	/** Terminal output tensor — `logits` for `output: "logits"`. */
+	/**
+	 * Terminal output tensor — `logits` for `output: "logits"`; argmax result
+	 * / top-K values / logits depending on `decodeMode` for `output: "decode"`.
+	 */
 	outputTensor: TensorPtr;
+	/**
+	 * Secondary output tensor — top-K indices for `output: "decode"` +
+	 * `decodeMode: "topk"`; 0 for all other output kinds/modes.
+	 */
+	secondaryTensor: TensorPtr;
 	/** Position leaf tensor. */
 	posTensor: TensorPtr;
 	/** Token-ID leaf tensor. */
@@ -1578,9 +1597,9 @@ export class ModelInference {
 	 * `graphCompute`, readback, and teardown.
 	 *
 	 * This is the shared graph-construction entry point for the forward-pass
-	 * variants. B1 implements the `mode: "standard"` + `output: "logits"`
-	 * path (forwardSingle); B2-B5 will extend it to allPositions / decode /
-	 * embedding / taps.
+	 * variants. B1 implemented the `mode: "standard"` + `output: "logits"`
+	 * path (forwardSingle); B2 adds `output: "decode"` (forwardDecode);
+	 * B3-B5 will extend it to allPositions / embedding / taps.
 	 *
 	 * The op sequence is byte-identical to the pre-B1 `forwardSingle` body —
 	 * a mechanical extraction. Do not reorder, fuse, or "optimize" ops; the
@@ -1959,13 +1978,51 @@ export class ModelInference {
 		if (hp.finalLogitSoftcap)
 			logits = this.softCap(logits, hp.finalLogitSoftcap);
 
-		wasm.graphBuildForwardExpand(graph, logits);
+		// Terminal output dispatch. The shared body above (ctxCreate → logits)
+		// is byte-identical for every output kind; only the tensor expanded
+		// into the graph and returned for readback differs.
+		let outputTensor: TensorPtr;
+		let secondaryTensor: TensorPtr = 0;
+		if (opts.output === "logits") {
+			wasm.graphBuildForwardExpand(graph, logits);
+			outputTensor = logits;
+		} else {
+			// output === "decode": forwardDecode's argmax/topk/full tail.
+			const decodeMode = opts.decodeMode;
+			if (decodeMode === "greedy") {
+				const argmaxResult = wasm.opArgmax(logits);
+				wasm.graphBuildForwardExpand(graph, argmaxResult);
+				outputTensor = argmaxResult;
+			} else if (decodeMode === "topk" && opts.topK && opts.topK > 0) {
+				const topKIndices = wasm.opTopK(logits, opts.topK);
+				// `ggml_get_rows(a, b)` produces `[a.ne[0], b.ne[0], ...]` and
+				// gathers along `a.ne[1]` (rows). `logits` is `[vocab, 1]` so
+				// naively reshaping to `[vocab, 1]` leaves vocab on the inner
+				// dim where get_rows can't reach it — the result would be
+				// `[vocab, topK]` and the subsequent reshape to `[topK, 1]`
+				// trips `GGML_ASSERT(nelements == ne0*ne1)`. Flip so vocab is
+				// the row dim: each "row" holds one logit, and get_rows picks
+				// the top-K rows.
+				const logitsRow = wasm.opReshape2d(logits, 1, hp.vocabularySize);
+				const topKValues2D = wasm.opGetRows(logitsRow, topKIndices);
+				const topKValues = wasm.opReshape2d(topKValues2D, opts.topK, 1);
+				wasm.graphBuildForwardExpand(graph, topKValues);
+				outputTensor = topKValues;
+				secondaryTensor = topKIndices;
+			} else {
+				// Fallback: full logits (also reached when mode === "verify"
+				// or mode === "topk" with no valid topK).
+				wasm.graphBuildForwardExpand(graph, logits);
+				outputTensor = logits;
+			}
+		}
 
 		const t2 = trace ? performance.now() : 0;
 
 		return {
 			graph,
-			outputTensor: logits,
+			outputTensor,
+			secondaryTensor,
 			posTensor,
 			tokenIdsTensor,
 			maskTensor,
@@ -3425,7 +3482,7 @@ export class ModelInference {
 	): Promise<DecodeResult> {
 		if (!this.weights) throw new Error("Weights not loaded");
 		if (!this.kvLayers) throw new Error("KV cache not initialized");
-		const { hp, wasm, weights } = this;
+		const { hp, wasm } = this;
 		const nTokens = tokenIds.length;
 		const pastLen = this.nCached;
 		const totalLen = pastLen + nTokens;
@@ -3433,427 +3490,54 @@ export class ModelInference {
 		const trace = this.traceEnabled;
 		const t0 = trace ? performance.now() : 0;
 
-		// 64 bytes/elem covers long-prefill metadata on 7B+ (32x prior was
-		// too tight at seq=512 on Mistral 7B).
-		const { ctxBytes: graphMem, nodeCount } = computeGraphSizing(
-			hp,
-			totalLen,
-			"standard",
-		);
-		wasm.ctxCreate(graphMem);
-
-		const t1 = trace ? performance.now() : 0;
-
-		const ropeMode = getRopeModeForArchitecture(hp.architecture);
-
-		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
-		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
-
+		// Mask bits and ropeMode — pure computations passed to buildForwardGraph
+		// via opts. buildForwardGraph creates the mask tensors after ctxCreate
+		// (tensorNew needs the ctx; the bits are ctx-independent).
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
-		const maskTensor = needsMask
-			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
-			: 0;
-		// SWA mask for Gemma 2/3/4 sliding-window layers — see forwardSingle.
 		const swaWindow = hp.slidingWindowSize ?? 0;
 		const hasSwaLayers =
 			(hp.slidingWindowPattern?.some((b) => b) ?? false) && swaWindow > 0;
 		const needsSwaMask =
 			hasSwaLayers && (nTokens > 1 || pastLen + nTokens > swaWindow);
-		const swaMaskTensor = needsSwaMask
-			? wasm.tensorNew2d(GgmlType.F16, totalLen, maskPaddedCols)
-			: 0;
+		const ropeMode = getRopeModeForArchitecture(hp.architecture);
 
-		let x = wasm.opGetRows(weights.tokEmb, tokenIdsTensor);
-		// Gemma family: scale residual stream by sqrt(embedding_length)
-		// after embedding lookup (gemma2.cpp:70, gemma4.cpp:149).
-		if (isGemmaFamily(hp.architecture)) {
-			x = wasm.opScale(x, Math.sqrt(hp.embeddingLength));
-		}
-		// +32 over the prior 128 covers the ~10 PLE projection nodes (buildPreLoopPle).
-		// +8/layer over the prior 64 covers the 8 per-block PLE injection nodes (injectPerBlockPle).
-		const graph = wasm.graphNew(nodeCount);
+		const {
+			graph,
+			outputTensor,
+			secondaryTensor,
+			posTensor,
+			tokenIdsTensor,
+			maskTensor,
+			swaMaskTensor,
+			t1,
+			t2,
+		} = await this.buildForwardGraph({
+			mode: "standard",
+			output: "decode",
+			decodeMode: mode,
+			...(topK !== undefined ? { topK } : {}),
+			tokenIds,
+			positions,
+			nTokens,
+			pastLen,
+			totalLen,
+			ropeMode,
+			needsMask,
+			maskPaddedCols,
+			swaWindow,
+			needsSwaMask,
+			trace,
+		});
 
-		// Pre-loop PLE projection chain (Gemma 4 only; null for all other models).
-		// Keep the PLE chain in the graph; per-block slices consume this result in the layer loop below.
-		const inpPerLayer = this.buildPreLoopPle(tokenIdsTensor, x, nTokens);
-		if (inpPerLayer !== null) {
-			wasm.graphBuildForwardExpand(graph, inpPerLayer);
-		}
-
-		let cur = x;
-		for (let il = 0; il < hp.layerCount; il++) {
-			const lw = weights.layers[il];
-			const kv = this.kvLayers[il];
-
-			// Per-layer scalars for mixed-head-dim architectures (Gemma 4).
-			const headDim = hp.embeddingHeadLengthPerLayer
-				? hp.embeddingHeadLengthPerLayer[il]
-				: hp.embeddingHeadLength;
-			const nHeads = hp.headCountPerLayer
-				? hp.headCountPerLayer[il]
-				: hp.headCount;
-			const nHeadsKv = hp.headCountKvPerLayer
-				? hp.headCountKvPerLayer[il]
-				: hp.headCountKv;
-			const ropeFreqBase = hp.ropeFreqBasePerLayer
-				? hp.ropeFreqBasePerLayer[il]
-				: hp.ropeFreqBase;
-			const ropeDimCount = hp.ropeDimensionCountPerLayer
-				? hp.ropeDimensionCountPerLayer[il]
-				: headDim;
-			const ffnDim = hp.feedForwardLengthPerLayer
-				? hp.feedForwardLengthPerLayer[il]
-				: undefined;
-			const isShared = (hp.kvReuseFromLayer?.[il] ?? null) !== null;
-
-			// Per-layer attention mask: SWA layers use the windowed mask.
-			const isSwaLayer = hp.slidingWindowPattern?.[il] === true;
-			const layerMask =
-				isSwaLayer && swaMaskTensor !== 0
-					? swaMaskTensor
-					: needsMask
-						? maskTensor
-						: 0;
-
-			let normed = wasm.opMul(wasm.opRmsNorm(cur, hp.normEpsilon), lw.attnNorm);
-			if (lw.attnNormBias) normed = wasm.opAdd(normed, lw.attnNormBias);
-
-			let qReady: TensorPtr;
-			let kReadyOwn: TensorPtr | null = null;
-			let v3Own: TensorPtr | null = null;
-			if (isShared) {
-				qReady = this.buildQOnly(lw, normed, nTokens, headDim, nHeads);
-			} else {
-				const qkv = this.buildQKV(
-					lw,
-					normed,
-					nTokens,
-					headDim,
-					nHeads,
-					nHeadsKv,
-				);
-				qReady = qkv.qReady;
-				kReadyOwn = qkv.kReady;
-				v3Own = qkv.v3;
-			}
-
-			const qRope = this.applyRope(
-				qReady,
-				posTensor,
-				lw,
-				ropeDimCount,
-				ropeMode,
-				ropeFreqBase,
-			);
-
-			const kNb1 = wasm.tensorNb(kv.k, 1);
-			const kNb2 = wasm.tensorNb(kv.k, 2);
-			const vNb1 = wasm.tensorNb(kv.v, 1);
-			const vNb2 = wasm.tensorNb(kv.v, 2);
-			if (!isShared) {
-				const kRope = this.applyRope(
-					kReadyOwn as TensorPtr,
-					posTensor,
-					lw,
-					ropeDimCount,
-					ropeMode,
-					ropeFreqBase,
-				);
-				const v3 = v3Own as TensorPtr;
-				const kWriteView = wasm.opView3d(
-					kv.k,
-					headDim,
-					nTokens,
-					nHeadsKv,
-					kNb1,
-					kNb2,
-					pastLen * kNb1,
-				);
-				const kRopeP = wasm.opPermute(kRope, 0, 2, 1, 3);
-				wasm.graphBuildForwardExpand(graph, wasm.opCpy(kRopeP, kWriteView));
-
-				// V cache write — same dual-layout pattern as forward(); see Task 3.
-				let v3P: TensorPtr;
-				let vWriteView: TensorPtr;
-				if (this.flashAttn) {
-					v3P = wasm.opPermute(v3, 0, 2, 1, 3);
-					vWriteView = wasm.opView3d(
-						kv.v,
-						headDim,
-						nTokens,
-						nHeadsKv,
-						vNb1,
-						vNb2,
-						pastLen * vNb1,
-					);
-				} else {
-					const vNb0 = wasm.tensorNb(kv.v, 0);
-					v3P = wasm.opPermute(v3, 1, 2, 0, 3);
-					vWriteView = wasm.opView3d(
-						kv.v,
-						nTokens,
-						headDim,
-						nHeadsKv,
-						vNb1,
-						vNb2,
-						pastLen * vNb0,
-					);
-				}
-				wasm.graphBuildForwardExpand(graph, wasm.opCpy(v3P, vWriteView));
-			}
-
-			const fullK = wasm.opView3d(
-				kv.k,
-				headDim,
-				totalLen,
-				nHeadsKv,
-				kNb1,
-				kNb2,
-				0,
-			);
-			const fullV = this.flashAttn
-				? wasm.opView3d(kv.v, headDim, totalLen, nHeadsKv, vNb1, vNb2, 0)
-				: wasm.opView3d(kv.v, totalLen, headDim, nHeadsKv, vNb1, vNb2, 0);
-
-			const qp = wasm.opPermute(qRope, 0, 2, 1, 3);
-			let merged: TensorPtr;
-			if (this.flashAttn) {
-				const attnOut = wasm.opFlashAttn(
-					qp,
-					fullK,
-					fullV,
-					layerMask,
-					attnSoftmaxScale(hp, headDim),
-					0.0,
-					// Gemma 2 attention logit soft-cap (FA shader applies natively).
-					hp.attnLogitSoftcap ?? 0.0,
-				);
-				merged = wasm.opReshape2d(attnOut, nHeads * headDim, nTokens);
-			} else {
-				const qk = wasm.opMulMat(fullK, qp);
-				// Gemma 2 attention logit soft-cap: scale-first ordering
-				// (gemma2.cpp:110 + ggml-cpu/ops.cpp:8232-8305). See
-				// forwardSingle for the longer rationale.
-				let qkProcessed = qk;
-				let softmaxScale = attnSoftmaxScale(hp, headDim);
-				if (hp.attnLogitSoftcap) {
-					qkProcessed = this.softCap(
-						wasm.opScale(qk, softmaxScale),
-						hp.attnLogitSoftcap,
-					);
-					softmaxScale = 1.0;
-				}
-				const attnW = wasm.opSoftMaxExt(
-					qkProcessed,
-					layerMask,
-					softmaxScale,
-					0.0,
-				);
-				const attnOut = wasm.opMulMat(fullV, attnW);
-				merged = wasm.opReshape2d(
-					wasm.opCont(wasm.opPermute(attnOut, 0, 2, 1, 3)),
-					nHeads * headDim,
-					nTokens,
-				);
-			}
-			const oProjRaw = wasm.opMulMat(lw.oProj, merged);
-			// Gemma family post-attention norm: applied to attention output BEFORE the
-			// residual add. Other archs leave postAttentionNorm null and skip.
-			const oProj = lw.postAttentionNorm
-				? wasm.opMul(
-						wasm.opRmsNorm(oProjRaw, hp.normEpsilon),
-						lw.postAttentionNorm,
-					)
-				: oProjRaw;
-			const attnResidual = wasm.opAdd(oProj, cur);
-
-			let ffnNormed = wasm.opMul(
-				wasm.opRmsNorm(attnResidual, hp.normEpsilon),
-				lw.ffnNorm,
-			);
-			if (lw.ffnNormBias) ffnNormed = wasm.opAdd(ffnNormed, lw.ffnNormBias);
-			const { gate, up } = this.buildFFNGateUp(lw, ffnNormed, nTokens, ffnDim);
-			// Gemma family: gelu(gate) * up (gemma{,2,3,4}.cpp LLM_FFN_GELU + LLM_FFN_PAR).
-			const ffnHidden = isGemmaFamily(hp.architecture)
-				? wasm.opMul(wasm.opGelu(gate), up)
-				: wasm.opSwigluSplit(gate, up);
-			const ffnOutRaw = wasm.opMulMat(lw.downProj, ffnHidden);
-			// Gemma family post-FFW norm: applied to FFN output BEFORE the residual add.
-			const ffnOut = lw.postFfwNorm
-				? wasm.opMul(wasm.opRmsNorm(ffnOutRaw, hp.normEpsilon), lw.postFfwNorm)
-				: ffnOutRaw;
-			cur = wasm.opAdd(ffnOut, attnResidual);
-			if (
-				inpPerLayer !== null &&
-				lw.pleInpGate &&
-				lw.plePerBlockProj &&
-				lw.plePostNorm
-			) {
-				cur = this.injectPerBlockPle(lw, cur, inpPerLayer, il, nTokens);
-			}
-			// Gemma 4: multiply residual by per-layer learned scalar before feeding
-			// the next layer (broadcasts [1]-shape weight across all hidden dims).
-			if (lw.layerOutputScale) {
-				cur = wasm.opMul(cur, lw.layerOutputScale);
-			}
-		}
-
-		let finalNorm = wasm.opMul(
-			wasm.opRmsNorm(cur, hp.normEpsilon),
-			weights.norm,
-		);
-		if (weights.normBias) finalNorm = wasm.opAdd(finalNorm, weights.normBias);
-		let logits = weights.output
-			? wasm.opMulMat(weights.output, finalNorm)
-			: wasm.opMulMat(weights.tokEmb, finalNorm);
-		if (weights.outputBias) logits = wasm.opAdd(logits, weights.outputBias);
-		// Gemma 2 / Gemma 4 post-lm_head soft-cap: tanh(logits / s) * s.
-		if (hp.finalLogitSoftcap)
-			logits = this.softCap(logits, hp.finalLogitSoftcap);
-
-		const t2 = trace ? performance.now() : 0;
-
-		if (mode === "greedy") {
-			const argmaxResult = wasm.opArgmax(logits);
-			wasm.graphBuildForwardExpand(graph, argmaxResult);
-
-			const graphBuf = wasm.backendAllocCtxTensors();
-			const t3 = trace ? performance.now() : 0;
-			this.uploadLeaves(
-				wasm,
-				tokenIds,
-				positions,
-				nTokens,
-				pastLen,
-				totalLen,
-				needsMask,
-				maskPaddedCols,
-				posTensor,
-				tokenIdsTensor,
-				maskTensor,
-				swaMaskTensor,
-				swaWindow,
-			);
-			const t4 = trace ? performance.now() : 0;
-
-			const graphProfile = await this.computeGraphWithOptionalProfile(
-				trace,
-				graph,
-			);
-			const t5 = trace ? performance.now() : 0;
-
-			const buf = await wasm.downloadFromTensor(argmaxResult, 4, 0);
-			const tokenId = new Int32Array(buf.buffer, buf.byteOffset, 1)[0];
-			const t6 = trace ? performance.now() : 0;
-
-			wasm.backendBufferFree(graphBuf);
-			wasm.ctxFree();
-			this.nCached = totalLen;
-			const t7 = trace ? performance.now() : 0;
-			if (trace) {
-				this.recordTrace(
-					"greedy",
-					nTokens,
-					pastLen,
-					t0,
-					t1,
-					t2,
-					t3,
-					t4,
-					t5,
-					t6,
-					t7,
-					graphProfile,
-				);
-			}
-			return { tokenId };
-		}
-
-		if (mode === "topk" && topK && topK > 0) {
-			const topKIndices = wasm.opTopK(logits, topK);
-			// `ggml_get_rows(a, b)` produces `[a.ne[0], b.ne[0], ...]` and
-			// gathers along `a.ne[1]` (rows). `logits` is `[vocab, 1]` so
-			// naively reshaping to `[vocab, 1]` leaves vocab on the inner
-			// dim where get_rows can't reach it — the result would be
-			// `[vocab, topK]` and the subsequent reshape to `[topK, 1]`
-			// trips `GGML_ASSERT(nelements == ne0*ne1)`. Flip so vocab is
-			// the row dim: each "row" holds one logit, and get_rows picks
-			// the top-K rows.
-			const logitsRow = wasm.opReshape2d(logits, 1, hp.vocabularySize);
-			const topKValues2D = wasm.opGetRows(logitsRow, topKIndices);
-			const topKValues = wasm.opReshape2d(topKValues2D, topK, 1);
-
-			wasm.graphBuildForwardExpand(graph, topKValues);
-
-			const graphBuf = wasm.backendAllocCtxTensors();
-			const t3 = trace ? performance.now() : 0;
-			this.uploadLeaves(
-				wasm,
-				tokenIds,
-				positions,
-				nTokens,
-				pastLen,
-				totalLen,
-				needsMask,
-				maskPaddedCols,
-				posTensor,
-				tokenIdsTensor,
-				maskTensor,
-				swaMaskTensor,
-				swaWindow,
-			);
-			const t4 = trace ? performance.now() : 0;
-
-			const graphProfile = await this.computeGraphWithOptionalProfile(
-				trace,
-				graph,
-			);
-			const t5 = trace ? performance.now() : 0;
-
-			const kBytes = topK * 4;
-			const idxBuf = await wasm.downloadFromTensor(topKIndices, kBytes, 0);
-			const valBuf = await wasm.downloadFromTensor(topKValues, kBytes, 0);
-			const t6 = trace ? performance.now() : 0;
-
-			const indices = new Int32Array(
-				idxBuf.buffer,
-				idxBuf.byteOffset,
-				topK,
-			).slice();
-			const values = new Float32Array(
-				valBuf.buffer,
-				valBuf.byteOffset,
-				topK,
-			).slice();
-
-			wasm.backendBufferFree(graphBuf);
-			wasm.ctxFree();
-			this.nCached = totalLen;
-			const t7 = trace ? performance.now() : 0;
-			if (trace) {
-				this.recordTrace(
-					"topk",
-					nTokens,
-					pastLen,
-					t0,
-					t1,
-					t2,
-					t3,
-					t4,
-					t5,
-					t6,
-					t7,
-					graphProfile,
-				);
-			}
-			return { topKIndices: indices, topKValues: values };
-		}
-
-		// Fallback: full logits
-		wasm.graphBuildForwardExpand(graph, logits);
 		const graphBuf = wasm.backendAllocCtxTensors();
+
 		const t3 = trace ? performance.now() : 0;
+
+		// Upload leaf input data AFTER backend buffers are assigned. The helper
+		// packs pos / tokenIds / mask into a single backendTensorSet3 call to
+		// avoid 2-3 separate FFI hops per forward; when SWA layers are active a
+		// follow-on backendTensorSet uploads `swaMaskTensor` from the same heap.
 		this.uploadLeaves(
 			wasm,
 			tokenIds,
@@ -3869,35 +3553,72 @@ export class ModelInference {
 			swaMaskTensor,
 			swaWindow,
 		);
+
 		const t4 = trace ? performance.now() : 0;
 
 		const graphProfile = await this.computeGraphWithOptionalProfile(
 			trace,
 			graph,
 		);
+
 		const t5 = trace ? performance.now() : 0;
 
-		const logitsBytes = hp.vocabularySize * 4;
-		const offset = nTokens > 1 ? (nTokens - 1) * logitsBytes : 0;
-		const resultBuf = await wasm.downloadFromTensor(
-			logits,
-			logitsBytes,
-			offset,
-		);
+		// Readback: which tensors to download depends on the decode mode. The
+		// graph tail (argmax/topk/expand) was built inside buildForwardGraph;
+		// here we only marshal the downloaded bytes into a DecodeResult.
+		let result: DecodeResult;
+		let traceMode: DecodeMode;
+		if (mode === "greedy") {
+			const buf = await wasm.downloadFromTensor(outputTensor, 4, 0);
+			const tokenId = new Int32Array(buf.buffer, buf.byteOffset, 1)[0];
+			result = { tokenId };
+			traceMode = "greedy";
+		} else if (mode === "topk" && topK && topK > 0) {
+			const kBytes = topK * 4;
+			const idxBuf = await wasm.downloadFromTensor(secondaryTensor, kBytes, 0);
+			const valBuf = await wasm.downloadFromTensor(outputTensor, kBytes, 0);
+			const indices = new Int32Array(
+				idxBuf.buffer,
+				idxBuf.byteOffset,
+				topK,
+			).slice();
+			const values = new Float32Array(
+				valBuf.buffer,
+				valBuf.byteOffset,
+				topK,
+			).slice();
+			result = { topKIndices: indices, topKValues: values };
+			traceMode = "topk";
+		} else {
+			// Fallback: full logits (also reached when mode === "verify" or
+			// mode === "topk" with no valid topK).
+			const logitsBytes = hp.vocabularySize * 4;
+			const offset = nTokens > 1 ? (nTokens - 1) * logitsBytes : 0;
+			const resultBuf = await wasm.downloadFromTensor(
+				outputTensor,
+				logitsBytes,
+				offset,
+			);
+			const fullLogits = new Float32Array(
+				resultBuf.buffer,
+				resultBuf.byteOffset,
+				hp.vocabularySize,
+			).slice();
+			result = { logits: fullLogits };
+			traceMode = "full";
+		}
+
 		const t6 = trace ? performance.now() : 0;
-		const fullLogits = new Float32Array(
-			resultBuf.buffer,
-			resultBuf.byteOffset,
-			hp.vocabularySize,
-		).slice();
 
 		wasm.backendBufferFree(graphBuf);
 		wasm.ctxFree();
 		this.nCached = totalLen;
+
 		const t7 = trace ? performance.now() : 0;
+
 		if (trace) {
 			this.recordTrace(
-				"full",
+				traceMode,
 				nTokens,
 				pastLen,
 				t0,
@@ -3911,7 +3632,8 @@ export class ModelInference {
 				graphProfile,
 			);
 		}
-		return { logits: fullLogits };
+
+		return result;
 	}
 
 	private async computeGraphWithOptionalProfile(
