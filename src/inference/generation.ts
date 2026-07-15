@@ -145,7 +145,7 @@ export interface GenerationResult {
 }
 
 export interface GenerationStreamChunk {
-	/** Incremental decoded text for a generated token. */
+	/** Incremental visible text delta for a generated token — excludes `<think>` reasoning. */
 	text: string;
 	/**
 	 * Incremental think-block reasoning delta (inner reasoning, NO

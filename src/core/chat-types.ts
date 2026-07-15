@@ -176,7 +176,7 @@ export interface StreamStats {
 
 /** Each yield from generateStream() / chatCompletion(). */
 export interface StreamChunk {
-	/** Incremental text fragment (empty string on final done=true chunk). */
+	/** Incremental visible text fragment — excludes `<think>` reasoning (empty string on the final done=true chunk). */
 	readonly text: string;
 	/**
 	 * Incremental think-block reasoning delta (inner reasoning, NO
