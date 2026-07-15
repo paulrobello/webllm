@@ -482,6 +482,16 @@ function tryServeStatic(
 	}
 }
 
+/** A request handler bound to the server's closures (store, broadcaster, …). */
+type RouteHandler = (req: Request, url: URL) => Response | Promise<Response>;
+
+/** A path-parameterized route matched by pathname prefix, checked after the exact-match map. */
+interface PrefixRoute {
+	readonly prefix: string;
+	readonly method: string;
+	readonly handler: RouteHandler;
+}
+
 export function createLiveServer(options: ServerOptions) {
 	const db: Database | undefined = options.dbPath
 		? openLiveDb(options.dbPath)
@@ -494,6 +504,340 @@ export function createLiveServer(options: ServerOptions) {
 	// can be large (the full task catalogue is ~100 KB).
 	const taskLists = new Map<string, unknown[]>();
 
+	// ── Route handlers ─────────────────────────────────────────────────
+	// Each handler is the byte-for-byte body of the former if-chain branch;
+	// the route table below dispatches to them. All Phase 1 security
+	// hardening (origin-scoped CORS, taskLists cap/eviction, ValidationError
+	// suppression, path containment in tryServeStatic) lives on unchanged.
+
+	const handleHealth = (req: Request, _url: URL): Response => {
+		return jsonResponse({
+			ok: true,
+			subscribers: broadcaster.subscriberCount(),
+			seq: store.currentSeq(),
+			runs: store.completedRuns().length,
+			evals: store.completedEvals().length,
+			systemProfiles: store.allSystemProfiles().length,
+		}, 200, req);
+	};
+
+	const handleListRuns = (req: Request, _url: URL): Response => {
+		return jsonResponse({ runs: store.completedRuns() }, 200, req);
+	};
+
+	const handleListEvals = (req: Request, _url: URL): Response => {
+		return jsonResponse({ evals: store.completedEvals() }, 200, req);
+	};
+
+	const handleEvalsSeries = (req: Request, _url: URL): Response => {
+		if (!db) return jsonResponse({ series: [] }, 200, req);
+		return jsonResponse({ series: loadEvalSeries(db) }, 200, req);
+	};
+
+	// Serves the full BenchmarkModel registry from eval/models.ts so the
+	// dashboard can drive encoder / param-count filters from `architecture`
+	// and `paramsB` instead of hand-maintained id-prefix maps. Sorted by id
+	// for stable client-side hashing.
+	const handleListModels = (req: Request, _url: URL): Response => {
+		const models = [...BENCHMARK_MODELS].sort((a, b) =>
+			a.id.localeCompare(b.id),
+		);
+		return jsonResponse({ models }, 200, req);
+	};
+
+	const handleCreateSystemProfile = async (
+		req: Request,
+		_url: URL,
+	): Promise<Response> => {
+		try {
+			const body = await parseJsonBody<
+				SystemProfileInput & { systemId?: string }
+			>(req);
+			if (!body || typeof body.userAgent !== "string") {
+				return errorResponse(
+					"bad_request",
+					"system profile must include at least userAgent",
+					400,
+					req,
+				);
+			}
+			// Recompute the id server-side to keep dedup honest.
+			const systemId = await computeSystemId(body);
+			const profile: SystemProfile = {
+				...(body as SystemProfileInput),
+				systemId,
+				collectedAt: new Date().toISOString(),
+			};
+			store.registerSystemProfile(profile);
+			return jsonResponse({ ok: true, systemId }, 200, req);
+		} catch (err) {
+			console.error("system-profiles POST:", err);
+			return errorResponse("bad_request", "invalid request", 400, req);
+		}
+	};
+
+	const handleListSystemProfiles = (req: Request, _url: URL): Response => {
+		return jsonResponse({ systemProfiles: store.allSystemProfiles() }, 200, req);
+	};
+
+	const handleGetSystemProfile = (req: Request, url: URL): Response => {
+		const id = url.pathname.slice("/system-profiles/".length);
+		const profile = store.getSystemProfile(id);
+		if (!profile) {
+			return errorResponse(
+				"not_found",
+				`unknown system profile: ${id}`,
+				404,
+				req,
+			);
+		}
+		return jsonResponse(profile, 200, req);
+	};
+
+	const handleCreateTasks = async (
+		req: Request,
+		_url: URL,
+	): Promise<Response> => {
+		try {
+			const body = (await parseJsonBody<{
+				id?: string;
+				tasks: unknown[];
+			}>(req)) as { id?: string; tasks: unknown[] };
+			if (!Array.isArray(body.tasks) || body.tasks.length === 0) {
+				return errorResponse(
+					"bad_request",
+					"tasks must be a non-empty array",
+					400,
+					req,
+				);
+			}
+			if (body.tasks.length > MAX_TASKS_PER_LIST) {
+				return errorResponse(
+					"bad_request",
+					`task list too large: max ${MAX_TASKS_PER_LIST} entries`,
+					400,
+					req,
+				);
+			}
+			const id =
+				body.id ??
+				`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			taskLists.set(id, body.tasks);
+			// Evict oldest insertion if we've hit the staging cap (Map
+			// preserves insertion order, so the first key is oldest).
+			if (taskLists.size > MAX_TASK_LISTS) {
+				const first = taskLists.keys().next().value;
+				if (first !== undefined) taskLists.delete(first);
+			}
+			return jsonResponse({ ok: true, id, count: body.tasks.length }, 200, req);
+		} catch (err) {
+			console.error("tasks POST:", err);
+			return errorResponse("bad_request", "invalid request", 400, req);
+		}
+	};
+
+	const handleGetTasks = (req: Request, url: URL): Response => {
+		const id = url.pathname.slice("/tasks/".length);
+		const tasks = taskLists.get(id);
+		if (!tasks) {
+			return errorResponse("not_found", `unknown task list: ${id}`, 404, req);
+		}
+		return jsonResponse({ id, tasks }, 200, req);
+	};
+
+	const handleIngest = async (req: Request, url: URL): Promise<Response> => {
+		const kind = url.searchParams.get("kind");
+		try {
+			const body = await parseJsonBody<unknown>(req);
+			if (kind === "run_started") {
+				const payload = validation(() => validateRunStarted(body));
+				const stamped = store.stampEvent({ kind: "run_started", payload });
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "run_complete") {
+				const payload = validation(() => validateRunComplete(body));
+				const stamped = store.stampEvent({
+					kind: "run_complete",
+					payload,
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "run_failed") {
+				const payload = validation(() => validateRunFailed(body));
+				const stamped = store.stampEvent({ kind: "run_failed", payload });
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "eval_started") {
+				const payload = validation(() => validateEvalStarted(body));
+				const stamped = store.stampEvent({
+					kind: "eval_started",
+					payload,
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "eval_task_complete") {
+				const payload = validation(() => validateEvalTaskComplete(body));
+				const stamped = store.stampEvent({
+					kind: "eval_task_complete",
+					payload,
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "eval_complete") {
+				const payload = validation(() => validateEvalComplete(body));
+				const stamped = store.stampEvent({
+					kind: "eval_complete",
+					payload,
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "eval_failed") {
+				const payload = validation(() => validateEvalFailed(body));
+				const stamped = store.stampEvent({
+					kind: "eval_failed",
+					payload,
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "bench_session_started") {
+				const payload = validation(() => validateBenchSessionStarted(body));
+				const stamped = store.stampEvent({
+					kind: "bench_session_started",
+					payload,
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "bench_session_complete") {
+				const payload = validation(() => validateBenchSessionComplete(body));
+				const stamped = store.stampEvent({
+					kind: "bench_session_complete",
+					payload,
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			if (kind === "reset") {
+				const reason =
+					typeof (body as { reason?: unknown })?.reason === "string"
+						? ((body as { reason?: string }).reason as string)
+						: undefined;
+				const stamped = store.stampEvent({
+					kind: "reset",
+					payload: { reason },
+				});
+				broadcaster.broadcast(stamped);
+				return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
+			}
+			return errorResponse(
+				"unknown_kind",
+				`?kind= must be run_started | run_complete | run_failed | eval_started | eval_task_complete | eval_complete | eval_failed | bench_session_started | bench_session_complete | reset (got ${kind ?? "none"})`,
+				400,
+				req,
+			);
+		} catch (err) {
+			// Validation errors carry safe, hand-authored field-name
+			// messages (intentional harness feedback). Any other error
+			// (DB/IO) may carry filesystem paths — log it server-side
+			// and return a generic message to the client.
+			if (err instanceof ValidationError) {
+				return errorResponse("bad_request", err.message, 400, req);
+			}
+			console.error("ingest:", err);
+			return errorResponse("bad_request", "invalid request", 400, req);
+		}
+	};
+
+	// SSE streaming arm — kept as its own conditional rather than a table
+	// entry: the ReadableStream response doesn't fit the JSON-shaped handlers.
+	const handleStream = (req: Request, _url: URL): Response => {
+		const lastEventIdHeader = req.headers.get("last-event-id");
+		const lastSeq = lastEventIdHeader
+			? Number.parseInt(lastEventIdHeader, 10) || 0
+			: 0;
+		let assignedController:
+			| ReadableStreamDefaultController<Uint8Array>
+			| null = null;
+		let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+		const body = new ReadableStream<Uint8Array>({
+			start: (controller) => {
+				assignedController = controller;
+				broadcaster.addSubscriber(controller);
+
+				controller.enqueue(
+					encoder.encode(
+						`retry: 3000\n: connected seq=${store.currentSeq()}\n\n`,
+					),
+				);
+
+				const snapshot = store.snapshot();
+				controller.enqueue(encoder.encode(encodeSseFrame(snapshot)));
+
+				if (lastSeq > 0) {
+					for (const event of store.eventsSince(lastSeq)) {
+						controller.enqueue(encoder.encode(encodeSseFrame(event)));
+					}
+				}
+
+				heartbeat = setInterval(() => {
+					try {
+						controller.enqueue(
+							encoder.encode(`: heartbeat ${Date.now()}\n\n`),
+						);
+					} catch {
+						// stream torn down
+					}
+				}, 15_000);
+			},
+			cancel: () => {
+				if (heartbeat) clearInterval(heartbeat);
+				if (assignedController)
+					broadcaster.removeSubscriber(assignedController);
+			},
+		});
+
+		return new Response(body, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream; charset=utf-8",
+				"cache-control": "no-cache, no-transform",
+				connection: "keep-alive",
+				"x-accel-buffering": "no",
+				...corsHeaders(req),
+			},
+		});
+	};
+
+	// Exact-match route table. Key shape is `"METHOD /path"`; the method
+	// wildcard `"* /path"` is used for method-agnostic routes (only /health
+	// — originally unguarded by method). Lookup tries the qualified key
+	// first, then the wildcard.
+	const routes = new Map<string, RouteHandler>([
+		["* /health", handleHealth],
+		["GET /runs", handleListRuns],
+		["GET /evals", handleListEvals],
+		["GET /evals/series", handleEvalsSeries],
+		["GET /models", handleListModels],
+		["POST /system-profiles", handleCreateSystemProfile],
+		["GET /system-profiles", handleListSystemProfiles],
+		["POST /tasks", handleCreateTasks],
+		["POST /ingest", handleIngest],
+	]);
+
+	// Path-parameterized routes, checked in order after the exact-match map.
+	const prefixRoutes: PrefixRoute[] = [
+		{ prefix: "/system-profiles/", method: "GET", handler: handleGetSystemProfile },
+		{ prefix: "/tasks/", method: "GET", handler: handleGetTasks },
+	];
+
 	const server = Bun.serve({
 		hostname: options.host,
 		port: options.port,
@@ -501,311 +845,35 @@ export function createLiveServer(options: ServerOptions) {
 		async fetch(req) {
 			const url = new URL(req.url);
 
+			// CORS preflight — every response (including 404) composes headers
+			// through the origin-scoped corsHeaders helper.
 			if (req.method === "OPTIONS") {
 				return new Response(null, { status: 204, headers: corsHeaders(req) });
 			}
 
-			if (url.pathname === "/health") {
-				return jsonResponse({
-					ok: true,
-					subscribers: broadcaster.subscriberCount(),
-					seq: store.currentSeq(),
-					runs: store.completedRuns().length,
-					evals: store.completedEvals().length,
-					systemProfiles: store.allSystemProfiles().length,
-				}, 200, req);
-			}
+			// Exact-match route lookup (method-qualified, with "*" wildcard
+			// fallback for method-agnostic routes like /health).
+			const exact = routes.get(`${req.method} ${url.pathname}`) ??
+				routes.get(`* ${url.pathname}`);
+			if (exact) return exact(req, url);
 
-			if (url.pathname === "/runs" && req.method === "GET") {
-				return jsonResponse({ runs: store.completedRuns() }, 200, req);
-			}
-
-			if (url.pathname === "/evals" && req.method === "GET") {
-				return jsonResponse({ evals: store.completedEvals() }, 200, req);
-			}
-
-			if (url.pathname === "/evals/series" && req.method === "GET") {
-				if (!db) return jsonResponse({ series: [] }, 200, req);
-				return jsonResponse({ series: loadEvalSeries(db) }, 200, req);
-			}
-
-			// ── Model registry ─────────────────────────────────────────
-			// Serves the full BenchmarkModel registry from eval/models.ts
-			// so the dashboard can drive encoder / param-count filters
-			// from `architecture` and `paramsB` instead of hand-maintained
-			// id-prefix maps. Sorted by id for stable client-side hashing.
-			if (url.pathname === "/models" && req.method === "GET") {
-				const models = [...BENCHMARK_MODELS].sort((a, b) =>
-					a.id.localeCompare(b.id),
-				);
-				return jsonResponse({ models }, 200, req);
-			}
-
-			// ── System profile registry ────────────────────────────────
-			if (url.pathname === "/system-profiles" && req.method === "POST") {
-				try {
-					const body = await parseJsonBody<
-						SystemProfileInput & { systemId?: string }
-					>(req);
-					if (!body || typeof body.userAgent !== "string") {
-						return errorResponse(
-							"bad_request",
-							"system profile must include at least userAgent",
-							400,
-							req,
-						);
-					}
-					// Recompute the id server-side to keep dedup honest.
-					const systemId = await computeSystemId(body);
-					const profile: SystemProfile = {
-						...(body as SystemProfileInput),
-						systemId,
-						collectedAt: new Date().toISOString(),
-					};
-					store.registerSystemProfile(profile);
-					return jsonResponse({ ok: true, systemId }, 200, req);
-				} catch (err) {
-					console.error("system-profiles POST:", err);
-					return errorResponse("bad_request", "invalid request", 400, req);
-				}
-			}
-			if (url.pathname === "/system-profiles" && req.method === "GET") {
-				return jsonResponse({ systemProfiles: store.allSystemProfiles() }, 200, req);
-			}
-			if (
-				url.pathname.startsWith("/system-profiles/") &&
-				req.method === "GET"
-			) {
-				const id = url.pathname.slice("/system-profiles/".length);
-				const profile = store.getSystemProfile(id);
-				if (!profile) {
-					return errorResponse(
-						"not_found",
-						`unknown system profile: ${id}`,
-						404,
-						req,
-					);
-				}
-				return jsonResponse(profile, 200, req);
-			}
-
-			// ── Task list staging (browser bench mode) ─────────────────
-			if (url.pathname === "/tasks" && req.method === "POST") {
-				try {
-					const body = (await parseJsonBody<{
-						id?: string;
-						tasks: unknown[];
-					}>(req)) as { id?: string; tasks: unknown[] };
-					if (!Array.isArray(body.tasks) || body.tasks.length === 0) {
-						return errorResponse(
-							"bad_request",
-							"tasks must be a non-empty array",
-							400,
-							req,
-						);
-					}
-					if (body.tasks.length > MAX_TASKS_PER_LIST) {
-						return errorResponse(
-							"bad_request",
-							`task list too large: max ${MAX_TASKS_PER_LIST} entries`,
-							400,
-							req,
-						);
-					}
-					const id =
-						body.id ??
-						`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-					taskLists.set(id, body.tasks);
-					// Evict oldest insertion if we've hit the staging cap (Map
-					// preserves insertion order, so the first key is oldest).
-					if (taskLists.size > MAX_TASK_LISTS) {
-						const first = taskLists.keys().next().value;
-						if (first !== undefined) taskLists.delete(first);
-					}
-					return jsonResponse({ ok: true, id, count: body.tasks.length }, 200, req);
-				} catch (err) {
-					console.error("tasks POST:", err);
-					return errorResponse("bad_request", "invalid request", 400, req);
-				}
-			}
-			if (url.pathname.startsWith("/tasks/") && req.method === "GET") {
-				const id = url.pathname.slice("/tasks/".length);
-				const tasks = taskLists.get(id);
-				if (!tasks) {
-					return errorResponse("not_found", `unknown task list: ${id}`, 404, req);
-				}
-				return jsonResponse({ id, tasks }, 200, req);
-			}
-
-			if (url.pathname === "/ingest" && req.method === "POST") {
-				const kind = url.searchParams.get("kind");
-				try {
-					const body = await parseJsonBody<unknown>(req);
-					if (kind === "run_started") {
-						const payload = validation(() => validateRunStarted(body));
-						const stamped = store.stampEvent({ kind: "run_started", payload });
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "run_complete") {
-						const payload = validation(() => validateRunComplete(body));
-						const stamped = store.stampEvent({
-							kind: "run_complete",
-							payload,
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "run_failed") {
-						const payload = validation(() => validateRunFailed(body));
-						const stamped = store.stampEvent({ kind: "run_failed", payload });
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "eval_started") {
-						const payload = validation(() => validateEvalStarted(body));
-						const stamped = store.stampEvent({
-							kind: "eval_started",
-							payload,
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "eval_task_complete") {
-						const payload = validation(() => validateEvalTaskComplete(body));
-						const stamped = store.stampEvent({
-							kind: "eval_task_complete",
-							payload,
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "eval_complete") {
-						const payload = validation(() => validateEvalComplete(body));
-						const stamped = store.stampEvent({
-							kind: "eval_complete",
-							payload,
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "eval_failed") {
-						const payload = validation(() => validateEvalFailed(body));
-						const stamped = store.stampEvent({
-							kind: "eval_failed",
-							payload,
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "bench_session_started") {
-						const payload = validation(() => validateBenchSessionStarted(body));
-						const stamped = store.stampEvent({
-							kind: "bench_session_started",
-							payload,
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "bench_session_complete") {
-						const payload = validation(() => validateBenchSessionComplete(body));
-						const stamped = store.stampEvent({
-							kind: "bench_session_complete",
-							payload,
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					if (kind === "reset") {
-						const reason =
-							typeof (body as { reason?: unknown })?.reason === "string"
-								? ((body as { reason?: string }).reason as string)
-								: undefined;
-						const stamped = store.stampEvent({
-							kind: "reset",
-							payload: { reason },
-						});
-						broadcaster.broadcast(stamped);
-						return jsonResponse({ ok: true, seq: stamped.seq }, 200, req);
-					}
-					return errorResponse(
-						"unknown_kind",
-						`?kind= must be run_started | run_complete | run_failed | eval_started | eval_task_complete | eval_complete | eval_failed | bench_session_started | bench_session_complete | reset (got ${kind ?? "none"})`,
-						400,
-						req,
-					);
-				} catch (err) {
-					// Validation errors carry safe, hand-authored field-name
-					// messages (intentional harness feedback). Any other error
-					// (DB/IO) may carry filesystem paths — log it server-side
-					// and return a generic message to the client.
-					if (err instanceof ValidationError) {
-						return errorResponse("bad_request", err.message, 400, req);
-					}
-					console.error("ingest:", err);
-					return errorResponse("bad_request", "invalid request", 400, req);
+			// Prefix routes (path-parameterized endpoints), in declared order.
+			for (const route of prefixRoutes) {
+				if (
+					req.method === route.method &&
+					url.pathname.startsWith(route.prefix)
+				) {
+					return route.handler(req, url);
 				}
 			}
 
+			// SSE streaming arm (streaming responses don't fit the route table).
 			if (url.pathname === "/stream" && req.method === "GET") {
-				const lastEventIdHeader = req.headers.get("last-event-id");
-				const lastSeq = lastEventIdHeader
-					? Number.parseInt(lastEventIdHeader, 10) || 0
-					: 0;
-				let assignedController:
-					| ReadableStreamDefaultController<Uint8Array>
-					| null = null;
-				let heartbeat: ReturnType<typeof setInterval> | null = null;
-
-				const body = new ReadableStream<Uint8Array>({
-					start: (controller) => {
-						assignedController = controller;
-						broadcaster.addSubscriber(controller);
-
-						controller.enqueue(
-							encoder.encode(
-								`retry: 3000\n: connected seq=${store.currentSeq()}\n\n`,
-							),
-						);
-
-						const snapshot = store.snapshot();
-						controller.enqueue(encoder.encode(encodeSseFrame(snapshot)));
-
-						if (lastSeq > 0) {
-							for (const event of store.eventsSince(lastSeq)) {
-								controller.enqueue(encoder.encode(encodeSseFrame(event)));
-							}
-						}
-
-						heartbeat = setInterval(() => {
-							try {
-								controller.enqueue(
-									encoder.encode(`: heartbeat ${Date.now()}\n\n`),
-								);
-							} catch {
-								// stream torn down
-							}
-						}, 15_000);
-					},
-					cancel: () => {
-						if (heartbeat) clearInterval(heartbeat);
-						if (assignedController)
-							broadcaster.removeSubscriber(assignedController);
-					},
-				});
-
-				return new Response(body, {
-					status: 200,
-					headers: {
-						"content-type": "text/event-stream; charset=utf-8",
-						"cache-control": "no-cache, no-transform",
-						connection: "keep-alive",
-						"x-accel-buffering": "no",
-						...corsHeaders(req),
-					},
-				});
+				return handleStream(req, url);
 			}
 
+			// Static-file fallback (SEC-005 path-containment check lives in
+			// tryServeStatic). Only GET requests fall through to static serving.
 			if (req.method === "GET") {
 				const served = tryServeStatic(options.dashboardRoot, url.pathname, req);
 				if (served) return served;
