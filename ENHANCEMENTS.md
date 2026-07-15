@@ -20,7 +20,7 @@
 | ID | Title | Expected impact | Effort/risk | Status | Plan |
 |----|-------|-----------------|-------------|--------|------|
 | ENH-001 | Automated browser regression lane (Playwright) | High — converts the manual ship gate into a scriptable one; prerequisite safety net for ARC-001/QA-005 | Medium | ✅ Done — 2026-07-15 (`9c59fa7`) | [plan](docs/fable/ENH-001-playwright-browser-lane.md) |
-| ENH-002 | Streaming token API through `chat()` and the worker proxy | High — user-visible latency win for agent/Three.js UX | Medium | 📋 Open | [plan](docs/fable/ENH-002-streaming-chat-api.md) |
+| ENH-002 | Streaming token API through `chat()` and the worker proxy | High — user-visible latency win for agent/Three.js UX | Medium | ✅ Done — 2026-07-15 (`a652447`) | [plan](docs/fable/ENH-002-streaming-chat-api.md) |
 | ENH-003 | KV-cache + scratch accounting in MemoryPool, with pressure events | Medium-High — makes the 16 GB-floor doctrine enforceable at runtime | Medium | 📋 Open | [plan](docs/fable/ENH-003-kv-memory-accounting.md) |
 | ENH-004 | Extract `ConversationTurnRunner` from `chatCompletionWithConversation` | Medium — de-risks the engine's highest out-degree bridge (47) for future features | Medium | 📋 Open | [plan](docs/fable/ENH-004-conversation-turn-runner.md) |
 | ENH-005 | Probe: per-conversation KV multiplexing cost for multi-NPC agents | High if it lands (unlocks concurrent NPC conversations); probe itself is cheap | Probe: Low · Follow-on: High | 📋 Open | [plan](docs/fable/ENH-005-kv-multiplex-probe.md) |
@@ -68,6 +68,15 @@ automated gate; ARC-001's per-port verification becomes cheap). **Effort/risk**:
 devDep and a CI-incompatible local target (needs a real GPU), but zero changes to shipped code.
 
 ## ENH-002 — Streaming token API
+
+> **Status**: ✅ Done — shipped 2026-07-15 (`a652447` + follow-ups `517c7a0`, `7b427e4`, `28b5a88`).
+> Verified via `make checkall` (green) + browser regression on `qwen3-0.6b-q4f16` in worker mode:
+> visible answer streams progressively, `<think>` reasoning never flashes (confirmed across a
+> 511-token think-only turn + a turn with a visible answer), and the stop button halts mid-stream.
+> **Design note**: discovery showed streaming generators already existed inline + via the worker
+> stream protocol; the shipped work makes deltas + `result.text` **visible-only** (the one
+> intentional behavior change — `<think>` excluded) and adds additive `onToken` / `onThinking`
+> callbacks (inline + worker). `chat()` returns visible-only text but takes no callbacks (drains).
 
 `Generator.generate()` is already an AsyncGenerator yielding token IDs, and the tokenizer already
 ships a `StreamingDecoder` (`tokenizer.ts:954`) implementing the full-redecode delta pattern —
