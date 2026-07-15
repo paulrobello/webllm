@@ -411,6 +411,11 @@ export function writeCausalMaskF16(
 	}
 }
 
+/** Round `v` up to the next multiple of `mult` (mask row/column padding). */
+function padTo(v: number, mult: number): number {
+	return Math.ceil(v / mult) * mult;
+}
+
 /**
  * Manages model weights loaded into WASM/ggml tensors and runs forward passes.
  *
@@ -1520,7 +1525,6 @@ export class ModelInference {
 		// of the same shape that holds a banded windowed-causal mask. Per-layer
 		// dispatch picks `swaMaskTensor` for layers with
 		// `hp.slidingWindowPattern[il] === true`, otherwise `maskTensor`.
-		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
 		// FA requires F16 mask (ggml.c:5330); opSoftMaxExt accepts F16 too,
@@ -1978,7 +1982,6 @@ export class ModelInference {
 			const posTensor = wasm.tensorNew1d(GgmlType.I32, N);
 			const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, N);
 
-			const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 			const maskPaddedRows = padTo(N, 32);
 			const maskTensor = wasm.tensorNew2d(GgmlType.F16, N, maskPaddedRows);
 
@@ -2255,7 +2258,6 @@ export class ModelInference {
 			const posTensor = wasm.tensorNew1d(GgmlType.I32, N);
 			const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, N);
 
-			const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 			const needsMask = N > 1;
 			const maskPaddedCols = padTo(N, 32);
 			const maskTensor = needsMask
@@ -2882,7 +2884,6 @@ export class ModelInference {
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 
-		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
 		const maskTensor = needsMask
@@ -3263,7 +3264,6 @@ export class ModelInference {
 		const posTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 		const tokenIdsTensor = wasm.tensorNew1d(GgmlType.I32, nTokens);
 
-		const padTo = (v: number, mult: number) => Math.ceil(v / mult) * mult;
 		const needsMask = nTokens > 1;
 		const maskPaddedCols = padTo(nTokens, 32);
 		const maskTensor = needsMask
