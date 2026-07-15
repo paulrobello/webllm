@@ -17,18 +17,44 @@
 > implementation time). Effort ratings below are **maintenance-burden + risk** ratings per that
 > doctrine.
 
-| ID | Title | Expected impact | Effort/risk | Plan |
-|----|-------|-----------------|-------------|------|
-| ENH-001 | Automated browser regression lane (Playwright) | High — converts the manual ship gate into a scriptable one; prerequisite safety net for ARC-001/QA-005 | Medium | [plan](docs/fable/ENH-001-playwright-browser-lane.md) |
-| ENH-002 | Streaming token API through `chat()` and the worker proxy | High — user-visible latency win for agent/Three.js UX | Medium | [plan](docs/fable/ENH-002-streaming-chat-api.md) |
-| ENH-003 | KV-cache + scratch accounting in MemoryPool, with pressure events | Medium-High — makes the 16 GB-floor doctrine enforceable at runtime | Medium | [plan](docs/fable/ENH-003-kv-memory-accounting.md) |
-| ENH-004 | Extract `ConversationTurnRunner` from `chatCompletionWithConversation` | Medium — de-risks the engine's highest out-degree bridge (47) for future features | Medium | [plan](docs/fable/ENH-004-conversation-turn-runner.md) |
-| ENH-005 | Probe: per-conversation KV multiplexing cost for multi-NPC agents | High if it lands (unlocks concurrent NPC conversations); probe itself is cheap | Probe: Low · Follow-on: High | [plan](docs/fable/ENH-005-kv-multiplex-probe.md) |
-| ENH-006 | Persist bench sessions to SQLite on the live dashboard | Low-Medium — closes the documented "restart loses session rollup" gap | Low | [plan](docs/fable/ENH-006-bench-session-persistence.md) |
-| ENH-007 | Thread `--no-ingest` through `make smoke-bench` | Low — implements the one-liner CLAUDE.md already specifies for throwaway sweeps | Low | [plan](docs/fable/ENH-007-no-ingest-flag.md) |
-| ENH-008 | Verified dead-helper sweep of the eval harness | Low — trims real orphans surfaced by graph analysis, with the false-positive discipline the audit established | Low | [plan](docs/fable/ENH-008-eval-dead-code-sweep.md) |
+| ID | Title | Expected impact | Effort/risk | Status | Plan |
+|----|-------|-----------------|-------------|--------|------|
+| ENH-001 | Automated browser regression lane (Playwright) | High — converts the manual ship gate into a scriptable one; prerequisite safety net for ARC-001/QA-005 | Medium | ✅ Done — 2026-07-15 (`9c59fa7`) | [plan](docs/fable/ENH-001-playwright-browser-lane.md) |
+| ENH-002 | Streaming token API through `chat()` and the worker proxy | High — user-visible latency win for agent/Three.js UX | Medium | 📋 Open | [plan](docs/fable/ENH-002-streaming-chat-api.md) |
+| ENH-003 | KV-cache + scratch accounting in MemoryPool, with pressure events | Medium-High — makes the 16 GB-floor doctrine enforceable at runtime | Medium | 📋 Open | [plan](docs/fable/ENH-003-kv-memory-accounting.md) |
+| ENH-004 | Extract `ConversationTurnRunner` from `chatCompletionWithConversation` | Medium — de-risks the engine's highest out-degree bridge (47) for future features | Medium | 📋 Open | [plan](docs/fable/ENH-004-conversation-turn-runner.md) |
+| ENH-005 | Probe: per-conversation KV multiplexing cost for multi-NPC agents | High if it lands (unlocks concurrent NPC conversations); probe itself is cheap | Probe: Low · Follow-on: High | 📋 Open | [plan](docs/fable/ENH-005-kv-multiplex-probe.md) |
+| ENH-006 | Persist bench sessions to SQLite on the live dashboard | Low-Medium — closes the documented "restart loses session rollup" gap | Low | 📋 Open | [plan](docs/fable/ENH-006-bench-session-persistence.md) |
+| ENH-007 | Thread `--no-ingest` through `make smoke-bench` | Low — implements the one-liner CLAUDE.md already specifies for throwaway sweeps | Low | 📋 Open | [plan](docs/fable/ENH-007-no-ingest-flag.md) |
+| ENH-008 | Verified dead-helper sweep of the eval harness | Low — trims real orphans surfaced by graph analysis, with the false-positive discipline the audit established | Low | 📋 Open | [plan](docs/fable/ENH-008-eval-dead-code-sweep.md) |
+
+## Status tracking
+
+The **Status** column is the source of truth for each idea's lifecycle. Keep it
+current as work happens — an out-of-date status column is worse than none.
+
+- **📋 Open** — not started.
+- **🚧 In progress** — actively being worked; set this when implementation
+  begins (not when planning begins).
+- **✅ Done** — shipped **and** verified through the project gate
+  (`make checkall`, plus the item's own plan-defined verification). When an item
+  completes, update its Status cell to `✅ Done — <YYYY-MM-DD> (<commit-sha>)`
+  *in the same commit* that lands or finalizes the work (a separate
+  `docs(enh): mark ENH-XXX done` commit is fine if the implementation commit
+  already shipped). **Also add a `> **Status**:` banner at the top of the
+  item's section** so the done/in-progress/reverted state is visible when
+  reading the detail, not only in the table. **Completed items stay in this
+  file as a record** — do not delete the row, its section below, or its plan
+  link; they are the durable artifact for what was built and why.
+- **↩️ Reverted / 🔄 Superseded** — if a done item is later rolled back or
+  replaced, change the status to one of these with a one-line reason (and a link
+  to the follow-up) rather than removing the row.
 
 ## ENH-001 — Automated browser regression lane (Playwright)
+
+> **Status**: ✅ Done — shipped 2026-07-15 (`9c59fa7`, with follow-up fixes `133173c` / `1f5fa90`).
+> Verified via `make test-browser` (1 test passes) + `make checkall` (799 pass / 0 fail). Lane lives
+> in `playwright.config.ts` + `tests-browser/smoke.spec.ts`; documented in `CLAUDE.md`.
 
 The GPU inference paths — the code ARC-001 must refactor — are verified today only by the manual
 agentchrome smoke workflow; Bun tests cannot touch them (36 permanently-skipped tests are the
