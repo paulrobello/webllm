@@ -94,6 +94,28 @@ interface ConversationSession {
 }
 
 /**
+ * Per-model state aggregate (ARC-004). Consolidates the six prior parallel
+ * `Map<string, …>` fields (`wasmModules`, `inferenceEngines`,
+ * `encoderEngines`, `causalEmbedderEngines`, `sessions`, `modelChatChains`)
+ * into one row per loaded model id. Load/unload consistency is now enforced
+ * by construction — a single `delete` drops everything.
+ *
+ * The three engine-kind fields (`inference` / `encoder` / `causalEmbedder`)
+ * remain type-partitioned (ARC-006); only the containers are unified, not
+ * the types. All fields are optional because load is staged: a fresh record
+ * may be created with just `wasm`, gain an engine a moment later, and only
+ * acquire a `session` / `chatChain` on first chat use.
+ */
+interface ModelRecord {
+	wasm?: GgmlWasm;
+	inference?: ModelInference;
+	encoder?: EncoderInference;
+	causalEmbedder?: CausalLMEmbedder;
+	session?: ConversationSession;
+	chatChain?: Promise<void>;
+}
+
+/**
  * True when the cached prompt's leading messages still appear at the start
  * of the new prompt. The delta-encoding fast-path in `prepareChatPrompt`
  * relies on this — if cached and new diverge on the leading slice, the
@@ -230,17 +252,14 @@ export class WebLLM {
 	private _modelManager: ModelManager;
 	private characterManager: CharacterManager;
 	private eventHandlers = new Map<string, Set<EventHandler>>();
-	private wasmModules = new Map<string, GgmlWasm>();
-	private inferenceEngines = new Map<string, ModelInference>();
-	private encoderEngines = new Map<string, EncoderInference>();
-	private causalEmbedderEngines = new Map<string, CausalLMEmbedder>();
-	private sessions = new Map<string, ConversationSession>();
+	/**
+	 * Per-model state (ARC-004). Single row per loaded model id holding the
+	 * wasm module, the type-partitioned engine (chat / encoder /
+	 * causal-embedder), the default chat session, and the per-model
+	 * chat-serialization chain. Replaces six prior parallel Maps.
+	 */
+	private models = new Map<string, ModelRecord>();
 	private conversationPool: ConversationPool;
-	// Per-model lock chain. Two conversations on the same model share one
-	// working KV cache, so their load/prefill/decode/save phases must not
-	// interleave. Calls await the prior call's chainTail before entering
-	// their load phase.
-	private modelChatChains = new Map<string, Promise<void>>();
 
 	/**
 	 * Install JSEP callbacks on a freshly-initialized `GgmlWasm` if the
@@ -335,26 +354,14 @@ export class WebLLM {
 
 	async unloadModel(id: string): Promise<void> {
 		this.conversationPool.disposeAllForModel(id);
-		this.sessions.delete(id);
-		const inf = this.inferenceEngines.get(id);
-		if (inf) {
-			await inf.dispose();
-			this.inferenceEngines.delete(id);
-		}
-		const enc = this.encoderEngines.get(id);
-		if (enc) {
-			await enc.dispose();
-			this.encoderEngines.delete(id);
-		}
-		const cembed = this.causalEmbedderEngines.get(id);
-		if (cembed) {
-			await cembed.dispose();
-			this.causalEmbedderEngines.delete(id);
-		}
-		const wasm = this.wasmModules.get(id);
-		if (wasm) {
-			await wasm.shutdown();
-			this.wasmModules.delete(id);
+		const record = this.models.get(id);
+		if (record) {
+			const { inference, encoder, causalEmbedder, wasm } = record;
+			if (inference) await inference.dispose();
+			if (encoder) await encoder.dispose();
+			if (causalEmbedder) await causalEmbedder.dispose();
+			if (wasm) await wasm.shutdown();
+			this.models.delete(id);
 		}
 		await this._modelManager.unregister(id);
 	}
@@ -366,11 +373,7 @@ export class WebLLM {
 	 * WebLLMProxy.dispose().
 	 */
 	async dispose(): Promise<void> {
-		const ids = [
-			...this.inferenceEngines.keys(),
-			...this.encoderEngines.keys(),
-			...this.causalEmbedderEngines.keys(),
-		];
+		const ids = [...this.models.keys()];
 		const seen = new Set<string>();
 		for (const id of ids) {
 			if (seen.has(id)) continue;
@@ -397,7 +400,7 @@ export class WebLLM {
 		if (!entry.loaded || !entry.tokenizer)
 			throw new ModelNotLoadedError(modelId);
 
-		const inf = this.inferenceEngines.get(modelId);
+		const inf = this.models.get(modelId)?.inference;
 		if (!inf) throw new InferenceEngineMissingError(modelId);
 
 		const tokenizer = entry.tokenizer;
@@ -462,7 +465,7 @@ export class WebLLM {
 		if (!entry.loaded || !entry.tokenizer)
 			throw new ModelNotLoadedError(modelId);
 
-		const inf = this.inferenceEngines.get(modelId);
+		const inf = this.models.get(modelId)?.inference;
 		if (!inf) throw new InferenceEngineMissingError(modelId);
 
 		const tokenizer = entry.tokenizer;
@@ -723,7 +726,7 @@ export class WebLLM {
 		if (!entry.loaded || !entry.tokenizer) {
 			throw new ModelNotLoadedError(modelHandleId);
 		}
-		const inf = this.inferenceEngines.get(modelHandleId);
+		const inf = this.models.get(modelHandleId)?.inference;
 		if (!inf) throw new InferenceEngineMissingError(modelHandleId);
 		if (!inf.flashAttn) {
 			throw new Error(
@@ -799,7 +802,7 @@ export class WebLLM {
 		if (!entry.loaded || !entry.tokenizer) {
 			throw new ModelNotLoadedError(modelHandleId);
 		}
-		const inf = this.inferenceEngines.get(modelHandleId);
+		const inf = this.models.get(modelHandleId)?.inference;
 		if (!inf) throw new InferenceEngineMissingError(modelHandleId);
 		if (!inf.flashAttn) {
 			throw new Error(
@@ -869,12 +872,13 @@ export class WebLLM {
 		// 2. Per-model serialization chain — the working KV is shared across
 		// conversations on the same model. Wait for any prior conv call on
 		// this model to finish before entering our load/prefill/decode/save.
-		const prior = this.modelChatChains.get(conv.modelHandleId);
+		const chainRecord = this.models.get(conv.modelHandleId);
+		const prior = chainRecord?.chatChain;
 		let resolveChain!: () => void;
 		const chainTail = new Promise<void>((res) => {
 			resolveChain = res;
 		});
-		this.modelChatChains.set(conv.modelHandleId, chainTail);
+		if (chainRecord) chainRecord.chatChain = chainTail;
 		if (prior) await prior;
 
 		try {
@@ -884,7 +888,7 @@ export class WebLLM {
 			if (!entry.loaded || !entry.tokenizer) {
 				throw new ModelNotLoadedError(conv.modelHandleId);
 			}
-			const inf = this.inferenceEngines.get(conv.modelHandleId);
+			const inf = this.models.get(conv.modelHandleId)?.inference;
 			if (!inf) throw new InferenceEngineMissingError(conv.modelHandleId);
 			const tokenizer = entry.tokenizer;
 
@@ -1205,8 +1209,12 @@ export class WebLLM {
 		} finally {
 			release();
 			resolveChain();
-			if (this.modelChatChains.get(conv.modelHandleId) === chainTail) {
-				this.modelChatChains.delete(conv.modelHandleId);
+			const r = this.models.get(conv.modelHandleId);
+			if (r?.chatChain === chainTail) {
+				// Drop only the chain slot — the model is still loaded, so
+				// the record itself stays. `delete` is required because
+				// `exactOptionalPropertyTypes: true` rejects `= undefined`.
+				delete r.chatChain;
 			}
 		}
 	}
@@ -1217,17 +1225,17 @@ export class WebLLM {
 	 * API; the field type is the public {@link ModelInference}.
 	 */
 	__debugInferenceForModel(modelId: string): ModelInference | undefined {
-		return this.inferenceEngines.get(modelId);
+		return this.models.get(modelId)?.inference;
 	}
 
 	/**
 	 * Compute an L2-normalized sentence embedding for the given text.
 	 *
 	 * Dispatch order (first match wins):
-	 *   1. **Encoder** — bidirectional BERT/RoBERTa model registered via
-	 *      `encoderEngines` (e.g. `bge-large-en-v1.5`). Highest quality.
+	 *   1. **Encoder** — bidirectional BERT/RoBERTa model registered as
+	 *      `ModelRecord.encoder` (e.g. `bge-large-en-v1.5`). Highest quality.
 	 *   2. **Causal-embedder** — causal-LM fine-tuned for retrieval,
-	 *      registered via `causalEmbedderEngines` (e.g.
+	 *      registered as `ModelRecord.causalEmbedder` (e.g.
 	 *      `qwen3-embedding-0.6b-hyb`). MTEB-competitive quality.
 	 *   3. **Chat-model / bucket D** — general chat model whose registration
 	 *      entry carries `embeddingCapable: true`. Taps the post-`output_norm`
@@ -1247,9 +1255,10 @@ export class WebLLM {
 			throw new ModelNotLoadedError(modelId);
 		}
 		const ids = entry.tokenizer.encode(text);
-		const enc = this.encoderEngines.get(modelId);
+		const record = this.models.get(modelId);
+		const enc = record?.encoder;
 		if (enc) return enc.embed(new Int32Array(ids));
-		const cembed = this.causalEmbedderEngines.get(modelId);
+		const cembed = record?.causalEmbedder;
 		if (cembed) {
 			// Causal-LM-derived embedders require an explicit EOS marker at the
 			// end of the input (the model was fine-tuned to pool the hidden
@@ -1266,11 +1275,10 @@ export class WebLLM {
 
 		// Bucket D — chat-model self-embedding. Gated on the registration
 		// flag so we only fall through for chat models that have passed
-		// the parity gate (encoderEngines / causalEmbedderEngines remain
-		// the high-quality path; bucket D is the simplicity / single-
-		// model-load path).
+		// the parity gate (encoder / causalEmbedder remain the high-quality
+		// path; bucket D is the simplicity / single-model-load path).
 		if (entry.embeddingCapable) {
-			const inf = this.inferenceEngines.get(modelId);
+			const inf = record?.inference;
 			if (inf) {
 				const eos = entry.tokenizer.eosId;
 				const withEos =
@@ -1295,8 +1303,9 @@ export class WebLLM {
 	 * session-tracker entry, and clears its inference engine's KV cache.
 	 */
 	resetModelSession(modelId: string): void {
-		this.sessions.delete(modelId);
-		const inf = this.inferenceEngines.get(modelId);
+		const record = this.models.get(modelId);
+		if (record) delete record.session;
+		const inf = record?.inference;
 		if (inf) inf.resetKVCache();
 	}
 
@@ -1354,7 +1363,8 @@ export class WebLLM {
 	}
 
 	private getOrCreateSession(modelId: string): ConversationSession {
-		let entry = this.sessions.get(modelId);
+		let record = this.models.get(modelId);
+		let entry = record?.session;
 		if (!entry) {
 			entry = {
 				session: new InferenceSession(
@@ -1371,7 +1381,11 @@ export class WebLLM {
 				messageCount: 0,
 				cachedMessages: [],
 			};
-			this.sessions.set(modelId, entry);
+			if (!record) {
+				record = {};
+				this.models.set(modelId, record);
+			}
+			record.session = entry;
 		}
 		return entry;
 	}
@@ -1446,23 +1460,18 @@ export class WebLLM {
 		if (options?.embeddingPooling !== undefined) {
 			entry.embeddingPooling = options.embeddingPooling;
 		}
-		this.wasmModules.set(handle.id, pipeline.wasm);
+		// Upsert the model record: wasm + exactly one of the three
+		// engine-kind fields (preserving the type partition per ARC-006).
+		const record = this.models.get(handle.id) ?? {};
+		record.wasm = pipeline.wasm;
 		if (isEncoder) {
-			this.encoderEngines.set(
-				handle.id,
-				pipeline.inference as EncoderInference,
-			);
+			record.encoder = pipeline.inference as EncoderInference;
 		} else if (isCausalEmbedder) {
-			this.causalEmbedderEngines.set(
-				handle.id,
-				pipeline.inference as CausalLMEmbedder,
-			);
+			record.causalEmbedder = pipeline.inference as CausalLMEmbedder;
 		} else {
-			this.inferenceEngines.set(
-				handle.id,
-				pipeline.inference as ModelInference,
-			);
+			record.inference = pipeline.inference as ModelInference;
 		}
+		this.models.set(handle.id, record);
 		// ARC-002: record the adopted pipeline's weight footprint when the
 		// caller knows it, so `unloadModel` → `_modelManager.unregister`
 		// → `memoryPool.evictModel` keeps the budget honest on this path.
@@ -1806,14 +1815,17 @@ export class WebLLM {
 				entry.loaded = true;
 			}
 
-			this.wasmModules.set(handle.id, wasm);
+			// Upsert the model record: wasm + exactly one engine-kind field.
+			const record = this.models.get(handle.id) ?? {};
+			record.wasm = wasm;
 			if (inference instanceof EncoderInference) {
-				this.encoderEngines.set(handle.id, inference);
+				record.encoder = inference;
 			} else if (inference instanceof CausalLMEmbedder) {
-				this.causalEmbedderEngines.set(handle.id, inference);
+				record.causalEmbedder = inference;
 			} else {
-				this.inferenceEngines.set(handle.id, inference);
+				record.inference = inference;
 			}
+			this.models.set(handle.id, record);
 
 			// ARC-002: record the model's weight footprint in the MemoryPool
 			// so `ModelManager.canFit` enforces `WebLLMConfig.memoryBudget`
@@ -1926,24 +1938,15 @@ export class WebLLM {
 	}
 
 	async shutdown(): Promise<void> {
-		this.sessions.clear();
 		this.conversationPool.clear();
-		for (const [, wasm] of this.wasmModules) {
-			await wasm.shutdown();
+		for (const record of this.models.values()) {
+			const { inference, encoder, causalEmbedder, wasm } = record;
+			if (inference) await inference.dispose();
+			if (encoder) await encoder.dispose();
+			if (causalEmbedder) await causalEmbedder.dispose();
+			if (wasm) await wasm.shutdown();
 		}
-		this.wasmModules.clear();
-		for (const [, inf] of this.inferenceEngines) {
-			await inf.dispose();
-		}
-		this.inferenceEngines.clear();
-		for (const [, enc] of this.encoderEngines) {
-			await enc.dispose();
-		}
-		this.encoderEngines.clear();
-		for (const [, cembed] of this.causalEmbedderEngines) {
-			await cembed.dispose();
-		}
-		this.causalEmbedderEngines.clear();
+		this.models.clear();
 		this._modelManager.clear();
 		this._scheduler.clear();
 		this.eventHandlers.clear();

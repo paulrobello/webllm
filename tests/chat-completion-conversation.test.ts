@@ -49,13 +49,11 @@ type EngineInternals = {
 		get(id: string): unknown;
 		unregister?: (id: string) => Promise<void>;
 	};
-	inferenceEngines: Map<string, FakeInference>;
-	encoderEngines: Map<string, unknown>;
-	causalEmbedderEngines: Map<string, unknown>;
-	wasmModules: Map<string, unknown>;
+	// Post-ARC-004: per-model state lives in one row. Tests populate the
+	// `inference` field (and may stub `wasm`/`encoder`/`causalEmbedder`
+	// with empty records via the `models` Map when one fixture is enough).
+	models: Map<string, { inference?: FakeInference }>;
 	conversationPool: ConversationPool;
-	sessions: Map<string, unknown>;
-	modelChatChains: Map<string, Promise<void>>;
 };
 
 function asInternals(engine: WebLLM): EngineInternals {
@@ -127,13 +125,10 @@ function createFakeEngine(sequence: number[] = [4, 5, 2]): WebLLM {
 		},
 		unregister: async () => {},
 	};
-	internals.inferenceEngines = new Map<string, FakeInference>([["tl", fake]]);
-	internals.encoderEngines = new Map();
-	internals.causalEmbedderEngines = new Map();
-	internals.wasmModules = new Map();
+	internals.models = new Map<string, { inference?: FakeInference }>([
+		["tl", { inference: fake }],
+	]);
 	internals.conversationPool = new ConversationPool({ maxConversations: 4 });
-	internals.sessions = new Map();
-	internals.modelChatChains = new Map();
 	return engine;
 }
 
@@ -184,7 +179,7 @@ describe("chatCompletion(conv, ...)", () => {
 		const engine = createFakeEngine();
 		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
-		const inf = internals.inferenceEngines.get("tl");
+		const inf = internals.models.get("tl")?.inference;
 		if (!inf) throw new Error("missing fake");
 
 		// Wrap inf.forward to log per-call (ids, positions).
@@ -250,7 +245,7 @@ describe("chatCompletion(conv, ...)", () => {
 		const engine = createFakeEngine([4, 5, 2]);
 		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
-		const inf = internals.inferenceEngines.get("tl");
+		const inf = internals.models.get("tl")?.inference;
 		if (!inf) throw new Error("missing fake");
 
 		// Seed a snapshot directly so we don't depend on chat-template
@@ -310,7 +305,7 @@ describe("chatCompletion(conv, ...)", () => {
 		const engine = createFakeEngine();
 		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
-		const inf = internals.inferenceEngines.get("tl");
+		const inf = internals.models.get("tl")?.inference;
 		if (!inf) throw new Error("missing fake");
 
 		let serializeCalls = 0;
@@ -350,7 +345,7 @@ describe("chatCompletion(conv, ...)", () => {
 		const engine = createFakeEngine();
 		const conv = await engine.createConversation("tl");
 		const internals = asInternals(engine);
-		const inf = internals.inferenceEngines.get("tl");
+		const inf = internals.models.get("tl")?.inference;
 		if (!inf) throw new Error("missing fake");
 
 		let serializeCalls = 0;

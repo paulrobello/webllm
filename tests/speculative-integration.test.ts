@@ -211,8 +211,7 @@ describe("WebLLM.generateStream drafter is reserved in v1", () => {
 		// cast boundary so the rest of the test stays type-safe.
 		const internals = engine as unknown as {
 			_modelManager: { get(id: string): unknown };
-			inferenceEngines: Map<string, unknown>;
-			sessions: Map<string, unknown>;
+			models: Map<string, unknown>;
 		};
 		internals._modelManager = {
 			get: (id: string) =>
@@ -224,17 +223,18 @@ describe("WebLLM.generateStream drafter is reserved in v1", () => {
 						}
 					: undefined,
 		};
-		internals.inferenceEngines = new Map<string, unknown>([
+		internals.models = new Map<string, unknown>([
 			[
 				"target",
 				{
-					forward: async () => new Float32Array(tokenizer.vocabSize),
-					cachedTokenCount: 0,
-					resetKVCache: () => {},
+					inference: {
+						forward: async () => new Float32Array(tokenizer.vocabSize),
+						cachedTokenCount: 0,
+						resetKVCache: () => {},
+					},
 				},
 			],
 		]);
-		internals.sessions = new Map<string, unknown>();
 
 		await expect(
 			(async () => {

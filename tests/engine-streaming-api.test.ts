@@ -104,14 +104,13 @@ const originalSample = Sampler.prototype.sample;
 
 // Tests intentionally inject minimal internal state into a WebLLM
 // instance. This shape narrows the unsafe cast to a single boundary so
-// the rest of each test stays type-safe. The runtime shape of
-// _modelManager / inferenceEngines / sessions is more complex than
-// these tests need; `unknown` values keep us from reimplementing the
-// full ModelInference / ModelEntry surface in the test fixtures.
+// the rest of each test stays type-safe. Post-ARC-004 the per-model state
+// lives in one `models: Map<string, ModelRecord>` row; tests populate the
+// `inference` field of that record. `unknown` values keep us from
+// reimplementing the full ModelInference / ModelEntry surface in fixtures.
 type EngineInternals = {
 	_modelManager: { get(id: string): unknown };
-	inferenceEngines: Map<string, unknown>;
-	sessions: Map<string, unknown>;
+	models: Map<string, unknown>;
 };
 
 function asInternals(engine: WebLLM): EngineInternals {
@@ -139,21 +138,22 @@ function createTestEngineWithTokenizer(
 			},
 		}),
 	};
-	internals.inferenceEngines = new Map<string, unknown>([
+	internals.models = new Map<string, unknown>([
 		[
 			"model",
 			{
-				forward: async () => {
-					const tokenId = sequence[Math.min(step, sequence.length - 1)];
-					step++;
-					return createLogits(tokenId, tokenizer.vocabSize);
+				inference: {
+					forward: async () => {
+						const tokenId = sequence[Math.min(step, sequence.length - 1)];
+						step++;
+						return createLogits(tokenId, tokenizer.vocabSize);
+					},
+					cachedTokenCount: 0,
+					resetKVCache: () => {},
 				},
-				cachedTokenCount: 0,
-				resetKVCache: () => {},
 			},
 		],
 	]);
-	internals.sessions = new Map<string, unknown>();
 	return engine;
 }
 
@@ -313,21 +313,22 @@ describe("WebLLM.generateStream", () => {
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		internals.inferenceEngines = new Map<string, unknown>([
+		internals.models = new Map<string, unknown>([
 			[
 				"model",
 				{
-					forward: async (ids: Int32Array, positions: Int32Array) => {
-						seenIds = Array.from(ids);
-						seenPositions = Array.from(positions);
-						return createLogits(2, tokenizer.vocabSize);
+					inference: {
+						forward: async (ids: Int32Array, positions: Int32Array) => {
+							seenIds = Array.from(ids);
+							seenPositions = Array.from(positions);
+							return createLogits(2, tokenizer.vocabSize);
+						},
+						cachedTokenCount: 0,
+						resetKVCache: () => {},
 					},
-					cachedTokenCount: 0,
-					resetKVCache: () => {},
 				},
 			],
 		]);
-		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -370,17 +371,18 @@ describe("WebLLM.generateStream", () => {
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		internals.inferenceEngines = new Map<string, unknown>([
+		internals.models = new Map<string, unknown>([
 			[
 				"model",
 				{
-					forward: async () => createLogits(2, tokenizer.vocabSize),
-					cachedTokenCount: 0,
-					resetKVCache: () => {},
+					inference: {
+						forward: async () => createLogits(2, tokenizer.vocabSize),
+						cachedTokenCount: 0,
+						resetKVCache: () => {},
+					},
 				},
 			],
 		]);
-		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -437,17 +439,18 @@ describe("WebLLM.generateStream", () => {
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		internals.inferenceEngines = new Map<string, unknown>([
+		internals.models = new Map<string, unknown>([
 			[
 				"model",
 				{
-					forward: async () => createLogits(4, tokenizer.vocabSize),
-					cachedTokenCount: 0,
-					resetKVCache: () => {},
+					inference: {
+						forward: async () => createLogits(4, tokenizer.vocabSize),
+						cachedTokenCount: 0,
+						resetKVCache: () => {},
+					},
 				},
 			],
 		]);
-		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream("model", [
 			{ role: "user", content: "Hello" },
@@ -503,17 +506,18 @@ describe("WebLLM.generateStream", () => {
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		internals.inferenceEngines = new Map<string, unknown>([
+		internals.models = new Map<string, unknown>([
 			[
 				"model",
 				{
-					forward: async () => createLogits(4, tokenizer.vocabSize),
-					cachedTokenCount: 0,
-					resetKVCache: () => {},
+					inference: {
+						forward: async () => createLogits(4, tokenizer.vocabSize),
+						cachedTokenCount: 0,
+						resetKVCache: () => {},
+					},
 				},
 			],
 		]);
-		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -556,17 +560,18 @@ describe("WebLLM.generateStream", () => {
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		internals.inferenceEngines = new Map<string, unknown>([
+		internals.models = new Map<string, unknown>([
 			[
 				"model",
 				{
-					forward: async () => createLogits(2, tokenizer.vocabSize),
-					cachedTokenCount: 0,
-					resetKVCache: () => {},
+					inference: {
+						forward: async () => createLogits(2, tokenizer.vocabSize),
+						cachedTokenCount: 0,
+						resetKVCache: () => {},
+					},
 				},
 			],
 		]);
-		internals.sessions = new Map<string, unknown>();
 
 		for await (const _chunk of engine.generateStream(
 			"model",
@@ -640,8 +645,9 @@ describe("WebLLM.generateStream", () => {
 				hyperparams: { architecture: "qwen3" },
 			}),
 		};
-		internals.inferenceEngines = new Map<string, unknown>([["model", fake]]);
-		internals.sessions = new Map<string, unknown>();
+		internals.models = new Map<string, unknown>([
+			["model", { inference: fake }],
+		]);
 
 		const calls: Array<{ firstPosition: number; resetCount: number }> = [];
 		let resetCount = 0;
