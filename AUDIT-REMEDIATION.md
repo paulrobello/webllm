@@ -4,7 +4,34 @@
 > **Audit Date**: 2026-07-14 (AUDIT.md at commit `eccf6e6`)
 > **Remediation Date**: 2026-07-14
 > **Severity Filter Applied**: `all`, scoped per user to **"safe tier + backend/export calls"** — all security, the low-risk architecture/CI/gate-wiring/quality fixes, and the full documentation accuracy pass; the four large/decision-gated refactors deferred (see Requires Manual Intervention).
-> **Branch**: `fix/audit-remediation` (base `eccf6e6` → HEAD `01a9a5d`, 5 commits, 70 files changed: 12 added, 5 deleted, 53 modified)
+> **Branch**: `fix/audit-remediation` (base `eccf6e6` → HEAD `bfef48e`, 17 commits). Phase 1–5 below, plus the Tier-1 + ARC-001 follow-ups in the Follow-up Update section.
+
+---
+
+## Follow-up Update (post-Phase-5: Tier 1 + ARC-001)
+
+After the Phase 1–5 remediation below, two follow-up efforts landed on the same branch.
+
+### Tier 1 quick wins — all resolved (ARC-011/012/015/016, QA-013)
+- **ARC-012** — JSPI/ABI build-time invariant check (`scripts/check-jspi-exports.ts` + `make check-jspi`): hard-fails on both shipped historical regressions (missing per-target `-sJSPI_EXPORTS`; unawaited promising-wrapped export); full allowlist audit printed per run. Wired into `make checkall`.
+- **ARC-011 / QA-008** — scorer-registry Bun↔browser parity test (13/13 names, 12/13 bodies; the one known semantic-equivalent drift pinned so new drift fails loudly).
+- **ARC-015** — `exactOptionalPropertyTypes: true` (53 fallout sites fixed; codebase now fully strict).
+- **ARC-016** — test layout flattened (4 nested files → flat `tests/`).
+- **QA-013** — JSEP `-1`/sentinel error convention documented (`src/inference/jsep/README.md`).
+
+### ARC-001 — forward-pass graph-builder consolidation — RESOLVED (the audit's #1 hazard)
+Staged and browser-verified:
+- **Stage A** (`c7aac32`+`ecf652a`) — hoisted the 5 `padTo` copies + parameterized `graphMem`/`graphNew` into `computeGraphSizing(mode)` (every variant mapped exactly).
+- **Stage B** (`3988523`…`afa411e`) — extracted one `buildForwardGraph(opts)` (3 modes standard/embedding/taps; 4 outputs logits/decode/embedding/taps) and ported all 5 forwarders onto it (B1 forwardSingle → B5 forwardWithLayerTaps), one checkpoint commit per port. Architecture/mask/PLE fixes now land in **one** place instead of five.
+- **Stage C** (`bfef48e`) — extracted the `debug*` family to `src/inference/model-inference-diagnostics.ts` via a narrow `ModelInferenceDebugHandle` interface; `ModelInference` keeps thin delegating stubs. `model-inference.ts`: 4383 → 3749 lines.
+
+**Browser parity** (gemma-4-e2b PLE beacon, `make smoke-bench`): the main chat path (forwardSingle B1 + forwardDecode B2) is **directly verified byte-identical** — `backendDispatchCount: 1040` identical across all ports, graphCompute median 20.20ms (faster than baseline 21.90), no crash. B3/B4/B5 (forwardAllPositions/ForEmbedding/WithLayerTaps) aren't exercised by the gemma-4 beacon (their callers are the spec-decode verify / qwen3-8b embed / parity-capture diagnostic paths); their parity rests on byte-identical construction (each port's op sequence verified verbatim; the one non-mechanical B5 `graphBuildForwardExpand` reorder confirmed a semantic no-op — it wraps ggml's order-independent output-set union). Direct verification of B3/B4/B5 via those specialized paths is available as a follow-up.
+
+### Updated gate
+`make checkall` = **799 pass / 23 skip / 0 fail**, now with `exactOptionalPropertyTypes: true` + `check-jspi` + `check-skip-count` all enforcing.
+
+### Updated deferred set (was ~19, now ~10)
+Still deferred: **ARC-004** (ModelRecord consolidation), **ARC-006** (InferencePipeline interface), **ARC-008/QA-009** (live-server route table), **ARC-014** (worker-entry extraction), **QA-002** (Generator steering), **QA-003** (JSEP uniform-buffer leak), **QA-005** (loadAndTest split), **QA-012 (.cpp)** (webgpu-bridge probe sweep — needs a WASM rebuild; environment confirmed functional), **DOC-008** (engine JSDoc, after ARC-004), **DOC-013** (style sweep). *(ARC-001, ARC-011/012/015/016, QA-013 — previously deferred — are now resolved above.)*
 
 ---
 
