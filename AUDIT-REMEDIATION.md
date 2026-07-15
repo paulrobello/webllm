@@ -8,9 +8,9 @@
 
 ---
 
-## Follow-up Update (post-Phase-5: Tier 1 + ARC-001)
+## Follow-up Update (post-Phase-5: Tier 1 + ARC-001 + doable-now tier)
 
-After the Phase 1–5 remediation below, two follow-up efforts landed on the same branch.
+After the Phase 1–5 remediation below, three follow-up efforts landed on the same branch.
 
 ### Tier 1 quick wins — all resolved (ARC-011/012/015/016, QA-013)
 - **ARC-012** — JSPI/ABI build-time invariant check (`scripts/check-jspi-exports.ts` + `make check-jspi`): hard-fails on both shipped historical regressions (missing per-target `-sJSPI_EXPORTS`; unawaited promising-wrapped export); full allowlist audit printed per run. Wired into `make checkall`.
@@ -27,11 +27,18 @@ Staged and browser-verified:
 
 **Browser parity** (gemma-4-e2b PLE beacon, `make smoke-bench`): the main chat path (forwardSingle B1 + forwardDecode B2) is **directly verified byte-identical** — `backendDispatchCount: 1040` identical across all ports, graphCompute median 20.20ms (faster than baseline 21.90), no crash. B3/B4/B5 (forwardAllPositions/ForEmbedding/WithLayerTaps) aren't exercised by the gemma-4 beacon (their callers are the spec-decode verify / qwen3-8b embed / parity-capture diagnostic paths); their parity rests on byte-identical construction (each port's op sequence verified verbatim; the one non-mechanical B5 `graphBuildForwardExpand` reorder confirmed a semantic no-op — it wraps ggml's order-independent output-set union). Direct verification of B3/B4/B5 via those specialized paths is available as a follow-up.
 
+### Doable-now tier — resolved (ARC-004/006/008, DOC-008, QA-012.cpp)
+- **ARC-004 / QA-010** — `engine.ts` 6 per-model Maps → one `ModelRecord` aggregate; `unloadModel` 24→9 lines; `WebLLMSurface` Pick + `implements` on `WebLLMProxy` (13 methods; `tokenize` + streaming methods excluded with documented reasons). `eventHandlers` correctly left standalone (engine-global, not per-model — the audit's "7" was 6).
+- **ARC-008 / QA-009** — `eval/live-server.ts` CC-53 `if`-chain → route table (12 named handlers + prefix routes + SSE arm + static fallback); Phase-1 security primitives preserved.
+- **ARC-006** — `InferencePipeline` interface (`kind` + `dispose` + `embed?`) in `types.ts`; the 3 engine kinds `implements` it (chat/encoder/causal-embedder). Additive — a 4th kind is now a one-line addition.
+- **DOC-008** — `WebLLM` class banner + JSDoc on the 6 public entry points + `IndexedDBConversationStore` docs.
+- **QA-012 (.cpp)** — deleted the retired synthetic-offload probe + CHECKPOINT-IDX-DUMP (211 lines) from `webgpu-bridge.cpp`; `make wasm-build` rebuilt wasm32+wasm64; smoke-bench sniff confirmed dispatch 1040 (deletions off the inference path). QA-012 now fully closed (TS half was Phase 3c).
+
 ### Updated gate
 `make checkall` = **799 pass / 23 skip / 0 fail**, now with `exactOptionalPropertyTypes: true` + `check-jspi` + `check-skip-count` all enforcing.
 
-### Updated deferred set (was ~19, now ~10)
-Still deferred: **ARC-004** (ModelRecord consolidation), **ARC-006** (InferencePipeline interface), **ARC-008/QA-009** (live-server route table), **ARC-014** (worker-entry extraction), **QA-002** (Generator steering), **QA-003** (JSEP uniform-buffer leak), **QA-005** (loadAndTest split), **QA-012 (.cpp)** (webgpu-bridge probe sweep — needs a WASM rebuild; environment confirmed functional), **DOC-008** (engine JSDoc, after ARC-004), **DOC-013** (style sweep). *(ARC-001, ARC-011/012/015/016, QA-013 — previously deferred — are now resolved above.)*
+### Updated deferred set (was ~19, now ~6 — browser-loop + cosmetic only)
+Still deferred: **ARC-014** (worker-entry extraction — needs worker-mode browser verify), **QA-002** (Generator steering, CC 81 — needs Qwen3 thinking browser smoke), **QA-005** (split `loadAndTest`, CC 202 — full smoke workflow), **QA-003** (JSEP uniform-buffer leak — prototype backend, needs JSEP browser verify), **DOC-013** (style-guide sweep — cosmetic), **QA-012 loose ends** (rebuild the JSEP variant via `make wasm-build-jsep` — self-corrects from the edited CMakeLists; delete the orphaned `smoke-test/p2-v2-offload-probe.*`/`p2-v2-spike` harness referencing the deleted exports). The browser-loop tier (ARC-014/QA-002/QA-005) is a dedicated effort with the same per-port parity harness as ARC-001. *(ARC-004/006/008, DOC-008, QA-012.cpp, ARC-001, ARC-011/012/015/016, QA-013 — all previously deferred — are now resolved.)*
 
 ---
 

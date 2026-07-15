@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+Audit remediation (`fix/audit-remediation` branch). See `AUDIT-REMEDIATION.md`
+for full per-issue detail; ~6 items deferred (browser-loop tier + cosmetic).
+
+### Changed
+- **Forward-pass graph-builder consolidation (ARC-001)** — the five
+  near-duplicate forward methods now delegate graph construction to a single
+  `buildForwardGraph(opts)` (3 modes, 4 outputs); the `debug*` family moved to
+  `model-inference-diagnostics.ts`. Architecture/mask/PLE fixes now land in one
+  place. `model-inference.ts`: 4383 → 3749 lines. Main chat path browser-verified byte-identical.
+- **Engine state consolidation (ARC-004)** — six per-model Maps → one
+  `ModelRecord`; `WebLLMSurface` Pick makes worker/engine proxy drift a compile error.
+- **Live-server route table (ARC-008)** — the 330-line `fetch` if-chain → a route table.
+- **MemoryPool wired + `memoryBudget` optional (ARC-002)**; **JSEP packaged as
+  experimental + `JsepPipelineCache` rename (ARC-007)**; **trimmed public export
+  surface → `./internal` subpath (ARC-003)**.
+
+### Added
+- **JSPI/ABI build-time invariant check (ARC-012)** — `make checkall` now
+  hard-fails on the two historical WASM ABI regressions.
+- **`InferencePipeline` interface (ARC-006)** — a 4th engine kind is additive.
+- Minimal CI (ARC-005); MIT `LICENSE`; `CONTRIBUTING.md`; env-var reference;
+  JSDoc on the public engine entry points (DOC-008).
+- `exactOptionalPropertyTypes: true` (fully strict); scorer-registry Bun↔browser parity test.
+
+### Security
+- Deleted the unauthenticated path-traversal `log_receiver.py`; dev servers
+  default to `127.0.0.1`; dashboard CORS scoped to localhost + `taskLists`
+  capped; realpath path-containment; DOMPurify on the chat page.
+- Generated Emscripten bundles de-indexed; smoke harness brought under the lint gate.
+
+### Fixed
+- README Quick Start now compiles; `MODEL_SUPPORT`/`BENCHMARKS` accuracy passes;
+  13 IndexedDB tests un-skipped (`fake-indexeddb`); retired probe scaffolding
+  swept (incl. WASM `webgpu-bridge.cpp`, rebuilt).
 
 ## [0.1.0] - 2026-07-14
 
